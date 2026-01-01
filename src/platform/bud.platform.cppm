@@ -2,6 +2,7 @@
 
 #include <string>
 #include <memory>
+#include <SDL3/SDL.h>
 
 export module bud.platform;
 
@@ -11,6 +12,7 @@ export namespace bud::platform {
     public:
         virtual ~Window() = default;
 
+		virtual SDL_Window* get_sdl_window() const = 0;
         virtual void get_size(int& width, int& height) const = 0;
         virtual bool should_close() const = 0;
         virtual void poll_events() = 0;

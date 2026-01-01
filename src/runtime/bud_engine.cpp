@@ -20,10 +20,21 @@ using namespace bud::engine;
 BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 	window_ = bud::platform::create_window(window_title, width, height);
 	task_scheduler_ = std::make_unique<bud::threading::TaskScheduler>();
+
+	rhi_ = std::make_unique<bud::graphics::VulkanRHI>();
+
+#ifdef _DEBUG
+	bool enable_validation = true;
+#else
+	bool enable_validation = false;
+#endif
+
+	rhi_->init(window_->get_sdl_window(), enable_validation);
 }
 
 BudEngine::~BudEngine() {
 	task_scheduler_->stop();
+	rhi_->cleanup();
 }
 
 void BudEngine::run() {
@@ -35,16 +46,16 @@ void BudEngine::run() {
 
 		window_->poll_events();
 
-		perform_frame_logic();
+		//perform_frame_logic();
 
-		// --- C. 协助执行任务 ---
+		rhi_->draw_frame();
+
 		task_scheduler_->pump_main_thread_tasks();
 
 		FrameMark;
-
-		// Avoid busy waiting, 100% CPU usage
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
+
+	rhi_->wait_idle();
 }
 
 void BudEngine::perform_frame_logic() {

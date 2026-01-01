@@ -1,4 +1,4 @@
-# .gitignore
+﻿# .gitignore
 # Build directories
 build/
 cmake-build-*/
@@ -41,3 +41,9 @@ cmake_install.cmake
 *.user
 *.filters
 ipch/
+
+
+# Shaders
+*.spv
+*.pdb
+*.ilk

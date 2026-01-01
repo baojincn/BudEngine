@@ -7,9 +7,9 @@ export module bud.graphics;
 import bud.core;
 
 export namespace bud::graphics {
-    class VulkanContext {
+    class VulkanRHI {
     public:
-        VulkanContext() = default;
-        ~VulkanContext() = default;
+        VulkanRHI() = default;
+        ~VulkanRHI() = default;
     };
 }

@@ -85,6 +85,7 @@ target_sources(bud_engine_core
             "src/dod/bud.dod.cppm"
             "src/threading/bud.threading.cppm"
             "src/graphics/bud.graphics.cppm"
+			"src/graphics/rhi/bud.graphics.rhi.cppm"
             
             "src/threading/bud.io.cppm"
             "src/platform/bud.platform.cppm"

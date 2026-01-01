@@ -10,6 +10,7 @@ import bud.math;
 import bud.dod;
 import bud.threading;
 import bud.platform;
+import bud.graphics.rhi;
 
 export namespace bud::engine {
 
@@ -36,6 +37,8 @@ export namespace bud::engine {
 
         std::unique_ptr<bud::threading::TaskScheduler> task_scheduler_;
         bud::threading::Counter frame_counter_{ 0 };
+
+		std::unique_ptr<bud::graphics::RHI> rhi_;
 
         bud::dod::Registry<bud::math::float3, float> registry_;
     };

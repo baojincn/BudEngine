@@ -22,10 +22,14 @@ namespace bud::platform {
                 title.c_str(),
                 width,
                 height,
-                SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE
+                SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE
             );
 
             if (!window_) {
+				auto err = SDL_GetError();
+				auto msg = std::format("SDL Error: {}", err ? err : "Unknown error");
+				std::println(stderr, "CRITICAL FAILURE: {}", msg);
+
                 SDL_Quit();
                 throw std::runtime_error("Failed to create SDL window");
             }
@@ -41,6 +45,10 @@ namespace bud::platform {
             }
             SDL_Quit();
         }
+
+		SDL_Window* get_sdl_window() const override {
+			return window_;
+		}
 
         void get_size(int& width, int& height) const override {
             width = width_;
