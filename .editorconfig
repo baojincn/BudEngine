@@ -1,0 +1,20 @@
+﻿# Top-most EditorConfig file
+root = true
+
+# 1. 默认情况：为了照顾 VS 的 C++ 编译器和中文注释，使用带 BOM 的 UTF-8
+[*]
+indent_style = tab
+indent_size = 4
+end_of_line = crlf
+charset = utf-8-bom        # <--- C++ 继续用这个，防止乱码
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+# 2. 特殊对待：汇编文件必须用 ANSI (latin1)，否则 ml64 会报错
+[*.asm]
+charset = latin1           # <--- 关键修改：汇编文件强制 ANSI (无 BOM)
+
+# C++ 细节微调
+[*.{cpp,h,hpp,cppm,ixx}]
+cpp_indent_braces = false
+cpp_indent_multi_line_relative_to = statement_begin

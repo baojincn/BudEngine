@@ -1,0 +1,43 @@
+# .gitignore
+# Build directories
+build/
+cmake-build-*/
+out/
+vcpkg/
+
+# IDE files
+.vs/
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Compiler artifacts
+*.obj
+*.pdb
+*.lib
+*.dll
+*.so
+*.dylib
+
+# Third party (but keep the directory structure)
+third_party/*/!.gitkeep
+third_party/*/.gitignore
+
+# Logs
+*.log
+*.tmp
+
+# CMake cache
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Visual Studio
+*.sln
+*.vcxproj*
+*.user
+*.filters
+ipch/

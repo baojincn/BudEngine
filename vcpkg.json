@@ -1,0 +1,25 @@
+﻿{
+	"name": "bud-engine",
+	"version-string": "1.0.0",
+	"builtin-baseline": "b1b19307e2d2ec1eefbdb7ea069de7d4bcd31f01",
+	"dependencies": [
+		"sdl3",
+		"vulkan",
+		"tracy"
+	],
+	"overrides": [
+		{
+			"name": "sdl3",
+			"version-string": "3.2.8"
+		},
+		{
+			"name": "vulkan",
+			"version-string": "1.3.268.0"
+		},
+		{
+			"name": "tracy",
+			"version-string": "0.11.1"
+		}
+	],
+	"description": "Bud Engine - A full task-driven Game Engine."
+}

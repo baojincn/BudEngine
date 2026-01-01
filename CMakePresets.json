@@ -1,0 +1,67 @@
+﻿{
+	"version": 3,
+	"configurePresets": [
+		{
+			"name": "default",
+			"displayName": "default",
+			"binaryDir": "${sourceDir}/build",
+			"hidden": true,
+			"generator": "Ninja"
+		},
+		{
+			"name": "debug",
+			"displayName": "Debug Config",
+			"inherits": "default",
+			"architecture": {
+				"value": "x64",
+				"strategy": "external"
+			},
+			"cacheVariables": {
+				"CMAKE_BUILD_TYPE": "Debug",
+				"BUD_ENABLE_PROFILING": "ON"
+			}
+		},
+		{
+			"name": "relwithdebinfo",
+			"displayName": "Profile Config (RelWithDebInfo)",
+			"description": "Optimized build with debug symbols for Tracy profiling",
+			"inherits": "default",
+			"architecture": {
+				"value": "x64",
+				"strategy": "external"
+			},
+			"cacheVariables": {
+				"CMAKE_BUILD_TYPE": "RelWithDebInfo",
+				"BUD_ENABLE_PROFILING": "ON"
+			}
+		},
+		{
+			"name": "release",
+			"displayName": "Release Config",
+			"description": "Pure release build for end-users",
+			"inherits": "default",
+			"architecture": {
+				"value": "x64",
+				"strategy": "external"
+			},
+			"cacheVariables": {
+				"CMAKE_BUILD_TYPE": "Release",
+				"BUD_ENABLE_PROFILING": "OFF"
+			}
+		}
+	],
+	"buildPresets": [
+		{
+			"name": "Debug x64",
+			"configurePreset": "debug"
+		},
+		{
+			"name": "Profile x64",
+			"configurePreset": "relwithdebinfo"
+		},
+		{
+			"name": "Release x64",
+			"configurePreset": "release"
+		}
+	]
+}
