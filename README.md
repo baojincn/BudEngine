@@ -1,20 +1,25 @@
-BudEngine-repo/
-├── vcpkg/                 # Git submodule
-│   ├── scripts/
-│   └── ports/
-├── vcpkg.json            # Project Dependencies
-├── CMakeLists.txt        # Construct
-├── src/                  
-└── README.md             
+         
 
 
-# 项目名称
+# Bud Engine
+
+Hello world  
+![](samples/screenshots/hello_world.png)
+
+Performance tracing tool's test 
+![](samples/screenshots/performance_tracing.png)
+
 
 ## 构建说明
+
 ### 依赖管理
+
 ### 快速开始
+
 ### 详细配置
+
 ### 项目结构
+
 ### 常见问题
 
 # Naming Style
@@ -31,6 +36,7 @@ BudEngine-repo/
 # Note
 
 - Do git submodule update --init --recursive after cloning this repository.  
-- When you use Visual Studio to work, please add following configs into lauch.vs.json file.  
--- "currentDir": "${workspaceRoot}"  
--- "env": { "PATH": "${env.PATH};${workspaceRoot}/vcpkg/installed/x64-windows/bin" }  
+- If you use Visual Studio/VSCode with open folder to work, please add following configs into lauch.vs.json file.
+```  json
+"currentDir": "${workspaceRoot}../"  
+```
