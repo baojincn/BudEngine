@@ -188,6 +188,9 @@ export namespace bud::graphics {
 				vkResetCommandPool(device, pool, 0);
 			}
 
+			// 重置命令计数器, 不释放内存，只把游标指回 0，下一帧覆盖使用旧的 Handles
+			std::fill(frame.worker_cmd_counters.begin(), frame.worker_cmd_counters.end(), 0);
+
 			// 4. 录制主命令缓冲
 			VkCommandBuffer cmd = frame.main_command_buffer;
 			VkCommandBufferBeginInfo begin_info{};
@@ -215,12 +218,24 @@ export namespace bud::graphics {
 
 				// 从当前帧的 FrameData 里拿 Pool
 				// 此时 Pool 已经被主线程 Reset 过了，Worker 可以直接 Alloc，不用 Reset！
-				VkCommandPool worker_pool = frames[current_frame_idx].worker_pools[worker_id];
+				auto& frame_data = frames[current_frame_idx];
+				VkCommandPool worker_pool = frame_data.worker_pools[worker_id];
 
-				VkCommandBuffer sec_cmd = allocate_secondary_command_buffer(worker_pool);
+				// 分配或复用 Secondary Command Buffer
+				VkCommandBuffer sec_cmd = nullptr;
+				auto& cmd_counter = frame_data.worker_cmd_counters[worker_id];
+				auto& cmd_buffer = frame_data.worker_cmd_buffers[worker_id];
 
-				// ... 录制逻辑 (Inheritance, BindPipeline, Draw) 保持不变 ...
-				// 记得把之前的代码考过来，注意使用 sec_cmd
+				if (cmd_counter < cmd_buffer.size()) {
+					sec_cmd = cmd_buffer[cmd_counter];
+				}
+				else {
+					sec_cmd = allocate_secondary_command_buffer(worker_pool);
+					cmd_buffer.push_back(sec_cmd);
+				}
+				cmd_counter++;
+
+
 				VkCommandBufferInheritanceInfo inheritance_info{};
 				inheritance_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
 				inheritance_info.renderPass = render_pass;
@@ -233,8 +248,7 @@ export namespace bud::graphics {
 				vkBeginCommandBuffer(sec_cmd, &sec_begin_info);
 
 				vkCmdBindPipeline(sec_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
-				// ... SetViewport, Scissor, BindVertex, BindDescriptor, Draw ...
-				// (此处省略具体的 Draw Call 代码以节省篇幅，逻辑与之前完全一致)
+
 				VkViewport viewport{};
 				viewport.width = (float)swapchain_extent.width; viewport.height = (float)swapchain_extent.height; viewport.maxDepth = 1.0f;
 				vkCmdSetViewport(sec_cmd, 0, 1, &viewport);
@@ -390,6 +404,8 @@ export namespace bud::graphics {
 
 			// Worker 资源 (每个 Worker 一个 Pool)
 			std::vector<VkCommandPool> worker_pools;
+			std::vector<std::vector<VkCommandBuffer>> worker_cmd_buffers;
+			std::vector<uint32_t> worker_cmd_counters;
 		};
 
 		std::array<FrameData, MAX_FRAMES_IN_FLIGHT> frames;
@@ -534,6 +550,8 @@ export namespace bud::graphics {
 			}
 
 			VkPhysicalDeviceFeatures device_features{};
+			device_features.samplerAnisotropy = VK_TRUE;
+
 			VkDeviceCreateInfo create_info{};
 			create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 			create_info.queueCreateInfoCount = static_cast<uint32_t>(queue_create_infos.size());
@@ -831,7 +849,7 @@ export namespace bud::graphics {
 
 		void create_command_pool() {
 			QueueFamilyIndices queue_family_indices = find_queue_families(physical_device);
-			size_t thread_count = task_scheduler ? 32 : 1; // 即使没 scheduler 也要保证有 1
+			size_t thread_count = task_scheduler ? task_scheduler->get_thread_count() : 1;
 
 			for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 				// 1. 创建主线程 Pool
@@ -846,6 +864,9 @@ export namespace bud::graphics {
 
 				// 2. 创建 Worker Pools
 				frames[i].worker_pools.resize(thread_count);
+				frames[i].worker_cmd_buffers.resize(thread_count);
+				frames[i].worker_cmd_counters.resize(thread_count);
+
 				for (size_t t = 0; t < thread_count; t++) {
 					VkCommandPoolCreateInfo worker_pool_info{};
 					worker_pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -1530,7 +1551,7 @@ export namespace bud::graphics {
 		}
 
 		void generate_mipmaps(VkImage image, VkFormat format, int32_t tex_width, int32_t tex_height, uint32_t mip_levels) {
-			// 检查纹理格式是否支持线性过滤 (Blit 需要)
+			// Blit 需要纹理格式是否支持线性过滤
 			VkFormatProperties format_properties;
 			vkGetPhysicalDeviceFormatProperties(physical_device, format, &format_properties);
 
@@ -1554,8 +1575,34 @@ export namespace bud::graphics {
 			int32_t mip_height = tex_height;
 
 			for (uint32_t i = 1; i < mip_levels; i++) {
+				// 准备目标层 (Level i)
+				// 此时 Level i 是 UNDEFINED，需要把它转为 TRANSFER_DST_OPTIMAL 以便 Blit 写入
+				VkImageMemoryBarrier barrier_dst{};
+				barrier_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+				barrier_dst.image = image;
+				barrier_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				barrier_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				barrier_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+				barrier_dst.subresourceRange.baseArrayLayer = 0;
+				barrier_dst.subresourceRange.layerCount = 1;
+				barrier_dst.subresourceRange.levelCount = 1;
+				barrier_dst.subresourceRange.baseMipLevel = i; // 目标是当前层 i
+
+				barrier_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+				barrier_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+				barrier_dst.srcAccessMask = 0;
+				barrier_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+				vkCmdPipelineBarrier(command_buffer,
+					VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+					0,
+					0, nullptr,
+					0, nullptr,
+					1, &barrier_dst);
+
+
 				// 1. 转换 Level i-1: TRANSFER_DST_OPTIMAL -> TRANSFER_SRC_OPTIMAL
-				// (因为它要作为下一次 Blit 的源)
+				// 因为它要作为下一次 Blit 的源
 				barrier.subresourceRange.baseMipLevel = i - 1;
 				barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 				barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -1592,7 +1639,7 @@ export namespace bud::graphics {
 					VK_FILTER_LINEAR);
 
 				// 3. 转换 Level i-1: TRANSFER_SRC_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
-				// (这层做完了，可以给 Shader 读了)
+				// 这层做完了，可以给 Shader 读了
 				barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 				barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 				barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
