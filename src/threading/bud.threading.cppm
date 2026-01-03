@@ -10,17 +10,21 @@ module;
 #include <mutex>
 #include <deque>
 #include <print>
+// #define BUD_TRACK_TASK_SOURCE
+#if defined(_DEBUG) && defined(BUD_TRACK_TASK_SOURCE)
 #include <stacktrace>
+#endif
 
 #ifdef TRACY_ENABLE
-	#include <tracy/Tracy.hpp>
-	#include <stdio.h>
+#include <tracy/Tracy.hpp>
+#include <stdio.h>
 #else
 	// Define empty macros to avoid Tracy calls when disabled
-	#define ZoneScoped
-	#define ZoneScopedN(x)
-	#define FrameMark
+#define ZoneScoped
+#define ZoneScopedN(x)
+#define FrameMark
 #endif
+
 
 // Assembly hooks
 #ifdef _WIN64
@@ -34,20 +38,20 @@ extern "C" void bud_switch_context_linux(void** old_rsp, void* new_rsp);
 export module bud.threading;
 
 export namespace bud::threading {
-    struct Fiber;
-    class TaskScheduler;
+	struct Fiber;
+	class TaskScheduler;
 
-    /// <summary>
-    /// A lightweight, thread-safe counter wrapper around std::atomic<int> that exposes basic atomic operations and holds an atomic pointer to a waiting list of Fiber objects.
-    /// </summary>
-    struct Counter {
-        std::atomic<int> value{ 0 };
-        std::atomic<Fiber*> waiting_list{ nullptr };
+	/// <summary>
+	/// A lightweight, thread-safe counter wrapper around std::atomic<int> that exposes basic atomic operations and holds an atomic pointer to a waiting list of Fiber objects.
+	/// </summary>
+	struct Counter {
+		std::atomic<int> value{ 0 };
+		std::atomic<Fiber*> waiting_list{ nullptr };
 
-        Counter(int initial = 0) : value(initial) {}
+		Counter(int initial = 0) : value(initial) {}
 
-        Counter(const Counter&) = delete;
-        Counter& operator=(const Counter&) = delete;
+		Counter(const Counter&) = delete;
+		Counter& operator=(const Counter&) = delete;
 
 		int fetch_add(int arg, std::memory_order order = std::memory_order_seq_cst) {
 			return value.fetch_add(arg, order);
@@ -64,29 +68,34 @@ export namespace bud::threading {
 		void store(int arg, std::memory_order order = std::memory_order_seq_cst) {
 			value.store(arg, order);
 		}
-    };
+	};
 
 	/// <summary>
 	/// Fiber for lightweight cooperative multitasking in user space.
 	/// </summary>
-    struct alignas(16) Fiber {
-        // Pool List
-        Fiber* next_pool = nullptr;
+	struct alignas(16) Fiber {
+		// Pool List
+		Fiber* next_pool = nullptr;
 
 		// Link to the next waiting fiber in the Counter's waiting list 
-        Fiber* next_waiting = nullptr;
+		Fiber* next_waiting = nullptr;
 
-        void* rsp = nullptr;
-        std::vector<uint8_t> stack_mem;
-        std::move_only_function<void()> work;
-        Counter* signal_counter = nullptr;
+		void* rsp = nullptr;
+		std::vector<uint8_t> stack_mem;
+		std::move_only_function<void()> work;
+		Counter* signal_counter = nullptr;
 
-        bool is_finished = false;
+		bool is_finished = false;
 
 		// Solved: "Double Run" Issue
 		Counter* pending_wait_counter = nullptr;
 
-#ifdef _DEBUG
+		// Lightweight debug Info 
+#if defined(_DEBUG)
+		const char* debug_name = nullptr;
+#endif
+
+#if defined(_DEBUG) && defined(BUD_TRACK_TASK_SOURCE)
 		std::stacktrace creation_stack;
 #endif
 
@@ -96,7 +105,7 @@ export namespace bud::threading {
 		static constexpr size_t DEFAULT_STACK_SIZE = 32 * 1024; // 32KB
 #endif
 
-        Fiber(size_t stack_size = DEFAULT_STACK_SIZE) {
+		Fiber(size_t stack_size = DEFAULT_STACK_SIZE) {
 			stack_mem.resize(stack_size);
 		}
 
@@ -107,6 +116,10 @@ export namespace bud::threading {
 			next_waiting = nullptr;
 			next_pool = nullptr;
 			pending_wait_counter = nullptr;
+
+#if defined(_DEBUG)
+			debug_name = nullptr;
+#endif
 
 			// Initialize the stack pointer (RSP) for the fiber
 			uintptr_t top = reinterpret_cast<uintptr_t>(stack_mem.data() + stack_mem.size());
@@ -151,7 +164,7 @@ export namespace bud::threading {
 			byte_ptr -= 160;
 			rsp = static_cast<void*>(byte_ptr);
 		}
-    };
+	};
 
 
 	/*
@@ -165,95 +178,93 @@ export namespace bud::threading {
 	(FIFO)                                     (LIFO / Stack)
 	*/
 
-    /// <summary>
+	/// <summary>
 	/// A lock-free Work-Stealing Queue and pool
-    /// </summary>
-    constexpr size_t CACHE_LINE = 64;
-    template<typename T>
-    class alignas(CACHE_LINE) WorkStealingQueue {
-        std::atomic<int64_t> top_{ 0 };
-        std::atomic<int64_t> bottom_{ 0 };
-        std::vector<T> buffer_;
-        size_t mask_;
-    public:
-        explicit WorkStealingQueue(size_t capacity = 4096) {
-            size_t cap = std::bit_ceil(capacity);
-            buffer_.resize(cap);
-            mask_ = cap - 1;
-        }
+	/// </summary>
+	constexpr size_t CACHE_LINE = 64;
+	template<typename T>
+	class alignas(CACHE_LINE) WorkStealingQueue {
+		std::atomic<int64_t> top_{ 0 };
+		std::atomic<int64_t> bottom_{ 0 };
+		std::vector<T> buffer_;
+		size_t mask_;
+	public:
+		explicit WorkStealingQueue(size_t capacity = 4096) {
+			size_t cap = std::bit_ceil(capacity);
+			buffer_.resize(cap);
+			mask_ = cap - 1;
+		}
 
-        void push(T item) {
-            int64_t b = bottom_.load(std::memory_order_relaxed);
-            buffer_[b & mask_] = item;
-            std::atomic_thread_fence(std::memory_order_release);
-            bottom_.store(b + 1, std::memory_order_relaxed);
-        }
+		void push(T item) {
+			int64_t b = bottom_.load(std::memory_order_relaxed);
+			buffer_[b & mask_] = item;
+			std::atomic_thread_fence(std::memory_order_release);
+			bottom_.store(b + 1, std::memory_order_relaxed);
+		}
 
-        std::optional<T> pop() {
-            int64_t b = bottom_.load(std::memory_order_relaxed) - 1;
-            bottom_.store(b, std::memory_order_relaxed);
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-            int64_t t = top_.load(std::memory_order_relaxed);
-            if (t <= b) {
-                T item = buffer_[b & mask_];
-                if (t == b) {
-                    if (!top_.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
-                        bottom_.store(b + 1, std::memory_order_relaxed);
-                        return std::nullopt;
-                    }
-                    bottom_.store(b + 1, std::memory_order_relaxed);
-                }
-                return item;
-            }
-            else {
-                bottom_.store(b + 1, std::memory_order_relaxed);
-                return std::nullopt;
-            }
-        }
+		std::optional<T> pop() {
+			int64_t b = bottom_.load(std::memory_order_relaxed) - 1;
+			bottom_.store(b, std::memory_order_relaxed);
+			std::atomic_thread_fence(std::memory_order_seq_cst);
+			int64_t t = top_.load(std::memory_order_relaxed);
+			if (t <= b) {
+				T item = buffer_[b & mask_];
+				if (t == b) {
+					if (!top_.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
+						bottom_.store(b + 1, std::memory_order_relaxed);
+						return std::nullopt;
+					}
+					bottom_.store(b + 1, std::memory_order_relaxed);
+				}
+				return item;
+			}
+			else {
+				bottom_.store(b + 1, std::memory_order_relaxed);
+				return std::nullopt;
+			}
+		}
 
-        std::optional<T> steal() {
-            int64_t t = top_.load(std::memory_order_acquire);
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-            int64_t b = bottom_.load(std::memory_order_acquire);
-            if (t < b) {
-                T item = buffer_[t & mask_];
-                if (!top_.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
-                    return std::nullopt;
-                }
-                return item;
-            }
-            return std::nullopt;
-        }
-    };
+		std::optional<T> steal() {
+			int64_t t = top_.load(std::memory_order_acquire);
+			std::atomic_thread_fence(std::memory_order_seq_cst);
+			int64_t b = bottom_.load(std::memory_order_acquire);
+			if (t < b) {
+				T item = buffer_[t & mask_];
+				if (!top_.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
+					return std::nullopt;
+				}
+				return item;
+			}
+			return std::nullopt;
+		}
+	};
 
-    class LockFreeFiberPool {
-        std::atomic<Fiber*> head_{ nullptr };
-    public:
-        void push(Fiber* f) {
-            Fiber* old_head = head_.load(std::memory_order_relaxed);
-            do {
+	class LockFreeFiberPool {
+		std::atomic<Fiber*> head_{ nullptr };
+	public:
+		void push(Fiber* f) {
+			Fiber* old_head = head_.load(std::memory_order_relaxed);
+			do {
 				f->next_pool = old_head;
-			}
-			while (!head_.compare_exchange_weak(old_head, f, std::memory_order_release, std::memory_order_relaxed));
-        }
-        Fiber* pop() {
-            Fiber* old_head = head_.load(std::memory_order_relaxed);
-            do {
+			} while (!head_.compare_exchange_weak(old_head, f, std::memory_order_release, std::memory_order_relaxed));
+		}
+		Fiber* pop() {
+			Fiber* old_head = head_.load(std::memory_order_relaxed);
+			do {
 				if (!old_head) return nullptr;
-			}
-			while (!head_.compare_exchange_weak(old_head, old_head->next_pool, std::memory_order_acquire, std::memory_order_relaxed));
-            return old_head;
-        }
-    };
+			} while (!head_.compare_exchange_weak(old_head, old_head->next_pool, std::memory_order_acquire, std::memory_order_relaxed));
+			return old_head;
+		}
+	};
 
 
-    /// <summary>
-    /// Thread-local pointer that stores a worker thread's stack pointer (RSP) for the current thread.
-    /// </summary>
-    thread_local void* t_worker_rsp = nullptr;
-    thread_local Fiber* t_current_fiber = nullptr;
-    thread_local size_t t_worker_index = 0;
-    thread_local TaskScheduler* t_scheduler = nullptr;
+	/// <summary>
+	/// Thread-local pointer that stores a worker thread's stack pointer (RSP) for the current thread.
+	/// </summary>
+	thread_local void* t_worker_rsp = nullptr;
+	thread_local Fiber* t_current_fiber = nullptr;
+	thread_local size_t t_worker_index = 0;
+	thread_local TaskScheduler* t_scheduler = nullptr;
 
 
 
@@ -332,33 +343,33 @@ export namespace bud::threading {
 	/// -----------------------------------------------------------------------------
 
 
-    export class TaskScheduler {
-        struct alignas(CACHE_LINE) Worker {
-            std::jthread thread;
-            WorkStealingQueue<Fiber*> queue;
-        };
+	export class TaskScheduler {
+		struct alignas(CACHE_LINE) Worker {
+			std::jthread thread;
+			WorkStealingQueue<Fiber*> queue;
+		};
 
-        std::vector<Worker*> workers_;
-        LockFreeFiberPool fiber_pool_;
-        std::atomic<bool> running_{ true };
-        size_t num_threads_;
+		std::vector<Worker*> workers_;
+		LockFreeFiberPool fiber_pool_;
+		std::atomic<bool> running_{ true };
+		size_t num_threads_{ 0 };
 
 		// Only for main thread tasks
-        std::deque<Fiber*> main_thread_incoming_queue_;
-        std::mutex main_queue_mtx_;
+		std::deque<Fiber*> main_thread_incoming_queue_;
+		std::mutex main_queue_mtx_;
 
 		static constexpr size_t MAX_FIBERS_PER_THREAD = 128;
 
-    public:
-        explicit TaskScheduler(size_t n = std::thread::hardware_concurrency())
-            : num_threads_(n) {
+	public:
+		explicit TaskScheduler(size_t n = std::thread::hardware_concurrency())
+			: num_threads_(n) {
 
 			std::println("[TaskScheduler] Initializing with {} threads(workers), {} fibers per thread", n, MAX_FIBERS_PER_THREAD);
 
-            for (size_t i = 0; i < n * MAX_FIBERS_PER_THREAD; ++i)
+			for (size_t i = 0; i < n * MAX_FIBERS_PER_THREAD; ++i)
 				fiber_pool_.push(new Fiber());
 
-            workers_.reserve(n);
+			workers_.reserve(n);
 
 			for (size_t i = 0; i < n; ++i) {
 				workers_.push_back(new Worker());
@@ -369,10 +380,10 @@ export namespace bud::threading {
 					worker_loop(i, st);
 				});
 			}
-        }
+		}
 
-        /// <summary>
-        /// /// @brief Destructor.
+		/// <summary>
+		/// /// @brief Destructor.
 		/// 
 		/// @note DESTRUCTION ORDER IS CRITICAL:
 		/// 1. stop(): Tell threads to exit their loops.
@@ -381,8 +392,8 @@ export namespace bud::threading {
 		///    We MUST do this before deleting fibers, otherwise background threads
 		///    might try to access a deleted fiber pool (Use-After-Free).
 		/// 3. delete fibers: Now that all threads are dead, it is safe to clean up memory.
-        /// </summary>
-        ~TaskScheduler() {
+		/// </summary>
+		~TaskScheduler() {
 			stop();
 			for (auto w : workers_) {
 				delete w;
@@ -399,8 +410,12 @@ export namespace bud::threading {
 			}
 		}
 
-        void stop() {
+		void stop() {
 			running_ = false;
+		}
+
+		auto get_thread_count() const {
+			return num_threads_;
 		}
 
 		/// <summary>
@@ -439,37 +454,45 @@ export namespace bud::threading {
 		}
 
 
-        void spawn(std::move_only_function<void()> work, Counter* counter = nullptr) {
-            auto f = allocate_fiber();
+		void spawn(const char* name, std::move_only_function<void()> work, Counter* counter = nullptr) {
+			auto f = allocate_fiber();
 
-#ifdef _DEBUG
+#if defined(_DEBUG)
+			f->debug_name = name;
+#endif
+
+#if defined(_DEBUG) && defined(BUD_TRACK_TASK_SOURCE)
 			f->creation_stack = std::stacktrace::current();
 #endif
 
-            f->reset(std::move(work), counter, &fiber_entry_stub);
-            if (counter)
+			f->reset(std::move(work), counter, &fiber_entry_stub);
+			if (counter)
 				counter->fetch_add(1, std::memory_order_relaxed);
 
-            size_t idx = (t_scheduler) ? t_worker_index : 0u;
-            workers_[idx]->queue.push(f);
-        }
+			size_t idx = (t_scheduler) ? t_worker_index : 0u;
+			workers_[idx]->queue.push(f);
+		}
+
+		void spawn(std::move_only_function<void()> work, Counter* counter = nullptr) {
+			spawn(nullptr, std::move(work), counter);
+		}
 
 		/// <summary>
 		/// Submit a task that must be executed on the main thread.
 		/// </summary>
-        void submit_main_thread_task(std::move_only_function<void()> work, Counter* counter = nullptr) {
-            auto f = allocate_fiber();
-            f->reset(std::move(work), counter, &fiber_entry_stub);
-            if (counter) counter->fetch_add(1, std::memory_order_relaxed);
+		void submit_main_thread_task(std::move_only_function<void()> work, Counter* counter = nullptr) {
+			auto f = allocate_fiber();
+			f->reset(std::move(work), counter, &fiber_entry_stub);
+			if (counter) counter->fetch_add(1, std::memory_order_relaxed);
 
-            if (t_scheduler && t_worker_index == 0) {
-                workers_[0]->queue.push(f);
-            }
-            else {
-                std::lock_guard lock(main_queue_mtx_);
-                main_thread_incoming_queue_.push_back(f);
-            }
-        }
+			if (t_scheduler && t_worker_index == 0) {
+				workers_[0]->queue.push(f);
+			}
+			else {
+				std::lock_guard lock(main_queue_mtx_);
+				main_thread_incoming_queue_.push_back(f);
+			}
+		}
 
 		void wait_for_counter(Counter& counter, std::function<void()> on_idle = nullptr) {
 			if (counter.value.load(std::memory_order_acquire) == 0)
@@ -523,48 +546,48 @@ export namespace bud::threading {
 			}
 		}
 
-    private:
-        Fiber* allocate_fiber() {
-            auto f = fiber_pool_.pop();
-            return f ? f : new Fiber();
-        }
+	private:
+		Fiber* allocate_fiber() {
+			auto f = fiber_pool_.pop();
+			return f ? f : new Fiber();
+		}
 
-        void free_fiber(Fiber* f) {
-            fiber_pool_.push(f);
-        }
+		void free_fiber(Fiber* f) {
+			fiber_pool_.push(f);
+		}
 
-        /// <summary>
-        /// Entry routine for a fiber: runs the fiber's work callback, resolves dependency waiters when the fiber signals completion, marks the fiber finished, and switches context back to the worker.
-        /// </summary>
-        /// <param name="f_dummy">An unused placeholder parameter to match the fiber entry signature. The function instead operates on the thread-local current fiber (t_current_fiber) and scheduler (t_scheduler).</param>
-        static void fiber_entry_stub(Fiber* f_dummy) {
-            auto self = t_current_fiber;
-            auto scheduler = t_scheduler;
+		/// <summary>
+		/// Entry routine for a fiber: runs the fiber's work callback, resolves dependency waiters when the fiber signals completion, marks the fiber finished, and switches context back to the worker.
+		/// </summary>
+		/// <param name="f_dummy">An unused placeholder parameter to match the fiber entry signature. The function instead operates on the thread-local current fiber (t_current_fiber) and scheduler (t_scheduler).</param>
+		static void fiber_entry_stub(Fiber* f_dummy) {
+			auto self = t_current_fiber;
+			auto scheduler = t_scheduler;
 
-            if (self->work)
-				self->work();					
+			if (self->work)
+				self->work();
 
 			// Process dependencies
-            if (self->signal_counter) {
-                auto prev = self->signal_counter->value.fetch_sub(1, std::memory_order_acq_rel);
-                if (prev == 1) {
-                    auto waiting_head = self->signal_counter->waiting_list.exchange(nullptr, std::memory_order_acquire);
+			if (self->signal_counter) {
+				auto prev = self->signal_counter->value.fetch_sub(1, std::memory_order_acq_rel);
+				if (prev == 1) {
+					auto waiting_head = self->signal_counter->waiting_list.exchange(nullptr, std::memory_order_acquire);
 
-                    while (waiting_head) {
-                        auto next = waiting_head->next_waiting;
-                        waiting_head->next_waiting = nullptr;
-                        scheduler->workers_[t_worker_index]->queue.push(waiting_head);
-                        waiting_head = next;
-                    }
-                }
-            }
+					while (waiting_head) {
+						auto next = waiting_head->next_waiting;
+						waiting_head->next_waiting = nullptr;
+						scheduler->workers_[t_worker_index]->queue.push(waiting_head);
+						waiting_head = next;
+					}
+				}
+			}
 
-            self->is_finished = true;
-            bud_switch_context(&self->rsp, t_worker_rsp);
-        }
+			self->is_finished = true;
+			bud_switch_context(&self->rsp, t_worker_rsp);
+		}
 
 
-        void execute_task(Fiber* f) {
+		void execute_task(Fiber* f) {
 			ZoneScoped;
 
 			t_current_fiber = f;
@@ -581,8 +604,7 @@ export namespace bud::threading {
 
 				do {
 					f->next_waiting = old_head;
-				}
-				while (!c->waiting_list.compare_exchange_weak(
+				} while (!c->waiting_list.compare_exchange_weak(
 					old_head, f,
 					std::memory_order_release, std::memory_order_relaxed));
 
@@ -599,21 +621,21 @@ export namespace bud::threading {
 				return;
 			}
 
-            if (f->is_finished) {
-                f->work = nullptr;
-                free_fiber(f);
-            }
-        }
+			if (f->is_finished) {
+				f->work = nullptr;
+				free_fiber(f);
+			}
+		}
 
-        Fiber* steal_task(size_t my_idx) {
-            for (size_t i = 1; i < num_threads_; ++i) {
-                size_t victim = (my_idx + i) % num_threads_;
-                auto opt = workers_[victim]->queue.steal();
-                if (opt)
+		Fiber* steal_task(size_t my_idx) {
+			for (size_t i = 1; i < num_threads_; ++i) {
+				size_t victim = (my_idx + i) % num_threads_;
+				auto opt = workers_[victim]->queue.steal();
+				if (opt)
 					return *opt;
-            }
-            return nullptr;
-        }
+			}
+			return nullptr;
+		}
 
 		void worker_loop(size_t index, std::stop_token st) {
 			t_worker_index = index;
@@ -631,30 +653,30 @@ export namespace bud::threading {
 			while (running_ && !st.stop_requested()) {
 				Fiber* f = nullptr;
 
-                if (index == 0) {
-                    std::unique_lock lock(main_queue_mtx_, std::try_to_lock);
-                    if (lock.owns_lock() && !main_thread_incoming_queue_.empty()) {
-                        f = main_thread_incoming_queue_.front();
-                        main_thread_incoming_queue_.pop_front();
-                    }
-                }
+				if (index == 0) {
+					std::unique_lock lock(main_queue_mtx_, std::try_to_lock);
+					if (lock.owns_lock() && !main_thread_incoming_queue_.empty()) {
+						f = main_thread_incoming_queue_.front();
+						main_thread_incoming_queue_.pop_front();
+					}
+				}
 
-                if (!f) {
-                    auto opt = workers_[index]->queue.pop();
-                    if (opt)
+				if (!f) {
+					auto opt = workers_[index]->queue.pop();
+					if (opt)
 						f = *opt;
-                }
+				}
 
-                if (!f)
+				if (!f)
 					f = steal_task(index);
 
-                if (f) {
-                    execute_task(f);
-                }
-                else {
+				if (f) {
+					execute_task(f);
+				}
+				else {
 					std::this_thread::sleep_for(std::chrono::microseconds(1));
-                }
-            }
-        }
-    };
+				}
+			}
+		}
+	};
 }

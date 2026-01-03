@@ -29,7 +29,7 @@ BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 	bool enable_validation = false;
 #endif
 
-	rhi_->init(window_->get_sdl_window(), enable_validation);
+	rhi_->init(window_->get_sdl_window(), task_scheduler_.get(), enable_validation);
 }
 
 BudEngine::~BudEngine() {
@@ -46,11 +46,11 @@ void BudEngine::run() {
 
 		window_->poll_events();
 
+		task_scheduler_->pump_main_thread_tasks();
+
 		//perform_frame_logic();
 
 		rhi_->draw_frame();
-
-		task_scheduler_->pump_main_thread_tasks();
 
 		FrameMark;
 	}

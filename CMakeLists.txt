@@ -22,7 +22,7 @@ enable_language(ASM_MASM)
 
 # Profiler support, CMakePresets can override this option
 if(NOT DEFINED BUD_ENABLE_PROFILING)
-	option(BUD_ENABLE_PROFILING "Enable Tracy Profiler" ON)
+	option(BUD_ENABLE_PROFILING "Enable Tracy Profiler" OFF)
 endif()
 
 # MSVC 模块支持
@@ -57,10 +57,65 @@ set(BUD_THIRD_PARTY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 # End, global settings
 
 # Begin, define engine core library
+
+file(GLOB SHADER_FILES
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.vert"	# Vertex Shader
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.frag"	# Fragment Shader
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.comp"	# Compute Shader
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.geom"	# Geometry Shader
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.tesc"	# Tessellation Control Shader
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.tese"	# Tessellation Evaluation Shader
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.mesh"	# Mesh Shader
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.task"	# Task Shader
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rgen"	# Ray Generation Shader
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rmiss"	# Ray Miss Shader
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rchit"	# Ray Closest Hit Shader
+)
+
+# Find glslc compiler and set up custom commands to compile shaders
+find_program(GLSLC_EXECUTABLE NAMES glslc HINTS "$ENV{VULKAN_SDK}/Bin")
+
+if(NOT GLSLC_EXECUTABLE)
+    message(WARNING "Not found glslc, please install Vulkan SDK")
+else()
+    message(STATUS "Found Shader compiler: ${GLSLC_EXECUTABLE}")
+    
+    set(SPV_OUTPUTS "")
+
+    foreach(SHADER_SOURCE ${SHADER_FILES})
+        get_filename_component(SHADER_EXT ${SHADER_SOURCE} EXT)
+
+		if(NOT SHADER_EXT STREQUAL ".spv")
+            set(SHADER_OUTPUT "${SHADER_SOURCE}.spv")
+
+			add_custom_command(
+                OUTPUT ${SHADER_OUTPUT}
+                COMMAND ${GLSLC_EXECUTABLE} ${SHADER_SOURCE} -o ${SHADER_OUTPUT}
+                DEPENDS ${SHADER_SOURCE}
+                COMMENT "Compiling ${SHADER_SOURCE} -> ${SHADER_OUTPUT}"
+                VERBATIM
+            )
+            
+            list(APPEND SPV_OUTPUTS ${SHADER_OUTPUT})
+        endif()
+    endforeach()
+
+    add_custom_target(CompileShaders ALL DEPENDS ${SPV_OUTPUTS})
+endif()
+
+source_group("Shaders" FILES ${SHADER_FILES})
+
 add_library(bud_engine_core STATIC
     "src/platform/window.cpp"
     "src/runtime/bud_engine.cpp"
+	"src/third_party/bud_third_party.cpp"
+	${SHADER_FILES}
 )
+
+# Ensure shaders are compiled before building the core library
+if(TARGET CompileShaders)
+    add_dependencies(bud_engine_core CompileShaders)
+endif()
 
 if (BUD_ENABLE_PROFILING)
 	target_compile_definitions(bud_engine_core PUBLIC TRACY_ENABLE)
@@ -87,7 +142,7 @@ target_sources(bud_engine_core
             "src/graphics/bud.graphics.cppm"
 			"src/graphics/rhi/bud.graphics.rhi.cppm"
             
-            "src/threading/bud.io.cppm"
+            "src/io/bud.io.cppm"
             "src/platform/bud.platform.cppm"
             "src/runtime/bud.engine.cppm"
 )
@@ -111,6 +166,7 @@ if(BUD_BUILD_SAMPLES)
     target_link_libraries(triangle_sample PRIVATE bud_engine_core)
     target_include_directories(triangle_sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     set_target_properties(triangle_sample PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+	set_target_properties(triangle_sample PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
 	set_property(TARGET triangle_sample PROPERTY CXX_SCAN_FOR_MODULES ON)
 

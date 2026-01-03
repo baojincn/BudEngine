@@ -10,7 +10,8 @@
 		"vulkan",
 		"vulkan-memory-allocator",
 		"glm",
-		"tracy"
+		"tracy",
+		"tinygltf"
 	],
 	"overrides": [
 		{
@@ -32,6 +33,10 @@
 		{
 			"name": "tracy",
 			"version-string": "0.11.1"
+		},
+		{
+			"name": "tinygltf",
+			"version-string": "2.9.6"
 		}
 	],
 	"description": "Bud Engine - A full task-driven Game Engine."
