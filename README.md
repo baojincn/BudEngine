@@ -2,9 +2,13 @@
 
 
 # Bud Engine
+A full fiber-based task driven lightweight 3D Game Engine.
 
 Hello world  
 ![](samples/screenshots/hello_world.png)
+
+Hello mipmaps
+![](samples/screenshots/hello_mipmaps.png)
 
 Performance tracing tool's test 
 ![](samples/screenshots/performance_tracing.png)

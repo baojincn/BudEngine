@@ -7,6 +7,18 @@
 export module bud.platform;
 
 export namespace bud::platform {
+	enum class Key {
+		Unknown = 0,
+		Escape,
+		Space,
+		Enter,
+		W,
+		A,
+		S,
+		D,
+		R,
+		// ... 以后随用随加
+	};
 
     class Window {
     public:
@@ -16,6 +28,7 @@ export namespace bud::platform {
         virtual void get_size(int& width, int& height) const = 0;
         virtual bool should_close() const = 0;
         virtual void poll_events() = 0;
+		virtual bool is_key_pressed(bud::platform::Key key) const = 0;
 
         int get_width() const {
             int w, h;

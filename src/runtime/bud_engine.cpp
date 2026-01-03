@@ -5,6 +5,7 @@ module;
 #include <memory>
 #include <thread>
 #include <chrono>
+#include <print>
 
 #ifdef TRACY_ENABLE
 #include <tracy/Tracy.hpp>
@@ -41,10 +42,24 @@ void BudEngine::run() {
 	// Initialize the main thread as a worker
 	task_scheduler_->init_main_thread_worker();
 
+	//
+	auto last_reload_time = std::chrono::high_resolution_clock::now();
+
 	// 2. 游戏主循环 (Game Loop)
 	while (!window_->should_close()) {
 
 		window_->poll_events();
+
+		if (window_->is_key_pressed(bud::platform::Key::R)) {
+			auto now = std::chrono::high_resolution_clock::now();
+			auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_reload_time);
+			if (duration.count() > 500) { // 500ms 防抖
+				std::println("[Engine] Reloading shaders...");
+				last_reload_time = now;
+				// 异步重载着色器
+				rhi_.get()->reload_shaders_async();
+			}
+		}
 
 		task_scheduler_->pump_main_thread_tasks();
 

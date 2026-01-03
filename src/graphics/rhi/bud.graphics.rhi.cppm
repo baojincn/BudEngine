@@ -26,8 +26,6 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-#include <stb_image.h>
-
 import bud.io;
 import bud.threading;
 
@@ -111,6 +109,7 @@ export namespace bud::graphics {
 		virtual void draw_frame() = 0;
 		virtual void wait_idle() = 0;
 		virtual void cleanup() = 0;
+		virtual void reload_shaders_async() = 0;
 	};
 
 	// ==========================================
@@ -383,6 +382,25 @@ export namespace bud::graphics {
 			if (instance) {
 				vkDestroyInstance(instance, nullptr);
 			}
+		}
+
+		// [Worker Thread] 异步加载 Shader
+		void reload_shaders_async() {
+			task_scheduler->spawn("AsyncShaderLoad", [this]() {
+				// 使用新的 FileSystem
+				auto vert_opt = bud::io::FileSystem::read_binary("src/shaders/triangle.vert.spv");
+				auto frag_opt = bud::io::FileSystem::read_binary("src/shaders/triangle.frag.spv");
+
+				if (!vert_opt || !frag_opt) return;
+
+				// 移动所有权给主线程
+				task_scheduler->submit_main_thread_task([this,
+					vert = std::move(*vert_opt),
+					frag = std::move(*frag_opt)]() {
+
+					this->recreate_graphics_pipeline(vert, frag);
+				});
+			});
 		}
 
 		// ==========================================
@@ -715,13 +733,8 @@ export namespace bud::graphics {
 			std::println("[Vulkan] Descriptor Set Layout created.");
 		}
 
-		void create_graphics_pipeline() {
-			auto vert_shader_code = read_file("src/shaders/triangle.vert.spv");
-			auto frag_shader_code = read_file("src/shaders/triangle.frag.spv");
-
-			VkShaderModule vert_module = create_shader_module(vert_shader_code);
-			VkShaderModule frag_module = create_shader_module(frag_shader_code);
-
+		// Called by Init and Hot-Reload
+		void setup_pipeline_state(VkShaderModule vert_module, VkShaderModule frag_module) {
 			VkPipelineShaderStageCreateInfo vert_stage_info{};
 			vert_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 			vert_stage_info.stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -818,13 +831,61 @@ export namespace bud::graphics {
 			pipeline_info.renderPass = render_pass;
 			pipeline_info.subpass = 0;
 
+			// 创建新管线
 			if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &graphics_pipeline) != VK_SUCCESS) {
 				throw std::runtime_error("Failed to create graphics pipeline!");
 			}
 
+			std::println("[Vulkan] Pipeline State Created.");
+		}
+
+		void create_graphics_pipeline() {
+			auto vert_shader_code = bud::io::FileSystem::read_binary("src/shaders/triangle.vert.spv");
+			auto frag_shader_code = bud::io::FileSystem::read_binary("src/shaders/triangle.frag.spv");
+
+			if (!vert_shader_code || !frag_shader_code) {
+				throw std::runtime_error("Failed to load shader SPIR-V files!");
+			}
+
+			VkShaderModule vert_module = create_shader_module(*vert_shader_code);
+			VkShaderModule frag_module = create_shader_module(*frag_shader_code);
+
+			setup_pipeline_state(vert_module, frag_module);
+
 			vkDestroyShaderModule(device, frag_module, nullptr);
 			vkDestroyShaderModule(device, vert_module, nullptr);
 			std::println("[Vulkan] Graphics pipeline created successfully");
+		}
+
+		// [新增] 仅重建管线的内部函数
+		void recreate_graphics_pipeline(const std::vector<char>& vert_code, const std::vector<char>& frag_code) {
+			std::println("[Main] Recreating Pipeline for Hot-Reload...");
+
+			// 1. 等待 GPU 空闲 (因为我们要销毁正在用的管线)
+			vkDeviceWaitIdle(device);
+
+			// 2. 销毁旧管线
+			if (graphics_pipeline) {
+				vkDestroyPipeline(device, graphics_pipeline, nullptr);
+				graphics_pipeline = nullptr;
+			}
+
+			// 3. 创建新 Modules
+			VkShaderModule vert_module = create_shader_module(vert_code);
+			VkShaderModule frag_module = create_shader_module(frag_code);
+
+			// 4. [复用] 创建新管线
+			try {
+				setup_pipeline_state(vert_module, frag_module);
+				std::println("[Main] Hot-Reload Success!");
+			}
+			catch (const std::exception& e) {
+				std::println(stderr, "[Main] Hot-Reload Failed: {}", e.what());
+			}
+
+			// 5. 清理 Modules
+			vkDestroyShaderModule(device, frag_module, nullptr);
+			vkDestroyShaderModule(device, vert_module, nullptr);
 		}
 
 		void create_framebuffers() {
@@ -954,32 +1015,33 @@ export namespace bud::graphics {
 			std::println("[Vulkan] Placeholder texture created (1x1).");
 		}
 
-		// [新增] 异步加载任务
+		// [Worker Thread] 异步加载图片
 		void load_texture_async(const std::string& filename) {
 			std::println("[RHI] Dispatching async texture load: {}", filename);
 
 			task_scheduler->spawn("AsyncTextureLoad", [this, filename]() {
-				// [Worker Thread] 1. 从硬盘读取文件 (耗时操作)
-				int tex_width, tex_height, tex_channels;
-				stbi_uc* pixels = stbi_load(filename.c_str(), &tex_width, &tex_height, &tex_channels, STBI_rgb_alpha);
+				// 1. 调用 IO 模块 (自动处理内存，RAII)
+				// 使用 std::optional 处理可能的失败
+				auto img_opt = bud::io::ImageLoader::load(filename);
 
-				if (!pixels) {
-					std::println("[Worker] Failed to load texture: {}", filename);
-					return;
+				if (!img_opt) {
+					return; // IO 模块内部已经打印了错误
 				}
 
-				// [Worker Thread] 2. 提交上传任务给主线程
-				task_scheduler->submit_main_thread_task([this, pixels, tex_width, tex_height]() {
-					// [Main Thread] 3. 执行热更替 (Hot Swap)
-					this->update_texture_resources(pixels, tex_width, tex_height);
+				// Move 语义转移所有权，img_opt 里的内存现在属于这个 lambda
+				auto img = std::move(*img_opt);
 
-					// 释放内存
-					stbi_image_free(pixels);
+				// 2. 提交给主线程
+				task_scheduler->submit_main_thread_task([this, img = std::move(img)]() mutable {
+					// 3. 主线程拿到了 img (包含 width, height, pixels)
+					// 注意：这里传的是 img 对象，lambda 结束时 img 析构，自动调用 stbi_image_free
+					// 所以要在 update_texture_resources 里面拷贝数据，或者把 img 所有权传进去
+					this->update_texture_resources(img.pixels, img.width, img.height);
 				});
 			});
 		}
 
-		void update_texture_resources(stbi_uc* pixels, int width, int height) {
+		void update_texture_resources(unsigned char* pixels, int width, int height) {
 			std::println("[Main] Texture data received. Uploading with Mipmaps...");
 			vkDeviceWaitIdle(device);
 
@@ -1414,18 +1476,6 @@ export namespace bud::graphics {
 		// Low-Level Helpers
 		// ==========================================
 	private:
-		static std::vector<char> read_file(const std::string& filename) {
-			std::ifstream file(filename, std::ios::ate | std::ios::binary);
-			if (!file.is_open()) {
-				throw std::runtime_error("Failed to open file: " + filename);
-			}
-			size_t file_size = (size_t)file.tellg();
-			std::vector<char> buffer(file_size);
-			file.seekg(0);
-			file.read(buffer.data(), file_size);
-			file.close();
-			return buffer;
-		}
 
 		VkShaderModule create_shader_module(const std::vector<char>& code) {
 			VkShaderModuleCreateInfo create_info{};
