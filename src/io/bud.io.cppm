@@ -9,18 +9,61 @@
 #include <optional>
 
 // 保持第三方库的 include
+#include <tiny_obj_loader.h>
 #include <tiny_gltf.h> 
-#include <stb_image.h> // 把 stb_image 的依赖移到这里
+#include <stb_image.h>
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#define GLM_ENABLE_EXPERIMENTAL // for glm::hash
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/hash.hpp>
 
 export module bud.io;
 
 export namespace bud::io {
 
+
+	export struct MeshData {
+		struct Vertex {
+			glm::vec3 pos;
+			glm::vec3 color;
+			glm::vec3 normal;
+			glm::vec2 texture_uv;
+			float texture_index;
+
+			bool operator==(const Vertex& other) const {
+				return pos == other.pos &&
+					color == other.color &&
+					normal == other.normal &&
+					texture_uv == other.texture_uv &&
+					texture_index == other.texture_index;
+			}
+		};
+
+		std::vector<Vertex> vertices;
+		std::vector<uint32_t> indices;
+		std::vector<std::string> texture_paths;
+	};
+}
+
+// 特化 glm::vec3 和 glm::vec2 的哈希函数，以支持 MeshData::Vertex 的哈希
+namespace std {
+	template<> struct hash<bud::io::MeshData::Vertex> {
+		size_t operator()(bud::io::MeshData::Vertex const& vertex) const {
+			auto h1 = hash<glm::vec3>()(vertex.pos);
+			auto h2 = hash<glm::vec3>()(vertex.color);
+			auto h3 = hash<glm::vec3>()(vertex.normal);
+			auto h4 = hash<glm::vec2>()(vertex.texture_uv);
+			auto h5 = hash<float>()(vertex.texture_index);
+
+			return h1 ^ (h2 << 1) ^ (h2 << 2) ^ (h3 << 3) ^ (h5 << 4);
+		}
+	};
+}
+
+export namespace bud::io {
 	// ==========================================
 	// 1. File System (基础 IO)
 	// ==========================================
@@ -95,6 +138,7 @@ export namespace bud::io {
 		}
 	};
 
+
 	export class ImageLoader {
 	public:
 		static std::optional<Image> load(const std::filesystem::path& path) {
@@ -117,22 +161,113 @@ export namespace bud::io {
 	// ==========================================
 	// 3. Model Loader (网格模型)
 	// ==========================================
-	export struct MeshData {
-		struct Vertex {
-			glm::vec3 pos;
-			glm::vec3 color;
-			glm::vec2 texCoord;
-		};
-
-		std::vector<Vertex> vertices;
-		std::vector<uint32_t> indices;
-	};
-
 	export class ModelLoader {
 	public:
+		static std::optional<MeshData> load_obj(const std::filesystem::path& path) {
+			tinyobj::attrib_t attrib;
+			std::vector<tinyobj::shape_t> shapes;
+			std::vector<tinyobj::material_t> materials;
+			std::string warn, err;
+
+			std::string path_str = path.string();
+			std::string base_dir = path.parent_path().string() + "/"; // load .mtl
+
+			bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path_str.c_str(), base_dir.c_str());
+
+			if (!warn.empty() && warn.find("Both") == std::string::npos)
+				std::println("[OBJ Warn]: {}", warn);
+
+			if (!err.empty())
+				std::println("[OBJ Error]: {}", err);
+
+			if (!ret)
+				return std::nullopt;
+
+			MeshData meshData;
+			// 1. 收集所有用到的纹理
+				// map: 材质名 -> 全局纹理 ID (0, 1, 2...)
+			std::unordered_map<int, float> materialToTextureIndex;
+
+			// 默认纹理 ID 为 0 (我们稍后把 0 号槽位留给那个 1x1 的白图或紫黑格)
+			float defaultTexIndex = 0.0f;
+
+			// Sponza 的材质里有漫反射贴图 (diffuse_texname)
+			for (size_t i = 0; i < materials.size(); i++) {
+				std::string texName = materials[i].diffuse_texname;
+				if (!texName.empty()) {
+					// 构造完整路径
+					std::string fullPath = base_dir + texName;
+
+					// 存入 list
+					meshData.texture_paths.push_back(fullPath);
+
+					// 记录映射关系: Material ID (i) -> Texture Array Index (size)
+					// 注意：因为我们预留了 0 号作为 fallback，所以这里 +1.0f
+					materialToTextureIndex[i] = static_cast<float>(meshData.texture_paths.size());
+				}
+				else {
+					materialToTextureIndex[i] = 0.0f; // 没有贴图的材质用默认图
+				}
+			}
+
+			// 如果一个纹理都没找到，至少保证 lists 不为空
+			if (meshData.texture_paths.empty()) {
+				// 只是为了占位，具体的 fallback 逻辑在 RHI 处理
+			}
+
+			std::unordered_map<MeshData::Vertex, uint32_t> uniqueVertices{};
+
+			for (const auto& shape : shapes) {
+				size_t index_offset = 0;
+				// 遍历每一个面 (Face)
+				for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); f++) {
+					int fv = shape.mesh.num_face_vertices[f]; // 通常是 3 (三角形)
+
+					// 获取这个面的材质 ID
+					int mat_id = shape.mesh.material_ids[f];
+					float currentTexIndex = 0.0f;
+					if (mat_id >= 0 && materialToTextureIndex.count(mat_id)) {
+						currentTexIndex = materialToTextureIndex[mat_id];
+					}
+
+					// 遍历面的每个顶点
+					for (size_t v = 0; v < fv; v++) {
+						tinyobj::index_t idx = shape.mesh.indices[index_offset + v];
+
+						MeshData::Vertex vertex{};
+						// ... pos, texCoord 读取逻辑不变 ...
+						vertex.pos = { attrib.vertices[3 * idx.vertex_index + 0], attrib.vertices[3 * idx.vertex_index + 1], attrib.vertices[3 * idx.vertex_index + 2] };
+
+						if (idx.normal_index >= 0) {
+							vertex.normal = { attrib.normals[3 * idx.normal_index + 0], attrib.normals[3 * idx.normal_index + 1], attrib.normals[3 * idx.normal_index + 2] };
+						}
+						else {
+							// 如果没有法线，给个默认向上的
+							vertex.normal = { 0.0f, 1.0f, 0.0f };
+						}
+
+						if (idx.texcoord_index >= 0) {
+							vertex.texture_uv = { attrib.texcoords[2 * idx.texcoord_index + 0], 1.0f - attrib.texcoords[2 * idx.texcoord_index + 1] };
+						}
+						vertex.color = { 1.0f, 1.0f, 1.0f };
+
+						// [新增] 写入纹理索引
+						vertex.texture_index = currentTexIndex;
+
+						if (uniqueVertices.count(vertex) == 0) {
+							uniqueVertices[vertex] = static_cast<uint32_t>(meshData.vertices.size());
+							meshData.vertices.push_back(vertex);
+						}
+						meshData.indices.push_back(uniqueVertices[vertex]);
+					}
+					index_offset += fv;
+				}
+			}
+
+			return meshData;
+		}
+
 		static std::optional<MeshData> load_gltf(const std::filesystem::path& path) {
-			// ... (保持你之前的 ModelLoader 代码不变) ...
-			// 篇幅原因省略，这部分代码可以直接保留
 			tinygltf::Model model;
 			tinygltf::TinyGLTF loader;
 			std::string err;
@@ -150,9 +285,8 @@ export namespace bud::io {
 		}
 	private:
 		static MeshData convert_to_mesh_data(const tinygltf::Model& model) {
-			// ... (保持你之前的转换代码不变) ...
 			MeshData meshData;
-			// 复制原来的逻辑即可
+
 			if (model.meshes.empty()) return meshData;
 			const auto& gltfMesh = model.meshes[0];
 			if (gltfMesh.primitives.empty()) return meshData;
@@ -175,7 +309,7 @@ export namespace bud::io {
 				MeshData::Vertex vertex{};
 				if (positionBuffer) vertex.pos = glm::vec3(positionBuffer[i * 3 + 0], positionBuffer[i * 3 + 1], positionBuffer[i * 3 + 2]);
 				vertex.color = glm::vec3(1.0f, 1.0f, 1.0f);
-				if (texCoordBuffer) vertex.texCoord = glm::vec2(texCoordBuffer[i * 2 + 0], texCoordBuffer[i * 2 + 1]);
+				if (texCoordBuffer) vertex.texture_uv = glm::vec2(texCoordBuffer[i * 2 + 0], texCoordBuffer[i * 2 + 1]);
 				meshData.vertices.push_back(vertex);
 			}
 			if (primitive.indices >= 0) {
@@ -200,3 +334,4 @@ export namespace bud::io {
 		}
 	};
 }
+

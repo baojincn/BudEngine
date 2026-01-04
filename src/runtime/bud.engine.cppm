@@ -11,6 +11,7 @@ import bud.dod;
 import bud.threading;
 import bud.platform;
 import bud.graphics.rhi;
+import bud.graphics;
 
 export namespace bud::engine {
 
@@ -28,10 +29,11 @@ export namespace bud::engine {
         void run();
 
     private:
-        void perform_frame_logic();
+		void handle_events();
+        void perform_frame_logic(float delta_time);
+		void perform_rendering();
 
     private:
-        bool running_ = true;
 
         std::unique_ptr<bud::platform::Window> window_;
 
@@ -40,6 +42,12 @@ export namespace bud::engine {
 
 		std::unique_ptr<bud::graphics::RHI> rhi_;
 
-        bud::dod::Registry<bud::math::float3, float> registry_;
+		bud::graphics::Camera camera_;
+
+		float aspect_ratio_{ 16.0f / 9.0f };
+		float far_plane_{ 4000.0f };
+		float near_plane_{ 0.1f };
+
+        bool running_ = true;
     };
 }

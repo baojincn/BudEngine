@@ -10,6 +10,9 @@ Hello world
 Hello mipmaps
 ![](samples/screenshots/hello_mipmaps.png)
 
+Hello PBR
+![](samples/screenshots/hello_pbr.png)
+
 Performance tracing tool's test 
 ![](samples/screenshots/performance_tracing.png)
 

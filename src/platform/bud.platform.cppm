@@ -7,6 +7,13 @@
 export module bud.platform;
 
 export namespace bud::platform {
+
+	enum class MouseButton {
+		Left,
+		Right,
+		Middle
+	};
+
 	enum class Key {
 		Unknown = 0,
 		Escape,
@@ -29,6 +36,14 @@ export namespace bud::platform {
         virtual bool should_close() const = 0;
         virtual void poll_events() = 0;
 		virtual bool is_key_pressed(bud::platform::Key key) const = 0;
+
+		virtual void set_title(const std::string& title) = 0;
+		virtual const char* get_title() const = 0;
+
+		virtual float get_mouse_scroll_y() const = 0;
+
+		virtual void get_mouse_delta(float& x, float& y) const = 0;
+		virtual bool is_mouse_button_down(MouseButton button) const = 0;
 
         int get_width() const {
             int w, h;

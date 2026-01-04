@@ -24,6 +24,9 @@ BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 
 	rhi_ = std::make_unique<bud::graphics::VulkanRHI>();
 
+	camera_ = bud::graphics::Camera(bud::math::vec3(10.0f, 5.0f, 0.0f));
+	camera_.movement_speed = 50.0f;
+
 #ifdef _DEBUG
 	bool enable_validation = true;
 #else
@@ -31,6 +34,9 @@ BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 #endif
 
 	rhi_->init(window_->get_sdl_window(), task_scheduler_.get(), enable_validation);
+
+
+	rhi_->load_model_async("data/cryteksponza/sponza.obj");
 }
 
 BudEngine::~BudEngine() {
@@ -45,10 +51,30 @@ void BudEngine::run() {
 	//
 	auto last_reload_time = std::chrono::high_resolution_clock::now();
 
+	//
+	auto last_frame_time = std::chrono::high_resolution_clock::now();
+
 	// 2. 游戏主循环 (Game Loop)
 	while (!window_->should_close()) {
+		// Priority to process window events
+		handle_events();
 
-		window_->poll_events();
+		auto current_time = std::chrono::high_resolution_clock::now();
+		auto delta_time = std::chrono::duration<float, std::chrono::seconds::period>(current_time - last_frame_time).count();
+		last_frame_time = current_time;
+
+		static float timer = 0.0f;
+		timer += delta_time;
+		static int fps = 0;
+		fps++;
+
+		const std::string base_title = "Bud Engine - Triangle Sample";
+		if (timer >= 1.0f) {
+			auto new_title = std::format("{} FPS: {}", base_title, fps);
+			window_->set_title(new_title.c_str());
+			timer = 0.0f;
+			fps = 0;
+		}
 
 		if (window_->is_key_pressed(bud::platform::Key::R)) {
 			auto now = std::chrono::high_resolution_clock::now();
@@ -56,16 +82,15 @@ void BudEngine::run() {
 			if (duration.count() > 500) { // 500ms 防抖
 				std::println("[Engine] Reloading shaders...");
 				last_reload_time = now;
-				// 异步重载着色器
 				rhi_.get()->reload_shaders_async();
 			}
 		}
 
 		task_scheduler_->pump_main_thread_tasks();
 
-		//perform_frame_logic();
+		perform_frame_logic(delta_time);
 
-		rhi_->draw_frame();
+		perform_rendering();
 
 		FrameMark;
 	}
@@ -73,31 +98,51 @@ void BudEngine::run() {
 	rhi_->wait_idle();
 }
 
-void BudEngine::perform_frame_logic() {
-	for (int i = 0; i < 100; ++i) {
-		task_scheduler_->spawn([i] {
-			// Simulate some work
-			int x = 0;
-			for (int j = 0; j < 10000; j++)
-				x += j;
-		},
-		&frame_counter_);
+void BudEngine::handle_events() {
+	window_->poll_events();
+}
+
+void BudEngine::perform_frame_logic(float delta_time) {
+
+	// 键盘移动 (WASD)
+	if (window_->is_key_pressed(bud::platform::Key::W))
+		camera_.process_keyboard(0, delta_time); // 0 = FORWARD
+	if (window_->is_key_pressed(bud::platform::Key::S))
+		camera_.process_keyboard(1, delta_time); // 1 = BACKWARD
+	if (window_->is_key_pressed(bud::platform::Key::A))
+		camera_.process_keyboard(2, delta_time); // 2 = LEFT
+	if (window_->is_key_pressed(bud::platform::Key::D))
+		camera_.process_keyboard(3, delta_time); // 3 = RIGHT
+
+	// 鼠标滚轮缩放
+	float dx, dy;
+	window_->get_mouse_delta(dx, dy);
+
+
+	// Look Around
+	if (window_->is_mouse_button_down(bud::platform::MouseButton::Left)) {
+		if (dx != 0.0f || dy != 0.0f) {
+			camera_.process_mouse_movement(dx, dy);
+		}
 	}
+	else // Zoom
+		if (window_->is_mouse_button_down(bud::platform::MouseButton::Right)) {
+			if (dy != 0.0f) {
+				camera_.process_mouse_drag_zoom(dy);
+			}
+		}
+}
 
-	// Synchronize logic and processing of window events
-	task_scheduler_->wait_for_counter(frame_counter_, [this]() {
-		window_->poll_events();
-	});
+void BudEngine::perform_rendering() {
+	int width, height;
+	window_->get_size(width, height);
 
-	// Render frame
+	if (height == 0)
+		height = 1; // Avoid division by zero
 
-	// Compile Render Graphh
+	aspect_ratio_ = static_cast<float>(width) / static_cast<float>(height);
 
-	// Execute Render Graph
+	auto proj = bud::math::perspective_vk(camera_.zoom, aspect_ratio_, near_plane_, far_plane_);
 
-	// Commit
-
-	// Present
-
-	// Reset frame counter for next frame
+	rhi_->draw_frame(camera_.get_view_matrix(), proj);
 }

@@ -21,12 +21,8 @@
 #include <tracy/TracyVulkan.hpp>
 #endif
 
-#define GLM_FORCE_RADIANS           // Force use of radians
-#define GLM_FORCE_DEPTH_ZERO_TO_ONE // Force Vulkan depth range (0.0 to 1.0)
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-
 import bud.io;
+import bud.math;
 import bud.threading;
 
 export module bud.graphics.rhi;
@@ -45,16 +41,20 @@ export namespace bud::graphics {
 
 	// Strict alignment for UBO
 	struct UniformBufferObject {
-		alignas(16) glm::mat4 model;
-		alignas(16) glm::mat4 view;
-		alignas(16) glm::mat4 proj;
+		alignas(16) bud::math::mat4 model;
+		alignas(16) bud::math::mat4 view;
+		alignas(16) bud::math::mat4 proj;
+		alignas(16) bud::math::vec3 camPos;   // 相机位置 (用于高光)
+		alignas(16) bud::math::vec3 lightDir; // 太阳方向
 	};
 
 	// Non strict alignment for Vertex
 	struct Vertex {
-		float pos[3];		// x, y, z	   0~11
-		float color[3];		// r, g, b	   11~23
-		float texCoord[2];  // u, v		   24~31
+		float pos[3];		
+		float color[3];		
+		float normal[3];		
+		float texCoord[2];  
+		float texIndex;	
 
 		static VkVertexInputBindingDescription get_binding_description() {
 			VkVertexInputBindingDescription binding_description{};
@@ -65,7 +65,7 @@ export namespace bud::graphics {
 		}
 
 		static std::vector<VkVertexInputAttributeDescription> get_attribute_descriptions() {
-			std::vector<VkVertexInputAttributeDescription> attribute_descriptions(3);
+			std::vector<VkVertexInputAttributeDescription> attribute_descriptions(5);
 
 			// Attribute 0: Position
 			attribute_descriptions[0].binding = 0;
@@ -79,11 +79,23 @@ export namespace bud::graphics {
 			attribute_descriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
 			attribute_descriptions[1].offset = offsetof(Vertex, color);
 
-			// Attribute 2: TexCoord
+			// Attribute 2: Normal
 			attribute_descriptions[2].binding = 0;
 			attribute_descriptions[2].location = 2;
-			attribute_descriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
-			attribute_descriptions[2].offset = offsetof(Vertex, texCoord);
+			attribute_descriptions[2].format = VK_FORMAT_R32G32B32_SFLOAT;
+			attribute_descriptions[2].offset = offsetof(Vertex, normal);
+
+			// Attribute 3: TexCoord 
+			attribute_descriptions[3].binding = 0;
+			attribute_descriptions[3].location = 3;
+			attribute_descriptions[3].format = VK_FORMAT_R32G32_SFLOAT;
+			attribute_descriptions[3].offset = offsetof(Vertex, texCoord);
+
+			// Attribute 4: TexIndex
+			attribute_descriptions[4].binding = 0;
+			attribute_descriptions[4].location = 4;
+			attribute_descriptions[4].format = VK_FORMAT_R32_SFLOAT;
+			attribute_descriptions[4].offset = offsetof(Vertex, texIndex);
 
 			return attribute_descriptions;
 		}
@@ -106,10 +118,11 @@ export namespace bud::graphics {
 	public:
 		virtual ~RHI() = default;
 		virtual void init(SDL_Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation) = 0;
-		virtual void draw_frame() = 0;
+		virtual void draw_frame(const bud::math::mat4& view, const bud::math::mat4& proj) = 0;
 		virtual void wait_idle() = 0;
 		virtual void cleanup() = 0;
 		virtual void reload_shaders_async() = 0;
+		virtual void load_model_async(const std::string& filepath) = 0;
 	};
 
 	// ==========================================
@@ -132,6 +145,8 @@ export namespace bud::graphics {
 			create_swapchain(window);
 			create_image_views();
 
+			create_depth_resources();
+
 			// 3. Pipeline Setup
 			create_render_pass();
 			create_descriptor_set_layout(); // Layout 必须在 Pipeline 之前
@@ -141,7 +156,7 @@ export namespace bud::graphics {
 			// 4. Resources Setup
 			create_command_pool();
 
-			create_vertex_buffer();
+			//create_vertex_buffer();
 			create_uniform_buffers();       // Buffer 必须在 Set 之前
 
 			// Texture placeholders
@@ -160,7 +175,7 @@ export namespace bud::graphics {
 			create_sync_objects();
 		}
 
-		void draw_frame() override {
+		void draw_frame(const bud::math::mat4& view, const bud::math::mat4& proj) override {
 			FrameData& frame = frames[current_frame]; // 获取当前帧的资源包
 
 			// 1. 等待上一轮使用该帧资源的操作完成
@@ -178,7 +193,7 @@ export namespace bud::graphics {
 			// 只有确定要绘制了，才 Reset Fence
 			vkResetFences(device, 1, &frame.in_flight_fence);
 
-			update_uniform_buffer(image_index); // 更新 UBO (注意：UBO 最好也做多帧缓冲，这里暂且复用)
+			update_uniform_buffer(image_index, view, proj); // 更新 UBO (注意：UBO 最好也做多帧缓冲，这里暂且复用)
 
 			// 3. 【关键】重置当前帧的所有 Command Pools
 			// 这会释放该帧之前分配的所有 command buffers 内存
@@ -201,9 +216,13 @@ export namespace bud::graphics {
 			render_pass_info.renderPass = render_pass;
 			render_pass_info.framebuffer = swapchain_framebuffers[image_index];
 			render_pass_info.renderArea.extent = swapchain_extent;
-			VkClearValue clear_color = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
-			render_pass_info.clearValueCount = 1;
-			render_pass_info.pClearValues = &clear_color;
+
+			std::array<VkClearValue, 2> clear_values{};
+			clear_values[0].color = { {0.1f, 0.1f, 0.1f, 1.0f} };
+			clear_values[1].depthStencil = { 1.0f, 0 };
+
+			render_pass_info.clearValueCount = static_cast<uint32_t>(clear_values.size());
+			render_pass_info.pClearValues = clear_values.data();
 
 			vkCmdBeginRenderPass(cmd, &render_pass_info, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
 
@@ -212,11 +231,11 @@ export namespace bud::graphics {
 			std::mutex recorded_cmds_mutex;
 			std::vector<VkCommandBuffer> secondary_cmds;
 
-			task_scheduler->spawn("DrawTask", [&, current_frame_idx = current_frame, img_idx = image_index]() { // 捕获当前的 frame index
+			task_scheduler->spawn("DrawTask", [&, current_frame_idx = current_frame, img_idx = image_index]() {
 				size_t worker_id = bud::threading::t_worker_index;
 
 				// 从当前帧的 FrameData 里拿 Pool
-				// 此时 Pool 已经被主线程 Reset 过了，Worker 可以直接 Alloc，不用 Reset！
+				// 此时 Pool 已经被主线程 Reset 过了，Worker 可以直接 Alloc，不用 Reset
 				auto& frame_data = frames[current_frame_idx];
 				VkCommandPool worker_pool = frame_data.worker_pools[worker_id];
 
@@ -244,6 +263,7 @@ export namespace bud::graphics {
 				sec_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 				sec_begin_info.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
 				sec_begin_info.pInheritanceInfo = &inheritance_info;
+
 				vkBeginCommandBuffer(sec_cmd, &sec_begin_info);
 
 				vkCmdBindPipeline(sec_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
@@ -251,12 +271,22 @@ export namespace bud::graphics {
 				VkViewport viewport{};
 				viewport.width = (float)swapchain_extent.width; viewport.height = (float)swapchain_extent.height; viewport.maxDepth = 1.0f;
 				vkCmdSetViewport(sec_cmd, 0, 1, &viewport);
+
+
 				VkRect2D scissor{}; scissor.extent = swapchain_extent;
 				vkCmdSetScissor(sec_cmd, 0, 1, &scissor);
-				VkBuffer vbs[] = { vertex_buffer }; VkDeviceSize offs[] = { 0 };
-				vkCmdBindVertexBuffers(sec_cmd, 0, 1, vbs, offs);
-				vkCmdBindDescriptorSets(sec_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0, 1, &descriptor_sets[img_idx], 0, nullptr);
-				vkCmdDraw(sec_cmd, 3, 1, 0, 0);
+
+				// Don't draw if didn't load model yet
+				if (!indices.empty() && vertex_buffer && index_buffer) {
+					VkBuffer vbs[] = { vertex_buffer }; VkDeviceSize offs[] = { 0 };
+					vkCmdBindVertexBuffers(sec_cmd, 0, 1, vbs, offs);
+
+					vkCmdBindIndexBuffer(sec_cmd, index_buffer, 0, VK_INDEX_TYPE_UINT32);
+
+					vkCmdBindDescriptorSets(sec_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0, 1, &descriptor_sets[img_idx], 0, nullptr);
+
+					vkCmdDrawIndexed(sec_cmd, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+				}
 
 				vkEndCommandBuffer(sec_cmd);
 
@@ -316,6 +346,10 @@ export namespace bud::graphics {
 		void cleanup() override {
 			wait_idle();
 
+			vkDestroyImageView(device, depth_image_view, nullptr);
+			vkDestroyImage(device, depth_image, nullptr);
+			vkFreeMemory(device, depth_image_memory, nullptr);
+
 			for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 				vkDestroySemaphore(device, frames[i].render_finished_semaphore, nullptr);
 				vkDestroySemaphore(device, frames[i].image_available_semaphore, nullptr);
@@ -336,6 +370,8 @@ export namespace bud::graphics {
 			// Cleanup Buffers
 			vkDestroyBuffer(device, vertex_buffer, nullptr);
 			vkFreeMemory(device, vertex_buffer_memory, nullptr);
+			vkDestroyBuffer(device, index_buffer, nullptr);
+			vkFreeMemory(device, index_buffer_memory, nullptr);
 
 			for (size_t i = 0; i < swapchain_images.size(); i++) {
 				vkDestroyBuffer(device, uniform_buffers[i], nullptr);
@@ -385,9 +421,8 @@ export namespace bud::graphics {
 		}
 
 		// [Worker Thread] 异步加载 Shader
-		void reload_shaders_async() {
+		void reload_shaders_async() override {
 			task_scheduler->spawn("AsyncShaderLoad", [this]() {
-				// 使用新的 FileSystem
 				auto vert_opt = bud::io::FileSystem::read_binary("src/shaders/triangle.vert.spv");
 				auto frag_opt = bud::io::FileSystem::read_binary("src/shaders/triangle.frag.spv");
 
@@ -399,6 +434,19 @@ export namespace bud::graphics {
 					frag = std::move(*frag_opt)]() {
 
 					this->recreate_graphics_pipeline(vert, frag);
+				});
+			});
+		}
+
+		void load_model_async(const std::string& filepath) override {
+			task_scheduler->spawn("AsyncModelLoad", [this, filepath]() {
+				// 1. IO 线程解析 OBJ
+				auto mesh_opt = bud::io::ModelLoader::load_obj(filepath);
+				if (!mesh_opt) return;
+
+				// 2. 主线程上传 GPU
+				task_scheduler->submit_main_thread_task([this, mesh = std::move(*mesh_opt)]() {
+					this->upload_mesh(mesh);
 				});
 			});
 		}
@@ -454,8 +502,6 @@ export namespace bud::graphics {
 		VkPipelineLayout pipeline_layout = nullptr;
 		VkPipeline graphics_pipeline = nullptr;
 
-		VkBuffer vertex_buffer = nullptr;
-		VkDeviceMemory vertex_buffer_memory = nullptr;
 
 		VkImage texture_image = nullptr;
 		VkDeviceMemory texture_image_memory = nullptr;
@@ -465,18 +511,29 @@ export namespace bud::graphics {
 		VkImageView texture_image_view = nullptr;
 		VkSampler texture_sampler = nullptr;
 
+		std::vector<VkImage> texture_images;
+		std::vector<VkDeviceMemory> texture_images_memories;
+		std::vector<VkImageView> texture_views;
+		std::vector<VkSampler> texture_samplers;
+
+		VkImage depth_image = nullptr;
+		VkDeviceMemory depth_image_memory = nullptr;
+		VkImageView depth_image_view = nullptr;
+
 		VkDescriptorPool descriptor_pool = nullptr;
 		std::vector<VkDescriptorSet> descriptor_sets;
 		std::vector<VkBuffer> uniform_buffers;
 		std::vector<VkDeviceMemory> uniform_buffers_memory;
 		std::vector<void*> uniform_buffers_mapped;
 
-		// Test Data
-		const std::vector<Vertex> vertices = {
-			{{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.5f, 0.0f}},
-			{{0.5f, 0.5f},  {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
-			{{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}}
-		};
+		std::vector<Vertex> vertices;
+		std::vector<uint32_t> indices;
+
+		VkBuffer vertex_buffer = nullptr;
+		VkDeviceMemory vertex_buffer_memory = nullptr;
+		VkBuffer index_buffer = nullptr;
+		VkDeviceMemory index_buffer_memory = nullptr;
+
 
 		bud::threading::TaskScheduler* task_scheduler = nullptr;
 
@@ -484,6 +541,50 @@ export namespace bud::graphics {
 		// Initialization Helpers
 		// ==========================================
 	private:
+		void create_depth_resources() {
+			VkFormat depth_format = find_depth_format();
+			create_image(swapchain_extent.width, swapchain_extent.height, 1, depth_format, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depth_image, depth_image_memory);
+
+			// 创建 View (注意 aspectMask 是 DEPTH)
+			VkImageViewCreateInfo view_info{};
+			view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+			view_info.image = depth_image;
+			view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			view_info.format = depth_format;
+			view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+			view_info.subresourceRange.baseMipLevel = 0;
+			view_info.subresourceRange.levelCount = 1;
+			view_info.subresourceRange.baseArrayLayer = 0;
+			view_info.subresourceRange.layerCount = 1;
+
+			if (vkCreateImageView(device, &view_info, nullptr, &depth_image_view) != VK_SUCCESS) {
+				throw std::runtime_error("Failed to create depth image view!");
+			}
+		}
+
+		VkFormat find_supported_format(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features) {
+			for (VkFormat format : candidates) {
+				VkFormatProperties props;
+				vkGetPhysicalDeviceFormatProperties(physical_device, format, &props);
+
+				if (tiling == VK_IMAGE_TILING_LINEAR && (props.linearTilingFeatures & features) == features) {
+					return format;
+				}
+				else if (tiling == VK_IMAGE_TILING_OPTIMAL && (props.optimalTilingFeatures & features) == features) {
+					return format;
+				}
+			}
+			throw std::runtime_error("Failed to find supported format!");
+		}
+
+		VkFormat find_depth_format() {
+			return find_supported_format(
+				{ VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT },
+				VK_IMAGE_TILING_OPTIMAL,
+				VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+			);
+		}
+
 		void create_instance(SDL_Window* window, bool enable_validation) {
 			enable_validation_layers = enable_validation;
 			VkApplicationInfo app_info{};
@@ -570,8 +671,16 @@ export namespace bud::graphics {
 			VkPhysicalDeviceFeatures device_features{};
 			device_features.samplerAnisotropy = VK_TRUE;
 
+			// 开启 Descriptor Indexing 特性链
+			VkPhysicalDeviceDescriptorIndexingFeatures indexing_features{};
+			indexing_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+			indexing_features.descriptorBindingPartiallyBound = VK_TRUE; // 允许数组不填满
+			indexing_features.runtimeDescriptorArray = VK_TRUE;          // 允许 Shader 使用非固定大小数组
+			indexing_features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+
 			VkDeviceCreateInfo create_info{};
 			create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+			create_info.pNext = &indexing_features;	// Link
 			create_info.queueCreateInfoCount = static_cast<uint32_t>(queue_create_infos.size());
 			create_info.pQueueCreateInfos = queue_create_infos.data();
 			create_info.pEnabledFeatures = &device_features;
@@ -678,23 +787,39 @@ export namespace bud::graphics {
 			color_attachment_ref.attachment = 0;
 			color_attachment_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+			VkAttachmentDescription depth_attachment{};
+			depth_attachment.format = find_depth_format();
+			depth_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+			depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; // 每一帧开始时清空深度
+			depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			depth_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			depth_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			depth_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			depth_attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+			VkAttachmentReference depth_attachment_ref{};
+			depth_attachment_ref.attachment = 1; // 这里的 1 对应下面 array 的下标
+			depth_attachment_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
 			VkSubpassDescription subpass{};
 			subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 			subpass.colorAttachmentCount = 1;
 			subpass.pColorAttachments = &color_attachment_ref;
+			subpass.pDepthStencilAttachment = &depth_attachment_ref;
 
 			VkSubpassDependency dependency{};
 			dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
 			dependency.dstSubpass = 0;
-			dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+			dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
 			dependency.srcAccessMask = 0;
-			dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-			dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+			dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+			dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
 			VkRenderPassCreateInfo render_pass_info{};
+			std::array<VkAttachmentDescription, 2> attachments = { color_attachment, depth_attachment }; // 数组包含两个
 			render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-			render_pass_info.attachmentCount = 1;
-			render_pass_info.pAttachments = &color_attachment;
+			render_pass_info.attachmentCount = static_cast<uint32_t>(attachments.size());
+			render_pass_info.pAttachments = attachments.data();
 			render_pass_info.subpassCount = 1;
 			render_pass_info.pSubpasses = &subpass;
 			render_pass_info.dependencyCount = 1;
@@ -715,15 +840,27 @@ export namespace bud::graphics {
 
 			VkDescriptorSetLayoutBinding sampler_layout_binding{};
 			sampler_layout_binding.binding = 1;
-			sampler_layout_binding.descriptorCount = 1;
+			sampler_layout_binding.descriptorCount = 100;
 			sampler_layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 			sampler_layout_binding.pImmutableSamplers = nullptr;
-			sampler_layout_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // 在 Fragment Shader 使用
+			sampler_layout_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
 			std::array<VkDescriptorSetLayoutBinding, 2> bindings = { ubo_layout_binding, sampler_layout_binding };
 
 			VkDescriptorSetLayoutCreateInfo layout_info{};
 			layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+
+			VkDescriptorBindingFlags binding_flags[] = {
+			  0,
+			  VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
+			};
+
+			VkDescriptorSetLayoutBindingFlagsCreateInfo flags_info{};
+			flags_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+			flags_info.bindingCount = 2;
+			flags_info.pBindingFlags = binding_flags;
+
+			layout_info.pNext = &flags_info; // Link in
 			layout_info.bindingCount = static_cast<uint32_t>(bindings.size());
 			layout_info.pBindings = bindings.data();
 
@@ -781,7 +918,7 @@ export namespace bud::graphics {
 			rasterizer.rasterizerDiscardEnable = VK_FALSE;
 			rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
 			rasterizer.lineWidth = 1.0f;
-			rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+			rasterizer.cullMode = VK_CULL_MODE_NONE;
 			rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; // GLM 投影矩阵翻转了 Y，这里顺应调整
 			rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -806,6 +943,14 @@ export namespace bud::graphics {
 			dynamic_state_info.dynamicStateCount = static_cast<uint32_t>(dynamic_states.size());
 			dynamic_state_info.pDynamicStates = dynamic_states.data();
 
+			VkPipelineDepthStencilStateCreateInfo depth_stencil{};
+			depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+			depth_stencil.depthTestEnable = VK_TRUE;  // 开启测试
+			depth_stencil.depthWriteEnable = VK_TRUE; // 开启写入
+			depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS; // 近的覆盖远的
+			depth_stencil.depthBoundsTestEnable = VK_FALSE;
+			depth_stencil.stencilTestEnable = VK_FALSE;
+
 			VkPipelineLayoutCreateInfo pipeline_layout_info{};
 			pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 			pipeline_layout_info.setLayoutCount = 1;
@@ -824,7 +969,7 @@ export namespace bud::graphics {
 			pipeline_info.pViewportState = &viewport_state;
 			pipeline_info.pRasterizationState = &rasterizer;
 			pipeline_info.pMultisampleState = &multisampling;
-			pipeline_info.pDepthStencilState = nullptr;
+			pipeline_info.pDepthStencilState = &depth_stencil;
 			pipeline_info.pColorBlendState = &color_blending;
 			pipeline_info.pDynamicState = &dynamic_state_info;
 			pipeline_info.layout = pipeline_layout;
@@ -891,13 +1036,16 @@ export namespace bud::graphics {
 		void create_framebuffers() {
 			swapchain_framebuffers.resize(swapchain_image_views.size());
 			for (size_t i = 0; i < swapchain_image_views.size(); i++) {
-				VkImageView attachments[] = { swapchain_image_views[i] };
+				std::array<VkImageView, 2> attachments = {
+					swapchain_image_views[i],
+					depth_image_view
+				};
 
 				VkFramebufferCreateInfo framebuffer_info{};
 				framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 				framebuffer_info.renderPass = render_pass;
-				framebuffer_info.attachmentCount = 1;
-				framebuffer_info.pAttachments = attachments;
+				framebuffer_info.attachmentCount = static_cast<uint32_t>(attachments.size());
+				framebuffer_info.pAttachments = attachments.data();
 				framebuffer_info.width = swapchain_extent.width;
 				framebuffer_info.height = swapchain_extent.height;
 				framebuffer_info.layers = 1;
@@ -942,6 +1090,20 @@ export namespace bud::graphics {
 			}
 		}
 
+
+		void copy_buffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+			VkCommandBuffer command_buffer = begin_single_time_commands();
+
+			VkBufferCopy copyRegion{};
+			copyRegion.srcOffset = 0;
+			copyRegion.dstOffset = 0;
+			copyRegion.size = size;
+
+			vkCmdCopyBuffer(command_buffer, srcBuffer, dstBuffer, 1, &copyRegion);
+
+			end_single_time_commands(command_buffer);
+		}
+
 		void create_vertex_buffer() {
 			VkDeviceSize buffer_size = sizeof(vertices[0]) * vertices.size();
 			create_buffer(buffer_size,
@@ -954,6 +1116,26 @@ export namespace bud::graphics {
 			vkMapMemory(device, vertex_buffer_memory, 0, buffer_size, 0, &data);
 			memcpy(data, vertices.data(), (size_t)buffer_size);
 			vkUnmapMemory(device, vertex_buffer_memory);
+		}
+
+		void create_index_buffer() {
+			VkDeviceSize buffer_size = sizeof(indices[0]) * indices.size();
+
+			VkBuffer staging_buffer;
+			VkDeviceMemory staging_buffer_memory;
+			create_buffer(buffer_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging_buffer, staging_buffer_memory);
+
+			void* data;
+			vkMapMemory(device, staging_buffer_memory, 0, buffer_size, 0, &data);
+			memcpy(data, indices.data(), (size_t)buffer_size);
+			vkUnmapMemory(device, staging_buffer_memory);
+
+			create_buffer(buffer_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, index_buffer, index_buffer_memory);
+
+			copy_buffer(staging_buffer, index_buffer, buffer_size);
+
+			vkDestroyBuffer(device, staging_buffer, nullptr);
+			vkFreeMemory(device, staging_buffer_memory, nullptr);
 		}
 
 		void create_uniform_buffers() {
@@ -972,9 +1154,192 @@ export namespace bud::graphics {
 			}
 		}
 
+
+		void upload_mesh(const bud::io::MeshData& mesh) {
+			vkDeviceWaitIdle(device); // 等待 GPU 空闲
+
+			// 1. 清理旧缓冲
+			if (vertex_buffer) {
+				vkDestroyBuffer(device, vertex_buffer, nullptr);
+				vkFreeMemory(device, vertex_buffer_memory, nullptr);
+			}
+
+			if (index_buffer) {
+				vkDestroyBuffer(device, index_buffer, nullptr);
+				vkFreeMemory(device, index_buffer_memory, nullptr);
+			}
+
+			// 2. 转换数据格式 (bud::io::Vertex -> bud::graphics::Vertex)
+			this->vertices.clear();
+			this->indices = mesh.indices;
+
+			for (const auto& v : mesh.vertices) {
+				Vertex rhi_v{};
+				rhi_v.pos[0] = v.pos.x;
+				rhi_v.pos[1] = v.pos.y;
+				rhi_v.pos[2] = v.pos.z;
+
+				rhi_v.color[0] = v.color.x;
+				rhi_v.color[1] = v.color.y;
+				rhi_v.color[2] = v.color.z;
+
+				rhi_v.normal[0] = v.normal.x;
+				rhi_v.normal[1] = v.normal.y;
+				rhi_v.normal[2] = v.normal.z;
+
+				rhi_v.texCoord[0] = v.texture_uv.x;
+				rhi_v.texCoord[1] = v.texture_uv.y;
+
+				rhi_v.texIndex = v.texture_index;
+
+				this->vertices.push_back(rhi_v);
+			}
+
+			// 3. 创建新缓冲
+			create_vertex_buffer();
+			create_index_buffer();
+
+
+			// 1. 清理旧的 Sponza 纹理 (保留 Slot 0 的 default texture)
+			for (auto v : texture_views) vkDestroyImageView(device, v, nullptr);
+			for (auto i : texture_images) vkDestroyImage(device, i, nullptr);
+			for (auto m : texture_images_memories) vkFreeMemory(device, m, nullptr);
+			// Sampler 通常可以复用，不需要每个纹理建一个。如果需要清理：
+			// for(auto s : texture_samplers) vkDestroySampler(device, s, nullptr);
+
+			texture_views.clear();
+			texture_images.clear();
+			texture_images_memories.clear();
+			// texture_samplers.clear(); 
+
+			// 2. 预分配空间
+			size_t count = mesh.texture_paths.size();
+			texture_views.resize(count);
+			texture_images.resize(count);
+			texture_images_memories.resize(count);
+			// texture_samplers.resize(count); 
+
+			std::println("[RHI] Loading {} textures for mesh...", count);
+
+			// 3. 循环加载并更新 Descriptor
+			for (size_t index = 0; index < count; ++index) {
+				std::string path = mesh.texture_paths[index];
+
+				// [新增] 打印正在加载哪张图，方便定位是谁的问题
+				std::println("[RHI] Loading texture [{}/{}]: {}", index + 1, count, path);
+
+				try {
+					// 尝试加载
+					create_texture_from_file(path, texture_images[index], texture_images_memories[index], texture_views[index]);
+				}
+				catch (const std::exception& e) {
+					// [关键] 捕获异常！不要让线程死掉！
+					std::println("❌ Error loading texture: {} | Reason: {}", path, e.what());
+
+					// [补救] 加载失败时，给一个 fallback (比如复用第一张图，或者创建一个 placeholder)
+					// 这里为了简单，我们假设 index=0 的图（通常是占位图或第一张）是好的，复用它
+					// 或者你可以再创建一个 1x1 的粉色图
+					if (index > 0 && texture_views[0]) {
+						std::println("   -> Using fallback texture (Slot 0)");
+						// 注意：这里只是复用 View，不要 Destroy 它
+						// 这种简单的复用在清理时可能会有问题（重复 destroy），
+						// 最稳妥的是生成一个专用的 1x1 错误贴图。
+						// 但为了现在不崩，我们先暂时创建一个新的 1x1 占位图给它：
+						create_texture_from_file("data/textures/default.png", texture_images[index], texture_images_memories[index], texture_views[index]);
+					}
+				}
+
+				// B. 准备 Descriptor 信息
+				VkDescriptorImageInfo image_info{};
+				image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				image_info.imageView = texture_views[index];
+				// 优化：所有纹理复用同一个全局采样器 texture_sampler
+				// 除非你需要不同的过滤方式
+				image_info.sampler = texture_sampler;
+
+				VkWriteDescriptorSet descriptor_write{};
+				descriptor_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+				descriptor_write.dstBinding = 1; // 绑定点 1
+				// 【关键】偏移量 = index + 1 (因为 0 号被占用了)
+				descriptor_write.dstArrayElement = static_cast<uint32_t>(index + 1);
+				descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				descriptor_write.descriptorCount = 1;
+				descriptor_write.pImageInfo = &image_info;
+
+				// C. 更新所有 Frame 的 Set
+				for (size_t i = 0; i < swapchain_images.size(); i++) {
+					descriptor_write.dstSet = descriptor_sets[i];
+					vkUpdateDescriptorSets(device, 1, &descriptor_write, 0, nullptr);
+				}
+
+				// 打印进度 (可选，防止以为卡死)
+				if ((index + 1) % 5 == 0) std::println("[RHI] Loaded {}/{} textures...", index + 1, count);
+			}
+		}
+
 		// ==========================================
 		// Texture Implementation
 		// ==========================================
+
+		// [新增] 加载单张纹理并返回资源
+		void create_texture_from_file(const std::string& path, VkImage& out_image, VkDeviceMemory& out_mem, VkImageView& out_view) {
+			// 1. 使用 IO 模块加载像素数据
+			auto img_opt = bud::io::ImageLoader::load(path);
+
+			// 如果加载失败（比如路径不对），就生成一个粉色 1x1 像素作为占位，防止崩
+			if (!img_opt) {
+				std::println("[RHI] Failed to load texture: {}. Using fallback.", path);
+				// 这里可以写个生成 1x1 纯色像素的逻辑，或者简单抛出异常
+				// 为了代码简短，这里先抛出异常，实际项目建议用 fallback
+				throw std::runtime_error("Texture load failed");
+			}
+			auto& img = *img_opt;
+
+			// 2. 创建 Staging Buffer
+			VkDeviceSize image_size = img.width * img.height * 4;
+			VkBuffer staging_buffer;
+			VkDeviceMemory staging_buffer_memory;
+			create_buffer(image_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging_buffer, staging_buffer_memory);
+
+			void* data;
+			vkMapMemory(device, staging_buffer_memory, 0, image_size, 0, &data);
+			memcpy(data, img.pixels, static_cast<size_t>(image_size));
+			vkUnmapMemory(device, staging_buffer_memory);
+
+			// 3. 计算 Mipmaps
+			uint32_t mips = static_cast<uint32_t>(std::floor(std::log2(std::max(img.width, img.height)))) + 1;
+
+			// 4. 创建 Image
+			create_image(img.width, img.height, mips, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
+				VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, out_image, out_mem);
+
+			// 5. 拷贝数据 + 生成 Mipmaps
+			transition_image_layout(out_image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+			copy_buffer_to_image(staging_buffer, out_image, static_cast<uint32_t>(img.width), static_cast<uint32_t>(img.height));
+			generate_mipmaps(out_image, VK_FORMAT_R8G8B8A8_SRGB, img.width, img.height, mips);
+
+			// 6. 清理 Staging
+			vkDestroyBuffer(device, staging_buffer, nullptr);
+			vkFreeMemory(device, staging_buffer_memory, nullptr);
+
+			// 7. 创建 View
+			// 注意：这里我们需要稍微修改 create_image_view 让它支持传入 mips 参数，或者直接在这里写
+			VkImageViewCreateInfo view_info{};
+			view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+			view_info.image = out_image;
+			view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			view_info.format = VK_FORMAT_R8G8B8A8_SRGB;
+			view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			view_info.subresourceRange.baseMipLevel = 0;
+			view_info.subresourceRange.levelCount = mips; // 使用计算出的 mips
+			view_info.subresourceRange.baseArrayLayer = 0;
+			view_info.subresourceRange.layerCount = 1;
+
+			if (vkCreateImageView(device, &view_info, nullptr, &out_view) != VK_SUCCESS) {
+				throw std::runtime_error("Failed to create texture view!");
+			}
+		}
 
 		void create_texture_image() {
 			// 1. 手动造一个 1x1 的白色像素 (R=255, G=255, B=255, A=255)
@@ -1296,7 +1661,7 @@ export namespace bud::graphics {
 			pool_sizes[0].descriptorCount = static_cast<uint32_t>(swapchain_images.size());
 			// 为 Sampler 预留池子空间
 			pool_sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			pool_sizes[1].descriptorCount = static_cast<uint32_t>(swapchain_images.size());
+			pool_sizes[1].descriptorCount = static_cast<uint32_t>(swapchain_images.size() * 1000);
 
 			VkDescriptorPoolCreateInfo pool_info{};
 			pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1423,9 +1788,13 @@ export namespace bud::graphics {
 			render_pass_info.framebuffer = swapchain_framebuffers[image_index];
 			render_pass_info.renderArea.offset = { 0, 0 };
 			render_pass_info.renderArea.extent = swapchain_extent;
-			VkClearValue clear_color = { {{0.1f, 0.1f, 0.1f, 1.0f}} };
-			render_pass_info.clearValueCount = 1;
-			render_pass_info.pClearValues = &clear_color;
+
+			std::array<VkClearValue, 2> clear_values{};
+			clear_values[0].color = { {0.1f, 0.1f, 0.1f, 1.0f} };
+			clear_values[1].depthStencil = { 1.0f, 0 };
+
+			render_pass_info.clearValueCount = static_cast<uint32_t>(clear_values.size());
+			render_pass_info.pClearValues = clear_values.data();
 
 			vkCmdBeginRenderPass(buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 			vkCmdBindPipeline(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
@@ -1458,16 +1827,23 @@ export namespace bud::graphics {
 			}
 		}
 
-		void update_uniform_buffer(uint32_t current_image) {
+		void update_uniform_buffer(uint32_t current_image, const bud::math::mat4& view, const bud::math::mat4& proj) {
 			static auto start_time = std::chrono::high_resolution_clock::now();
 			auto current_time = std::chrono::high_resolution_clock::now();
 			float time = std::chrono::duration<float, std::chrono::seconds::period>(current_time - start_time).count();
 
 			UniformBufferObject ubo{};
-			ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-			ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-			ubo.proj = glm::perspective(glm::radians(45.0f), swapchain_extent.width / (float)swapchain_extent.height, 0.1f, 10.0f);
-			ubo.proj[1][1] *= -1; // Fix GLM clip space
+			ubo.model = bud::math::mat4(1.0f);
+			ubo.view = view;
+			ubo.proj = proj;
+
+			// 假设相机位置从 view 矩阵逆推，或者从 camera 类传进来更好
+			// 直接从 View Matrix 的逆矩阵取位移
+			auto invView = bud::math::inverse(view);
+			ubo.camPos = bud::math::vec3(invView[3]);
+
+			// 从侧后方打过来法线细节更明显
+			ubo.lightDir = bud::math::normalize(bud::math::vec3(-1.0f, 2.0f, 1.5f));
 
 			memcpy(uniform_buffers_mapped[current_image], &ubo, sizeof(ubo));
 		}
