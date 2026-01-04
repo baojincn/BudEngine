@@ -38,14 +38,34 @@ export namespace bud::graphics {
 	// ==========================================
 	// Data Structures
 	// ==========================================
+	export struct RenderConfig {
+		uint32_t shadowMapSize = 4096;
+		float shadowBiasConstant = 1.25f;
+		float shadowBiasSlope = 1.75f;
+		float shadowOrthoSize = 35.0f;
+		float shadowNear = 0.1f;
+		float shadowFar = 100.0f;
+
+		bud::math::vec3 lightPos = { 5.0f, 15.0f, 5.0f };
+		bud::math::vec3 lightColor = { 1.0f, 1.0f, 1.0f };
+		float lightIntensity = 5.0f;
+		float ambientStrength = 0.05f;
+
+		bool enableSoftShadows = true;
+	};
 
 	// Strict alignment for UBO
 	struct UniformBufferObject {
 		alignas(16) bud::math::mat4 model;
 		alignas(16) bud::math::mat4 view;
 		alignas(16) bud::math::mat4 proj;
-		alignas(16) bud::math::vec3 camPos;   // 相机位置 (用于高光)
-		alignas(16) bud::math::vec3 lightDir; // 太阳方向
+		alignas(16) bud::math::mat4 lightSpaceMatrix;
+		alignas(16) bud::math::vec3 camPos;   
+		alignas(16) bud::math::vec3 lightDir;
+		alignas(16) bud::math::vec3 lightColor;
+		float lightIntensity;
+		float ambientStrength;
+		float _padding[2];
 	};
 
 	// Non strict alignment for Vertex
@@ -134,26 +154,35 @@ export namespace bud::graphics {
 		void init(SDL_Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation) override {
 			this->task_scheduler = task_scheduler;
 
-			// 1. Core Vulkan Setup
+			// Core Vulkan Setup
 			create_instance(window, enable_validation);
 			setup_debug_messenger(enable_validation);
 			create_surface(window);
 			pick_physical_device();
 			create_logical_device(enable_validation);
 
-			// 2. Presentation Setup
+			// Presentation Setup
 			create_swapchain(window);
 			create_image_views();
 
 			create_depth_resources();
 
-			// 3. Pipeline Setup
-			create_render_pass();
+			// Pipeline Setup
+			create_main_render_pass();
+
+			// Shadow map
+			create_shadow_resources();
+			create_shadow_render_pass();
+			create_shadow_framebuffer();
+
 			create_descriptor_set_layout(); // Layout 必须在 Pipeline 之前
+
+			create_shadow_pipeline();
 			create_graphics_pipeline();
+
 			create_framebuffers();
 
-			// 4. Resources Setup
+			// Resources Setup
 			create_command_pool();
 
 			//create_vertex_buffer();
@@ -170,33 +199,47 @@ export namespace bud::graphics {
 			// Hot swap a texture
 			load_texture_async("data/textures/default.png");
 
-			// 5. Command & Sync
+			// Command & Sync
 			create_command_buffer();
 			create_sync_objects();
 		}
 
-		void draw_frame(const bud::math::mat4& view, const bud::math::mat4& proj) override {
-			FrameData& frame = frames[current_frame]; // 获取当前帧的资源包
+		RenderConfig settings;
 
-			// 1. 等待上一轮使用该帧资源的操作完成
+		void set_config(const RenderConfig& new_settings) {
+			settings = new_settings;
+		}
+
+		void draw_frame(const bud::math::mat4& view, const bud::math::mat4& proj) override {
+			FrameData& frame = frames[current_frame];
+
+			// 等上一帧资源的操作完成
 			vkWaitForFences(device, 1, &frame.in_flight_fence, VK_TRUE, UINT64_MAX);
 
-			// 2. 获取 swapchain image
 			uint32_t image_index;
 			VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, frame.image_available_semaphore, VK_NULL_HANDLE, &image_index);
 
 			if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-				// recreate swapchain...
 				return;
 			}
 
-			// 只有确定要绘制了，才 Reset Fence
 			vkResetFences(device, 1, &frame.in_flight_fence);
 
-			update_uniform_buffer(image_index, view, proj); // 更新 UBO (注意：UBO 最好也做多帧缓冲，这里暂且复用)
+			auto lightProj = bud::math::ortho_vk(
+				-settings.shadowOrthoSize, settings.shadowOrthoSize,
+				-settings.shadowOrthoSize, settings.shadowOrthoSize,
+				settings.shadowNear, settings.shadowFar
+			);
 
-			// 3. 【关键】重置当前帧的所有 Command Pools
-			// 这会释放该帧之前分配的所有 command buffers 内存
+			auto lightView = bud::math::lookAt(settings.lightPos, bud::math::vec3(0.0f), bud::math::vec3(1.0f, 0.0f, 0.0f));
+
+			bud::math::mat4 lightSpaceMatrix = lightProj * lightView;
+			bud::math::mat4 modelMatrix = bud::math::mat4(1.0f);
+
+			// 更新 UBO, 最好也做多帧缓冲，这里暂且复用
+			update_uniform_buffer(image_index, view, proj, lightSpaceMatrix); 
+
+			// 重置当前帧的所有 Command Pools
 			vkResetCommandPool(device, frame.main_command_pool, 0);
 			for (auto pool : frame.worker_pools) {
 				vkResetCommandPool(device, pool, 0);
@@ -205,12 +248,63 @@ export namespace bud::graphics {
 			// 重置命令计数器, 不释放内存，只把游标指回 0，下一帧覆盖使用旧的 Handles
 			std::fill(frame.worker_cmd_counters.begin(), frame.worker_cmd_counters.end(), 0);
 
-			// 4. 录制主命令缓冲
 			VkCommandBuffer cmd = frame.main_command_buffer;
 			VkCommandBufferBeginInfo begin_info{};
 			begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 			vkBeginCommandBuffer(cmd, &begin_info);
 
+
+			// Begin, Pass 1: Shadow Map
+			{
+				VkRenderPassBeginInfo shadow_pass_info{};
+				shadow_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+				shadow_pass_info.renderPass = shadow_render_pass;
+				shadow_pass_info.framebuffer = shadow_framebuffer;
+				shadow_pass_info.renderArea.extent.width = settings.shadowMapSize;
+				shadow_pass_info.renderArea.extent.height = settings.shadowMapSize;
+
+				VkClearValue clear_values[1] = {};
+				clear_values[0].depthStencil = { 1.0f, 0 };
+				shadow_pass_info.clearValueCount = 1;
+				shadow_pass_info.pClearValues = clear_values;
+
+				// Record Shadow Pass on main thread
+				vkCmdBeginRenderPass(cmd, &shadow_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
+
+				VkViewport viewport{};
+				viewport.width = (float)settings.shadowMapSize;
+				viewport.height = (float)settings.shadowMapSize;
+				viewport.minDepth = 0.0f; viewport.maxDepth = 1.0f;
+				vkCmdSetViewport(cmd, 0, 1, &viewport);							  
+
+				VkRect2D scissor{};
+				scissor.extent.width = settings.shadowMapSize;
+				scissor.extent.height = settings.shadowMapSize;
+				vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+				vkCmdSetDepthBias(cmd, settings.shadowBiasConstant, 0.0f, settings.shadowBiasSlope);
+
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_layout, 0, 1, &descriptor_sets[image_index], 0, nullptr);
+
+				auto pushConst = lightSpaceMatrix * modelMatrix;
+				vkCmdPushConstants(cmd, shadow_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(bud::math::mat4), &pushConst);
+
+				if (vertex_buffer && index_buffer && !indices.empty()) {
+					VkBuffer vbs[] = { vertex_buffer };
+					VkDeviceSize offs[] = { 0 };
+					vkCmdBindVertexBuffers(cmd, 0, 1, vbs, offs);
+					vkCmdBindIndexBuffer(cmd, index_buffer, 0, VK_INDEX_TYPE_UINT32);
+
+					vkCmdDrawIndexed(cmd, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+				}
+
+				vkCmdEndRenderPass(cmd);
+			}
+			// End, Pass 1
+
+
+			// Begin, Pass 2: Main Scene Rendering
 			VkRenderPassBeginInfo render_pass_info{};
 			render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 			render_pass_info.renderPass = render_pass;
@@ -226,7 +320,7 @@ export namespace bud::graphics {
 
 			vkCmdBeginRenderPass(cmd, &render_pass_info, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
 
-			// 5. 并行录制任务
+			// 并行录制任务
 			bud::threading::Counter recording_dependency;
 			std::mutex recorded_cmds_mutex;
 			std::vector<VkCommandBuffer> secondary_cmds;
@@ -234,8 +328,6 @@ export namespace bud::graphics {
 			task_scheduler->spawn("DrawTask", [&, current_frame_idx = current_frame, img_idx = image_index]() {
 				size_t worker_id = bud::threading::t_worker_index;
 
-				// 从当前帧的 FrameData 里拿 Pool
-				// 此时 Pool 已经被主线程 Reset 过了，Worker 可以直接 Alloc，不用 Reset
 				auto& frame_data = frames[current_frame_idx];
 				VkCommandPool worker_pool = frame_data.worker_pools[worker_id];
 
@@ -297,6 +389,9 @@ export namespace bud::graphics {
 
 			}, &recording_dependency);
 
+
+			// End, Pass 2: Main Scene Rendering
+
 			task_scheduler->wait_for_counter(recording_dependency);
 
 			if (!secondary_cmds.empty()) {
@@ -306,7 +401,9 @@ export namespace bud::graphics {
 			vkCmdEndRenderPass(cmd);
 			vkEndCommandBuffer(cmd);
 
-			// 6. 提交
+
+
+			// 提交
 			VkSubmitInfo submit_info{};
 			submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 			VkSemaphore wait_semaphores[] = { frame.image_available_semaphore };
@@ -335,7 +432,7 @@ export namespace bud::graphics {
 
 			vkQueuePresentKHR(present_queue, &present_info);
 
-			// 7. 切换到下一帧
+			// 切换到下一帧
 			current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 		}
 
@@ -345,6 +442,49 @@ export namespace bud::graphics {
 
 		void cleanup() override {
 			wait_idle();
+
+			if (shadow_pipeline) {
+				vkDestroyPipeline(device, shadow_pipeline, nullptr);
+			}
+
+			if (shadow_pipeline_layout) {
+				vkDestroyPipelineLayout(device, shadow_pipeline_layout, nullptr);
+			}
+
+			for (auto view : texture_views) {
+				vkDestroyImageView(device, view, nullptr);
+			}
+
+			for (auto image : texture_images) {
+				vkDestroyImage(device, image, nullptr);
+			}
+
+			for (auto memory : texture_images_memories) {
+				vkFreeMemory(device, memory, nullptr);
+			}
+
+			texture_views.clear();
+			texture_images.clear();
+			texture_images_memories.clear();
+
+
+			if (shadow_framebuffer)
+				vkDestroyFramebuffer(device, shadow_framebuffer, nullptr);
+
+			if (shadow_render_pass)
+				vkDestroyRenderPass(device, shadow_render_pass, nullptr);
+
+			if (shadow_sampler)
+				vkDestroySampler(device, shadow_sampler, nullptr);
+
+			if (shadow_image_view)
+				vkDestroyImageView(device, shadow_image_view, nullptr);
+
+			if (shadow_image)
+				vkDestroyImage(device, shadow_image, nullptr);
+
+			if (shadow_image_memory)
+				vkFreeMemory(device, shadow_image_memory, nullptr);
 
 			vkDestroyImageView(device, depth_image_view, nullptr);
 			vkDestroyImage(device, depth_image, nullptr);
@@ -423,8 +563,8 @@ export namespace bud::graphics {
 		// [Worker Thread] 异步加载 Shader
 		void reload_shaders_async() override {
 			task_scheduler->spawn("AsyncShaderLoad", [this]() {
-				auto vert_opt = bud::io::FileSystem::read_binary("src/shaders/triangle.vert.spv");
-				auto frag_opt = bud::io::FileSystem::read_binary("src/shaders/triangle.frag.spv");
+				auto vert_opt = bud::io::FileSystem::read_binary("src/shaders/main.vert.spv");
+				auto frag_opt = bud::io::FileSystem::read_binary("src/shaders/main.frag.spv");
 
 				if (!vert_opt || !frag_opt) return;
 
@@ -440,16 +580,17 @@ export namespace bud::graphics {
 
 		void load_model_async(const std::string& filepath) override {
 			task_scheduler->spawn("AsyncModelLoad", [this, filepath]() {
-				// 1. IO 线程解析 OBJ
+				// IO 线程解析 OBJ
 				auto mesh_opt = bud::io::ModelLoader::load_obj(filepath);
 				if (!mesh_opt) return;
 
-				// 2. 主线程上传 GPU
+				// 主线程上传 GPU
 				task_scheduler->submit_main_thread_task([this, mesh = std::move(*mesh_opt)]() {
 					this->upload_mesh(mesh);
 				});
 			});
 		}
+
 
 		// ==========================================
 		// Private Members
@@ -468,7 +609,7 @@ export namespace bud::graphics {
 			VkCommandPool main_command_pool = nullptr;
 			VkCommandBuffer main_command_buffer = nullptr;
 
-			// Worker 资源 (每个 Worker 一个 Pool)
+			// Worker 资源
 			std::vector<VkCommandPool> worker_pools;
 			std::vector<std::vector<VkCommandBuffer>> worker_cmd_buffers;
 			std::vector<uint32_t> worker_cmd_counters;
@@ -514,7 +655,6 @@ export namespace bud::graphics {
 		std::vector<VkImage> texture_images;
 		std::vector<VkDeviceMemory> texture_images_memories;
 		std::vector<VkImageView> texture_views;
-		std::vector<VkSampler> texture_samplers;
 
 		VkImage depth_image = nullptr;
 		VkDeviceMemory depth_image_memory = nullptr;
@@ -534,6 +674,19 @@ export namespace bud::graphics {
 		VkBuffer index_buffer = nullptr;
 		VkDeviceMemory index_buffer_memory = nullptr;
 
+		// Begin, Shadow Mapping Resources
+		VkImage shadow_image = nullptr;
+		VkDeviceMemory shadow_image_memory = nullptr;
+		VkImageView shadow_image_view = nullptr;
+		VkSampler shadow_sampler = nullptr;
+
+		VkRenderPass shadow_render_pass = nullptr;
+		VkFramebuffer shadow_framebuffer = nullptr;
+
+		VkPipeline shadow_pipeline = nullptr;
+		VkPipelineLayout shadow_pipeline_layout = nullptr;
+		// End, Shadow Mapping Resources
+
 
 		bud::threading::TaskScheduler* task_scheduler = nullptr;
 
@@ -541,11 +694,281 @@ export namespace bud::graphics {
 		// Initialization Helpers
 		// ==========================================
 	private:
+		void create_shadow_pipeline() {
+			auto vert_code = bud::io::FileSystem::read_binary("src/shaders/shadow.vert.spv");
+			auto frag_code = bud::io::FileSystem::read_binary("src/shaders/shadow.frag.spv");
+
+			if (!vert_code)
+				throw std::runtime_error("Failed to load shadow.vert.spv!");
+
+			if (!frag_code)
+				throw std::runtime_error("Failed to load shadow.frag.spv!");
+
+			VkShaderModule vert_module = create_shader_module(*vert_code);
+			VkShaderModule frag_module = create_shader_module(*frag_code);
+
+			VkPipelineShaderStageCreateInfo vert_stage_info{};
+			vert_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			vert_stage_info.stage = VK_SHADER_STAGE_VERTEX_BIT;
+			vert_stage_info.module = vert_module;
+			vert_stage_info.pName = "main";
+
+			VkPipelineShaderStageCreateInfo frag_stage_info{};
+			frag_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			frag_stage_info.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+			frag_stage_info.module = frag_module;
+			frag_stage_info.pName = "main";
+
+			VkPipelineShaderStageCreateInfo shader_stages[] = { vert_stage_info, frag_stage_info };
+
+			// 复用现有的 Vertex 结构
+			auto bindingDescription = Vertex::get_binding_description();
+			auto attributeDescriptions = Vertex::get_attribute_descriptions();
+
+			VkPipelineVertexInputStateCreateInfo vertex_input_info{};
+			vertex_input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+			vertex_input_info.vertexBindingDescriptionCount = 1;
+			vertex_input_info.pVertexBindingDescriptions = &bindingDescription;
+			vertex_input_info.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+			vertex_input_info.pVertexAttributeDescriptions = attributeDescriptions.data();
+
+			// Input Assembly
+			VkPipelineInputAssemblyStateCreateInfo input_assembly{};
+			input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+			input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+			input_assembly.primitiveRestartEnable = VK_FALSE;
+
+			// Viewport & Scissor (设为 Dynamic，因为阴影图尺寸可能变)
+			VkPipelineViewportStateCreateInfo viewport_state{};
+			viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+			viewport_state.viewportCount = 1;
+			viewport_state.scissorCount = 1;
+
+			// Rasterizer
+			VkPipelineRasterizationStateCreateInfo rasterizer{};
+			rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+			rasterizer.depthClampEnable = VK_FALSE;
+			rasterizer.rasterizerDiscardEnable = VK_FALSE;
+			rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+			rasterizer.lineWidth = 1.0f;
+
+			// Shadow Trick 1, 剔除正面
+			// 修复彼得潘现象-漏光，让阴影根部更实
+			rasterizer.cullMode = VK_CULL_MODE_NONE;
+			rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+			// Shadow Trick 2, 深度偏移
+			// 修复阴影条纹 - Shadow Acne
+			rasterizer.depthBiasEnable = VK_TRUE;
+
+			VkPipelineMultisampleStateCreateInfo multisampling{};
+			multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+			multisampling.sampleShadingEnable = VK_FALSE;
+			multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+			// Depth Stencil
+			VkPipelineDepthStencilStateCreateInfo depth_stencil{};
+			depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+			depth_stencil.depthTestEnable = VK_TRUE;
+			depth_stencil.depthWriteEnable = VK_TRUE;
+			depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS;
+			depth_stencil.depthBoundsTestEnable = VK_FALSE;
+			depth_stencil.stencilTestEnable = VK_FALSE;
+
+			// Color Blend, 全部禁用
+			VkPipelineColorBlendStateCreateInfo color_blending{};
+			color_blending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+			color_blending.logicOpEnable = VK_FALSE;
+			color_blending.attachmentCount = 0;
+
+			// Dynamic States
+			std::vector<VkDynamicState> dynamic_states = {
+				VK_DYNAMIC_STATE_VIEWPORT,
+				VK_DYNAMIC_STATE_SCISSOR,
+				VK_DYNAMIC_STATE_DEPTH_BIAS
+			};
+
+			VkPipelineDynamicStateCreateInfo dynamic_state_info{};
+			dynamic_state_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+			dynamic_state_info.dynamicStateCount = static_cast<uint32_t>(dynamic_states.size());
+			dynamic_state_info.pDynamicStates = dynamic_states.data();
+
+			// Pipeline Layout, configs Push Constant
+			VkPushConstantRange push_constant_range{};
+			push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+			push_constant_range.offset = 0;
+			push_constant_range.size = sizeof(bud::math::mat4); // mat4, 64字节
+
+			VkPipelineLayoutCreateInfo pipeline_layout_info{};
+			pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_info.setLayoutCount = 1;
+			pipeline_layout_info.pSetLayouts = &descriptor_set_layout; // 复用
+			pipeline_layout_info.pushConstantRangeCount = 1;
+			pipeline_layout_info.pPushConstantRanges = &push_constant_range;
+
+			if (vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr, &shadow_pipeline_layout) != VK_SUCCESS) {
+				throw std::runtime_error("Failed to create shadow pipeline layout!");
+			}
+
+			// Create Pipeline
+			VkGraphicsPipelineCreateInfo pipeline_info{};
+			pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+			pipeline_info.stageCount = 2;
+			pipeline_info.pStages = shader_stages;
+			pipeline_info.pVertexInputState = &vertex_input_info;
+			pipeline_info.pInputAssemblyState = &input_assembly;
+			pipeline_info.pViewportState = &viewport_state;
+			pipeline_info.pRasterizationState = &rasterizer;
+			pipeline_info.pMultisampleState = &multisampling;
+			pipeline_info.pDepthStencilState = &depth_stencil;
+			pipeline_info.pColorBlendState = &color_blending;
+			pipeline_info.pDynamicState = &dynamic_state_info;
+			pipeline_info.layout = shadow_pipeline_layout;
+			pipeline_info.renderPass = shadow_render_pass;
+			pipeline_info.subpass = 0;
+
+			if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &shadow_pipeline) != VK_SUCCESS) {
+				throw std::runtime_error("Failed to create shadow pipeline!");
+			}
+
+			vkDestroyShaderModule(device, vert_module, nullptr);
+			vkDestroyShaderModule(device, frag_module, nullptr);
+		}
+
+		void create_shadow_framebuffer() {
+			VkFramebufferCreateInfo framebuffer_info{};
+			framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+			framebuffer_info.renderPass = shadow_render_pass;
+			framebuffer_info.attachmentCount = 1;
+			framebuffer_info.pAttachments = &shadow_image_view;
+			framebuffer_info.width = settings.shadowMapSize;
+			framebuffer_info.height = settings.shadowMapSize;
+			framebuffer_info.layers = 1;
+
+			if (vkCreateFramebuffer(device, &framebuffer_info, nullptr, &shadow_framebuffer) != VK_SUCCESS) {
+				throw std::runtime_error("Failed to create shadow framebuffer!");
+			}
+		}
+
+		void create_shadow_render_pass() {
+			VkAttachmentDescription depth_attachment{};
+			depth_attachment.format = find_depth_format();
+			depth_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+			depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+
+			// STORE_OP_STORE: 保留渲染数据
+			depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+			depth_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			depth_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			depth_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+			// 渲染完后，转为 SHADER_READ_ONLY，方便主 Pass 读取
+			depth_attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+			VkAttachmentReference depth_attachment_ref{};
+			depth_attachment_ref.attachment = 0;
+			depth_attachment_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+			VkSubpassDescription subpass{};
+			subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+			subpass.colorAttachmentCount = 0;
+			subpass.pDepthStencilAttachment = &depth_attachment_ref;
+
+			// 处理依赖关系
+			std::array<VkSubpassDependency, 2> dependencies{};
+			dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+			dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+			// 进入 Pass 前：确保之前的读取结束
+			dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+			dependencies[0].dstSubpass = 0;
+			dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+			dependencies[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+			dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			dependencies[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+			// 离开 Pass 后：确保写入结束
+			dependencies[1].srcSubpass = 0;
+			dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+			dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+			dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+			dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+			VkRenderPassCreateInfo render_pass_info{};
+			render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+			render_pass_info.attachmentCount = 1;
+			render_pass_info.pAttachments = &depth_attachment;
+			render_pass_info.subpassCount = 1;
+			render_pass_info.pSubpasses = &subpass;
+			render_pass_info.dependencyCount = static_cast<uint32_t>(dependencies.size());
+			render_pass_info.pDependencies = dependencies.data();
+
+			if (vkCreateRenderPass(device, &render_pass_info, nullptr, &shadow_render_pass) != VK_SUCCESS) {
+				throw std::runtime_error("Failed to create shadow render pass!");
+			}
+		}
+
+		void create_shadow_resources() {
+			VkFormat depth_format = find_depth_format();
+
+			// 创建 Image
+			// DEPTH_STENCIL_ATTACHMENT (作为渲染目标), SAMPLED (作为贴图被 Shader 读取)
+			create_image(settings.shadowMapSize, settings.shadowMapSize, 1, depth_format, VK_IMAGE_TILING_OPTIMAL,
+				VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				shadow_image, shadow_image_memory);
+
+			// 创建 View
+			VkImageViewCreateInfo view_info{};
+			view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+			view_info.image = shadow_image;
+			view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			view_info.format = depth_format;
+			view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+			view_info.subresourceRange.baseMipLevel = 0;
+			view_info.subresourceRange.levelCount = 1;
+			view_info.subresourceRange.baseArrayLayer = 0;
+			view_info.subresourceRange.layerCount = 1;
+
+			if (vkCreateImageView(device, &view_info, nullptr, &shadow_image_view) != VK_SUCCESS) {
+				throw std::runtime_error("Failed to create shadow image view!");
+			}
+
+			// 创建 Sampler
+			VkSamplerCreateInfo sampler_info{};
+			sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+			sampler_info.magFilter = VK_FILTER_LINEAR;
+			sampler_info.minFilter = VK_FILTER_LINEAR;
+			sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+
+			sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+			sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+			sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+
+			// 边界颜色设为白色 = 1.0, depth > shadow_map_value 才会有阴影。
+			sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+
+			sampler_info.mipLodBias = 0.0f;
+			sampler_info.minLod = 0.0f;
+			sampler_info.maxLod = 1.0f;
+			sampler_info.anisotropyEnable = VK_FALSE;
+
+			// Close, compare with shader code
+			sampler_info.compareEnable = VK_FALSE;
+			sampler_info.compareOp = VK_COMPARE_OP_LESS;
+
+			if (vkCreateSampler(device, &sampler_info, nullptr, &shadow_sampler) != VK_SUCCESS) {
+				throw std::runtime_error("Failed to create shadow sampler!");
+			}
+		}
+
 		void create_depth_resources() {
 			VkFormat depth_format = find_depth_format();
 			create_image(swapchain_extent.width, swapchain_extent.height, 1, depth_format, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depth_image, depth_image_memory);
 
-			// 创建 View (注意 aspectMask 是 DEPTH)
+			// 创建 View, aspectMask = DEPTH
 			VkImageViewCreateInfo view_info{};
 			view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 			view_info.image = depth_image;
@@ -772,7 +1195,7 @@ export namespace bud::graphics {
 			}
 		}
 
-		void create_render_pass() {
+		void create_main_render_pass() {
 			VkAttachmentDescription color_attachment{};
 			color_attachment.format = swapchain_image_format;
 			color_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -831,13 +1254,15 @@ export namespace bud::graphics {
 		}
 
 		void create_descriptor_set_layout() {
+			// UBO
 			VkDescriptorSetLayoutBinding ubo_layout_binding{};
 			ubo_layout_binding.binding = 0;
 			ubo_layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 			ubo_layout_binding.descriptorCount = 1;
-			ubo_layout_binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+			ubo_layout_binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 			ubo_layout_binding.pImmutableSamplers = nullptr;
 
+			// Texture array
 			VkDescriptorSetLayoutBinding sampler_layout_binding{};
 			sampler_layout_binding.binding = 1;
 			sampler_layout_binding.descriptorCount = 100;
@@ -845,19 +1270,32 @@ export namespace bud::graphics {
 			sampler_layout_binding.pImmutableSamplers = nullptr;
 			sampler_layout_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-			std::array<VkDescriptorSetLayoutBinding, 2> bindings = { ubo_layout_binding, sampler_layout_binding };
+			// Shadow map
+			VkDescriptorSetLayoutBinding shadow_layout_binding{};
+			shadow_layout_binding.binding = 2;
+			shadow_layout_binding.descriptorCount = 1;
+			shadow_layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			shadow_layout_binding.pImmutableSamplers = nullptr;
+			shadow_layout_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+			std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+				ubo_layout_binding,
+				sampler_layout_binding,
+				shadow_layout_binding
+			};
 
 			VkDescriptorSetLayoutCreateInfo layout_info{};
 			layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
 
 			VkDescriptorBindingFlags binding_flags[] = {
-			  0,
-			  VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
+			  0,	// UBO 
+			  VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,	// Texture array
+			  0		// Shadow
 			};
 
 			VkDescriptorSetLayoutBindingFlagsCreateInfo flags_info{};
 			flags_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-			flags_info.bindingCount = 2;
+			flags_info.bindingCount = 3;
 			flags_info.pBindingFlags = binding_flags;
 
 			layout_info.pNext = &flags_info; // Link in
@@ -985,8 +1423,8 @@ export namespace bud::graphics {
 		}
 
 		void create_graphics_pipeline() {
-			auto vert_shader_code = bud::io::FileSystem::read_binary("src/shaders/triangle.vert.spv");
-			auto frag_shader_code = bud::io::FileSystem::read_binary("src/shaders/triangle.frag.spv");
+			auto vert_shader_code = bud::io::FileSystem::read_binary("src/shaders/main.vert.spv");
+			auto frag_shader_code = bud::io::FileSystem::read_binary("src/shaders/main.frag.spv");
 
 			if (!vert_shader_code || !frag_shader_code) {
 				throw std::runtime_error("Failed to load shader SPIR-V files!");
@@ -1002,24 +1440,23 @@ export namespace bud::graphics {
 			std::println("[Vulkan] Graphics pipeline created successfully");
 		}
 
-		// [新增] 仅重建管线的内部函数
+		// 仅重建管线的内部函数
 		void recreate_graphics_pipeline(const std::vector<char>& vert_code, const std::vector<char>& frag_code) {
 			std::println("[Main] Recreating Pipeline for Hot-Reload...");
 
-			// 1. 等待 GPU 空闲 (因为我们要销毁正在用的管线)
 			vkDeviceWaitIdle(device);
 
-			// 2. 销毁旧管线
+			// 销毁旧管线
 			if (graphics_pipeline) {
 				vkDestroyPipeline(device, graphics_pipeline, nullptr);
 				graphics_pipeline = nullptr;
 			}
 
-			// 3. 创建新 Modules
+			// 创建新 ShaderModules
 			VkShaderModule vert_module = create_shader_module(vert_code);
 			VkShaderModule frag_module = create_shader_module(frag_code);
 
-			// 4. [复用] 创建新管线
+			// 创建新管线
 			try {
 				setup_pipeline_state(vert_module, frag_module);
 				std::println("[Main] Hot-Reload Success!");
@@ -1028,7 +1465,6 @@ export namespace bud::graphics {
 				std::println(stderr, "[Main] Hot-Reload Failed: {}", e.what());
 			}
 
-			// 5. 清理 Modules
 			vkDestroyShaderModule(device, frag_module, nullptr);
 			vkDestroyShaderModule(device, vert_module, nullptr);
 		}
@@ -1158,7 +1594,7 @@ export namespace bud::graphics {
 		void upload_mesh(const bud::io::MeshData& mesh) {
 			vkDeviceWaitIdle(device); // 等待 GPU 空闲
 
-			// 1. 清理旧缓冲
+			// 清理旧缓冲
 			if (vertex_buffer) {
 				vkDestroyBuffer(device, vertex_buffer, nullptr);
 				vkFreeMemory(device, vertex_buffer_memory, nullptr);
@@ -1169,7 +1605,7 @@ export namespace bud::graphics {
 				vkFreeMemory(device, index_buffer_memory, nullptr);
 			}
 
-			// 2. 转换数据格式 (bud::io::Vertex -> bud::graphics::Vertex)
+			// 转换数据格式 (bud::io::Vertex -> bud::graphics::Vertex)
 			this->vertices.clear();
 			this->indices = mesh.indices;
 
@@ -1195,85 +1631,76 @@ export namespace bud::graphics {
 				this->vertices.push_back(rhi_v);
 			}
 
-			// 3. 创建新缓冲
+			// 创建新缓冲
 			create_vertex_buffer();
 			create_index_buffer();
 
 
-			// 1. 清理旧的 Sponza 纹理 (保留 Slot 0 的 default texture)
-			for (auto v : texture_views) vkDestroyImageView(device, v, nullptr);
-			for (auto i : texture_images) vkDestroyImage(device, i, nullptr);
-			for (auto m : texture_images_memories) vkFreeMemory(device, m, nullptr);
-			// Sampler 通常可以复用，不需要每个纹理建一个。如果需要清理：
-			// for(auto s : texture_samplers) vkDestroySampler(device, s, nullptr);
+			// 清理旧的纹理 (保留 Slot 0 的 default texture)
+			for (auto v : texture_views)
+				vkDestroyImageView(device, v, nullptr);
+
+			for (auto i : texture_images)
+				vkDestroyImage(device, i, nullptr);
+
+			for (auto m : texture_images_memories)
+				vkFreeMemory(device, m, nullptr);
 
 			texture_views.clear();
 			texture_images.clear();
 			texture_images_memories.clear();
-			// texture_samplers.clear(); 
 
-			// 2. 预分配空间
+			// 预分配空间
 			size_t count = mesh.texture_paths.size();
 			texture_views.resize(count);
 			texture_images.resize(count);
 			texture_images_memories.resize(count);
-			// texture_samplers.resize(count); 
 
 			std::println("[RHI] Loading {} textures for mesh...", count);
 
-			// 3. 循环加载并更新 Descriptor
+			// 循环加载并更新 Descriptor
 			for (size_t index = 0; index < count; ++index) {
 				std::string path = mesh.texture_paths[index];
 
-				// [新增] 打印正在加载哪张图，方便定位是谁的问题
 				std::println("[RHI] Loading texture [{}/{}]: {}", index + 1, count, path);
 
 				try {
-					// 尝试加载
 					create_texture_from_file(path, texture_images[index], texture_images_memories[index], texture_views[index]);
 				}
 				catch (const std::exception& e) {
-					// [关键] 捕获异常！不要让线程死掉！
-					std::println("❌ Error loading texture: {} | Reason: {}", path, e.what());
+					std::println("Error loading texture: {} | Reason: {}", path, e.what());
 
-					// [补救] 加载失败时，给一个 fallback (比如复用第一张图，或者创建一个 placeholder)
-					// 这里为了简单，我们假设 index=0 的图（通常是占位图或第一张）是好的，复用它
-					// 或者你可以再创建一个 1x1 的粉色图
 					if (index > 0 && texture_views[0]) {
 						std::println("   -> Using fallback texture (Slot 0)");
-						// 注意：这里只是复用 View，不要 Destroy 它
+
 						// 这种简单的复用在清理时可能会有问题（重复 destroy），
-						// 最稳妥的是生成一个专用的 1x1 错误贴图。
-						// 但为了现在不崩，我们先暂时创建一个新的 1x1 占位图给它：
 						create_texture_from_file("data/textures/default.png", texture_images[index], texture_images_memories[index], texture_views[index]);
 					}
 				}
 
-				// B. 准备 Descriptor 信息
+				// 准备 Descriptor 信息
 				VkDescriptorImageInfo image_info{};
 				image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 				image_info.imageView = texture_views[index];
-				// 优化：所有纹理复用同一个全局采样器 texture_sampler
-				// 除非你需要不同的过滤方式
 				image_info.sampler = texture_sampler;
 
 				VkWriteDescriptorSet descriptor_write{};
 				descriptor_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				descriptor_write.dstBinding = 1; // 绑定点 1
-				// 【关键】偏移量 = index + 1 (因为 0 号被占用了)
+				descriptor_write.dstBinding = 1;
 				descriptor_write.dstArrayElement = static_cast<uint32_t>(index + 1);
 				descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 				descriptor_write.descriptorCount = 1;
 				descriptor_write.pImageInfo = &image_info;
 
-				// C. 更新所有 Frame 的 Set
+				// 更新所有 Frame 的 descriptor_set
 				for (size_t i = 0; i < swapchain_images.size(); i++) {
 					descriptor_write.dstSet = descriptor_sets[i];
 					vkUpdateDescriptorSets(device, 1, &descriptor_write, 0, nullptr);
 				}
 
-				// 打印进度 (可选，防止以为卡死)
-				if ((index + 1) % 5 == 0) std::println("[RHI] Loaded {}/{} textures...", index + 1, count);
+				// 打印进度，防止以为卡死
+				if ((index + 1) % 5 == 0)
+					std::println("[RHI] Loaded {}/{} textures...", index + 1, count);
 			}
 		}
 
@@ -1281,21 +1708,18 @@ export namespace bud::graphics {
 		// Texture Implementation
 		// ==========================================
 
-		// [新增] 加载单张纹理并返回资源
 		void create_texture_from_file(const std::string& path, VkImage& out_image, VkDeviceMemory& out_mem, VkImageView& out_view) {
-			// 1. 使用 IO 模块加载像素数据
 			auto img_opt = bud::io::ImageLoader::load(path);
 
-			// 如果加载失败（比如路径不对），就生成一个粉色 1x1 像素作为占位，防止崩
+			// 加载失败就生成一个粉色 1x1 像素作为占位，防止崩
 			if (!img_opt) {
 				std::println("[RHI] Failed to load texture: {}. Using fallback.", path);
 				// 这里可以写个生成 1x1 纯色像素的逻辑，或者简单抛出异常
-				// 为了代码简短，这里先抛出异常，实际项目建议用 fallback
 				throw std::runtime_error("Texture load failed");
 			}
 			auto& img = *img_opt;
 
-			// 2. 创建 Staging Buffer
+			// 创建 Staging Buffer
 			VkDeviceSize image_size = img.width * img.height * 4;
 			VkBuffer staging_buffer;
 			VkDeviceMemory staging_buffer_memory;
@@ -1306,25 +1730,24 @@ export namespace bud::graphics {
 			memcpy(data, img.pixels, static_cast<size_t>(image_size));
 			vkUnmapMemory(device, staging_buffer_memory);
 
-			// 3. 计算 Mipmaps
+			// 计算 Mipmaps
 			uint32_t mips = static_cast<uint32_t>(std::floor(std::log2(std::max(img.width, img.height)))) + 1;
 
-			// 4. 创建 Image
+			// 创建 Image
 			create_image(img.width, img.height, mips, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
 				VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, out_image, out_mem);
 
-			// 5. 拷贝数据 + 生成 Mipmaps
+			// 拷贝数据 + 生成 Mipmaps
 			transition_image_layout(out_image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 			copy_buffer_to_image(staging_buffer, out_image, static_cast<uint32_t>(img.width), static_cast<uint32_t>(img.height));
 			generate_mipmaps(out_image, VK_FORMAT_R8G8B8A8_SRGB, img.width, img.height, mips);
 
-			// 6. 清理 Staging
+			// 清理 Staging
 			vkDestroyBuffer(device, staging_buffer, nullptr);
 			vkFreeMemory(device, staging_buffer_memory, nullptr);
 
-			// 7. 创建 View
-			// 注意：这里我们需要稍微修改 create_image_view 让它支持传入 mips 参数，或者直接在这里写
+			// 创建 View
 			VkImageViewCreateInfo view_info{};
 			view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 			view_info.image = out_image;
@@ -1342,20 +1765,20 @@ export namespace bud::graphics {
 		}
 
 		void create_texture_image() {
-			// 1. 手动造一个 1x1 的白色像素 (R=255, G=255, B=255, A=255)
+			// 手动造一个 1x1 的白色像素 (R=255, G=255, B=255, A=255)
 			uint32_t pixel = 0xFFFFFFFF;
 			int tex_width = 1;
 			int tex_height = 1;
 			VkDeviceSize image_size = 4;
 
-			// 2. 创建 Staging Buffer
+			// 创建 Staging Buffer
 			VkBuffer staging_buffer;
 			VkDeviceMemory staging_buffer_memory;
 			create_buffer(image_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
 				staging_buffer, staging_buffer_memory);
 
-			// 3. 拷贝数据 (直接拷贝那个 uint32_t)
+			// 拷贝数据
 			void* data;
 			vkMapMemory(device, staging_buffer_memory, 0, image_size, 0, &data);
 			memcpy(data, &pixel, static_cast<size_t>(image_size));
@@ -1363,44 +1786,39 @@ export namespace bud::graphics {
 
 			mip_levels = 1; // 占位图只有 1 层
 
-			// 4. 创建 GPU Image
+			// 创建 GPU Image
 			create_image(tex_width, tex_height, mip_levels, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
 				VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, texture_image, texture_image_memory);
 
-			// 5. 布局转换 + 拷贝
+			// 布局转换 + 拷贝
 			transition_image_layout(texture_image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 			copy_buffer_to_image(staging_buffer, texture_image, static_cast<uint32_t>(tex_width), static_cast<uint32_t>(tex_height));
 			transition_image_layout(texture_image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-			// 6. 清理
+			// 清理
 			vkDestroyBuffer(device, staging_buffer, nullptr);
 			vkFreeMemory(device, staging_buffer_memory, nullptr);
 
 			std::println("[Vulkan] Placeholder texture created (1x1).");
 		}
 
-		// [Worker Thread] 异步加载图片
+		// 异步加载图片
 		void load_texture_async(const std::string& filename) {
 			std::println("[RHI] Dispatching async texture load: {}", filename);
 
 			task_scheduler->spawn("AsyncTextureLoad", [this, filename]() {
-				// 1. 调用 IO 模块 (自动处理内存，RAII)
 				// 使用 std::optional 处理可能的失败
 				auto img_opt = bud::io::ImageLoader::load(filename);
 
-				if (!img_opt) {
-					return; // IO 模块内部已经打印了错误
-				}
+				if (!img_opt)
+					return;
 
-				// Move 语义转移所有权，img_opt 里的内存现在属于这个 lambda
+				// img_opt 里的内存现在属于这个 lambda
 				auto img = std::move(*img_opt);
 
-				// 2. 提交给主线程
+				// 提交给主线程
 				task_scheduler->submit_main_thread_task([this, img = std::move(img)]() mutable {
-					// 3. 主线程拿到了 img (包含 width, height, pixels)
-					// 注意：这里传的是 img 对象，lambda 结束时 img 析构，自动调用 stbi_image_free
-					// 所以要在 update_texture_resources 里面拷贝数据，或者把 img 所有权传进去
 					this->update_texture_resources(img.pixels, img.width, img.height);
 				});
 			});
@@ -1415,8 +1833,7 @@ export namespace bud::graphics {
 			vkDestroyImage(device, texture_image, nullptr);
 			vkFreeMemory(device, texture_image_memory, nullptr);
 
-			// 1. 计算 Mipmap 层级数
-			// 公式：log2(max(w, h)) + 1
+			// 计算 Mipmap 层级数, 公式：log2(max(w, h)) + 1
 			mip_levels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
 
 			VkDeviceSize image_size = width * height * 4;
@@ -1429,27 +1846,26 @@ export namespace bud::graphics {
 			memcpy(data, pixels, static_cast<size_t>(image_size));
 			vkUnmapMemory(device, staging_buffer_memory);
 
-			// 2. 创建 Image
+			// 创建 Image
 			// 注意 usage：除了 TRANSFER_DST (接收 buffer)，还需要 TRANSFER_SRC (作为下一级 mip 的源)
 			create_image(width, height, mip_levels, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL,
 				VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, texture_image, texture_image_memory);
 
-			// 3. 拷贝 Base Level (Level 0)
+			// 拷贝 Base Level (Level 0)
 			transition_image_layout(texture_image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 			copy_buffer_to_image(staging_buffer, texture_image, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
 
-			// 4. 【关键】生成 Mipmaps (这会自动把 layout 转为 SHADER_READ_ONLY)
+			// 生成 Mipmaps (这会自动把 layout 转为 SHADER_READ_ONLY)
 			generate_mipmaps(texture_image, VK_FORMAT_R8G8B8A8_SRGB, width, height, mip_levels);
 
 			vkDestroyBuffer(device, staging_buffer, nullptr);
 			vkFreeMemory(device, staging_buffer_memory, nullptr);
 
-			// 5. 重建 View 和 Sampler
+			// 重建 View 和 Sampler
 			texture_image_view = create_image_view(texture_image, VK_FORMAT_R8G8B8A8_SRGB);
-			// 采样器可能需要重建以支持 maxLod，或者我们直接修改 create_texture_sampler
-			// 简单起见，这里我们假设 sampler 在 init 里创建一次就够了，只要 update Descriptor 就行
-			// 但为了严谨，最好更新 Sampler 的 maxLod
+			// 采样器可能需要重建以支持 maxLod，或者直接修改 create_texture_sampler
+			// 简单起见，假设 sampler 在 init 里创建一次就够了，只要 update Descriptor 就行
 			vkDestroySampler(device, texture_sampler, nullptr);
 			create_texture_sampler(); // 使用新的 mip_levels 创建采样器
 
@@ -1457,7 +1873,7 @@ export namespace bud::graphics {
 			std::println("[Vulkan] Texture loaded with {} mip levels!", mip_levels);
 		}
 
-		// [新增] 辅助函数：只更新纹理的 Descriptor Write
+		// 只更新纹理的 Descriptor Write
 		void update_descriptor_sets_texture() {
 			for (size_t i = 0; i < swapchain_images.size(); i++) {
 				VkDescriptorImageInfo image_info{};
@@ -1506,8 +1922,6 @@ export namespace bud::graphics {
 				throw std::runtime_error("Failed to create texture sampler!");
 			}
 		}
-
-		// --- 辅助函数 ---
 
 		VkImageView create_image_view(VkImage image, VkFormat format) {
 			VkImageViewCreateInfo view_info{};
@@ -1688,19 +2102,25 @@ export namespace bud::graphics {
 			}
 
 			for (size_t i = 0; i < swapchain_images.size(); i++) {
-				// Info 0: UBO
+				// UBO
 				VkDescriptorBufferInfo buffer_info{};
 				buffer_info.buffer = uniform_buffers[i];
 				buffer_info.offset = 0;
 				buffer_info.range = sizeof(UniformBufferObject);
 
-				// [新增] Info 1: Image Sampler
+				// Image Sampler
 				VkDescriptorImageInfo image_info{};
 				image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 				image_info.imageView = texture_image_view;
 				image_info.sampler = texture_sampler;
 
-				std::array<VkWriteDescriptorSet, 2> descriptor_writes{};
+				// Shadow Map
+				VkDescriptorImageInfo shadow_info{};
+				shadow_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+				shadow_info.imageView = shadow_image_view;
+				shadow_info.sampler = shadow_sampler;
+
+				std::array<VkWriteDescriptorSet, 3> descriptor_writes{};
 
 				// Write 0: UBO
 				descriptor_writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1711,7 +2131,7 @@ export namespace bud::graphics {
 				descriptor_writes[0].descriptorCount = 1;
 				descriptor_writes[0].pBufferInfo = &buffer_info;
 
-				// [新增] Write 1: Sampler
+				// Write 1: Sampler
 				descriptor_writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 				descriptor_writes[1].dstSet = descriptor_sets[i];
 				descriptor_writes[1].dstBinding = 1;
@@ -1719,6 +2139,15 @@ export namespace bud::graphics {
 				descriptor_writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 				descriptor_writes[1].descriptorCount = 1;
 				descriptor_writes[1].pImageInfo = &image_info;
+
+				// Write 3:	Shadow
+				descriptor_writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+				descriptor_writes[2].dstSet = descriptor_sets[i];
+				descriptor_writes[2].dstBinding = 2;
+				descriptor_writes[2].dstArrayElement = 0;
+				descriptor_writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				descriptor_writes[2].descriptorCount = 1;
+				descriptor_writes[2].pImageInfo = &shadow_info;
 
 				vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptor_writes.size()), descriptor_writes.data(), 0, nullptr);
 			}
@@ -1739,7 +2168,7 @@ export namespace bud::graphics {
 		}
 
 
-		// [新增] 辅助函数：从 Pool 分配 Secondary Buffer
+		// 从 Pool 分配 Secondary Buffer
 		VkCommandBuffer allocate_secondary_command_buffer(VkCommandPool pool) {
 			VkCommandBufferAllocateInfo alloc_info{};
 			alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -1827,7 +2256,7 @@ export namespace bud::graphics {
 			}
 		}
 
-		void update_uniform_buffer(uint32_t current_image, const bud::math::mat4& view, const bud::math::mat4& proj) {
+		void update_uniform_buffer(uint32_t current_image, const bud::math::mat4& view, const bud::math::mat4& proj, const bud::math::mat4& lightSpaceMatrix) {
 			static auto start_time = std::chrono::high_resolution_clock::now();
 			auto current_time = std::chrono::high_resolution_clock::now();
 			float time = std::chrono::duration<float, std::chrono::seconds::period>(current_time - start_time).count();
@@ -1837,13 +2266,14 @@ export namespace bud::graphics {
 			ubo.view = view;
 			ubo.proj = proj;
 
-			// 假设相机位置从 view 矩阵逆推，或者从 camera 类传进来更好
-			// 直接从 View Matrix 的逆矩阵取位移
+			// 从 View Matrix 的逆矩阵取位移
 			auto invView = bud::math::inverse(view);
 			ubo.camPos = bud::math::vec3(invView[3]);
-
-			// 从侧后方打过来法线细节更明显
-			ubo.lightDir = bud::math::normalize(bud::math::vec3(-1.0f, 2.0f, 1.5f));
+			ubo.lightDir = bud::math::normalize(settings.lightPos - bud::math::vec3(0.0f));
+			ubo.lightColor = settings.lightColor;
+			ubo.lightIntensity = settings.lightIntensity;
+			ubo.ambientStrength = settings.ambientStrength;
+			ubo.lightSpaceMatrix = lightSpaceMatrix;
 
 			memcpy(uniform_buffers_mapped[current_image], &ubo, sizeof(ubo));
 		}
@@ -1977,7 +2407,7 @@ export namespace bud::graphics {
 		}
 
 		void generate_mipmaps(VkImage image, VkFormat format, int32_t tex_width, int32_t tex_height, uint32_t mip_levels) {
-			// Blit 需要纹理格式是否支持线性过滤
+			// Blit 操作需要纹理格式是否支持线性过滤
 			VkFormatProperties format_properties;
 			vkGetPhysicalDeviceFormatProperties(physical_device, format, &format_properties);
 
@@ -2027,8 +2457,7 @@ export namespace bud::graphics {
 					1, &barrier_dst);
 
 
-				// 1. 转换 Level i-1: TRANSFER_DST_OPTIMAL -> TRANSFER_SRC_OPTIMAL
-				// 因为它要作为下一次 Blit 的源
+				// 转换 Level i-1: TRANSFER_DST_OPTIMAL -> TRANSFER_SRC_OPTIMAL, 因为它要作为下一次 Blit 的源
 				barrier.subresourceRange.baseMipLevel = i - 1;
 				barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 				barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -2042,7 +2471,7 @@ export namespace bud::graphics {
 					0, nullptr,
 					1, &barrier);
 
-				// 2. 执行 Blit (缩放)
+				// 执行 Blit (缩放)
 				VkImageBlit blit{};
 				blit.srcOffsets[0] = { 0, 0, 0 };
 				blit.srcOffsets[1] = { mip_width, mip_height, 1 };
@@ -2064,7 +2493,7 @@ export namespace bud::graphics {
 					1, &blit,
 					VK_FILTER_LINEAR);
 
-				// 3. 转换 Level i-1: TRANSFER_SRC_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
+				// 转换 Level i-1: TRANSFER_SRC_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
 				// 这层做完了，可以给 Shader 读了
 				barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 				barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -2082,7 +2511,7 @@ export namespace bud::graphics {
 				if (mip_height > 1) mip_height /= 2;
 			}
 
-			// 4. 处理最后一层 (Level n-1)
+			// 处理最后一层 (Level n-1)
 			// 它一直是 DST，从未变成 SRC，所以最后还需要手动转一次
 			barrier.subresourceRange.baseMipLevel = mip_levels - 1;
 			barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;

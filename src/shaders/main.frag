@@ -5,6 +5,7 @@ layout(location = 0) in vec3 fragWorldPos;
 layout(location = 1) in vec3 fragNormal;
 layout(location = 2) in vec2 fragTexCoord;
 layout(location = 3) in flat float fragTexIndex;
+layout(location = 4) in vec4 fragPosLightSpace;
 
 layout(location = 0) out vec4 outColor;
 
@@ -12,15 +13,20 @@ layout(binding = 0) uniform UniformBufferObject {
     mat4 model;
     mat4 view;
     mat4 proj;
+	mat4 lightSpaceMatrix;
     vec3 camPos;
     vec3 lightDir;
+    vec3 lightColor;
+    float lightIntensity;
+    float ambientStrength;
 } ubo;
 
 layout(binding = 1) uniform sampler2D texSamplers[];
+layout(binding = 2) uniform sampler2D shadowMap;
 
 const float PI = 3.14159265359;
 
-// --- [新增] ACES 电影级色调映射 (对比度更高) ---
+// ACES 电影级色调映射
 vec3 ACESFilm(vec3 x) {
     float a = 2.51;
     float b = 0.03;
@@ -30,7 +36,6 @@ vec3 ACESFilm(vec3 x) {
     return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
 }
 
-// ... DistributionGGX, GeometrySchlickGGX, GeometrySmith, FresnelSchlick 保持不变 ...
 float DistributionGGX(vec3 N, vec3 H, float roughness) {
     float a = roughness * roughness;
     float a2 = a * a;
@@ -62,16 +67,47 @@ vec3 FresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+float ShadowCalculation(vec4 fragPosLightSpace, vec3 N, vec3 L) {
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    
+    // [0, 1]
+    projCoords.xy = projCoords.xy * 0.5 + 0.5;
+
+    // 超出视锥体
+    if(projCoords.z > 1.0)
+		return 0.0;
+
+    // 解决 Shadow Acne
+    // Bias 越大角度越倾斜
+    float currentDepth = projCoords.z;
+    float bias = max(0.005 * (1.0 - dot(N, L)), 0.0005); 
+
+    // Percentage-closer filtering 软阴影
+    float shadow = 0.0;
+    vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
+    for(int x = -1; x <= 1; ++x) {
+        for(int y = -1; y <= 1; ++y) {
+            float pcfDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r; 
+            // 如果采样深度 < 当前深度 - bias，说明在阴影里
+            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;        
+        }    
+    }
+    shadow /= 9.0;
+    
+    return shadow;
+}
+
 void main() {
     int texID = int(fragTexIndex + 0.5);
     vec4 albedoSample = texture(texSamplers[nonuniformEXT(texID)], fragTexCoord);
-    
-    // 【修改 1】直接使用 rgb，不要再 pow(2.2) 了！
+
+	if (albedoSample.a < 0.5)
+		discard;
+
     vec3 albedo = albedoSample.rgb; 
 
-    // 【修改 2】让材质稍微光滑一点，增加对比
     float metallic = 0.1; 
-    float roughness = 0.5; // 从 0.8 改为 0.5，让高光更明显一点
+    float roughness = 0.5;
     float ao = 1.0;
 
     vec3 N = normalize(fragNormal);
@@ -79,16 +115,14 @@ void main() {
     vec3 L = normalize(ubo.lightDir); 
     vec3 H = normalize(V + L);
 
-    // F0 ... (保持不变)
     vec3 F0 = vec3(0.04); 
     F0 = mix(F0, albedo, metallic);
 
-    // 【修改 3】增加一点光照强度
-    vec3 lightColor = vec3(1.0, 1.0, 1.0); 
-    float lightIntensity = 5.0; // 加强亮度
+    vec3 lightColor = ubo.lightColor; 
+    float lightIntensity = ubo.lightIntensity;
     vec3 radiance = lightColor * lightIntensity; 
 
-    // --- Cook-Torrance BRDF (保持不变) ---
+    // Cook-Torrance BRDF
     float NDF = DistributionGGX(N, H, roughness);   
     float G   = GeometrySmith(N, V, L, roughness);      
     vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
@@ -105,15 +139,17 @@ void main() {
 
     vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
 
-    // 环境光 (稍微提亮一点暗部)
-    vec3 ambient = vec3(0.05) * albedo * ao;
+	float shadow = ShadowCalculation(fragPosLightSpace, N, L);
+
+    // 应用阴影到 Diffuse 和 Specular
+    Lo *=  (1.0 - shadow);
+
+    vec3 ambient = vec3(ubo.ambientStrength) * albedo * ao;
     vec3 color = ambient + Lo;
 
-    // 【修改 4】使用 ACES Tone Mapping 替代 Reinhard
     color = ACESFilm(color);
 
-    // Gamma Correction (Linear -> sRGB 输出)
-    // 这一步必须保留，因为显示器是 sRGB 的
+    // Gamma Correction (Linear -> sRGB)
     color = pow(color, vec3(1.0/2.2)); 
 
     outColor = vec4(color, albedoSample.a);

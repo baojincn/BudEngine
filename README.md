@@ -13,6 +13,9 @@ Hello mipmaps
 Hello PBR
 ![](samples/screenshots/hello_pbr.png)
 
+Hello Shadow
+![](samples/screenshots/hello_shadow.png)
+
 Performance tracing tool's test 
 ![](samples/screenshots/performance_tracing.png)
 
@@ -28,16 +31,6 @@ Performance tracing tool's test
 ### 项目结构
 
 ### 常见问题
-
-# Naming Style
-
-- Types: PascalCase (MyClass, WidgetMgr)  
-- Functions/Variables: snake_case (update_state, current_value)  
-- Private Members: snake_case with trailing underscore (value_)  
-- Namespaces: lowercase  
-- Constants: kPascalCaseor snake_case  
-
-
 
 
 # Note

@@ -5,7 +5,7 @@ import bud.engine;
 
 int main(int argc, char* argv[]) {
     try {
-        bud::engine::BudEngine engine("Bud Engine - Triangle Sample", 1280, 720);
+        bud::engine::BudEngine engine("Bud Engine - Triangle Sample", 1920, 1080);
 
         engine.run();
 

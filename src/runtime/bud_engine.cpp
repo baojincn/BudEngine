@@ -24,9 +24,6 @@ BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 
 	rhi_ = std::make_unique<bud::graphics::VulkanRHI>();
 
-	camera_ = bud::graphics::Camera(bud::math::vec3(10.0f, 5.0f, 0.0f));
-	camera_.movement_speed = 50.0f;
-
 #ifdef _DEBUG
 	bool enable_validation = true;
 #else
@@ -35,8 +32,29 @@ BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 
 	rhi_->init(window_->get_sdl_window(), task_scheduler_.get(), enable_validation);
 
+	camera_ = bud::graphics::Camera(bud::math::vec3(10.0f, 5.0f, 0.0f));
+	camera_.movement_speed = 50.0f;
+
+	bud::graphics::RenderConfig config;
+
+	config.shadowMapSize = 4096;
+
+	config.lightPos = { 500.0f, 1000.0f, 10.0f };
+	config.lightColor = { 1.0f, 1.0f, 1.0f };
+	config.lightIntensity = 3.0f;
+
+	config.shadowBiasConstant = 2.25f;
+	config.shadowBiasSlope = 4.75f;
+	config.shadowOrthoSize = 2000.0f;
+	config.shadowNear = 1.0f;
+	config.shadowFar = 5000.0f;
 
 	rhi_->load_model_async("data/cryteksponza/sponza.obj");
+
+	auto vulkan_rhi = dynamic_cast<bud::graphics::VulkanRHI*>(rhi_.get());
+	if (vulkan_rhi) {
+		vulkan_rhi->set_config(config);
+	}
 }
 
 BudEngine::~BudEngine() {
