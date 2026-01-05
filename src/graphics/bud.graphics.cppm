@@ -1,6 +1,8 @@
 ﻿module;
 
-#include <cmath> 
+#include <cmath>
+#include <string>
+#include <memory>
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
@@ -11,11 +13,69 @@
 export module bud.graphics;
 
 import bud.math;
+import bud.platform;
+import bud.threading;
 
 export namespace bud::graphics {
 
-	// 摄像机类 (纯逻辑，不含 Vulkan 代码)
-	class Camera {
+	export enum class Backend {
+		Vulkan,
+		D3D12,
+		Metal
+	};
+
+	export struct MemoryAllocation {
+		void* internal_handle = nullptr;
+		uint64_t offset = 0;
+		uint64_t size = 0;
+		void* mapped_ptr = nullptr;
+	};
+
+	export class MemoryManager {
+	public:
+		virtual ~MemoryManager() = default;
+
+		virtual void init() = 0;
+		virtual void cleanup() = 0;
+
+		virtual bool allocate_staging(uint64_t size, MemoryAllocation& out_alloc) = 0;
+
+		virtual void mark_submitted(const MemoryAllocation& alloc, void* sync_handle) = 0;
+	};
+
+
+	export struct RenderConfig {
+		uint32_t shadowMapSize = 4096;
+		float shadowBiasConstant = 1.25f;
+		float shadowBiasSlope = 1.75f;
+		float shadowOrthoSize = 35.0f;
+		float shadowNear = 0.1f;
+		float shadowFar = 100.0f;
+
+		bud::math::vec3 lightPos = { 5.0f, 15.0f, 5.0f };
+		bud::math::vec3 lightColor = { 1.0f, 1.0f, 1.0f };
+		float lightIntensity = 5.0f;
+		float ambientStrength = 0.05f;
+
+		bool enableSoftShadows = true;
+	};
+
+	export class RHI {
+	public:
+		virtual ~RHI() = default;
+		virtual void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation) = 0;
+		virtual void draw_frame(const bud::math::mat4& view, const bud::math::mat4& proj) = 0;
+		virtual void wait_idle() = 0;
+		virtual void cleanup() = 0;
+		virtual void reload_shaders_async() = 0;
+		virtual void load_model_async(const std::string& filepath) = 0;
+		virtual void set_config(const RenderConfig& new_settings) = 0;
+	};
+
+	export std::unique_ptr<RHI> create_rhi(Backend backend);
+
+	// 摄像机类
+	export class Camera {
 	public:
 		// 状态数据
 		bud::math::vec3 position;

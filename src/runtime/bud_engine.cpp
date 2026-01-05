@@ -18,11 +18,12 @@ module bud.engine;
 
 using namespace bud::engine;
 
+
 BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 	window_ = bud::platform::create_window(window_title, width, height);
 	task_scheduler_ = std::make_unique<bud::threading::TaskScheduler>();
 
-	rhi_ = std::make_unique<bud::graphics::VulkanRHI>();
+	rhi_ = bud::graphics::create_rhi(bud::graphics::Backend::Vulkan);
 
 #ifdef _DEBUG
 	bool enable_validation = true;
@@ -30,7 +31,7 @@ BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 	bool enable_validation = false;
 #endif
 
-	rhi_->init(window_->get_sdl_window(), task_scheduler_.get(), enable_validation);
+	rhi_->init(window_.get(), task_scheduler_.get(), enable_validation);
 
 	camera_ = bud::graphics::Camera(bud::math::vec3(10.0f, 5.0f, 0.0f));
 	camera_.movement_speed = 50.0f;
@@ -51,10 +52,7 @@ BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 
 	rhi_->load_model_async("data/cryteksponza/sponza.obj");
 
-	auto vulkan_rhi = dynamic_cast<bud::graphics::VulkanRHI*>(rhi_.get());
-	if (vulkan_rhi) {
-		vulkan_rhi->set_config(config);
-	}
+	rhi_->set_config(config);
 }
 
 BudEngine::~BudEngine() {

@@ -10,7 +10,6 @@ import bud.math;
 import bud.dod;
 import bud.threading;
 import bud.platform;
-import bud.graphics.rhi;
 import bud.graphics;
 
 export namespace bud::engine {

@@ -106,11 +106,8 @@ endif()
 source_group("Shaders" FILES ${SHADER_FILES})
 
 add_library(bud_engine_core STATIC
-    "src/platform/window.cpp"
-    "src/runtime/bud_engine.cpp"
-	"src/third_party/bud_third_party.cpp"
 	${SHADER_FILES}
-)
+  )
 
 # Ensure shaders are compiled before building the core library
 if(TARGET CompileShaders)
@@ -130,6 +127,11 @@ endif()
 target_sources(bud_engine_core
     PRIVATE
         "src/platform/windows/switch_context_win_x86_64.asm"
+		"src/platform/window.cpp"
+		"src/runtime/bud_engine.cpp"
+		"src/graphics/bud.graphics.cpp"
+		"src/graphics/vulkan/bud.graphics.vulkan.cpp"
+		"src/third_party/bud_third_party.cpp"
     PUBLIC
         FILE_SET CXX_MODULES
         TYPE CXX_MODULES
@@ -137,14 +139,18 @@ target_sources(bud_engine_core
         FILES
             "src/core/bud.core.cppm"
             "src/core/bud.math.cppm"
-            "src/dod/bud.dod.cppm"
-            "src/threading/bud.threading.cppm"
-            "src/graphics/bud.graphics.cppm"
-			"src/graphics/rhi/bud.graphics.rhi.cppm"
-            
             "src/io/bud.io.cppm"
-            "src/platform/bud.platform.cppm"
+            "src/dod/bud.dod.cppm"
             "src/runtime/bud.engine.cppm"
+            "src/platform/bud.platform.cppm"
+            "src/threading/bud.threading.cppm"
+
+			"src/graphics/bud.graphics.cppm"
+
+			"src/graphics/vulkan/bud.graphics.vulkan.cppm"
+			"src/graphics/vulkan/bud.vulkan.memory.cppm"
+			"src/graphics/d3d12/bud.graphics.d3d12.cppm"
+			"src/graphics/d3d12/bud.d3d12.memory.cppm"
 )
 
 set_target_properties(bud_engine_core PROPERTIES CXX_SCAN_FOR_MODULES ON)
