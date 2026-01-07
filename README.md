@@ -26,31 +26,28 @@ A full fiber-based task driven lightweight 3D Game Engine.
 
 ## Planned Features
 
+* **Scene Management & Acceleration**:
+    * **Spatial Partitioning**: Implement dynamic **BVH (Bounding Volume Hierarchy)** construction on CPU for efficient scene queries.
+    * **Data-Oriented Design (DOD)**: ECS-based scene memory layout for cache coherence.
+
+* **Pipeline & Rendering**:
+    * **Render Graph**: Automatic resource barrier management, pass reordering, and transient memory aliasing.
+    * **GPU-Driven Rendering**: **LBVH (Linear BVH)** traversal using Compute Shaders for precise occlusion culling (Hi-Z) and Indirect Draw.
+    * **Advanced Shading**: Forward+ (Tile-based Light Culling) or Deferred Shading.
+
 * **Memory Management**: 
     * **Staging Ring Buffer**: Persistent mapped memory for high-frequency dynamic data uploads.
     * **Fine-grained Sub-allocation**: Page-based GPU memory allocator.
     * **Virtual Texture Streaming**: Sparse binding support for massive textures.
 
-* **Pipeline**: 
-    * **Render Graph**: Automatic resource barrier management and pass reordering.
-    * **GPU-Driven Rendering**: Indirect Draw, Hi-Z Occlusion Culling.
-    * **Advanced Shading**: Forward+ or Deferred Shading.
 
-* **Core**: 
-    * **Data-Oriented Design (DOD)**: ECS-based scene management.
+PBR and shadow
+![](samples/screenshots/hello_shadow.png)
 
 
-Hello world  
-![](samples/screenshots/hello_world.png)
-
-Hello mipmaps
+Mipmaps
 ![](samples/screenshots/hello_mipmaps.png)
 
-Hello PBR
-![](samples/screenshots/hello_pbr.png)
-
-Hello Shadow
-![](samples/screenshots/hello_shadow.png)
 
 Performance tracing tool's test 
 ![](samples/screenshots/performance_tracing.png)
