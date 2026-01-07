@@ -27,13 +27,15 @@ A full fiber-based task driven lightweight 3D Game Engine.
 ## Planned Features
 
 * **Scene Management & Acceleration**:
-    * **Spatial Partitioning**: Implement dynamic **BVH (Bounding Volume Hierarchy)** construction on CPU for efficient scene queries.
+    * **Spatial Partitioning**: Implement dynamic **BVH** construction on CPU for efficient scene queries.
     * **Data-Oriented Design (DOD)**: ECS-based scene memory layout for cache coherence.
 
 * **Pipeline & Rendering**:
     * **Render Graph**: Automatic resource barrier management, pass reordering, and transient memory aliasing.
-    * **GPU-Driven Rendering**: **LBVH (Linear BVH)** traversal using Compute Shaders for precise occlusion culling (Hi-Z) and Indirect Draw.
-    * **Advanced Shading**: Forward+ (Tile-based Light Culling) or Deferred Shading.
+    * **GPU-Driven Rendering**: 
+        * **Culling Architecture**: **LBVH (Linear BVH)** traversal and **Hi-Z** occlusion culling.
+        * **Dual-Pipeline Support**: Designed to support both standard **Compute Shader** (Indirect Draw) and modern **Mesh Shader** (Task Shader amplification) workflows.
+    * **Advanced Shading**: Forward+ or Deferred Shading.
 
 * **Memory Management**: 
     * **Staging Ring Buffer**: Persistent mapped memory for high-frequency dynamic data uploads.
