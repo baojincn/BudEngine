@@ -27,8 +27,7 @@ endif()
 
 # MSVC 模块支持
 if(MSVC)
-    set(CMAKE_CXX_MODULE_SCAN ON)
-    add_compile_options(/TP)
+    set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 endif()
 
 # 检测平台
