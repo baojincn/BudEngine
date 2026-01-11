@@ -34,7 +34,7 @@ BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 	rhi_->init(window_.get(), task_scheduler_.get(), enable_validation);
 
 	camera_ = bud::graphics::Camera(bud::math::vec3(10.0f, 5.0f, 0.0f));
-	camera_.movement_speed = 50.0f;
+	camera_.movement_speed = 100.0f;
 
 	bud::graphics::RenderConfig config;
 
