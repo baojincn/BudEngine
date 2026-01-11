@@ -44,7 +44,7 @@ A full fiber-based task driven lightweight 3D Game Engine.
 
 
 PBR and shadow
-![](samples/screenshots/hello_shadow.png)
+![](samples/screenshots/pbr_shadow.png)
 
 
 Mipmaps
