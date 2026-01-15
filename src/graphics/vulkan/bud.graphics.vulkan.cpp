@@ -160,7 +160,8 @@ void VulkanRHI::draw_frame(const bud::math::mat4& view, const bud::math::mat4& p
 		VkViewport viewport{};
 		viewport.width = (float)settings.shadowMapSize;
 		viewport.height = (float)settings.shadowMapSize;
-		viewport.minDepth = 0.0f; viewport.maxDepth = 1.0f;
+		viewport.minDepth = 0.0f;
+		viewport.maxDepth = 1.0f;
 		vkCmdSetViewport(cmd, 0, 1, &viewport);
 
 		VkRect2D scissor{};
@@ -172,8 +173,13 @@ void VulkanRHI::draw_frame(const bud::math::mat4& view, const bud::math::mat4& p
 
 		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_layout, 0, 1, &descriptor_sets[image_index], 0, nullptr);
 
-		auto pushConst = lightSpaceMatrix * modelMatrix;
-		vkCmdPushConstants(cmd, shadow_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(bud::math::mat4), &pushConst);
+		ShadowConstantData shadow_constant_data{};
+		shadow_constant_data.lightMVP = lightSpaceMatrix * modelMatrix;
+		auto dir = bud::math::normalize(bud::math::vec3(0.0f) - settings.lightPos);
+		shadow_constant_data.lightDir = bud::math::vec4(dir, 0.0f);
+
+
+		vkCmdPushConstants(cmd, shadow_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ShadowConstantData), &shadow_constant_data);
 
 		if (vertex_buffer && index_buffer && !indices.empty()) {
 			VkBuffer vbs[] = { vertex_buffer };
@@ -246,7 +252,9 @@ void VulkanRHI::draw_frame(const bud::math::mat4& view, const bud::math::mat4& p
 		vkCmdBindPipeline(sec_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
 
 		VkViewport viewport{};
-		viewport.width = (float)swapchain_extent.width; viewport.height = (float)swapchain_extent.height; viewport.maxDepth = 1.0f;
+		viewport.width = (float)swapchain_extent.width;
+		viewport.height = (float)swapchain_extent.height;
+		viewport.maxDepth = 1.0f;
 		vkCmdSetViewport(sec_cmd, 0, 1, &viewport);
 
 
@@ -583,7 +591,7 @@ void VulkanRHI::create_shadow_pipeline() {
 	VkPushConstantRange push_constant_range{};
 	push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 	push_constant_range.offset = 0;
-	push_constant_range.size = sizeof(bud::math::mat4); // mat4, 64字节
+	push_constant_range.size = sizeof(ShadowConstantData);
 
 	VkPipelineLayoutCreateInfo pipeline_layout_info{};
 	pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -741,8 +749,7 @@ void VulkanRHI::create_shadow_resources() {
 	sampler_info.maxLod = 1.0f;
 	sampler_info.anisotropyEnable = VK_FALSE;
 
-	// Close, compare with shader code
-	sampler_info.compareEnable = VK_FALSE;
+	sampler_info.compareEnable = VK_TRUE;
 	sampler_info.compareOp = VK_COMPARE_OP_LESS;
 
 	if (vkCreateSampler(device, &sampler_info, nullptr, &shadow_sampler) != VK_SUCCESS) {

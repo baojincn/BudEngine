@@ -44,8 +44,8 @@ BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 	config.lightColor = { 1.0f, 1.0f, 1.0f };
 	config.lightIntensity = 3.0f;
 
-	config.shadowBiasConstant = 2.25f;
-	config.shadowBiasSlope = 4.75f;
+	config.shadowBiasConstant = 1.0f;
+	config.shadowBiasSlope = 2.0f;
 	config.shadowOrthoSize = 2000.0f;
 	config.shadowNear = 1.0f;
 	config.shadowFar = 5000.0f;

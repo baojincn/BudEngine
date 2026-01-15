@@ -106,6 +106,11 @@ namespace bud::graphics::vulkan {
 		std::vector<VkPresentModeKHR> present_modes;
 	};
 
+	struct ShadowConstantData {
+		bud::math::mat4 lightMVP;  // 64 bytes (offset 0)
+		bud::math::vec4 lightDir;  // 16 bytes (offset 64)
+	};
+
 
 	export class VulkanRHI : public bud::graphics::RHI {
 	public:
