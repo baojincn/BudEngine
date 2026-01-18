@@ -6,7 +6,10 @@
 			"displayName": "default",
 			"binaryDir": "${sourceDir}/build",
 			"hidden": true,
-			"generator": "Ninja"
+			"generator": "Ninja",
+			"cacheVariables": {
+				"CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake"
+			}
 		},
 		{
 			"name": "debug",

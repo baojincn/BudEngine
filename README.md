@@ -60,7 +60,6 @@ Performance tracing tool's test
 
 # Note
 
-- Do git submodule update --init --recursive after cloning this repository.  
 - If you use Visual Studio/VSCode with open folder to work, please add following configs into lauch.vs.json file.
 ```  json
 "currentDir": "${workspaceRoot}"  
