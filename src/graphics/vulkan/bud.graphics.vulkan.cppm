@@ -45,49 +45,9 @@ namespace bud::graphics::vulkan {
 		float texCoord[2];
 		float texIndex;
 
-		static VkVertexInputBindingDescription get_binding_description() {
-			VkVertexInputBindingDescription binding_description{};
-			binding_description.binding = 0;
-			binding_description.stride = sizeof(Vertex);
-			binding_description.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-			return binding_description;
-		}
+		static VkVertexInputBindingDescription get_binding_description();
 
-		static std::vector<VkVertexInputAttributeDescription> get_attribute_descriptions() {
-			std::vector<VkVertexInputAttributeDescription> attribute_descriptions(5);
-
-			// Attribute 0: Position
-			attribute_descriptions[0].binding = 0;
-			attribute_descriptions[0].location = 0;
-			attribute_descriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-			attribute_descriptions[0].offset = offsetof(Vertex, pos);
-
-			// Attribute 1: Color
-			attribute_descriptions[1].binding = 0;
-			attribute_descriptions[1].location = 1;
-			attribute_descriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-			attribute_descriptions[1].offset = offsetof(Vertex, color);
-
-			// Attribute 2: Normal
-			attribute_descriptions[2].binding = 0;
-			attribute_descriptions[2].location = 2;
-			attribute_descriptions[2].format = VK_FORMAT_R32G32B32_SFLOAT;
-			attribute_descriptions[2].offset = offsetof(Vertex, normal);
-
-			// Attribute 3: TexCoord 
-			attribute_descriptions[3].binding = 0;
-			attribute_descriptions[3].location = 3;
-			attribute_descriptions[3].format = VK_FORMAT_R32G32_SFLOAT;
-			attribute_descriptions[3].offset = offsetof(Vertex, texCoord);
-
-			// Attribute 4: TexIndex
-			attribute_descriptions[4].binding = 0;
-			attribute_descriptions[4].location = 4;
-			attribute_descriptions[4].format = VK_FORMAT_R32_SFLOAT;
-			attribute_descriptions[4].offset = offsetof(Vertex, texIndex);
-
-			return attribute_descriptions;
-		}
+		static std::vector<VkVertexInputAttributeDescription> get_attribute_descriptions();
 	};
 
 
@@ -190,7 +150,7 @@ namespace bud::graphics::vulkan {
 
 		static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData);
 
-
+	private:
 		static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 		struct FrameData {
 			// 同步原语

@@ -31,7 +31,50 @@ import bud.graphics;
 
 using namespace bud::graphics::vulkan;
 
+VkVertexInputBindingDescription Vertex::get_binding_description() {
+	VkVertexInputBindingDescription binding_description{};
+	binding_description.binding = 0;
+	binding_description.stride = sizeof(Vertex);
+	binding_description.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+	return binding_description;
+}
 
+
+std::vector<VkVertexInputAttributeDescription> Vertex::get_attribute_descriptions() {
+	std::vector<VkVertexInputAttributeDescription> attribute_descriptions(5);
+
+	// Attribute 0: Position
+	attribute_descriptions[0].binding = 0;
+	attribute_descriptions[0].location = 0;
+	attribute_descriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+	attribute_descriptions[0].offset = offsetof(Vertex, pos);
+
+	// Attribute 1: Color
+	attribute_descriptions[1].binding = 0;
+	attribute_descriptions[1].location = 1;
+	attribute_descriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+	attribute_descriptions[1].offset = offsetof(Vertex, color);
+
+	// Attribute 2: Normal
+	attribute_descriptions[2].binding = 0;
+	attribute_descriptions[2].location = 2;
+	attribute_descriptions[2].format = VK_FORMAT_R32G32B32_SFLOAT;
+	attribute_descriptions[2].offset = offsetof(Vertex, normal);
+
+	// Attribute 3: TexCoord 
+	attribute_descriptions[3].binding = 0;
+	attribute_descriptions[3].location = 3;
+	attribute_descriptions[3].format = VK_FORMAT_R32G32_SFLOAT;
+	attribute_descriptions[3].offset = offsetof(Vertex, texCoord);
+
+	// Attribute 4: TexIndex
+	attribute_descriptions[4].binding = 0;
+	attribute_descriptions[4].location = 4;
+	attribute_descriptions[4].format = VK_FORMAT_R32_SFLOAT;
+	attribute_descriptions[4].offset = offsetof(Vertex, texIndex);
+
+	return attribute_descriptions;
+}
 
 
 
@@ -111,12 +154,12 @@ void VulkanRHI::draw_frame(const bud::math::mat4& view, const bud::math::mat4& p
 	vkResetFences(device, 1, &frame.in_flight_fence);
 
 	auto lightProj = bud::math::ortho_vk(
-		-settings.shadowOrthoSize, settings.shadowOrthoSize,
-		-settings.shadowOrthoSize, settings.shadowOrthoSize,
-		settings.shadowNear, settings.shadowFar
+		-settings.shadow_ortho_size, settings.shadow_ortho_size,
+		-settings.shadow_ortho_size, settings.shadow_ortho_size,
+		settings.shadow_near_plane, settings.shadow_far_plane
 	);
 
-	auto lightView = bud::math::lookAt(settings.lightPos, bud::math::vec3(0.0f), bud::math::vec3(1.0f, 0.0f, 0.0f));
+	auto lightView = bud::math::lookAt(settings.directional_light_position, bud::math::vec3(0.0f), bud::math::vec3(1.0f, 0.0f, 0.0f));
 
 	bud::math::mat4 lightSpaceMatrix = lightProj * lightView;
 	bud::math::mat4 modelMatrix = bud::math::mat4(1.0f);
@@ -145,8 +188,8 @@ void VulkanRHI::draw_frame(const bud::math::mat4& view, const bud::math::mat4& p
 		shadow_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 		shadow_pass_info.renderPass = shadow_render_pass;
 		shadow_pass_info.framebuffer = shadow_framebuffer;
-		shadow_pass_info.renderArea.extent.width = settings.shadowMapSize;
-		shadow_pass_info.renderArea.extent.height = settings.shadowMapSize;
+		shadow_pass_info.renderArea.extent.width = settings.shadow_map_size;
+		shadow_pass_info.renderArea.extent.height = settings.shadow_map_size;
 
 		VkClearValue clear_values[1] = {};
 		clear_values[0].depthStencil = { 1.0f, 0 };
@@ -158,24 +201,24 @@ void VulkanRHI::draw_frame(const bud::math::mat4& view, const bud::math::mat4& p
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
 
 		VkViewport viewport{};
-		viewport.width = (float)settings.shadowMapSize;
-		viewport.height = (float)settings.shadowMapSize;
+		viewport.width = (float)settings.shadow_map_size;
+		viewport.height = (float)settings.shadow_map_size;
 		viewport.minDepth = 0.0f;
 		viewport.maxDepth = 1.0f;
 		vkCmdSetViewport(cmd, 0, 1, &viewport);
 
 		VkRect2D scissor{};
-		scissor.extent.width = settings.shadowMapSize;
-		scissor.extent.height = settings.shadowMapSize;
+		scissor.extent.width = settings.shadow_map_size;
+		scissor.extent.height = settings.shadow_map_size;
 		vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-		vkCmdSetDepthBias(cmd, settings.shadowBiasConstant, 0.0f, settings.shadowBiasSlope);
+		vkCmdSetDepthBias(cmd, settings.shadow_bias_constant, 0.0f, settings.shadow_bias_slope);
 
 		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_layout, 0, 1, &descriptor_sets[image_index], 0, nullptr);
 
 		ShadowConstantData shadow_constant_data{};
 		shadow_constant_data.lightMVP = lightSpaceMatrix * modelMatrix;
-		auto dir = bud::math::normalize(bud::math::vec3(0.0f) - settings.lightPos);
+		auto dir = bud::math::normalize(bud::math::vec3(0.0f) - settings.directional_light_position);
 		shadow_constant_data.lightDir = bud::math::vec4(dir, 0.0f);
 
 
@@ -635,8 +678,8 @@ void VulkanRHI::create_shadow_framebuffer() {
 	framebuffer_info.renderPass = shadow_render_pass;
 	framebuffer_info.attachmentCount = 1;
 	framebuffer_info.pAttachments = &shadow_image_view;
-	framebuffer_info.width = settings.shadowMapSize;
-	framebuffer_info.height = settings.shadowMapSize;
+	framebuffer_info.width = settings.shadow_map_size;
+	framebuffer_info.height = settings.shadow_map_size;
 	framebuffer_info.layers = 1;
 
 	if (vkCreateFramebuffer(device, &framebuffer_info, nullptr, &shadow_framebuffer) != VK_SUCCESS) {
@@ -709,7 +752,7 @@ void VulkanRHI::create_shadow_resources() {
 
 	// 创建 Image
 	// DEPTH_STENCIL_ATTACHMENT (作为渲染目标), SAMPLED (作为贴图被 Shader 读取)
-	create_image(settings.shadowMapSize, settings.shadowMapSize, 1, depth_format, VK_IMAGE_TILING_OPTIMAL,
+	create_image(settings.shadow_map_size, settings.shadow_map_size, 1, depth_format, VK_IMAGE_TILING_OPTIMAL,
 		VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 		shadow_image, shadow_image_memory);
@@ -2056,10 +2099,10 @@ void VulkanRHI::update_uniform_buffer(uint32_t current_image, const bud::math::m
 	// 从 View Matrix 的逆矩阵取位移
 	auto invView = bud::math::inverse(view);
 	ubo.camPos = bud::math::vec3(invView[3]);
-	ubo.lightDir = bud::math::normalize(settings.lightPos - bud::math::vec3(0.0f));
-	ubo.lightColor = settings.lightColor;
-	ubo.lightIntensity = settings.lightIntensity;
-	ubo.ambientStrength = settings.ambientStrength;
+	ubo.lightDir = bud::math::normalize(settings.directional_light_position - bud::math::vec3(0.0f));
+	ubo.lightColor = settings.directional_light_color;
+	ubo.lightIntensity = settings.directional_light_intensity;
+	ubo.ambientStrength = settings.ambient_strength;
 	ubo.lightSpaceMatrix = lightSpaceMatrix;
 
 	memcpy(uniform_buffers_mapped[current_image], &ubo, sizeof(ubo));

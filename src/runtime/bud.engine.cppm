@@ -11,6 +11,7 @@ import bud.dod;
 import bud.threading;
 import bud.platform;
 import bud.graphics;
+import bud.scene;
 
 export namespace bud::engine {
 
@@ -41,7 +42,7 @@ export namespace bud::engine {
 
 		std::unique_ptr<bud::graphics::RHI> rhi_;
 
-		bud::graphics::Camera camera_;
+		bud::scene::Camera camera_;
 
 		float aspect_ratio_{ 16.0f / 9.0f };
 		float far_plane_{ 4000.0f };

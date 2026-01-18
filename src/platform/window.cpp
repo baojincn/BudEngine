@@ -9,6 +9,22 @@
 module bud.platform;
 
 namespace bud::platform {
+
+	bud::input::Key sdl_to_bud_key(SDL_Keycode sdl_key) {
+		switch (sdl_key) {
+		case SDLK_ESCAPE: return bud::input::Key::Escape;
+		case SDLK_SPACE:  return bud::input::Key::Space;
+		case SDLK_RETURN: return bud::input::Key::Enter;
+		case SDLK_W:      return bud::input::Key::W;
+		case SDLK_A:      return bud::input::Key::A;
+		case SDLK_S:      return bud::input::Key::S;
+		case SDLK_D:      return bud::input::Key::D;
+		case SDLK_R:      return bud::input::Key::R;
+
+		default:          return bud::input::Key::Unknown;
+		}
+	}
+
 	class WindowWin : public Window {
 	public:
 		WindowWin(const std::string& title, int width, int height)
@@ -73,10 +89,11 @@ namespace bud::platform {
 		}
 
 		void poll_events() override {
-			// Reset scroll each frame
-			scroll_y_ = 0.0f;
-			mouse_delta_x_ = 0.0f;
-			mouse_delta_y_ = 0.0f;
+			auto& input = bud::input::Input::get();
+
+			auto pass_key = create_pass_key();
+
+			input.internal_new_frame(pass_key);
 
 			SDL_Event event;
 			while (SDL_PollEvent(&event)) {
@@ -84,94 +101,63 @@ namespace bud::platform {
 				case SDL_EVENT_QUIT:
 					should_close_ = true;
 					break;
+
 				case SDL_EVENT_KEY_DOWN:
-					if (event.key.key == SDLK_ESCAPE) {
+					if (event.key.key == SDLK_ESCAPE)
 						should_close_ = true;
-					}
+					input.internal_set_key(pass_key, sdl_to_bud_key(event.key.key), true);
 					break;
+
+				case SDL_EVENT_KEY_UP:
+					input.internal_set_key(pass_key, sdl_to_bud_key(event.key.key), false);
+					break;
+
 				case SDL_EVENT_MOUSE_MOTION:
-					mouse_delta_x_ += event.motion.xrel;
-					mouse_delta_y_ += event.motion.yrel;
+					input.internal_update_mouse_pos(
+						pass_key,
+						event.motion.x,
+						event.motion.y,
+						event.motion.xrel,
+						event.motion.yrel
+					);
 					break;
 
 				case SDL_EVENT_MOUSE_WHEEL:
-					scroll_y_ += event.wheel.y;
+					input.internal_update_scroll(pass_key, event.wheel.y);
 					break;
-				default:
-					break;
+
+				case SDL_EVENT_MOUSE_BUTTON_DOWN:
+				case SDL_EVENT_MOUSE_BUTTON_UP:
+				{
+					auto is_down = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+					auto btn = bud::input::MouseButton::Left;
+
+					if (event.button.button == SDL_BUTTON_RIGHT)
+						btn = bud::input::MouseButton::Right;
+					else if (event.button.button == SDL_BUTTON_MIDDLE)
+						btn = bud::input::MouseButton::Middle;
+
+					input.internal_set_mouse_btn(pass_key, btn, is_down);
+				}
+				break;
 				}
 			}
 		}
 
-		SDL_Scancode map_key(bud::platform::Key key) const {
-			switch (key) {
-			case bud::platform::Key::Escape: return SDL_SCANCODE_ESCAPE;
-			case bud::platform::Key::Space:  return SDL_SCANCODE_SPACE;
-			case bud::platform::Key::R:      return SDL_SCANCODE_R;
-			case bud::platform::Key::W:      return SDL_SCANCODE_W;
-			case bud::platform::Key::A:      return SDL_SCANCODE_A;
-			case bud::platform::Key::S:      return SDL_SCANCODE_S;
-			case bud::platform::Key::D:      return SDL_SCANCODE_D;
-				// ...
-			default: return SDL_SCANCODE_UNKNOWN;
-			}
-		}
-
-
-		bool is_key_pressed(bud::platform::Key key) const override {
-			auto state = SDL_GetKeyboardState(nullptr);
-
-			if (!state)
-				return false;
-
-			SDL_Scancode sdl_code = map_key(key);
-			if (sdl_code == SDL_SCANCODE_UNKNOWN)
-				return false;
-
-			return state[sdl_code];
-		}
-
-		float get_mouse_scroll_y() const override {
-			return scroll_y_;
-		}
-
-		void get_mouse_delta(float& x, float& y) const override {
-			x = mouse_delta_x_;
-			y = mouse_delta_y_;
-		}
-
-		bool is_mouse_button_down(bud::platform::MouseButton button) const override {
-			// 获取全局鼠标状态
-			float x, y;
-			SDL_MouseButtonFlags flags = SDL_GetMouseState(&x, &y);
-
-			switch (button) {
-			case bud::platform::MouseButton::Left:
-				return (flags & SDL_BUTTON_MASK(SDL_BUTTON_LEFT)) != 0;
-			case bud::platform::MouseButton::Right:
-				return (flags & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT)) != 0;
-			case bud::platform::MouseButton::Middle:
-				return (flags & SDL_BUTTON_MASK(SDL_BUTTON_MIDDLE)) != 0;
-			default: return false;
-			}
-		}
 
 	private:
 		SDL_Window* window_ = nullptr;
 		int width_ = 0;
 		int height_ = 0;
 		bool should_close_ = false;
-		float scroll_y_ = 0.0f;
-		float mouse_delta_x_ = 0.0f;
-		float mouse_delta_y_ = 0.0f;
 
 	};
 
-		std::unique_ptr<Window> create_window(const std::string& title, int width, int height) {
+	std::unique_ptr<Window> create_window(const std::string& title, int width, int height) {
 #ifdef _WIN32
-			return std::make_unique<WindowWin>(title, width, height);
+		return std::make_unique<WindowWin>(title, width, height);
 #else
-			throw std::runtime_error("Platform not supported");
+		throw std::runtime_error("Platform not supported");
 #endif
-		}
 	}
+}

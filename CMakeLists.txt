@@ -150,6 +150,11 @@ target_sources(bud_engine_core
 			"src/graphics/vulkan/bud.vulkan.memory.cppm"
 			"src/graphics/d3d12/bud.graphics.d3d12.cppm"
 			"src/graphics/d3d12/bud.d3d12.memory.cppm"
+			"src/graphics/bud.graphics.passes.cppm"
+			"src/runtime/bud.scene.cppm"
+			"src/graphics/bud.graphics.renderer.cppm"
+			"src/runtime/bud.gameplay.cppm"
+			"src/runtime/bud.input.cppm"
 )
 
 set_target_properties(bud_engine_core PROPERTIES CXX_SCAN_FOR_MODULES ON)
