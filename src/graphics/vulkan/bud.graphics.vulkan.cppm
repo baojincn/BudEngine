@@ -8,7 +8,8 @@
 
 export module bud.graphics.vulkan;
 
-import bud.graphics; 
+import bud.graphics;
+import bud.graphics.defs;
 import bud.platform; 
 import bud.threading;
 import bud.math;     
@@ -72,17 +73,45 @@ namespace bud::graphics::vulkan {
 	};
 
 
+	class VulkanTexture : public RHITexture {
+	public:
+		VkImage image = VK_NULL_HANDLE;
+		VkImageView view = VK_NULL_HANDLE;
+		VkDeviceMemory memory = VK_NULL_HANDLE;
+	};
+
+	struct VulkanLayoutTransition {
+		VkImageLayout layout;
+		VkAccessFlags access;
+		VkPipelineStageFlags stage;
+	};
+
+	VulkanLayoutTransition get_vk_transition(bud::graphics::ResourceState state);
+
+
 	export class VulkanRHI : public bud::graphics::RHI {
 	public:
 		~VulkanRHI() = default;
 
 		void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation) override;
+
+		void cmd_resource_barrier(CommandHandle cmd, RHITexture* texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) override;
+
 		void set_config(const RenderConfig& new_settings) override;
 		void draw_frame(const bud::math::mat4& view, const bud::math::mat4& proj) override;
 		void wait_idle() override;
 		void cleanup() override;
 		void reload_shaders_async() override;
 		void load_model_async(const std::string& filepath) override;
+
+		CommandHandle begin_frame() override;
+		void end_frame(CommandHandle cmd) override;
+
+		void cmd_bind_pipeline(CommandHandle cmd, void* pipeline) override;
+		void cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) override;
+
+		RHITexture* get_current_swapchain_texture() override;
+		uint32_t get_current_image_index() override;
 
 	private:
 		void create_shadow_pipeline();
@@ -154,7 +183,6 @@ namespace bud::graphics::vulkan {
 		struct FrameData {
 			// 同步原语
 			VkSemaphore image_available_semaphore = nullptr;
-			VkSemaphore render_finished_semaphore = nullptr;
 			VkFence in_flight_fence = nullptr;
 
 			// 命令资源
@@ -166,6 +194,8 @@ namespace bud::graphics::vulkan {
 			std::vector<std::vector<VkCommandBuffer>> worker_cmd_buffers;
 			std::vector<uint32_t> worker_cmd_counters;
 		};
+
+		std::vector<VkSemaphore> render_finished_semaphores;
 
 		std::vector<FrameData> frames;
 
@@ -246,6 +276,10 @@ namespace bud::graphics::vulkan {
 
 
 		bud::threading::TaskScheduler* task_scheduler = nullptr;
+
+		uint32_t current_image_index = 0;
+
+		std::vector<VulkanTexture> swapchain_textures_wrappers;
 	};
 
 }

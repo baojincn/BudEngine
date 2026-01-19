@@ -155,7 +155,8 @@ target_sources(bud_engine_core
 			"src/graphics/bud.graphics.renderer.cppm"
 			"src/runtime/bud.gameplay.cppm"
 			"src/runtime/bud.input.cppm"
-)
+			"src/graphics/graph/bud.graphics.graph.cppm"
+			"src/graphics/bud.graphics.defs.cppm")
 
 set_target_properties(bud_engine_core PROPERTIES CXX_SCAN_FOR_MODULES ON)
 

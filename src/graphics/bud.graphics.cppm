@@ -15,6 +15,7 @@ export module bud.graphics;
 import bud.math;
 import bud.platform;
 import bud.threading;
+import bud.graphics.defs;
 
 export namespace bud::graphics {
 
@@ -66,10 +67,30 @@ export namespace bud::graphics {
 		int shadow_cascade_count = 3;
 	};
 
+
+	export class RHITexture {
+	public:
+		virtual ~RHITexture() = default;
+	};
+
 	export class RHI {
 	public:
 		virtual ~RHI() = default;
 		virtual void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation) = 0;
+
+		virtual CommandHandle begin_frame() = 0;
+		virtual void end_frame(CommandHandle cmd) = 0;
+
+		virtual void cmd_resource_barrier(CommandHandle cmd, RHITexture* texture, ResourceState old_state, ResourceState new_state) = 0;
+
+		virtual void cmd_bind_pipeline(CommandHandle cmd, void* pipeline) = 0;
+
+		virtual void cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) = 0;
+
+		virtual RHITexture* get_current_swapchain_texture() = 0;
+
+		virtual uint32_t get_current_image_index() = 0;
+
 		virtual void draw_frame(const bud::math::mat4& view, const bud::math::mat4& proj) = 0;
 		virtual void wait_idle() = 0;
 		virtual void cleanup() = 0;

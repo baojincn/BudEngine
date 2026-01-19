@@ -29,6 +29,7 @@ import bud.platform;
 import bud.threading;
 import bud.graphics;
 
+using namespace bud::graphics;
 using namespace bud::graphics::vulkan;
 
 VkVertexInputBindingDescription Vertex::get_binding_description() {
@@ -74,6 +75,37 @@ std::vector<VkVertexInputAttributeDescription> Vertex::get_attribute_description
 	attribute_descriptions[4].offset = offsetof(Vertex, texIndex);
 
 	return attribute_descriptions;
+}
+
+
+VulkanLayoutTransition bud::graphics::vulkan::get_vk_transition(bud::graphics::ResourceState state) {
+	switch (state) {
+	case bud::graphics::ResourceState::Undefined:
+		return { VK_IMAGE_LAYOUT_UNDEFINED, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT };
+
+	case bud::graphics::ResourceState::RenderTarget:
+		return { VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+				 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+
+	case bud::graphics::ResourceState::ShaderResource:
+		return { VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				 VK_ACCESS_SHADER_READ_BIT,
+				 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT };
+
+	case bud::graphics::ResourceState::DepthWrite:
+		return { VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+				 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+				 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT };
+
+	case bud::graphics::ResourceState::Present:
+		return { VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+				 0,
+				 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT };
+
+	default:
+		return { VK_IMAGE_LAYOUT_GENERAL, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT };
+	}
 }
 
 
@@ -132,6 +164,40 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	create_sync_objects();
 }
 
+
+void VulkanRHI::cmd_resource_barrier(CommandHandle cmd, RHITexture* texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) {
+	auto vk_cmd = static_cast<VkCommandBuffer>(cmd);
+	auto vk_tex = static_cast<VulkanTexture*>(texture);
+
+	auto src = get_vk_transition(old_state);
+	auto dst = get_vk_transition(new_state);
+
+	VkImageMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.oldLayout = src.layout;
+	barrier.newLayout = dst.layout;
+	barrier.srcAccessMask = src.access;
+	barrier.dstAccessMask = dst.access;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = vk_tex->image;
+
+	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	barrier.subresourceRange.baseMipLevel = 0;
+	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.baseArrayLayer = 0;
+	barrier.subresourceRange.layerCount = 1;
+
+	vkCmdPipelineBarrier(
+		vk_cmd,
+		src.stage,
+		dst.stage,
+		0,
+		0, nullptr,
+		0, nullptr,
+		1, &barrier
+	);
+}
 
 
 void VulkanRHI::set_config(const RenderConfig& new_settings) {
@@ -349,7 +415,7 @@ void VulkanRHI::draw_frame(const bud::math::mat4& view, const bud::math::mat4& p
 	submit_info.pWaitDstStageMask = wait_stages;
 	submit_info.commandBufferCount = 1;
 	submit_info.pCommandBuffers = &cmd; // 使用当前帧的 cmd
-	VkSemaphore signal_semaphores[] = { frame.render_finished_semaphore };
+	VkSemaphore signal_semaphores[] = { render_finished_semaphores[image_index]};
 	submit_info.signalSemaphoreCount = 1;
 	submit_info.pSignalSemaphores = signal_semaphores;
 
@@ -426,8 +492,13 @@ void VulkanRHI::cleanup() {
 	vkDestroyImage(device, depth_image, nullptr);
 	vkFreeMemory(device, depth_image_memory, nullptr);
 
+	for (auto semaphore : render_finished_semaphores) {
+		vkDestroySemaphore(device, semaphore, nullptr);
+	}
+
+	render_finished_semaphores.clear();
+
 	for (int i = 0; i < max_frames_in_flight; i++) {
-		vkDestroySemaphore(device, frames[i].render_finished_semaphore, nullptr);
 		vkDestroySemaphore(device, frames[i].image_available_semaphore, nullptr);
 		vkDestroyFence(device, frames[i].in_flight_fence, nullptr);
 
@@ -528,6 +599,110 @@ void VulkanRHI::load_model_async(const std::string& filepath) {
 }
 
 
+CommandHandle VulkanRHI::begin_frame() {
+	vkWaitForFences(device, 1, &frames[current_frame].in_flight_fence, VK_TRUE, UINT64_MAX);
+
+	VkResult result = vkAcquireNextImageKHR(
+		device,
+		swapchain,
+		UINT64_MAX,
+		frames[current_frame].image_available_semaphore,
+		VK_NULL_HANDLE,
+		&current_image_index
+	);
+
+	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+		return nullptr;
+	}
+	else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+		throw std::runtime_error("failed to acquire swap chain image!");
+	}
+
+	vkResetFences(device, 1, &frames[current_frame].in_flight_fence);
+
+	vkResetCommandBuffer(frames[current_frame].main_command_buffer, 0);
+
+	VkCommandBufferBeginInfo begin_info{};
+	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+	if (vkBeginCommandBuffer(frames[current_frame].main_command_buffer, &begin_info) != VK_SUCCESS) {
+		throw std::runtime_error("failed to begin recording command buffer!");
+	}
+
+	return frames[current_frame].main_command_buffer;
+}
+
+void VulkanRHI::end_frame(CommandHandle cmd) {
+	VkCommandBuffer command_buffer = static_cast<VkCommandBuffer>(cmd);
+
+	if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS) {
+		throw std::runtime_error("failed to record command buffer!");
+	}
+
+	VkSubmitInfo submit_info{};
+	submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+	VkSemaphore wait_semaphores[] = { frames[current_frame].image_available_semaphore };
+	VkPipelineStageFlags wait_stages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+	submit_info.waitSemaphoreCount = 1;
+	submit_info.pWaitSemaphores = wait_semaphores;
+	submit_info.pWaitDstStageMask = wait_stages;
+
+	submit_info.commandBufferCount = 1;
+	submit_info.pCommandBuffers = &command_buffer;
+
+	VkSemaphore signal_semaphores[] = { render_finished_semaphores[current_image_index]};
+	submit_info.signalSemaphoreCount = 1;
+	submit_info.pSignalSemaphores = signal_semaphores;
+
+	if (vkQueueSubmit(graphics_queue, 1, &submit_info, frames[current_frame].in_flight_fence) != VK_SUCCESS) {
+		throw std::runtime_error("failed to submit draw command buffer!");
+	}
+
+	VkPresentInfoKHR present_info{};
+	present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+
+	present_info.waitSemaphoreCount = 1;
+	present_info.pWaitSemaphores = signal_semaphores;
+
+	VkSwapchainKHR swap_chains[] = { swapchain };
+	present_info.swapchainCount = 1;
+	present_info.pSwapchains = swap_chains;
+	present_info.pImageIndices = &current_image_index;
+
+	vkQueuePresentKHR(present_queue, &present_info);
+
+	current_frame = (current_frame + 1) % max_frames_in_flight;
+}
+
+void VulkanRHI::cmd_bind_pipeline(CommandHandle cmd, void* pipeline) {
+	vkCmdBindPipeline(
+		static_cast<VkCommandBuffer>(cmd),
+		VK_PIPELINE_BIND_POINT_GRAPHICS,
+		static_cast<VkPipeline>(pipeline)
+	);
+}
+
+void VulkanRHI::cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) {
+	vkCmdDraw(
+		static_cast<VkCommandBuffer>(cmd),
+		vertex_count,
+		instance_count,
+		first_vertex,
+		first_instance
+	);
+}
+
+RHITexture* VulkanRHI::get_current_swapchain_texture() {
+	if (current_image_index >= swapchain_textures_wrappers.size())
+		return nullptr;
+
+	return &swapchain_textures_wrappers[current_image_index];
+}
+
+uint32_t VulkanRHI::get_current_image_index() {
+	return current_image_index;
+}
 
 
 
@@ -1032,6 +1207,13 @@ void VulkanRHI::create_image_views() {
 		if (vkCreateImageView(device, &create_info, nullptr, &swapchain_image_views[i]) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create image views!");
 		}
+	}
+
+	swapchain_textures_wrappers.resize(swapchain_images.size());
+	for (size_t i = 0; i < swapchain_images.size(); i++) {
+		swapchain_textures_wrappers[i].image = swapchain_images[i];
+		swapchain_textures_wrappers[i].view = swapchain_image_views[i];
+		swapchain_textures_wrappers[i].memory = VK_NULL_HANDLE; // 内存由驱动管理
 	}
 }
 
@@ -2023,15 +2205,22 @@ VkCommandBuffer VulkanRHI::allocate_secondary_command_buffer(VkCommandPool pool)
 void VulkanRHI::create_sync_objects() {
 	VkSemaphoreCreateInfo semaphore_info{};
 	semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
 	VkFenceCreateInfo fence_info{};
 	fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-	fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT; // 初始状态要是 Signaled，否则第一帧会卡死
+	fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
 	for (int i = 0; i < max_frames_in_flight; i++) {
 		if (vkCreateSemaphore(device, &semaphore_info, nullptr, &frames[i].image_available_semaphore) != VK_SUCCESS ||
-			vkCreateSemaphore(device, &semaphore_info, nullptr, &frames[i].render_finished_semaphore) != VK_SUCCESS ||
 			vkCreateFence(device, &fence_info, nullptr, &frames[i].in_flight_fence) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create synchronization objects for a frame!");
+		}
+	}
+
+	render_finished_semaphores.resize(swapchain_images.size());
+	for (size_t i = 0; i < swapchain_images.size(); ++i) {
+		if (vkCreateSemaphore(device, &semaphore_info, nullptr, &render_finished_semaphores[i]) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create render finished semaphores!");
 		}
 	}
 }
