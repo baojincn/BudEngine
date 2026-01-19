@@ -369,7 +369,7 @@ void VulkanRHI::draw_frame(const bud::math::mat4& view, const bud::math::mat4& p
 	vkQueuePresentKHR(present_queue, &present_info);
 
 	// 切换到下一帧
-	current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+	current_frame = (current_frame + 1) % max_frames_in_flight;
 }
 
 void VulkanRHI::wait_idle() {
@@ -426,7 +426,7 @@ void VulkanRHI::cleanup() {
 	vkDestroyImage(device, depth_image, nullptr);
 	vkFreeMemory(device, depth_image_memory, nullptr);
 
-	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+	for (int i = 0; i < max_frames_in_flight; i++) {
 		vkDestroySemaphore(device, frames[i].render_finished_semaphore, nullptr);
 		vkDestroySemaphore(device, frames[i].image_available_semaphore, nullptr);
 		vkDestroyFence(device, frames[i].in_flight_fence, nullptr);
@@ -960,10 +960,14 @@ void VulkanRHI::create_swapchain(SDL_Window* window) {
 	VkPresentModeKHR present_mode = choose_swap_present_mode(swapchain_support.present_modes);
 	VkExtent2D extent = choose_swap_extent(swapchain_support.capabilities, window);
 
-	uint32_t image_count = swapchain_support.capabilities.minImageCount + 1;
+	auto image_count = swapchain_support.capabilities.minImageCount + 1;
+
 	if (swapchain_support.capabilities.maxImageCount > 0 && image_count > swapchain_support.capabilities.maxImageCount) {
 		image_count = swapchain_support.capabilities.maxImageCount;
 	}
+
+	max_frames_in_flight = image_count + 1;
+	frames.resize(max_frames_in_flight);
 
 	VkSwapchainCreateInfoKHR create_info{};
 	create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -1332,7 +1336,7 @@ void VulkanRHI::create_command_pool() {
 	QueueFamilyIndices queue_family_indices = find_queue_families(physical_device);
 	size_t thread_count = task_scheduler ? task_scheduler->get_thread_count() : 1;
 
-	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+	for (int i = 0; i < max_frames_in_flight; i++) {
 		// 1. 创建主线程 Pool
 		VkCommandPoolCreateInfo pool_info{};
 		pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -1987,7 +1991,7 @@ void VulkanRHI::create_descriptor_sets() {
 }
 
 void VulkanRHI::create_command_buffer() {
-	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+	for (int i = 0; i < max_frames_in_flight; i++) {
 		VkCommandBufferAllocateInfo alloc_info{};
 		alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 		alloc_info.commandPool = frames[i].main_command_pool;
@@ -2023,7 +2027,7 @@ void VulkanRHI::create_sync_objects() {
 	fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 	fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT; // 初始状态要是 Signaled，否则第一帧会卡死
 
-	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+	for (int i = 0; i < max_frames_in_flight; i++) {
 		if (vkCreateSemaphore(device, &semaphore_info, nullptr, &frames[i].image_available_semaphore) != VK_SUCCESS ||
 			vkCreateSemaphore(device, &semaphore_info, nullptr, &frames[i].render_finished_semaphore) != VK_SUCCESS ||
 			vkCreateFence(device, &fence_info, nullptr, &frames[i].in_flight_fence) != VK_SUCCESS) {

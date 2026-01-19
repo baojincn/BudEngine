@@ -151,7 +151,6 @@ namespace bud::graphics::vulkan {
 		static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData);
 
 	private:
-		static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
 		struct FrameData {
 			// 同步原语
 			VkSemaphore image_available_semaphore = nullptr;
@@ -168,7 +167,9 @@ namespace bud::graphics::vulkan {
 			std::vector<uint32_t> worker_cmd_counters;
 		};
 
-		std::array<FrameData, MAX_FRAMES_IN_FLIGHT> frames;
+		std::vector<FrameData> frames;
+
+		uint32_t max_frames_in_flight = 4;
 
 		bud::graphics::RenderConfig settings;
 
