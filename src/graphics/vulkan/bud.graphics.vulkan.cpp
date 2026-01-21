@@ -205,237 +205,69 @@ void VulkanRHI::set_config(const RenderConfig& new_settings) {
 }
 
 void VulkanRHI::draw_frame(const bud::math::mat4& view, const bud::math::mat4& proj) {
+	CommandHandle cmd = begin_frame();
+	if (!cmd) return;
+
+	uint32_t image_index = current_image_index;
+
+	SceneView scene_view;
+	scene_view.view_matrix = view;
+	scene_view.proj_matrix = proj;
+	auto invView = bud::math::inverse(view);
+	scene_view.camera_position = bud::math::vec3(invView[3]);
+	scene_view.viewport_width = (float)swapchain_extent.width;
+	scene_view.viewport_height = (float)swapchain_extent.height;
+	scene_view.time = (float)SDL_GetTicks() / 1000.0f;
+
+	update_global_uniforms(image_index, scene_view);
+
+
 	FrameData& frame = frames[current_frame];
-
-	// 等上一帧资源的操作完成
-	vkWaitForFences(device, 1, &frame.in_flight_fence, VK_TRUE, UINT64_MAX);
-
-	uint32_t image_index;
-	VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, frame.image_available_semaphore, VK_NULL_HANDLE, &image_index);
-
-	if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-		return;
-	}
-
-	vkResetFences(device, 1, &frame.in_flight_fence);
-
-	auto lightProj = bud::math::ortho_vk(
-		-settings.shadow_ortho_size, settings.shadow_ortho_size,
-		-settings.shadow_ortho_size, settings.shadow_ortho_size,
-		settings.shadow_near_plane, settings.shadow_far_plane
-	);
-
-	auto lightView = bud::math::lookAt(settings.directional_light_position, bud::math::vec3(0.0f), bud::math::vec3(1.0f, 0.0f, 0.0f));
-
-	bud::math::mat4 lightSpaceMatrix = lightProj * lightView;
-	bud::math::mat4 modelMatrix = bud::math::mat4(1.0f);
-
-	// 更新 UBO, 最好也做多帧缓冲，这里暂且复用
-	update_uniform_buffer(image_index, view, proj, lightSpaceMatrix);
-
-	// 重置当前帧的所有 Command Pools
-	vkResetCommandPool(device, frame.main_command_pool, 0);
 	for (auto pool : frame.worker_pools) {
 		vkResetCommandPool(device, pool, 0);
 	}
-
-	// 重置命令计数器, 不释放内存，只把游标指回 0，下一帧覆盖使用旧的 Handles
 	std::fill(frame.worker_cmd_counters.begin(), frame.worker_cmd_counters.end(), 0);
 
-	VkCommandBuffer cmd = frame.main_command_buffer;
-	VkCommandBufferBeginInfo begin_info{};
-	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	vkBeginCommandBuffer(cmd, &begin_info);
+	// 渲染阴影
+	render_shadow_pass(cmd, image_index);
 
 
-	// Begin, Pass 1: Shadow Map
 	{
-		VkRenderPassBeginInfo shadow_pass_info{};
-		shadow_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-		shadow_pass_info.renderPass = shadow_render_pass;
-		shadow_pass_info.framebuffer = shadow_framebuffer;
-		shadow_pass_info.renderArea.extent.width = settings.shadow_map_size;
-		shadow_pass_info.renderArea.extent.height = settings.shadow_map_size;
+		VkCommandBuffer vk_cmd = static_cast<VkCommandBuffer>(cmd);
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 
-		VkClearValue clear_values[1] = {};
-		clear_values[0].depthStencil = { 1.0f, 0 };
-		shadow_pass_info.clearValueCount = 1;
-		shadow_pass_info.pClearValues = clear_values;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL; // 保持不变，只做 Memory Flush
 
-		// Record Shadow Pass on main thread
-		vkCmdBeginRenderPass(cmd, &shadow_pass_info, VK_SUBPASS_CONTENTS_INLINE);
-		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = shadow_image; 
 
-		VkViewport viewport{};
-		viewport.width = (float)settings.shadow_map_size;
-		viewport.height = (float)settings.shadow_map_size;
-		viewport.minDepth = 0.0f;
-		viewport.maxDepth = 1.0f;
-		vkCmdSetViewport(cmd, 0, 1, &viewport);
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		barrier.subresourceRange.baseMipLevel = 0;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.baseArrayLayer = 0;
+		barrier.subresourceRange.layerCount = 1;
 
-		VkRect2D scissor{};
-		scissor.extent.width = settings.shadow_map_size;
-		scissor.extent.height = settings.shadow_map_size;
-		vkCmdSetScissor(cmd, 0, 1, &scissor);
+		barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
-		vkCmdSetDepthBias(cmd, settings.shadow_bias_constant, 0.0f, settings.shadow_bias_slope);
-
-		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_layout, 0, 1, &descriptor_sets[image_index], 0, nullptr);
-
-		ShadowConstantData shadow_constant_data{};
-		shadow_constant_data.lightMVP = lightSpaceMatrix * modelMatrix;
-		auto dir = bud::math::normalize(bud::math::vec3(0.0f) - settings.directional_light_position);
-		shadow_constant_data.lightDir = bud::math::vec4(dir, 0.0f);
-
-
-		vkCmdPushConstants(cmd, shadow_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ShadowConstantData), &shadow_constant_data);
-
-		if (vertex_buffer && index_buffer && !indices.empty()) {
-			VkBuffer vbs[] = { vertex_buffer };
-			VkDeviceSize offs[] = { 0 };
-			vkCmdBindVertexBuffers(cmd, 0, 1, vbs, offs);
-			vkCmdBindIndexBuffer(cmd, index_buffer, 0, VK_INDEX_TYPE_UINT32);
-
-			vkCmdDrawIndexed(cmd, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
-		}
-
-		vkCmdEndRenderPass(cmd);
-	}
-	// End, Pass 1
-
-
-	// Begin, Pass 2: Main Scene Rendering
-	VkRenderPassBeginInfo render_pass_info{};
-	render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	render_pass_info.renderPass = render_pass;
-	render_pass_info.framebuffer = swapchain_framebuffers[image_index];
-	render_pass_info.renderArea.extent = swapchain_extent;
-
-	std::array<VkClearValue, 2> clear_values{};
-	clear_values[0].color = { {0.1f, 0.1f, 0.1f, 1.0f} };
-	clear_values[1].depthStencil = { 1.0f, 0 };
-
-	render_pass_info.clearValueCount = static_cast<uint32_t>(clear_values.size());
-	render_pass_info.pClearValues = clear_values.data();
-
-	vkCmdBeginRenderPass(cmd, &render_pass_info, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-
-	// 并行录制任务
-	bud::threading::Counter recording_dependency;
-	std::mutex recorded_cmds_mutex;
-	std::vector<VkCommandBuffer> secondary_cmds;
-
-	task_scheduler->spawn("DrawTask", [&, current_frame_idx = current_frame, img_idx = image_index]() {
-		size_t worker_id = bud::threading::t_worker_index;
-
-		auto& frame_data = frames[current_frame_idx];
-		VkCommandPool worker_pool = frame_data.worker_pools[worker_id];
-
-		// 分配或复用 Secondary Command Buffer
-		VkCommandBuffer sec_cmd = nullptr;
-		auto& cmd_counter = frame_data.worker_cmd_counters[worker_id];
-		auto& cmd_buffer = frame_data.worker_cmd_buffers[worker_id];
-
-		if (cmd_counter < cmd_buffer.size()) {
-			sec_cmd = cmd_buffer[cmd_counter];
-		}
-		else {
-			sec_cmd = allocate_secondary_command_buffer(worker_pool);
-			cmd_buffer.push_back(sec_cmd);
-		}
-		cmd_counter++;
-
-
-		VkCommandBufferInheritanceInfo inheritance_info{};
-		inheritance_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
-		inheritance_info.renderPass = render_pass;
-		inheritance_info.framebuffer = swapchain_framebuffers[img_idx];
-
-		VkCommandBufferBeginInfo sec_begin_info{};
-		sec_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		sec_begin_info.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
-		sec_begin_info.pInheritanceInfo = &inheritance_info;
-
-		vkBeginCommandBuffer(sec_cmd, &sec_begin_info);
-
-		vkCmdBindPipeline(sec_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
-
-		VkViewport viewport{};
-		viewport.width = (float)swapchain_extent.width;
-		viewport.height = (float)swapchain_extent.height;
-		viewport.maxDepth = 1.0f;
-		vkCmdSetViewport(sec_cmd, 0, 1, &viewport);
-
-
-		VkRect2D scissor{}; scissor.extent = swapchain_extent;
-		vkCmdSetScissor(sec_cmd, 0, 1, &scissor);
-
-		// Don't draw if didn't load model yet
-		if (!indices.empty() && vertex_buffer && index_buffer) {
-			VkBuffer vbs[] = { vertex_buffer }; VkDeviceSize offs[] = { 0 };
-			vkCmdBindVertexBuffers(sec_cmd, 0, 1, vbs, offs);
-
-			vkCmdBindIndexBuffer(sec_cmd, index_buffer, 0, VK_INDEX_TYPE_UINT32);
-
-			vkCmdBindDescriptorSets(sec_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0, 1, &descriptor_sets[img_idx], 0, nullptr);
-
-			vkCmdDrawIndexed(sec_cmd, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
-		}
-
-		vkEndCommandBuffer(sec_cmd);
-
-		{
-			std::lock_guard lock(recorded_cmds_mutex);
-			secondary_cmds.push_back(sec_cmd);
-		}
-
-	}, &recording_dependency);
-
-
-	// End, Pass 2: Main Scene Rendering
-
-	task_scheduler->wait_for_counter(recording_dependency);
-
-	if (!secondary_cmds.empty()) {
-		vkCmdExecuteCommands(cmd, (uint32_t)secondary_cmds.size(), secondary_cmds.data());
+		vkCmdPipelineBarrier(
+			vk_cmd,
+			VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, // 源阶段
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, // 目标阶段
+			0,
+			0, nullptr,
+			0, nullptr,
+			1, &barrier
+		);
 	}
 
-	vkCmdEndRenderPass(cmd);
-	vkEndCommandBuffer(cmd);
+	// 渲染主场景
+	render_main_pass(cmd, image_index);
 
-
-
-	// 提交
-	VkSubmitInfo submit_info{};
-	submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	VkSemaphore wait_semaphores[] = { frame.image_available_semaphore };
-	VkPipelineStageFlags wait_stages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-	submit_info.waitSemaphoreCount = 1;
-	submit_info.pWaitSemaphores = wait_semaphores;
-	submit_info.pWaitDstStageMask = wait_stages;
-	submit_info.commandBufferCount = 1;
-	submit_info.pCommandBuffers = &cmd; // 使用当前帧的 cmd
-	VkSemaphore signal_semaphores[] = { render_finished_semaphores[image_index]};
-	submit_info.signalSemaphoreCount = 1;
-	submit_info.pSignalSemaphores = signal_semaphores;
-
-	if (vkQueueSubmit(graphics_queue, 1, &submit_info, frame.in_flight_fence) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to submit draw command buffer!");
-	}
-
-	VkPresentInfoKHR present_info{};
-	present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-	present_info.waitSemaphoreCount = 1;
-	present_info.pWaitSemaphores = signal_semaphores;
-	VkSwapchainKHR swapchains[] = { swapchain };
-	present_info.swapchainCount = 1;
-	present_info.pSwapchains = swapchains;
-	present_info.pImageIndices = &image_index;
-
-	vkQueuePresentKHR(present_queue, &present_info);
-
-	// 切换到下一帧
-	current_frame = (current_frame + 1) % max_frames_in_flight;
+	end_frame(cmd);
 }
 
 void VulkanRHI::wait_idle() {
@@ -580,9 +412,9 @@ void VulkanRHI::reload_shaders_async() {
 			vert = std::move(*vert_opt),
 			frag = std::move(*frag_opt)]() {
 
-			this->recreate_graphics_pipeline(vert, frag);
+				this->recreate_graphics_pipeline(vert, frag);
+			});
 		});
-	});
 }
 
 void VulkanRHI::load_model_async(const std::string& filepath) {
@@ -594,8 +426,8 @@ void VulkanRHI::load_model_async(const std::string& filepath) {
 		// 主线程上传 GPU
 		task_scheduler->submit_main_thread_task([this, mesh = std::move(*mesh_opt)]() {
 			this->upload_mesh(mesh);
+			});
 		});
-	});
 }
 
 
@@ -651,7 +483,7 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	submit_info.commandBufferCount = 1;
 	submit_info.pCommandBuffers = &command_buffer;
 
-	VkSemaphore signal_semaphores[] = { render_finished_semaphores[current_image_index]};
+	VkSemaphore signal_semaphores[] = { render_finished_semaphores[current_image_index] };
 	submit_info.signalSemaphoreCount = 1;
 	submit_info.pSignalSemaphores = signal_semaphores;
 
@@ -704,6 +536,203 @@ uint32_t VulkanRHI::get_current_image_index() {
 	return current_image_index;
 }
 
+
+
+void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& scene_view) {
+	auto lightProj = bud::math::ortho_vk(
+		-settings.shadow_ortho_size, settings.shadow_ortho_size,
+		-settings.shadow_ortho_size, settings.shadow_ortho_size,
+		settings.shadow_near_plane, settings.shadow_far_plane
+	);
+
+	auto lightView = bud::math::lookAt(settings.directional_light_position, bud::math::vec3(0.0f), bud::math::vec3(1.0f, 0.0f, 0.0f));
+
+	auto lightSpaceMatrix = lightProj * lightView;
+
+	UniformBufferObject ubo{};
+	ubo.model = bud::math::mat4(1.0f);
+
+	ubo.view = scene_view.view_matrix;
+	ubo.proj = scene_view.proj_matrix;
+	ubo.camPos = scene_view.camera_position;
+
+	ubo.lightDir = bud::math::normalize(settings.directional_light_position);
+	ubo.lightColor = settings.directional_light_color;
+	ubo.lightIntensity = settings.directional_light_intensity;
+	ubo.ambientStrength = settings.ambient_strength;
+	ubo.lightSpaceMatrix = lightSpaceMatrix;
+
+	memcpy(uniform_buffers_mapped[image_index], &ubo, sizeof(ubo));
+}
+
+
+void VulkanRHI::cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) {
+	vkCmdPushConstants(
+		static_cast<VkCommandBuffer>(cmd),
+		static_cast<VkPipelineLayout>(pipeline_layout),
+		VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, // Vertex, fragment can see it
+		0,
+		size,
+		data
+	);
+}
+
+
+void VulkanRHI::render_shadow_pass(CommandHandle cmd, uint32_t image_index) {
+	VkCommandBuffer vk_cmd = static_cast<VkCommandBuffer>(cmd);
+
+	auto lightProj = bud::math::ortho_vk(
+		-settings.shadow_ortho_size, settings.shadow_ortho_size,
+		-settings.shadow_ortho_size, settings.shadow_ortho_size,
+		settings.shadow_near_plane, settings.shadow_far_plane
+	);
+
+	auto lightView = bud::math::lookAt(settings.directional_light_position, bud::math::vec3(0.0f), bud::math::vec3(1.0f, 0.0f, 0.0f));
+
+	bud::math::mat4 lightSpaceMatrix = lightProj * lightView;
+	bud::math::mat4 modelMatrix = bud::math::mat4(1.0f);
+
+	VkRenderPassBeginInfo shadow_pass_info{};
+	shadow_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	shadow_pass_info.renderPass = shadow_render_pass;
+	shadow_pass_info.framebuffer = shadow_framebuffer;
+	shadow_pass_info.renderArea.extent.width = settings.shadow_map_size;
+	shadow_pass_info.renderArea.extent.height = settings.shadow_map_size;
+
+	VkClearValue clear_values[1] = {};
+	clear_values[0].depthStencil = { 1.0f, 0 };
+	shadow_pass_info.clearValueCount = 1;
+	shadow_pass_info.pClearValues = clear_values;
+
+	vkCmdBeginRenderPass(vk_cmd, &shadow_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+	vkCmdBindPipeline(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
+
+	VkViewport viewport{};
+	viewport.width = (float)settings.shadow_map_size;
+	viewport.height = (float)settings.shadow_map_size;
+	viewport.minDepth = 0.0f;
+	viewport.maxDepth = 1.0f;
+	vkCmdSetViewport(vk_cmd, 0, 1, &viewport);
+
+	VkRect2D scissor{};
+	scissor.extent.width = settings.shadow_map_size;
+	scissor.extent.height = settings.shadow_map_size;
+	vkCmdSetScissor(vk_cmd, 0, 1, &scissor);
+
+	vkCmdSetDepthBias(vk_cmd, settings.shadow_bias_constant, 0.0f, settings.shadow_bias_slope);
+
+	// 绑定 Global Descriptor (Set 0)
+	vkCmdBindDescriptorSets(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_layout, 0, 1, &descriptor_sets[image_index], 0, nullptr);
+
+	ShadowConstantData shadow_constant_data{};
+	shadow_constant_data.lightMVP = lightSpaceMatrix * modelMatrix;
+	auto dir = bud::math::normalize(bud::math::vec3(0.0f) - settings.directional_light_position);
+	shadow_constant_data.lightDir = bud::math::vec4(dir, 0.0f);
+
+	cmd_push_constants(vk_cmd, shadow_pipeline_layout, sizeof(ShadowConstantData), &shadow_constant_data);
+
+	if (vertex_buffer && index_buffer && !indices.empty()) {
+		VkBuffer vbs[] = { vertex_buffer };
+		VkDeviceSize offs[] = { 0 };
+		vkCmdBindVertexBuffers(vk_cmd, 0, 1, vbs, offs);
+		vkCmdBindIndexBuffer(vk_cmd, index_buffer, 0, VK_INDEX_TYPE_UINT32);
+
+		vkCmdDrawIndexed(vk_cmd, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+	}
+
+	vkCmdEndRenderPass(vk_cmd);
+}
+
+void VulkanRHI::render_main_pass(CommandHandle cmd, uint32_t image_index) {
+	VkCommandBuffer vk_cmd = static_cast<VkCommandBuffer>(cmd);
+	uint32_t frame_idx = current_frame;
+
+	VkRenderPassBeginInfo render_pass_info{};
+	render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	render_pass_info.renderPass = render_pass;
+	render_pass_info.framebuffer = swapchain_framebuffers[image_index];
+	render_pass_info.renderArea.extent = swapchain_extent;
+
+	std::array<VkClearValue, 2> clear_values{};
+	clear_values[0].color = { {0.1f, 0.1f, 0.1f, 1.0f} };
+	clear_values[1].depthStencil = { 1.0f, 0 };
+
+	render_pass_info.clearValueCount = static_cast<uint32_t>(clear_values.size());
+	render_pass_info.pClearValues = clear_values.data();
+
+	vkCmdBeginRenderPass(vk_cmd, &render_pass_info, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+
+	bud::threading::Counter recording_dependency;
+	std::mutex recorded_cmds_mutex;
+	std::vector<VkCommandBuffer> secondary_cmds;
+
+	task_scheduler->spawn("DrawTask", [&, current_frame_idx = frame_idx, img_idx = image_index]() {
+		size_t worker_id = bud::threading::t_worker_index;
+		auto& frame_data = frames[current_frame_idx];
+		VkCommandPool worker_pool = frame_data.worker_pools[worker_id];
+
+		VkCommandBuffer sec_cmd = nullptr;
+		auto& cmd_counter = frame_data.worker_cmd_counters[worker_id];
+		auto& cmd_buffer = frame_data.worker_cmd_buffers[worker_id];
+
+		if (cmd_counter < cmd_buffer.size()) {
+			sec_cmd = cmd_buffer[cmd_counter];
+		}
+		else {
+			sec_cmd = allocate_secondary_command_buffer(worker_pool);
+			cmd_buffer.push_back(sec_cmd);
+		}
+		cmd_counter++;
+
+		VkCommandBufferInheritanceInfo inheritance_info{};
+		inheritance_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+		inheritance_info.renderPass = render_pass;
+		inheritance_info.framebuffer = swapchain_framebuffers[img_idx];
+
+		VkCommandBufferBeginInfo sec_begin_info{};
+		sec_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		sec_begin_info.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+		sec_begin_info.pInheritanceInfo = &inheritance_info;
+
+		vkBeginCommandBuffer(sec_cmd, &sec_begin_info);
+
+		vkCmdBindPipeline(sec_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
+
+		VkViewport viewport{};
+		viewport.width = (float)swapchain_extent.width;
+		viewport.height = (float)swapchain_extent.height;
+		viewport.maxDepth = 1.0f;
+		vkCmdSetViewport(sec_cmd, 0, 1, &viewport);
+
+		VkRect2D scissor{}; scissor.extent = swapchain_extent;
+		vkCmdSetScissor(sec_cmd, 0, 1, &scissor);
+
+		if (!indices.empty() && vertex_buffer && index_buffer) {
+			VkBuffer vbs[] = { vertex_buffer }; VkDeviceSize offs[] = { 0 };
+			vkCmdBindVertexBuffers(sec_cmd, 0, 1, vbs, offs);
+			vkCmdBindIndexBuffer(sec_cmd, index_buffer, 0, VK_INDEX_TYPE_UINT32);
+
+			// 绑定全局资源 (View UBO, Textures, ShadowMap)
+			vkCmdBindDescriptorSets(sec_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0, 1, &descriptor_sets[img_idx], 0, nullptr);
+			vkCmdDrawIndexed(sec_cmd, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+		}
+		vkEndCommandBuffer(sec_cmd);
+
+		{
+			std::lock_guard lock(recorded_cmds_mutex);
+			secondary_cmds.push_back(sec_cmd);
+		}
+	},
+	&recording_dependency);
+
+	task_scheduler->wait_for_counter(recording_dependency);
+
+	if (!secondary_cmds.empty()) {
+		vkCmdExecuteCommands(vk_cmd, (uint32_t)secondary_cmds.size(), secondary_cmds.data());
+	}
+
+	vkCmdEndRenderPass(vk_cmd);
+}
 
 
 void VulkanRHI::create_shadow_pipeline() {
@@ -807,7 +836,7 @@ void VulkanRHI::create_shadow_pipeline() {
 
 	// Pipeline Layout, configs Push Constant
 	VkPushConstantRange push_constant_range{};
-	push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 	push_constant_range.offset = 0;
 	push_constant_range.size = sizeof(ShadowConstantData);
 
@@ -1839,8 +1868,8 @@ void VulkanRHI::load_texture_async(const std::string& filename) {
 		// 提交给主线程
 		task_scheduler->submit_main_thread_task([this, img = std::move(img)]() mutable {
 			this->update_texture_resources(img.pixels, img.width, img.height);
+			});
 		});
-	});
 }
 
 void VulkanRHI::update_texture_resources(unsigned char* pixels, int width, int height) {

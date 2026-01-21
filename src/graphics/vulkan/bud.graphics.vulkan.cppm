@@ -113,6 +113,14 @@ namespace bud::graphics::vulkan {
 		RHITexture* get_current_swapchain_texture() override;
 		uint32_t get_current_image_index() override;
 
+		virtual void update_global_uniforms(uint32_t image_index, const SceneView& scene_view) override;
+
+		virtual void cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) override;
+
+		void render_shadow_pass(CommandHandle cmd, uint32_t image_index) override;
+
+		void render_main_pass(CommandHandle cmd, uint32_t image_index) override;
+
 	private:
 		void create_shadow_pipeline();
 		void create_shadow_framebuffer();

@@ -67,6 +67,27 @@ export namespace bud::graphics {
 		int shadow_cascade_count = 3;
 	};
 
+	export struct SceneView {
+		bud::math::mat4 view_matrix;
+		bud::math::mat4 proj_matrix;
+		bud::math::mat4 view_proj_matrix;
+
+		bud::math::vec3 camera_position;
+		float fov;
+		float near_plane;
+		float far_plane;
+
+		float viewport_width;
+		float viewport_height;
+
+		float time;
+		float delta_time;
+
+		void update_matrices() {
+			view_proj_matrix = proj_matrix * view_matrix;
+		}
+	};
+
 
 	export class RHITexture {
 	public:
@@ -90,6 +111,14 @@ export namespace bud::graphics {
 		virtual RHITexture* get_current_swapchain_texture() = 0;
 
 		virtual uint32_t get_current_image_index() = 0;
+
+		virtual void update_global_uniforms(uint32_t image_index, const SceneView& scene_view) = 0;
+
+		virtual void cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) = 0;
+
+		virtual void render_shadow_pass(CommandHandle cmd, uint32_t image_index) = 0;
+
+		virtual void render_main_pass(CommandHandle cmd, uint32_t image_index) = 0;
 
 		virtual void draw_frame(const bud::math::mat4& view, const bud::math::mat4& proj) = 0;
 		virtual void wait_idle() = 0;
