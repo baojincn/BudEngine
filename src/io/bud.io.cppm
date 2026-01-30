@@ -7,6 +7,7 @@
 #include <iostream>
 #include <print>
 #include <optional>
+#include <functional>
 
 // 保持第三方库的 include
 #include <tiny_obj_loader.h>
@@ -21,6 +22,8 @@
 #include <glm/gtx/hash.hpp>
 
 export module bud.io;
+
+import bud.threading;
 
 export namespace bud::io {
 
@@ -58,7 +61,7 @@ namespace std {
 			auto h4 = hash<glm::vec2>()(vertex.texture_uv);
 			auto h5 = hash<float>()(vertex.texture_index);
 
-			return h1 ^ (h2 << 1) ^ (h2 << 2) ^ (h3 << 3) ^ (h5 << 4);
+			return h1 ^ (h2 << 1) ^ (h3 << 2) ^ (h4 << 3) ^ (h5 << 4);
 		}
 	};
 }
@@ -69,22 +72,43 @@ export namespace bud::io {
 	// ==========================================
 	export class FileSystem {
 	public:
+		// [FIX] Helper to resolve paths relative to CWD, ../, or ../../
+		static std::optional<std::filesystem::path> resolve_path(const std::filesystem::path& path) {
+			auto check_exists = [](const std::filesystem::path& p) {
+				std::error_code ec;
+				return std::filesystem::exists(p, ec) && !std::filesystem::is_directory(p, ec);
+			};
+
+			if (check_exists(path)) return path;
+			if (check_exists(std::filesystem::path("../") / path)) {
+				auto p = std::filesystem::path("../") / path;
+				std::println("[IO] Resolved path via fallback: {}", p.string());
+				return p;
+			}
+			if (check_exists(std::filesystem::path("../../") / path)) {
+				auto p = std::filesystem::path("../../") / path;
+				std::println("[IO] Resolved path via fallback: {}", p.string());
+				return p;
+			}
+			return std::nullopt;
+		}
+
 		// 通用二进制读取 (用于 Shader (SPV), Buffer 等)
 		static std::optional<std::vector<char>> read_binary(const std::filesystem::path& path) {
-			std::ifstream file(path, std::ios::ate | std::ios::binary);
-
-			if (!file.is_open()) {
-				std::println(stderr, "[IO] Failed to open file: {}", path.string());
+			auto resolved_path = resolve_path(path);
+			if (!resolved_path) {
+				std::println(stderr, "[IO] Failed to find file: {}", path.string());
+				std::println(stderr, "[IO] CWD: {}", std::filesystem::current_path().string());
 				return std::nullopt;
 			}
 
+			std::ifstream file(*resolved_path, std::ios::ate | std::ios::binary);
+			if (!file.is_open()) return std::nullopt;
+
 			size_t file_size = (size_t)file.tellg();
 			std::vector<char> buffer(file_size);
-
 			file.seekg(0);
 			file.read(buffer.data(), file_size);
-			file.close();
-
 			return buffer;
 		}
 	};
@@ -143,7 +167,14 @@ export namespace bud::io {
 	public:
 		static std::optional<Image> load(const std::filesystem::path& path) {
 			Image img;
-			std::string path_str = path.string();
+			
+			// [FIX] Use resolve_path
+			auto resolved_opt = FileSystem::resolve_path(path);
+			if (!resolved_opt) {
+				std::println(stderr, "[IO] Image not found: {}", path.string());
+				return std::nullopt;
+			}
+			std::string path_str = resolved_opt->string();
 
 			// 强制加载为 RGBA (4通道)，Vulkan 友好
 			img.pixels = stbi_load(path_str.c_str(), &img.width, &img.height, &img.channels, STBI_rgb_alpha);
@@ -169,8 +200,15 @@ export namespace bud::io {
 			std::vector<tinyobj::material_t> materials;
 			std::string warn, err;
 
-			std::string path_str = path.string();
-			std::string base_dir = path.parent_path().string() + "/"; // load .mtl
+			// [FIX] Resolve path first
+			auto resolved_opt = FileSystem::resolve_path(path);
+			if (!resolved_opt) {
+				std::println(stderr, "[Asset] OBJ file not found: {}", path.string());
+				return std::nullopt;
+			}
+			
+			std::string path_str = resolved_opt->string();
+			std::string base_dir = resolved_opt->parent_path().string() + "/"; // load .mtl logic needs correct base dir
 
 			bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path_str.c_str(), base_dir.c_str());
 
@@ -201,12 +239,12 @@ export namespace bud::io {
 					// 存入 list
 					meshData.texture_paths.push_back(fullPath);
 
-					// 记录映射关系: Material ID (i) -> Texture Array Index (size)
-					// 注意：因为我们预留了 0 号作为 fallback，所以这里 +1.0f
 					materialToTextureIndex[i] = static_cast<float>(meshData.texture_paths.size());
+					std::println("[Asset] Material '{}' uses texture: {}", materials[i].name, texName);
 				}
 				else {
 					materialToTextureIndex[i] = 0.0f; // 没有贴图的材质用默认图
+					std::println("[Asset] Material '{}' has NO diffuse texture.", materials[i].name);
 				}
 			}
 
@@ -272,14 +310,22 @@ export namespace bud::io {
 			tinygltf::TinyGLTF loader;
 			std::string err;
 			std::string warn;
-			std::string path_str = path.string();
-			bool ret = false;
-			if (path.extension() == ".glb") ret = loader.LoadBinaryFromFile(&model, &err, &warn, path_str);
-			else ret = loader.LoadASCIIFromFile(&model, &err, &warn, path_str);
+			auto path_str = path.string();
+			auto ret = false;
 
-			if (!warn.empty()) std::println("[glTF Warn]: {}", warn);
-			if (!err.empty()) std::println("[glTF Error]: {}", err);
-			if (!ret) return std::nullopt;
+			if (path.extension() == ".glb")
+				ret = loader.LoadBinaryFromFile(&model, &err, &warn, path_str);
+			else
+				ret = loader.LoadASCIIFromFile(&model, &err, &warn, path_str);
+
+			if (!warn.empty())
+				std::println("[glTF Warn]: {}", warn);
+
+			if (!err.empty())
+				std::println("[glTF Error]: {}", err);
+
+			if (!ret)
+				return std::nullopt;
 
 			return convert_to_mesh_data(model);
 		}
@@ -287,13 +333,19 @@ export namespace bud::io {
 		static MeshData convert_to_mesh_data(const tinygltf::Model& model) {
 			MeshData meshData;
 
-			if (model.meshes.empty()) return meshData;
+			if (model.meshes.empty())
+				return meshData;
+
 			const auto& gltfMesh = model.meshes[0];
-			if (gltfMesh.primitives.empty()) return meshData;
+
+			if (gltfMesh.primitives.empty())
+				return meshData;
+
 			const auto& primitive = gltfMesh.primitives[0];
 			const float* positionBuffer = nullptr;
 			const float* texCoordBuffer = nullptr;
 			size_t vertexCount = 0;
+
 			if (primitive.attributes.find("POSITION") != primitive.attributes.end()) {
 				const auto& accessor = model.accessors[primitive.attributes.at("POSITION")];
 				const auto& view = model.bufferViews[accessor.bufferView];
@@ -332,6 +384,67 @@ export namespace bud::io {
 			}
 			return meshData;
 		}
+	};
+
+	export class AssetManager {
+	public:
+		AssetManager(bud::threading::TaskScheduler* scheduler) : task_scheduler(scheduler) {}
+
+		void load_mesh_async(const std::string& path, std::function<void(MeshData)> on_loaded) {
+
+			task_scheduler->spawn("AsyncMeshLoad", [this, path, on_loaded]() {
+				auto mesh_opt = ModelLoader::load_obj(path);
+
+				if (mesh_opt) {
+					std::println("[Asset] Mesh parsed: {} (v:{}, i:{})", path, mesh_opt->vertices.size(), mesh_opt->indices.size());
+
+					task_scheduler->submit_main_thread_task([on_loaded, mesh = std::move(*mesh_opt)]() mutable {
+						on_loaded(std::move(mesh));
+						});
+				}
+				else {
+					std::println(stderr, "[Asset] Failed to load mesh: {}", path);
+				}
+			});
+		}
+
+
+		void load_image_async(const std::string& path, std::function<void(Image)> on_loaded) {
+			task_scheduler->spawn("AsyncImageLoad", [this, path, on_loaded]() {
+				// Fiber Thread 操作：IO + STB 解码
+				auto img_opt = ImageLoader::load(path);
+
+				if (img_opt) {
+					std::println("[Asset] Image decoded: {} ({}x{})", path, img_opt->width, img_opt->height);
+
+					task_scheduler->submit_main_thread_task([on_loaded, img = std::move(*img_opt)]() mutable {
+						on_loaded(std::move(img));
+						});
+				}
+				else {
+					std::println(stderr, "[Asset] Failed to load image: {}", path);
+				}
+			});
+		}
+
+
+		void load_file_async(const std::string& path, std::function<void(std::vector<char>)> on_loaded) {
+			task_scheduler->spawn("AsyncFileLoad", [this, path, on_loaded]() {
+				auto data_opt = FileSystem::read_binary(path);
+				if (data_opt) {
+					task_scheduler->submit_main_thread_task([on_loaded, data = std::move(*data_opt)]() mutable {
+						on_loaded(std::move(data));
+						});
+				}
+				else {
+					std::println(stderr, "[Asset] Failed to read file: {}", path);
+				}
+			});
+		}
+
+
+	private:
+		bud::threading::TaskScheduler* task_scheduler;
 	};
 }
 

@@ -2,52 +2,62 @@
 
 #include <string>
 #include <memory>
+#include <functional>
 
 export module bud.engine;
 
+import bud.io;
 import bud.core;
 import bud.math;
-import bud.dod;
+import bud.scene;
 import bud.threading;
 import bud.platform;
 import bud.graphics;
-import bud.scene;
+import bud.graphics.renderer;
 
 export namespace bud::engine {
 
-    enum class EngineMode {
-        TASK_BASED,
-        THREAD_BASED,
-        MIXED
-    };
+	enum class EngineMode {
+		TASK_BASED,
+		THREAD_BASED,
+		MIXED
+	};
 
-    class BudEngine {
-    public:
-        BudEngine(const std::string& window_title, int width, int height);
-        ~BudEngine();
+	class BudEngine {
+	public:
 
-        void run();
+		using TickCallback = std::function<void(float)>;
 
-    private:
+		BudEngine(const std::string& window_title, int width, int height);
+		~BudEngine();
+
+		void run(TickCallback tick);
+
+		auto* get_asset_manager() { return asset_manager.get(); }
+		auto* get_renderer() { return renderer.get(); }
+		auto& get_scene() { return scene; }
+
+	private:
 		void handle_events();
-        void perform_frame_logic(float delta_time);
-		void perform_rendering();
+		void perform_frame_logic(float delta_time);
+		void perform_rendering(float delta_time);
 
-    private:
+	private:
+		std::unique_ptr<bud::platform::Window> window;
 
-        std::unique_ptr<bud::platform::Window> window_;
+		std::unique_ptr<bud::threading::TaskScheduler> task_scheduler;
+		std::unique_ptr<bud::io::AssetManager> asset_manager;
+		std::unique_ptr<bud::graphics::RHI> rhi;
+		std::unique_ptr<bud::graphics::Renderer> renderer;
 
-        std::unique_ptr<bud::threading::TaskScheduler> task_scheduler_;
-        bud::threading::Counter frame_counter_{ 0 };
+		// 场景数据
+		bud::scene::Scene scene;
 
-		std::unique_ptr<bud::graphics::RHI> rhi_;
+		// 渲染配置
+		float aspect_ratio{ 16.0f / 9.0f };
+		float far_plane{ 4000.0f };
+		float near_plane{ 0.1f };
 
-		bud::scene::Camera camera_;
-
-		float aspect_ratio_{ 16.0f / 9.0f };
-		float far_plane_{ 4000.0f };
-		float near_plane_{ 0.1f };
-
-        bool running_ = true;
-    };
+		bool running = true;
+	};
 }

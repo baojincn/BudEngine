@@ -28,20 +28,20 @@ namespace bud::platform {
 	class WindowWin : public Window {
 	public:
 		WindowWin(const std::string& title, int width, int height)
-			: width_(width), height_(height)
+			: width(width), height(height)
 		{
 			if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
 				throw std::runtime_error("Failed to initialize SDL3");
 			}
 
-			window_ = SDL_CreateWindow(
+			window = SDL_CreateWindow(
 				title.c_str(),
 				width,
 				height,
 				SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE
 			);
 
-			if (!window_) {
+			if (!window) {
 				auto err = SDL_GetError();
 				auto msg = std::format("SDL Error: {}", err ? err : "Unknown error");
 				std::println(stderr, "CRITICAL FAILURE: {}", msg);
@@ -50,42 +50,42 @@ namespace bud::platform {
 				throw std::runtime_error("Failed to create SDL window");
 			}
 
-			SDL_ShowWindow(window_);
+			SDL_ShowWindow(window);
 			std::print("Created window: {} ({}x{})\n", title, width, height);
 		}
 
 		~WindowWin() override {
-			if (window_) {
-				SDL_DestroyWindow(window_);
-				window_ = nullptr;
+			if (window) {
+				SDL_DestroyWindow(window);
+				window = nullptr;
 			}
 			SDL_Quit();
 		}
 
 		SDL_Window* get_sdl_window() const override {
-			return window_;
+			return window;
 		}
 
 		void set_title(const std::string& title) override {
-			if (window_) {
-				SDL_SetWindowTitle(window_, title.c_str());
+			if (window) {
+				SDL_SetWindowTitle(window, title.c_str());
 			}
 		}
 
 		const char* get_title() const override {
-			if (window_) {
-				return SDL_GetWindowTitle(window_);
+			if (window) {
+				return SDL_GetWindowTitle(window);
 			}
 			return "";
 		}
 
-		void get_size(int& width, int& height) const override {
-			width = width_;
-			height = height_;
+		void get_size(int& width_out, int& height_out) const override {
+			width_out = width;
+			height_out = height;
 		}
 
 		bool should_close() const override {
-			return should_close_;
+			return close_requested;
 		}
 
 		void poll_events() override {
@@ -99,12 +99,12 @@ namespace bud::platform {
 			while (SDL_PollEvent(&event)) {
 				switch (event.type) {
 				case SDL_EVENT_QUIT:
-					should_close_ = true;
+					close_requested = true;
 					break;
 
 				case SDL_EVENT_KEY_DOWN:
 					if (event.key.key == SDLK_ESCAPE)
-						should_close_ = true;
+						close_requested = true;
 					input.internal_set_key(pass_key, sdl_to_bud_key(event.key.key), true);
 					break;
 
@@ -146,10 +146,10 @@ namespace bud::platform {
 
 
 	private:
-		SDL_Window* window_ = nullptr;
-		int width_ = 0;
-		int height_ = 0;
-		bool should_close_ = false;
+		SDL_Window* window = nullptr;
+		int width = 0;
+		int height = 0;
+		bool close_requested = false;
 
 	};
 

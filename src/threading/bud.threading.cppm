@@ -184,53 +184,53 @@ export namespace bud::threading {
 	constexpr size_t CACHE_LINE = 64;
 	template<typename T>
 	class alignas(CACHE_LINE) WorkStealingQueue {
-		std::atomic<int64_t> top_{ 0 };
-		std::atomic<int64_t> bottom_{ 0 };
-		std::vector<T> buffer_;
-		size_t mask_;
+		std::atomic<int64_t> top{ 0 };
+		std::atomic<int64_t> bottom{ 0 };
+		std::vector<T> buffer;
+		size_t mask;
 	public:
 		explicit WorkStealingQueue(size_t capacity = 4096) {
 			size_t cap = std::bit_ceil(capacity);
-			buffer_.resize(cap);
-			mask_ = cap - 1;
+			buffer.resize(cap);
+			mask = cap - 1;
 		}
 
 		void push(T item) {
-			int64_t b = bottom_.load(std::memory_order_relaxed);
-			buffer_[b & mask_] = item;
+			int64_t b = bottom.load(std::memory_order_relaxed);
+			buffer[b & mask] = item;
 			std::atomic_thread_fence(std::memory_order_release);
-			bottom_.store(b + 1, std::memory_order_relaxed);
+			bottom.store(b + 1, std::memory_order_relaxed);
 		}
 
 		std::optional<T> pop() {
-			int64_t b = bottom_.load(std::memory_order_relaxed) - 1;
-			bottom_.store(b, std::memory_order_relaxed);
+			int64_t b = bottom.load(std::memory_order_relaxed) - 1;
+			bottom.store(b, std::memory_order_relaxed);
 			std::atomic_thread_fence(std::memory_order_seq_cst);
-			int64_t t = top_.load(std::memory_order_relaxed);
+			int64_t t = top.load(std::memory_order_relaxed);
 			if (t <= b) {
-				T item = buffer_[b & mask_];
+				T item = buffer[b & mask];
 				if (t == b) {
-					if (!top_.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
-						bottom_.store(b + 1, std::memory_order_relaxed);
+					if (!top.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
+						bottom.store(b + 1, std::memory_order_relaxed);
 						return std::nullopt;
 					}
-					bottom_.store(b + 1, std::memory_order_relaxed);
+					bottom.store(b + 1, std::memory_order_relaxed);
 				}
 				return item;
 			}
 			else {
-				bottom_.store(b + 1, std::memory_order_relaxed);
+				bottom.store(b + 1, std::memory_order_relaxed);
 				return std::nullopt;
 			}
 		}
 
 		std::optional<T> steal() {
-			int64_t t = top_.load(std::memory_order_acquire);
+			int64_t t = top.load(std::memory_order_acquire);
 			std::atomic_thread_fence(std::memory_order_seq_cst);
-			int64_t b = bottom_.load(std::memory_order_acquire);
+			int64_t b = bottom.load(std::memory_order_acquire);
 			if (t < b) {
-				T item = buffer_[t & mask_];
-				if (!top_.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
+				T item = buffer[t & mask];
+				if (!top.compare_exchange_strong(t, t + 1, std::memory_order_seq_cst, std::memory_order_relaxed)) {
 					return std::nullopt;
 				}
 				return item;
@@ -240,19 +240,19 @@ export namespace bud::threading {
 	};
 
 	class LockFreeFiberPool {
-		std::atomic<Fiber*> head_{ nullptr };
+		std::atomic<Fiber*> head{ nullptr };
 	public:
 		void push(Fiber* f) {
-			Fiber* old_head = head_.load(std::memory_order_relaxed);
+			Fiber* old_head = head.load(std::memory_order_relaxed);
 			do {
 				f->next_pool = old_head;
-			} while (!head_.compare_exchange_weak(old_head, f, std::memory_order_release, std::memory_order_relaxed));
+			} while (!head.compare_exchange_weak(old_head, f, std::memory_order_release, std::memory_order_relaxed));
 		}
 		Fiber* pop() {
-			Fiber* old_head = head_.load(std::memory_order_relaxed);
+			Fiber* old_head = head.load(std::memory_order_relaxed);
 			do {
 				if (!old_head) return nullptr;
-			} while (!head_.compare_exchange_weak(old_head, old_head->next_pool, std::memory_order_acquire, std::memory_order_relaxed));
+			} while (!head.compare_exchange_weak(old_head, old_head->next_pool, std::memory_order_acquire, std::memory_order_relaxed));
 			return old_head;
 		}
 	};
@@ -349,34 +349,34 @@ export namespace bud::threading {
 			WorkStealingQueue<Fiber*> queue;
 		};
 
-		std::vector<Worker*> workers_;
-		LockFreeFiberPool fiber_pool_;
-		std::atomic<bool> running_{ true };
-		size_t num_threads_{ 0 };
+		std::vector<Worker*> workers;
+		LockFreeFiberPool fiber_pool;
+		std::atomic<bool> running{ true };
+		size_t num_threads{ 0 };
 
 		// Only for main thread tasks
-		std::deque<Fiber*> main_thread_incoming_queue_;
-		std::mutex main_queue_mtx_;
+		std::deque<Fiber*> main_thread_incoming_queue;
+		std::mutex main_queue_mtx;
 
 		static constexpr size_t MAX_FIBERS_PER_THREAD = 128;
 
 	public:
 		explicit TaskScheduler(size_t n = std::thread::hardware_concurrency())
-			: num_threads_(n) {
+			: num_threads(n) {
 
 			std::println("[TaskScheduler] Initializing with {} threads(workers), {} fibers per thread", n, MAX_FIBERS_PER_THREAD);
 
 			for (size_t i = 0; i < n * MAX_FIBERS_PER_THREAD; ++i)
-				fiber_pool_.push(new Fiber());
+				fiber_pool.push(new Fiber());
 
-			workers_.reserve(n);
+			workers.reserve(n);
 
 			for (size_t i = 0; i < n; ++i) {
-				workers_.push_back(new Worker());
+				workers.push_back(new Worker());
 			}
 
 			for (size_t i = 1; i < n; ++i) {
-				workers_[i]->thread = std::jthread([this, i](std::stop_token st) {
+				workers[i]->thread = std::jthread([this, i](std::stop_token st) {
 					worker_loop(i, st);
 				});
 			}
@@ -395,27 +395,27 @@ export namespace bud::threading {
 		/// </summary>
 		~TaskScheduler() {
 			stop();
-			for (auto w : workers_) {
+			for (auto w : workers) {
 				delete w;
 			}
-			workers_.clear();
+			workers.clear();
 
-			for (auto f : main_thread_incoming_queue_)
+			for (auto f : main_thread_incoming_queue)
 				delete f;
-			main_thread_incoming_queue_.clear();
+			main_thread_incoming_queue.clear();
 
 			Fiber* f = nullptr;
-			while ((f = fiber_pool_.pop()) != nullptr) {
+			while ((f = fiber_pool.pop()) != nullptr) {
 				delete f;
 			}
 		}
 
 		void stop() {
-			running_ = false;
+			running = false;
 		}
 
 		auto get_thread_count() const {
-			return num_threads_;
+			return num_threads;
 		}
 
 		/// <summary>
@@ -435,10 +435,10 @@ export namespace bud::threading {
 			while (true) {
 				Fiber* f = nullptr;
 				{
-					std::unique_lock lock(main_queue_mtx_, std::try_to_lock);
-					if (lock.owns_lock() && !main_thread_incoming_queue_.empty()) {
-						f = main_thread_incoming_queue_.front();
-						main_thread_incoming_queue_.pop_front();
+					std::unique_lock lock(main_queue_mtx, std::try_to_lock);
+					if (lock.owns_lock() && !main_thread_incoming_queue.empty()) {
+						f = main_thread_incoming_queue.front();
+						main_thread_incoming_queue.pop_front();
 					}
 				}
 
@@ -448,7 +448,7 @@ export namespace bud::threading {
 					break; // No more tasks
 			}
 
-			while (auto opt = workers_[0]->queue.pop()) {
+			while (auto opt = workers[0]->queue.pop()) {
 				execute_task(*opt);
 			}
 		}
@@ -470,7 +470,7 @@ export namespace bud::threading {
 				counter->fetch_add(1, std::memory_order_relaxed);
 
 			size_t idx = (t_scheduler) ? t_worker_index : 0u;
-			workers_[idx]->queue.push(f);
+			workers[idx]->queue.push(f);
 		}
 
 		void spawn(std::move_only_function<void()> work, Counter* counter = nullptr) {
@@ -486,11 +486,11 @@ export namespace bud::threading {
 			if (counter) counter->fetch_add(1, std::memory_order_relaxed);
 
 			if (t_scheduler && t_worker_index == 0) {
-				workers_[0]->queue.push(f);
+				workers[0]->queue.push(f);
 			}
 			else {
-				std::lock_guard lock(main_queue_mtx_);
-				main_thread_incoming_queue_.push_back(f);
+				std::lock_guard lock(main_queue_mtx);
+				main_thread_incoming_queue.push_back(f);
 			}
 		}
 
@@ -509,7 +509,7 @@ export namespace bud::threading {
 
 					Fiber* f = nullptr;
 
-					auto opt = workers_[t_worker_index]->queue.pop();
+					auto opt = workers[t_worker_index]->queue.pop();
 					if (opt)
 						f = *opt;
 
@@ -548,12 +548,12 @@ export namespace bud::threading {
 
 	private:
 		Fiber* allocate_fiber() {
-			auto f = fiber_pool_.pop();
+			auto f = fiber_pool.pop();
 			return f ? f : new Fiber();
 		}
 
 		void free_fiber(Fiber* f) {
-			fiber_pool_.push(f);
+			fiber_pool.push(f);
 		}
 
 		/// <summary>
@@ -576,7 +576,7 @@ export namespace bud::threading {
 					while (waiting_head) {
 						auto next = waiting_head->next_waiting;
 						waiting_head->next_waiting = nullptr;
-						scheduler->workers_[t_worker_index]->queue.push(waiting_head);
+						scheduler->workers[t_worker_index]->queue.push(waiting_head);
 						waiting_head = next;
 					}
 				}
@@ -613,7 +613,7 @@ export namespace bud::threading {
 					while (wake_list) {
 						auto next = wake_list->next_waiting;
 						wake_list->next_waiting = nullptr;
-						workers_[t_worker_index]->queue.push(wake_list);
+						workers[t_worker_index]->queue.push(wake_list);
 						wake_list = next;
 					}
 				}
@@ -628,9 +628,9 @@ export namespace bud::threading {
 		}
 
 		Fiber* steal_task(size_t my_idx) {
-			for (size_t i = 1; i < num_threads_; ++i) {
-				size_t victim = (my_idx + i) % num_threads_;
-				auto opt = workers_[victim]->queue.steal();
+			for (size_t i = 1; i < num_threads; ++i) {
+				size_t victim = (my_idx + i) % num_threads;
+				auto opt = workers[victim]->queue.steal();
 				if (opt)
 					return *opt;
 			}
@@ -650,19 +650,19 @@ export namespace bud::threading {
 			tracy::SetThreadName(thread_name);
 #endif
 
-			while (running_ && !st.stop_requested()) {
+			while (running && !st.stop_requested()) {
 				Fiber* f = nullptr;
 
 				if (index == 0) {
-					std::unique_lock lock(main_queue_mtx_, std::try_to_lock);
-					if (lock.owns_lock() && !main_thread_incoming_queue_.empty()) {
-						f = main_thread_incoming_queue_.front();
-						main_thread_incoming_queue_.pop_front();
+					std::unique_lock lock(main_queue_mtx, std::try_to_lock);
+					if (lock.owns_lock() && !main_thread_incoming_queue.empty()) {
+						f = main_thread_incoming_queue.front();
+						main_thread_incoming_queue.pop_front();
 					}
 				}
 
 				if (!f) {
-					auto opt = workers_[index]->queue.pop();
+					auto opt = workers[index]->queue.pop();
 					if (opt)
 						f = *opt;
 				}

@@ -1,5 +1,4 @@
-// src/bud.dod.cppm
-
+﻿
 #include <vector>
 #include <algorithm>
 #include <thread>
@@ -13,7 +12,7 @@ export namespace bud::dod {
     // Data-Oriented Design Registry
     template<typename... Components>
     class Registry {
-        std::vector<std::vector<std::byte>> component_data_;
+        std::vector<std::vector<std::byte>> component_data;
 
     public:
         template<typename T>

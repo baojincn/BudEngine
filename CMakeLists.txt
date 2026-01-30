@@ -143,20 +143,29 @@ target_sources(bud_engine_core
             "src/runtime/bud.engine.cppm"
             "src/platform/bud.platform.cppm"
             "src/threading/bud.threading.cppm"
+			"src/runtime/bud.input.cppm"
+			"src/runtime/bud.scene.cppm"
+
+			"src/graphics/d3d12/bud.graphics.d3d12.cppm"
+			"src/graphics/d3d12/bud.d3d12.memory.cppm"
 
 			"src/graphics/bud.graphics.cppm"
+			"src/graphics/bud.graphics.defs.cppm"
+			"src/graphics/bud.graphics.types.cppm"
+			"src/graphics/bud.graphics.memory.cppm"
+			"src/graphics/bud.graphics.pool.cppm"
+			"src/graphics/bud.graphics.passes.cppm"
+			"src/graphics/bud.graphics.renderer.cppm"
+			"src/graphics/graph/bud.graphics.graph.cppm"
 
 			"src/graphics/vulkan/bud.graphics.vulkan.cppm"
 			"src/graphics/vulkan/bud.vulkan.memory.cppm"
-			"src/graphics/d3d12/bud.graphics.d3d12.cppm"
-			"src/graphics/d3d12/bud.d3d12.memory.cppm"
-			"src/graphics/bud.graphics.passes.cppm"
-			"src/runtime/bud.scene.cppm"
-			"src/graphics/bud.graphics.renderer.cppm"
-			"src/runtime/bud.gameplay.cppm"
-			"src/runtime/bud.input.cppm"
-			"src/graphics/graph/bud.graphics.graph.cppm"
-			"src/graphics/bud.graphics.defs.cppm")
+			"src/graphics/vulkan/bud.vulkan.descriptors.cppm"
+			"src/graphics/vulkan/bud.vulkan.pipeline.cppm"
+			"src/graphics/vulkan/bud.vulkan.pool.cppm"
+			"src/graphics/vulkan/bud.vulkan.types.cppm"
+			"src/graphics/vulkan/bud.vulkan.utils.cppm"
+)
 
 set_target_properties(bud_engine_core PROPERTIES CXX_SCAN_FOR_MODULES ON)
 

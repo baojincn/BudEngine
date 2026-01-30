@@ -72,6 +72,98 @@ export namespace bud::math {
 		return proj;
 	}
 
+	// 几何体
+	export struct BoundingSphere {
+		vec3 center{ 0.0f };
+		float radius = 0.0f;
+
+		BoundingSphere transform(const mat4& m) const {
+			vec4 new_center = m * vec4(center, 1.0f);
+			// Uniform scale assumption for radius transform
+			float max_scale = std::max(std::max(length(vec3(m[0])), length(vec3(m[1]))), length(vec3(m[2])));
+			return { vec3(new_center), radius * max_scale };
+		}
+	};
+
+	export struct AABB {
+		vec3 min{ std::numeric_limits<float>::max() };
+		vec3 max{ std::numeric_limits<float>::lowest() };
+
+		void merge(const vec3& p) {
+			min = glm::min(min, p);
+			max = glm::max(max, p);
+		}
+
+		void merge(const AABB& other) {
+			min = glm::min(min, other.min);
+			max = glm::max(max, other.max);
+		}
+
+		vec3 center() const { return (min + max) * 0.5f; }
+		vec3 size() const { return max - min; }
+
+		AABB transform(const mat4& m) const {
+			vec3 corners[8] = {
+				{min.x, min.y, min.z}, {min.x, min.y, max.z},
+				{min.x, max.y, min.z}, {min.x, max.y, max.z},
+				{max.x, min.y, min.z}, {max.x, min.y, max.z},
+				{max.x, max.y, min.z}, {max.x, max.y, max.z}
+			};
+
+			AABB res;
+			for (auto& c : corners) {
+				res.merge(vec3(m * vec4(c, 1.0f)));
+			}
+			return res;
+		}
+	};
+
+	export struct Frustum {
+		vec4 planes[6];
+
+		void update(const mat4& vp) {
+			mat4 m = transpose(vp);
+			planes[0] = m[3] + m[0]; // Left
+			planes[1] = m[3] - m[0]; // Right
+			planes[2] = m[3] + m[1]; // Bottom
+			planes[3] = m[3] - m[1]; // Top
+			planes[4] = m[3] + m[2]; // Near
+			planes[5] = m[3] - m[2]; // Far
+
+			for (auto& p : planes) {
+				float len = length(vec3(p));
+				p /= len;
+			}
+		}
+	};
+
+	export bool intersect_sphere_frustum(const BoundingSphere& s, const Frustum& f) {
+		for (const auto& plane : f.planes) {
+			if (dot(vec3(plane), s.center) + plane.w < -s.radius)
+				return false;
+		}
+		return true;
+	}
+
+	export bool intersect_aabb_frustum(const AABB& b, const Frustum& f) {
+		// Optimization: Check if all 8 corners are outside one plane
+		for (const auto& plane : f.planes) {
+			int out = 0;
+			vec3 corners[8] = {
+				{b.min.x, b.min.y, b.min.z}, {b.min.x, b.min.y, b.max.z},
+				{b.min.x, b.max.y, b.min.z}, {b.min.x, b.max.y, b.max.z},
+				{b.max.x, b.min.y, b.min.z}, {b.max.x, b.min.y, b.max.z},
+				{b.max.x, b.max.y, b.min.z}, {b.max.x, b.max.y, b.max.z}
+			};
+
+			for (const auto& c : corners) {
+				if (dot(vec3(plane), c) + plane.w < 0) out++;
+			}
+			if (out == 8) return false;
+		}
+		return true;
+	}
+
 }
 
 //export inline auto operator*(const bud::math::mat4& a, const bud::math::mat4& b) -> decltype(auto) {

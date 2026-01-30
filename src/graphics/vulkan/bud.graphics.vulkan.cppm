@@ -4,16 +4,25 @@
 #include <vector>
 #include <optional>
 #include <mutex>
+#include <memory>
+#include <unordered_map> // [FIX] Include
 #include <SDL3/SDL.h>
 
 export module bud.graphics.vulkan;
 
-import bud.graphics;
-import bud.graphics.defs;
+import bud.io;
+import bud.math;     
 import bud.platform; 
 import bud.threading;
-import bud.math;     
-import bud.io;       
+import bud.graphics;
+import bud.graphics.defs;
+import bud.graphics.types;
+
+import bud.vulkan.types;      
+import bud.vulkan.memory;     
+import bud.vulkan.pool;       
+import bud.vulkan.pipeline;   
+import bud.vulkan.descriptors;
 
 namespace bud::graphics::vulkan {
 
@@ -23,196 +32,121 @@ namespace bud::graphics::vulkan {
 	export using VkQueue = struct VkQueue_T*;
 	export using VkSurfaceKHR = struct VkSurfaceKHR_T*;
 
-
-	// Strict alignment for UBO
-	struct UniformBufferObject {
-		alignas(16) bud::math::mat4 model;
-		alignas(16) bud::math::mat4 view;
-		alignas(16) bud::math::mat4 proj;
-		alignas(16) bud::math::mat4 lightSpaceMatrix;
-		alignas(16) bud::math::vec3 camPos;
-		alignas(16) bud::math::vec3 lightDir;
-		alignas(16) bud::math::vec3 lightColor;
-		float lightIntensity;
-		float ambientStrength;
-		float _padding[2];
-	};
-
-	// Non strict alignment for Vertex
-	struct Vertex {
-		float pos[3];
-		float color[3];
-		float normal[3];
-		float texCoord[2];
-		float texIndex;
-
-		static VkVertexInputBindingDescription get_binding_description();
-
-		static std::vector<VkVertexInputAttributeDescription> get_attribute_descriptions();
-	};
-
-
-	struct QueueFamilyIndices {
-		std::optional<uint32_t> graphics_family;
-		std::optional<uint32_t> present_family;
-
-		bool is_complete() const {
-			return graphics_family.has_value() && present_family.has_value();
-		}
-	};
-
-	struct SwapChainSupportDetails {
-		VkSurfaceCapabilitiesKHR capabilities;
-		std::vector<VkSurfaceFormatKHR> formats;
-		std::vector<VkPresentModeKHR> present_modes;
-	};
-
-	struct ShadowConstantData {
-		bud::math::mat4 lightMVP;  // 64 bytes (offset 0)
-		bud::math::vec4 lightDir;  // 16 bytes (offset 64)
-	};
-
-
-	class VulkanTexture : public RHITexture {
-	public:
-		VkImage image = VK_NULL_HANDLE;
-		VkImageView view = VK_NULL_HANDLE;
-		VkDeviceMemory memory = VK_NULL_HANDLE;
-	};
-
-	struct VulkanLayoutTransition {
-		VkImageLayout layout;
-		VkAccessFlags access;
-		VkPipelineStageFlags stage;
-	};
-
+	// 工具函数声明
 	VulkanLayoutTransition get_vk_transition(bud::graphics::ResourceState state);
-
 
 	export class VulkanRHI : public bud::graphics::RHI {
 	public:
 		~VulkanRHI() = default;
 
+		// --- 生命周期 ---
 		void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation) override;
-
-		void cmd_resource_barrier(CommandHandle cmd, RHITexture* texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) override;
-
-		void set_config(const RenderConfig& new_settings) override;
-		void draw_frame(const bud::math::mat4& view, const bud::math::mat4& proj) override;
-		void wait_idle() override;
 		void cleanup() override;
+		void wait_idle() override;
+
+		bud::graphics::MemoryBlock create_gpu_buffer(uint64_t size, bud::graphics::ResourceState usage_state) override;
+		bud::graphics::MemoryBlock create_upload_buffer(uint64_t size) override;
+		void copy_buffer_immediate(bud::graphics::MemoryBlock src, bud::graphics::MemoryBlock dst, uint64_t size) override;
+		void destroy_buffer(bud::graphics::MemoryBlock block) override; // [FIX] Implement
+
+		// --- 帧控制 ---
+		CommandHandle begin_frame() override;
+		void end_frame(CommandHandle cmd) override;
+		Texture* get_current_swapchain_texture() override;
+		uint32_t get_current_image_index() override;
+
+		// --- 命令录制 (原子操作) ---
+		void resource_barrier(CommandHandle cmd, bud::graphics::Texture* texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) override;
+		void cmd_bind_pipeline(CommandHandle cmd, void* pipeline) override;
+		void cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) override;
+
+		// [核心] 动态渲染通道
+		void cmd_begin_render_pass(CommandHandle cmd, const bud::graphics::RenderPassBeginInfo& info) override;
+		void cmd_end_render_pass(CommandHandle cmd) override;
+
+		void cmd_bind_vertex_buffer(CommandHandle cmd, void* buffer) override;
+		void cmd_bind_index_buffer(CommandHandle cmd, void* buffer) override;
+		void cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) override;
+		void cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset, uint32_t first_instance) override;
+
+		void cmd_set_viewport(CommandHandle cmd, float width, float height) override;
+		void cmd_set_scissor(CommandHandle cmd, int32_t x, int32_t y, uint32_t width, uint32_t height) override;
+		void cmd_set_scissor(CommandHandle cmd, uint32_t width, uint32_t height) override;
+		void cmd_set_depth_bias(CommandHandle cmd, float constant, float clamp, float slope) override;
+		void update_global_shadow_map(Texture* texture) override;
+		void cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) override;
+
+		bud::graphics::Texture* create_texture(const bud::graphics::TextureDesc& desc, const void* initial_data, uint64_t size) override;
+		void update_bindless_texture(uint32_t index, bud::graphics::Texture* texture) override;
+		bud::graphics::Texture* get_fallback_texture() override;
+
+		// --- 杂项 / 待重构 ---
+		void set_render_config(const bud::graphics::RenderConfig& new_render_config) override;
+		void update_global_uniforms(uint32_t image_index, const bud::graphics::SceneView& scene_view) override;
 		void reload_shaders_async() override;
 		void load_model_async(const std::string& filepath) override;
 
-		CommandHandle begin_frame() override;
-		void end_frame(CommandHandle cmd) override;
+		// [Pipeline System]
+		void* create_graphics_pipeline(const bud::graphics::GraphicsPipelineDesc& desc) override;
+		void cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint32_t set_index) override;
 
-		void cmd_bind_pipeline(CommandHandle cmd, void* pipeline) override;
-		void cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) override;
+		VulkanMemoryAllocator* get_memory_allocator() { return memory_allocator.get(); }
+		//VulkanResourcePool* get_resource_pool() { return resource_pool.get(); }
+		bud::graphics::ResourcePool* get_resource_pool() override { return resource_pool.get(); }
 
-		RHITexture* get_current_swapchain_texture() override;
-		uint32_t get_current_image_index() override;
+		// Debug
+		void cmd_begin_debug_label(CommandHandle cmd, const std::string& name, float r, float g, float b) override;
+		void cmd_end_debug_label(CommandHandle cmd) override;
 
-		virtual void update_global_uniforms(uint32_t image_index, const SceneView& scene_view) override;
-
-		virtual void cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) override;
-
-		void render_shadow_pass(CommandHandle cmd, uint32_t image_index) override;
-
-		void render_main_pass(CommandHandle cmd, uint32_t image_index) override;
+		void set_debug_name(Texture* texture, ObjectType object_type, const std::string& name) override;
+		void set_debug_name(const MemoryBlock& buffer, ObjectType object_type, const std::string& name) override;
+		void set_debug_name(CommandHandle cmd, ObjectType object_type, const std::string& name) override;
 
 	private:
-		void create_shadow_pipeline();
-		void create_shadow_framebuffer();
-		void create_shadow_render_pass();
-		void create_shadow_resources();
-
-		void create_depth_resources();
-
-		VkFormat find_supported_format(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features);
-		VkFormat find_depth_format();
-
+		// --- 初始化辅助 ---
 		void create_instance(SDL_Window* window, bool enable_validation);
 		void create_surface(SDL_Window* window);
-
 		void pick_physical_device();
 		void create_logical_device(bool enable_validation);
 		void create_swapchain(SDL_Window* window);
 		void create_image_views();
-
-		void create_main_render_pass();
-		void create_descriptor_set_layout();
-		void setup_pipeline_state(VkShaderModule vert_module, VkShaderModule frag_module);
-		void create_graphics_pipeline();
-		void recreate_graphics_pipeline(const std::vector<char>& vert_code, const std::vector<char>& frag_code);
-		void create_framebuffers();
 		void create_command_pool();
-		void copy_buffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
-		void create_vertex_buffer();
-		void create_index_buffer();
-		void create_uniform_buffers();
-		void upload_mesh(const bud::io::MeshData& mesh);
-		void create_texture_from_file(const std::string& path, VkImage& out_image, VkDeviceMemory& out_mem, VkImageView& out_view);
-		void create_texture_image();
-		void load_texture_async(const std::string& filename);
-		void update_texture_resources(unsigned char* pixels, int width, int height);
-		void update_descriptor_sets_texture();
-		void create_texture_image_view();
-		void create_texture_sampler();
-		VkImageView create_image_view(VkImage image, VkFormat format);
-		void create_image(uint32_t width, uint32_t height, uint32_t mip_levels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& image_memory);
+		void create_command_buffer();
+		void create_sync_objects();
+
 		VkCommandBuffer begin_single_time_commands();
 		void end_single_time_commands(VkCommandBuffer command_buffer);
-		void transition_image_layout(VkImage image, VkFormat format, VkImageLayout old_layout, VkImageLayout new_layout);
-		void copy_buffer_to_image(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
-		void create_descriptor_pool();
-		void create_descriptor_sets();
-		void create_command_buffer();
-		VkCommandBuffer allocate_secondary_command_buffer(VkCommandPool pool);
-		void create_sync_objects();
-		void record_command_buffer(VkCommandBuffer buffer, uint32_t image_index);
-		void update_uniform_buffer(uint32_t current_image, const bud::math::mat4& view, const bud::math::mat4& proj, const bud::math::mat4& lightSpaceMatrix);
-		VkShaderModule create_shader_module(const std::vector<char>& code);
-		uint32_t find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties);
-		void create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& buffer_memory);
+		void transition_image_layout_immediate(VkImage image, VkFormat format, VkImageLayout old_layout, VkImageLayout new_layout);
+		void copy_buffer_to_image(VkImage image, VkBuffer buffer, uint32_t width, uint32_t height);
+		void generate_mipmaps(VkImage image, VkFormat format, int32_t texWidth, int32_t texHeight, uint32_t mipLevels); // [FIX] helper
+		
+		QueueFamilyIndices find_queue_families(VkPhysicalDevice device);
 		SwapChainSupportDetails query_swapchain_support(VkPhysicalDevice device);
 		VkSurfaceFormatKHR choose_swap_surface_format(const std::vector<VkSurfaceFormatKHR>& available_formats);
 		VkPresentModeKHR choose_swap_present_mode(const std::vector<VkPresentModeKHR>& available_present_modes);
 		VkExtent2D choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilities, SDL_Window* window);
-		QueueFamilyIndices find_queue_families(VkPhysicalDevice device);
-		void generate_mipmaps(VkImage image, VkFormat format, int32_t tex_width, int32_t tex_height, uint32_t mip_levels);
+
+		// Debug
 		VkResult create_debug_utils_messenger_ext(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger);
 		void destroy_debug_utils_messenger_ext(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator);
 		void setup_debug_messenger(bool enable);
-
 		static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData);
+
+		void set_object_debug_name(uint64_t object_handle, ObjectType object_type, const std::string& name);
 
 	private:
 		struct FrameData {
-			// 同步原语
 			VkSemaphore image_available_semaphore = nullptr;
 			VkFence in_flight_fence = nullptr;
-
-			// 命令资源
 			VkCommandPool main_command_pool = nullptr;
 			VkCommandBuffer main_command_buffer = nullptr;
-
-			// Worker 资源
-			std::vector<VkCommandPool> worker_pools;
-			std::vector<std::vector<VkCommandBuffer>> worker_cmd_buffers;
-			std::vector<uint32_t> worker_cmd_counters;
+			VkBuffer uniform_buffer = nullptr;       // Per-frame UBO
+			VkDeviceMemory uniform_memory = nullptr;
+			void* uniform_mapped = nullptr;          // Persistently mapped
+			VkDescriptorSet global_descriptor_set = VK_NULL_HANDLE;
 		};
 
-		std::vector<VkSemaphore> render_finished_semaphores;
-
-		std::vector<FrameData> frames;
-
-		uint32_t max_frames_in_flight = 4;
-
-		bud::graphics::RenderConfig settings;
-
-		uint32_t current_frame = 0;
-
+		// 核心 Vulkan 对象
 		VkInstance instance = nullptr;
 		VkPhysicalDevice physical_device = nullptr;
 		VkDevice device = nullptr;
@@ -221,73 +155,50 @@ namespace bud::graphics::vulkan {
 		VkQueue present_queue = nullptr;
 		VkDebugUtilsMessengerEXT debug_messenger = nullptr;
 		bool enable_validation_layers = false;
+
 		const std::vector<const char*> validation_layers = { "VK_LAYER_KHRONOS_validation" };
-		const std::vector<const char*> device_extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+		std::vector<const char*> device_extensions = {
+			VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+			VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+			VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME
+		};
 
 		// Swapchain
 		VkSwapchainKHR swapchain = nullptr;
 		std::vector<VkImage> swapchain_images;
 		std::vector<VkImageView> swapchain_image_views;
-		std::vector<VkFramebuffer> swapchain_framebuffers;
+		std::vector<VulkanTexture> swapchain_textures_wrappers; // 给 Graph 用的 Handle
 		VkFormat swapchain_image_format;
 		VkExtent2D swapchain_extent;
 
-		// Pipeline
-		VkRenderPass render_pass = nullptr;
-		VkDescriptorSetLayout descriptor_set_layout = nullptr;
-		VkPipelineLayout pipeline_layout = nullptr;
-		VkPipeline graphics_pipeline = nullptr;
-
-
-		VkImage texture_image = nullptr;
-		VkDeviceMemory texture_image_memory = nullptr;
-
-		uint32_t mip_levels = 1;
-
-		VkImageView texture_image_view = nullptr;
-		VkSampler texture_sampler = nullptr;
-
-		std::vector<VkImage> texture_images;
-		std::vector<VkDeviceMemory> texture_images_memories;
-		std::vector<VkImageView> texture_views;
-
-		VkImage depth_image = nullptr;
-		VkDeviceMemory depth_image_memory = nullptr;
-		VkImageView depth_image_view = nullptr;
-
-		VkDescriptorPool descriptor_pool = nullptr;
-		std::vector<VkDescriptorSet> descriptor_sets;
-		std::vector<VkBuffer> uniform_buffers;
-		std::vector<VkDeviceMemory> uniform_buffers_memory;
-		std::vector<void*> uniform_buffers_mapped;
-
-		std::vector<Vertex> vertices;
-		std::vector<uint32_t> indices;
-
-		VkBuffer vertex_buffer = nullptr;
-		VkDeviceMemory vertex_buffer_memory = nullptr;
-		VkBuffer index_buffer = nullptr;
-		VkDeviceMemory index_buffer_memory = nullptr;
-
-		// Begin, Shadow Mapping Resources
-		VkImage shadow_image = nullptr;
-		VkDeviceMemory shadow_image_memory = nullptr;
-		VkImageView shadow_image_view = nullptr;
-		VkSampler shadow_sampler = nullptr;
-
-		VkRenderPass shadow_render_pass = nullptr;
-		VkFramebuffer shadow_framebuffer = nullptr;
-
-		VkPipeline shadow_pipeline = nullptr;
-		VkPipelineLayout shadow_pipeline_layout = nullptr;
-		// End, Shadow Mapping Resources
-
-
-		bud::threading::TaskScheduler* task_scheduler = nullptr;
-
+		// Frame Data
+		std::vector<FrameData> frames;
+		std::vector<VkSemaphore> render_finished_semaphores;
+		uint32_t max_frames_in_flight = 2;
+		uint32_t current_frame = 0;
 		uint32_t current_image_index = 0;
 
-		std::vector<VulkanTexture> swapchain_textures_wrappers;
-	};
+		RenderConfig render_config;
+		bud::threading::TaskScheduler* task_scheduler = nullptr;
 
+		// [基础设施] 接管所有资源管理
+		std::unique_ptr<VulkanMemoryAllocator> memory_allocator;
+		std::unique_ptr<VulkanResourcePool>    resource_pool;
+		std::unique_ptr<VulkanPipelineCache>   pipeline_cache;
+		std::vector<VulkanDescriptorAllocator> descriptor_allocators;
+
+		// [UBO 系统]
+		VkDescriptorSetLayout global_set_layout = VK_NULL_HANDLE;
+		VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
+		VkSampler default_sampler = VK_NULL_HANDLE;
+		VkSampler shadow_sampler = VK_NULL_HANDLE; // [FIX] Shadow Sampler with Compare
+		VulkanTexture dummy_depth_texture; // Placeholder for shadow map binding
+
+		std::unordered_map<VkBuffer, VkDeviceMemory> buffer_memory_map; // [FIX] Track memory
+	
+		// [FIX] Track created pipeline layouts for cleanup
+		std::vector<VkPipelineLayout> created_layouts;
+
+		VulkanTexture* fallback_texture_ptr = nullptr;
+	};
 }
