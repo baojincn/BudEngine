@@ -9,21 +9,24 @@ export module bud.engine;
 import bud.io;
 import bud.core;
 import bud.math;
+import bud.input;
 import bud.scene;
 import bud.threading;
 import bud.platform;
+
 import bud.graphics;
 import bud.graphics.renderer;
 
+
 export namespace bud::engine {
 
-	enum class EngineMode {
+	export enum class EngineMode {
 		TASK_BASED,
 		THREAD_BASED,
 		MIXED
 	};
 
-	class BudEngine {
+	export class BudEngine {
 	public:
 
 		using TickCallback = std::function<void(float)>;

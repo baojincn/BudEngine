@@ -5,7 +5,7 @@
 #include <optional>
 #include <mutex>
 #include <memory>
-#include <unordered_map> // [FIX] Include
+#include <unordered_map>
 #include <SDL3/SDL.h>
 
 export module bud.graphics.vulkan;
@@ -14,8 +14,7 @@ import bud.io;
 import bud.math;     
 import bud.platform; 
 import bud.threading;
-import bud.graphics;
-import bud.graphics.defs;
+import bud.graphics.rhi;
 import bud.graphics.types;
 
 import bud.vulkan.types;      
@@ -39,7 +38,6 @@ namespace bud::graphics::vulkan {
 	public:
 		~VulkanRHI() = default;
 
-		// --- 生命周期 ---
 		void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation) override;
 		void cleanup() override;
 		void wait_idle() override;
@@ -47,20 +45,20 @@ namespace bud::graphics::vulkan {
 		bud::graphics::MemoryBlock create_gpu_buffer(uint64_t size, bud::graphics::ResourceState usage_state) override;
 		bud::graphics::MemoryBlock create_upload_buffer(uint64_t size) override;
 		void copy_buffer_immediate(bud::graphics::MemoryBlock src, bud::graphics::MemoryBlock dst, uint64_t size) override;
-		void destroy_buffer(bud::graphics::MemoryBlock block) override; // [FIX] Implement
+		void destroy_buffer(bud::graphics::MemoryBlock block) override;
 
-		// --- 帧控制 ---
+		// 帧控制
 		CommandHandle begin_frame() override;
 		void end_frame(CommandHandle cmd) override;
 		Texture* get_current_swapchain_texture() override;
 		uint32_t get_current_image_index() override;
 
-		// --- 命令录制 (原子操作) ---
+		// 命令录制 
 		void resource_barrier(CommandHandle cmd, bud::graphics::Texture* texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) override;
 		void cmd_bind_pipeline(CommandHandle cmd, void* pipeline) override;
 		void cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) override;
 
-		// [核心] 动态渲染通道
+		// 动态渲染通道
 		void cmd_begin_render_pass(CommandHandle cmd, const bud::graphics::RenderPassBeginInfo& info) override;
 		void cmd_end_render_pass(CommandHandle cmd) override;
 
@@ -80,18 +78,17 @@ namespace bud::graphics::vulkan {
 		void update_bindless_texture(uint32_t index, bud::graphics::Texture* texture) override;
 		bud::graphics::Texture* get_fallback_texture() override;
 
-		// --- 杂项 / 待重构 ---
+		// 杂项 / 待重构
 		void set_render_config(const bud::graphics::RenderConfig& new_render_config) override;
 		void update_global_uniforms(uint32_t image_index, const bud::graphics::SceneView& scene_view) override;
 		void reload_shaders_async() override;
 		void load_model_async(const std::string& filepath) override;
 
-		// [Pipeline System]
+		
 		void* create_graphics_pipeline(const bud::graphics::GraphicsPipelineDesc& desc) override;
 		void cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint32_t set_index) override;
 
 		VulkanMemoryAllocator* get_memory_allocator() { return memory_allocator.get(); }
-		//VulkanResourcePool* get_resource_pool() { return resource_pool.get(); }
 		bud::graphics::ResourcePool* get_resource_pool() override { return resource_pool.get(); }
 
 		// Debug
@@ -118,7 +115,7 @@ namespace bud::graphics::vulkan {
 		void end_single_time_commands(VkCommandBuffer command_buffer);
 		void transition_image_layout_immediate(VkImage image, VkFormat format, VkImageLayout old_layout, VkImageLayout new_layout);
 		void copy_buffer_to_image(VkImage image, VkBuffer buffer, uint32_t width, uint32_t height);
-		void generate_mipmaps(VkImage image, VkFormat format, int32_t texWidth, int32_t texHeight, uint32_t mipLevels); // [FIX] helper
+		void generate_mipmaps(VkImage image, VkFormat format, int32_t texWidth, int32_t texHeight, uint32_t mipLevels); 
 		
 		QueueFamilyIndices find_queue_families(VkPhysicalDevice device);
 		SwapChainSupportDetails query_swapchain_support(VkPhysicalDevice device);
@@ -146,7 +143,7 @@ namespace bud::graphics::vulkan {
 			VkDescriptorSet global_descriptor_set = VK_NULL_HANDLE;
 		};
 
-		// 核心 Vulkan 对象
+		
 		VkInstance instance = nullptr;
 		VkPhysicalDevice physical_device = nullptr;
 		VkDevice device = nullptr;
@@ -167,7 +164,7 @@ namespace bud::graphics::vulkan {
 		VkSwapchainKHR swapchain = nullptr;
 		std::vector<VkImage> swapchain_images;
 		std::vector<VkImageView> swapchain_image_views;
-		std::vector<VulkanTexture> swapchain_textures_wrappers; // 给 Graph 用的 Handle
+		std::vector<VulkanTexture> swapchain_textures_wrappers;
 		VkFormat swapchain_image_format;
 		VkExtent2D swapchain_extent;
 
@@ -181,22 +178,21 @@ namespace bud::graphics::vulkan {
 		RenderConfig render_config;
 		bud::threading::TaskScheduler* task_scheduler = nullptr;
 
-		// [基础设施] 接管所有资源管理
+		// 资源管理
 		std::unique_ptr<VulkanMemoryAllocator> memory_allocator;
 		std::unique_ptr<VulkanResourcePool>    resource_pool;
 		std::unique_ptr<VulkanPipelineCache>   pipeline_cache;
 		std::vector<VulkanDescriptorAllocator> descriptor_allocators;
 
-		// [UBO 系统]
+		// UBO
 		VkDescriptorSetLayout global_set_layout = VK_NULL_HANDLE;
 		VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
 		VkSampler default_sampler = VK_NULL_HANDLE;
-		VkSampler shadow_sampler = VK_NULL_HANDLE; // [FIX] Shadow Sampler with Compare
+		VkSampler shadow_sampler = VK_NULL_HANDLE;
 		VulkanTexture dummy_depth_texture; // Placeholder for shadow map binding
 
-		std::unordered_map<VkBuffer, VkDeviceMemory> buffer_memory_map; // [FIX] Track memory
+		std::unordered_map<VkBuffer, VkDeviceMemory> buffer_memory_map;
 	
-		// [FIX] Track created pipeline layouts for cleanup
 		std::vector<VkPipelineLayout> created_layouts;
 
 		VulkanTexture* fallback_texture_ptr = nullptr;

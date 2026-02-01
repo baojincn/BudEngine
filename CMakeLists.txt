@@ -127,10 +127,24 @@ target_sources(bud_engine_core
     PRIVATE
         "src/platform/windows/switch_context_win_x86_64.asm"
 		"src/platform/window.cpp"
-		"src/runtime/bud_engine.cpp"
+		"src/runtime/bud.engine.cpp"
 		"src/graphics/bud.graphics.cpp"
+        "src/graphics/bud.graphics.passes.cpp"
+        "src/graphics/bud.graphics.renderer.cpp"
+        
 		"src/graphics/vulkan/bud.graphics.vulkan.cpp"
-		"src/third_party/bud_third_party.cpp"
+		"src/graphics/vulkan/bud.vulkan.memory.cpp"
+		"src/graphics/vulkan/bud.vulkan.descriptors.cpp"
+		"src/graphics/vulkan/bud.vulkan.pipeline.cpp"
+		"src/graphics/vulkan/bud.vulkan.pool.cpp"
+
+		"src/io/bud.io.cpp"
+		"src/threading/bud.threading.cpp"
+        "src/third_party/bud_third_party.cpp"
+
+		"src/runtime/bud.input.cpp"
+		"src/runtime/bud.scene.cpp"
+
     PUBLIC
         FILE_SET CXX_MODULES
         TYPE CXX_MODULES
@@ -150,7 +164,8 @@ target_sources(bud_engine_core
 			"src/graphics/d3d12/bud.d3d12.memory.cppm"
 
 			"src/graphics/bud.graphics.cppm"
-			"src/graphics/bud.graphics.defs.cppm"
+			"src/graphics/bud.graphics.rhi.cppm"
+			"src/graphics/bud.graphics.scene.cppm"
 			"src/graphics/bud.graphics.types.cppm"
 			"src/graphics/bud.graphics.memory.cppm"
 			"src/graphics/bud.graphics.pool.cppm"

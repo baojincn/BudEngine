@@ -3,7 +3,6 @@
 
 export module bud.graphics.memory;
 
-import bud.graphics.defs;
 import bud.graphics.types;
 
 export namespace bud::graphics {

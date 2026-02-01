@@ -40,32 +40,16 @@ export namespace bud::input {
 
 	export class Input {
 	public:
-		static Input& get() {
-			static Input instance;
-			return instance;
-		}
+		static Input& get();
 
 		Input(const Input&) = delete;
 		Input& operator=(const Input&) = delete;
 
-		bool is_key_down(Key key) const {
-			auto it = keys.find(key);
-			return it != keys.end() && it->second;
-		}
+		bool is_key_down(Key key) const;
+		bool is_mouse_button_down(MouseButton btn) const;
+		void get_mouse_delta(float& x, float& y) const;
 
-		bool is_mouse_button_down(MouseButton btn) const {
-			auto it = mouse_buttons.find(btn);
-			return it != mouse_buttons.end() && it->second;
-		}
-
-		void get_mouse_delta(float& x, float& y) const {
-			x = mouse_delta_x;
-			y = mouse_delta_y;
-		}
-
-		float get_mouse_scroll() const {
-			return scroll_y;
-		}
+		float get_mouse_scroll() const;
 
 		template<typename T>
 		void internal_new_frame(PassKey<T> pass_key) {

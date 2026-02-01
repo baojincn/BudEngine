@@ -19,10 +19,9 @@ module bud.graphics.vulkan;
 import bud.math;
 import bud.platform;
 import bud.threading;
-import bud.graphics;
-import bud.graphics.defs;
 import bud.graphics.types;
 import bud.vulkan.types;
+import bud.vulkan.utils;
 
 using namespace bud::graphics;
 using namespace bud::graphics::vulkan;
@@ -32,13 +31,13 @@ PFN_vkCmdBeginDebugUtilsLabelEXT fpCmdBeginDebugUtilsLabelEXT = nullptr;
 PFN_vkCmdEndDebugUtilsLabelEXT fpCmdEndDebugUtilsLabelEXT = nullptr;
 PFN_vkSetDebugUtilsObjectNameEXT fpSetDebugUtilsObjectNameEXT = nullptr;
 
-// Pipeline wrapper to hold both VkPipeline and VkPipelineLayout
+
 struct VulkanPipelineObject {
 	VkPipeline pipeline;
 	VkPipelineLayout layout;
 };
 
-// --- Helper: State Transition Mapping ---
+
 VulkanLayoutTransition bud::graphics::vulkan::get_vk_transition(ResourceState state) {
 	switch (state) {
 	case ResourceState::Undefined:
@@ -103,51 +102,14 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	// Binding 0: UBO (std140)
 	// Binding 1: Sampler2D[] (Bindless, Variable Count / Partial Bound)
 	// Binding 2: ShadowMap (Sampler2DShadow)
-	
-	std::vector<VkDescriptorSetLayoutBinding> bindings(3);
-	
-	VkDescriptorSetLayoutBinding& ubo_binding = bindings[0];
-	ubo_binding.binding = 0;
-	ubo_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	ubo_binding.descriptorCount = 1;
-	ubo_binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-	ubo_binding.pImmutableSamplers = nullptr;
 
-	VkDescriptorSetLayoutBinding& tex_binding = bindings[1];
-	tex_binding.binding = 1;
-	tex_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	tex_binding.descriptorCount = 1000; // Bindless Limit for Prototype
-	tex_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-	tex_binding.pImmutableSamplers = nullptr;
+	DescriptorLayoutBuilder layout_builder;
+	layout_builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+	layout_builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1000, 
+		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+	layout_builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 
-	VkDescriptorSetLayoutBinding& shadow_binding = bindings[2];
-	shadow_binding.binding = 2;
-	shadow_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; 
-	shadow_binding.descriptorCount = 1;
-	shadow_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-	shadow_binding.pImmutableSamplers = nullptr;
-
-	// Enable update after bind for bindless textures
-	VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
-	flagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-	std::vector<VkDescriptorBindingFlags> bindingFlags = { 
-		0, // Binding 0: UBO doesn't need update-after-bind 
-		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, 
-		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT 
-	};
-	flagsInfo.bindingCount = (uint32_t)bindingFlags.size();
-	flagsInfo.pBindingFlags = bindingFlags.data();
-
-	VkDescriptorSetLayoutCreateInfo layout_info{};
-	layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	layout_info.pNext = &flagsInfo;
-	layout_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-	layout_info.bindingCount = (uint32_t)bindings.size();
-	layout_info.pBindings = bindings.data();
-
-	if (vkCreateDescriptorSetLayout(device, &layout_info, nullptr, &global_set_layout) != VK_SUCCESS) {
-		throw std::runtime_error("failed to create descriptor set layout!");
-	}
+	global_set_layout = layout_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
 
 	// 6. 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = 512; // Enough for matrices + light data (was 256)
@@ -304,35 +266,11 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 			throw std::runtime_error("failed to allocate global descriptor set!");
 		}
 
-		// 初始化 Binding 0 (UBO)
-		VkDescriptorBufferInfo buffer_info{};
-		buffer_info.buffer = frame.uniform_buffer;
-		buffer_info.offset = 0;
-		buffer_info.range = ubo_size;
-
-		VkWriteDescriptorSet descriptor_write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-		descriptor_write.dstSet = frame.global_descriptor_set;
-		descriptor_write.dstBinding = 0;
-		descriptor_write.dstArrayElement = 0;
-		descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		descriptor_write.descriptorCount = 1;
-		descriptor_write.pBufferInfo = &buffer_info;
-
-		// [FIX] Binding 2 (ShadowMap)
-		VkDescriptorImageInfo shadow_info{};
-		shadow_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-		shadow_info.imageView = dummy_depth_texture.view;
-		shadow_info.sampler = default_sampler;
+		DescriptorWriter writer;
+		writer.write_buffer(0, frame.uniform_buffer, ubo_size, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+		writer.write_image(2, 0, dummy_depth_texture.view, default_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
 		
-		VkWriteDescriptorSet shadow_write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-		shadow_write.dstSet = frame.global_descriptor_set;
-		shadow_write.dstBinding = 2;
-		shadow_write.descriptorCount = 1;
-		shadow_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		shadow_write.pImageInfo = &shadow_info;
-
-		VkWriteDescriptorSet writes[] = { descriptor_write, shadow_write };
-		vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+		writer.update_set(device, frame.global_descriptor_set);
 	}
 
 	// 8. 创建 Fallback 纹理 (Index 0)
@@ -619,21 +557,9 @@ CommandHandle VulkanRHI::begin_frame() {
 	// 特别注意：Bindless Textures 是持久化的，不需要每一帧重绑一次，否则会丢失状态导致 GPU Hang
 
 	// 更新 Descriptor Set 指向当前帧的 UBO
-	VkDescriptorBufferInfo buffer_info{};
-	buffer_info.buffer = frames[current_frame].uniform_buffer;
-	buffer_info.offset = 0;
-	buffer_info.range = VK_WHOLE_SIZE;
-
-	VkWriteDescriptorSet descriptor_write{};
-	descriptor_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptor_write.dstSet = frames[current_frame].global_descriptor_set;
-	descriptor_write.dstBinding = 0;
-	descriptor_write.dstArrayElement = 0;
-	descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	descriptor_write.descriptorCount = 1;
-	descriptor_write.pBufferInfo = &buffer_info;
-
-	vkUpdateDescriptorSets(device, 1, &descriptor_write, 0, nullptr);
+	DescriptorWriter writer;
+	writer.write_buffer(0, frames[current_frame].uniform_buffer, VK_WHOLE_SIZE, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+	writer.update_set(device, frames[current_frame].global_descriptor_set);
 
 	vkResetCommandBuffer(frames[current_frame].main_command_buffer, 0);
 
@@ -1531,24 +1457,14 @@ void VulkanRHI::update_bindless_texture(uint32_t index, bud::graphics::Texture* 
 	auto vk_tex = static_cast<VulkanTexture*>(texture);
 
 	for (int i = 0; i < max_frames_in_flight; i++) {
-		VkDescriptorImageInfo image_info{};
-		image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		image_info.imageView = vk_tex->view;
-		image_info.sampler = vk_tex->sampler;
-
-		VkWriteDescriptorSet descriptor_write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-		descriptor_write.dstSet = frames[i].global_descriptor_set;
-		if (descriptor_write.dstSet == VK_NULL_HANDLE) {
+		if (frames[i].global_descriptor_set == VK_NULL_HANDLE) { 
 			std::println(stderr, "[Vulkan] ERROR: global_descriptor_set at frame {} is NULL!", i);
-			continue;
+			continue; 
 		}
-		descriptor_write.dstBinding = 1;
-		descriptor_write.dstArrayElement = index;
-		descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		descriptor_write.descriptorCount = 1;
-		descriptor_write.pImageInfo = &image_info;
 
-		vkUpdateDescriptorSets(device, 1, &descriptor_write, 0, nullptr);
+		DescriptorWriter writer;
+		writer.write_image(1, index, vk_tex->view, vk_tex->sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+		writer.update_set(device, frames[i].global_descriptor_set);
 	}
 }
 
@@ -1586,22 +1502,11 @@ void VulkanRHI::update_global_shadow_map(bud::graphics::Texture* texture) {
 	if (!texture) return;
 	VulkanTexture* vk_tex = static_cast<VulkanTexture*>(texture);
 
-	VkDescriptorImageInfo shadow_info{};
-	shadow_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	shadow_info.imageView = vk_tex->view;
-	// [FIX] Use the dedicated shadow sampler (Comparison Enabled)
-	shadow_info.sampler = shadow_sampler; 
-
 	for (int i = 0; i < max_frames_in_flight; i++) {
-		VkWriteDescriptorSet tile_write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-		tile_write.dstSet = frames[i].global_descriptor_set;
-		tile_write.dstBinding = 2; // Shadow Binding
-		tile_write.dstArrayElement = 0;
-		tile_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		tile_write.descriptorCount = 1;
-		tile_write.pImageInfo = &shadow_info;
-
-		vkUpdateDescriptorSets(device, 1, &tile_write, 0, nullptr);
+		DescriptorWriter writer;
+		// [FIX] Use the dedicated shadow sampler (Comparison Enabled)
+		writer.write_image(2, 0, vk_tex->view, shadow_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+		writer.update_set(device, frames[i].global_descriptor_set);
 	}
 }
 

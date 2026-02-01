@@ -59,14 +59,14 @@ export namespace bud::math {
 	constexpr float ZOOM = 45.0f;
 
 
-	mat4 ortho_vk(float left, float right, float bottom, float top, float near, float far) {
+	export mat4 ortho_vk(float left, float right, float bottom, float top, float near, float far) {
 		mat4 proj = glm::ortho(left, right, bottom, top, near, far);
 		proj[1][1] *= -1;
 
 		return proj;
 	}
 
-	mat4 perspective_vk(float fov, float aspect, float near_plane, float far_plane) {
+	export mat4 perspective_vk(float fov, float aspect, float near_plane, float far_plane) {
 		mat4 proj = glm::perspective(glm::radians(fov), aspect, near_plane, far_plane);
 		proj[1][1] *= -1; // Vulkan Y-flip
 		return proj;

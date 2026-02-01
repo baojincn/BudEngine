@@ -3,17 +3,16 @@
 #include <string>
 #include <functional>
 #include <unordered_map>
-#include <algorithm> // for std::remove_if
-#include <iostream>  // for logging
-#include <stack>     // for topology sort
+#include <algorithm>
+#include <iostream>
+#include <stack>
 
 export module bud.graphics.graph;
 
-import bud.graphics;
-import bud.graphics.defs;
 import bud.graphics.types;
-import bud.graphics.pool; // ResourcePool
-import bud.threading; // TaskScheduler
+import bud.graphics.rhi;
+import bud.graphics.pool;
+import bud.threading;
 
 export namespace bud::graphics {
 
@@ -52,7 +51,11 @@ export namespace bud::graphics {
 		bool has_side_effects = false; // e.g. Present, Compute Write to buffer
 
 		// Barrier info calculated during compile()
-		struct BarrierInfo { RGHandle handle; ResourceState old_state; ResourceState new_state; };
+		struct BarrierInfo { 
+			RGHandle handle; 
+			ResourceState old_state; 
+			ResourceState new_state; 
+		};
 		std::vector<BarrierInfo> before_barriers;
 	};
 

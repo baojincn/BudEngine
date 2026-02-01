@@ -5,7 +5,7 @@
 
 export module bud.vulkan.utils;
 
-import bud.graphics.defs;
+import bud.graphics.types;
 
 export namespace bud::graphics::vulkan {
 

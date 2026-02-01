@@ -7,7 +7,6 @@
 export module bud.vulkan.types;
 
 import bud.math;
-import bud.graphics.defs;
 import bud.graphics.types;
 
 export namespace bud::graphics::vulkan {

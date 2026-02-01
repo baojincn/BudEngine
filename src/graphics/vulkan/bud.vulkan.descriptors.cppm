@@ -9,76 +9,55 @@ namespace bud::graphics::vulkan {
 
 	export class VulkanDescriptorAllocator {
 	public:
-		void init(VkDevice device) { m_device = device; }
+		struct PoolSizeRatio {
+			VkDescriptorType type;
+			float ratio;
+		};
 
-		void cleanup() {
-			for (auto p : m_free_pools) vkDestroyDescriptorPool(m_device, p, nullptr);
-			for (auto p : m_used_pools) vkDestroyDescriptorPool(m_device, p, nullptr);
-		}
+		void init(VkDevice device);
+		void cleanup();
+		void reset_frame();
+		bool allocate(VkDescriptorSetLayout layout, VkDescriptorSet& out_set);
 
-		// 每一帧开始时调用，极其高效地重置所有池子
-		void reset_frame() {
-			for (auto p : m_used_pools) {
-				vkResetDescriptorPool(m_device, p, 0);
-				m_free_pools.push_back(p);
-			}
-			m_used_pools.clear();
-			m_current_pool = VK_NULL_HANDLE;
-		}
-
-		bool allocate(VkDescriptorSetLayout layout, VkDescriptorSet& out_set) {
-			if (m_current_pool == VK_NULL_HANDLE) {
-				m_current_pool = grab_pool();
-				m_used_pools.push_back(m_current_pool);
-			}
-
-			VkDescriptorSetAllocateInfo alloc_info{};
-			alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-			alloc_info.pSetLayouts = &layout;
-			alloc_info.descriptorPool = m_current_pool;
-			alloc_info.descriptorSetCount = 1;
-
-			VkResult res = vkAllocateDescriptorSets(m_device, &alloc_info, &out_set);
-
-			// 如果当前池子满了，换一个新的再试一次
-			if (res == VK_ERROR_OUT_OF_POOL_MEMORY || res == VK_ERROR_FRAGMENTED_POOL) {
-				m_current_pool = grab_pool();
-				m_used_pools.push_back(m_current_pool);
-				alloc_info.descriptorPool = m_current_pool;
-				return vkAllocateDescriptorSets(m_device, &alloc_info, &out_set) == VK_SUCCESS;
-			}
-			return res == VK_SUCCESS;
-		}
+		VkDevice device;
 
 	private:
-		VkDevice m_device;
-		VkDescriptorPool m_current_pool = VK_NULL_HANDLE;
-		std::vector<VkDescriptorPool> m_used_pools;
-		std::vector<VkDescriptorPool> m_free_pools;
+		VkDescriptorPool grab_pool();
+		VkDescriptorPool create_pool(uint32_t count, uint32_t flags);
 
-		VkDescriptorPool grab_pool() {
-			if (!m_free_pools.empty()) {
-				VkDescriptorPool pool = m_free_pools.back();
-				m_free_pools.pop_back();
-				return pool;
-			}
-			return create_pool(1000, 1000); // 每次申请能存 1000 个 Set 的池子
-		}
+		VkDescriptorPool current_pool = VK_NULL_HANDLE;
+		std::vector<VkDescriptorPool> used_pools;
+		std::vector<VkDescriptorPool> free_pools;
+	};
 
-		VkDescriptorPool create_pool(uint32_t count, uint32_t flags) {
-			VkDescriptorPoolSize sizes[] = {
-				{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000 },
-				{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 },
-				// ... 添加你需要的大小
-			};
-			VkDescriptorPoolCreateInfo info{};
-			info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-			info.maxSets = count;
-			info.poolSizeCount = 2; // array size
-			info.pPoolSizes = sizes;
-			VkDescriptorPool pool;
-			vkCreateDescriptorPool(m_device, &info, nullptr, &pool);
-			return pool;
-		}
+	export class DescriptorLayoutBuilder {
+	public:
+		struct Binding {
+			uint32_t binding;
+			VkDescriptorType type;
+			uint32_t count;
+			VkShaderStageFlags stage_flags;
+			VkDescriptorBindingFlags binding_flags;
+		};
+
+		std::vector<Binding> bindings;
+
+		void add_binding(uint32_t binding, VkDescriptorType type, VkShaderStageFlags stageFlags = 0, uint32_t count = 1, VkDescriptorBindingFlags bindingFlags = 0);
+		void clear();
+		VkDescriptorSetLayout build(VkDevice device, VkShaderStageFlags shader_stages, void* pNext = nullptr, VkDescriptorSetLayoutCreateFlags flags = 0);
+	};
+
+	export class DescriptorWriter {
+	public:
+		std::deque<VkDescriptorImageInfo> image_infos;
+		std::deque<VkDescriptorBufferInfo> buffer_infos;
+		std::vector<VkWriteDescriptorSet> writes;
+
+		// Updated to support writing to specific array elements
+		void write_image(int binding, int arrayElement, VkImageView image, VkSampler sampler, VkImageLayout layout, VkDescriptorType type);
+		void write_buffer(int binding, VkBuffer buffer, size_t size, size_t offset, VkDescriptorType type);
+
+		void clear();
+		void update_set(VkDevice device, VkDescriptorSet set);
 	};
 }

@@ -4,9 +4,8 @@
 
 export module bud.graphics.pool;
 
-import bud.graphics.defs;
 import bud.graphics.types;
-import bud.graphics.memory; // 需要用到 MemoryBlock 定义
+import bud.graphics.memory;
 
 export namespace bud::graphics {
 

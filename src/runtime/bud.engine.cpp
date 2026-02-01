@@ -5,7 +5,6 @@
 #include <thread>
 #include <chrono>
 #include <print>
-//#include <glm/gtc/matrix_transform.hpp>
 
 #ifdef TRACY_ENABLE
 #include <tracy/Tracy.hpp>
@@ -16,8 +15,6 @@
 
 module bud.engine;
 
-import bud.input;
-import bud.math;
 
 using namespace bud::engine;
 
