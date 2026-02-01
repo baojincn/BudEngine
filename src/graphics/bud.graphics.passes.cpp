@@ -1,4 +1,3 @@
-module;
 #include <vector>
 #include <print>
 #include <glm/glm.hpp>
@@ -6,14 +5,14 @@ module;
 #include <stdexcept>
 #include <cmath>
 
-module bud.graphics.passes;
+#include "src/graphics/bud.graphics.passes.hpp"
 
-import bud.io;
-import bud.graphics.rhi;
-import bud.graphics.types;
-import bud.graphics.graph;
-import bud.scene;
-import bud.math;
+#include "src/io/bud.io.hpp"
+#include "src/graphics/bud.graphics.rhi.hpp"
+#include "src/graphics/bud.graphics.types.hpp"
+#include "src/graphics/graph/bud.graphics.graph.hpp"
+#include "src/runtime/bud.scene.hpp"
+#include "src/core/bud.math.hpp"
 
 namespace bud::graphics {
 

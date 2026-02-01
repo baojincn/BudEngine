@@ -1,4 +1,5 @@
-﻿module;
+﻿#pragma once
+
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <unordered_map>
@@ -6,14 +7,13 @@
 #include <memory>  // for unique_ptr
 #include <utility> // for move
 
-export module bud.vulkan.pool;
+#include "src/graphics/bud.graphics.types.hpp"
+#include "src/graphics/bud.graphics.pool.hpp"
+#include "src/graphics/bud.graphics.rhi.hpp" // For ResourcePool base
+#include "src/graphics/vulkan/bud.vulkan.types.hpp"
+#include "src/graphics/vulkan/bud.vulkan.memory.hpp"
 
-import bud.graphics.pool;
-import bud.graphics.types;
-import bud.vulkan.types;
-import bud.vulkan.memory;
-
-export namespace bud::graphics::vulkan {
+namespace bud::graphics::vulkan {
 
 	class VulkanResourcePool : public ResourcePool {
 	public:

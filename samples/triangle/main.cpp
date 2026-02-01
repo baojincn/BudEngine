@@ -2,9 +2,9 @@
 #include <exception>
 #include <functional>
 
-import bud.engine;
-import bud.graphics;
-import bud.io;
+#include "src/runtime/bud.engine.hpp"
+#include "src/graphics/bud.graphics.hpp"
+#include "src/io/bud.io.hpp"
 
 class GameApp {
 public:

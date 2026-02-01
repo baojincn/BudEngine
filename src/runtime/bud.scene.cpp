@@ -1,8 +1,7 @@
-module;
 #include <vector>
 #include <cmath>
 
-module bud.scene;
+#include "src/runtime/bud.scene.hpp"
 
 namespace bud::scene {
 

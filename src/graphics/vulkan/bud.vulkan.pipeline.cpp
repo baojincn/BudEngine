@@ -1,10 +1,10 @@
-module;
 #include <vulkan/vulkan.h>
 #include <unordered_map>
 #include <vector>
 #include <stdexcept>
 
-module bud.vulkan.pipeline;
+#include "src/graphics/vulkan/bud.vulkan.pipeline.hpp"
+#include "src/graphics/bud.graphics.types.hpp"
 
 namespace bud::graphics::vulkan {
 

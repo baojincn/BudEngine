@@ -1,15 +1,14 @@
-﻿module;
-#include <unordered_map>
+﻿#pragma once
 
-export module bud.input;
+#include <unordered_map>
 
 namespace bud::platform {
 	class Window;
 }
 
-export namespace bud::input {
+namespace bud::input {
 
-	export enum class Key {
+	 enum class Key {
 		Unknown = 0,
 		Escape,
 		Space,
@@ -23,13 +22,13 @@ export namespace bud::input {
 		E
 	};
 
-	export enum class MouseButton {
+	 enum class MouseButton {
 		Left,
 		Right,
 		Middle
 	};
 
-	export template<typename T>
+	 template<typename T>
 	class PassKey {
 	private:
 		friend T;
@@ -38,7 +37,7 @@ export namespace bud::input {
 		PassKey(const PassKey&) = default;
 	};
 
-	export class Input {
+	 class Input {
 	public:
 		static Input& get();
 

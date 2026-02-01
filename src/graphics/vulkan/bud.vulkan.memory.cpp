@@ -1,4 +1,3 @@
-module;
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <mutex>
@@ -6,7 +5,8 @@ module;
 #include <print>
 #include <stdexcept>
 
-module bud.vulkan.memory;
+#include "src/graphics/vulkan/bud.vulkan.memory.hpp"
+#include "src/graphics/bud.graphics.types.hpp"
 
 namespace bud::graphics::vulkan {
 

@@ -1,4 +1,3 @@
-module;
 #include <memory>
 #include <vector>
 #include <cmath>
@@ -6,15 +5,15 @@ module;
 #include <print>
 #include <cstring> // for std::memcpy
 
-module bud.graphics.renderer;
+#include "src/graphics/bud.graphics.renderer.hpp"
 
-import bud.graphics.rhi;
-import bud.graphics.graph;
-import bud.graphics.passes;
-import bud.graphics.types;
-import bud.io;
-import bud.scene;
-import bud.math;
+#include "src/graphics/bud.graphics.rhi.hpp"
+#include "src/graphics/graph/bud.graphics.graph.hpp"
+#include "src/graphics/bud.graphics.passes.hpp"
+#include "src/graphics/bud.graphics.types.hpp"
+#include "src/io/bud.io.hpp"
+#include "src/runtime/bud.scene.hpp"
+#include "src/core/bud.math.hpp"
 
 namespace bud::graphics {
 

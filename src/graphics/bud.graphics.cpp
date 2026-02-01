@@ -1,11 +1,10 @@
-﻿module;
+﻿
 #include <memory>
 #include <stdexcept>
 
-module bud.graphics;
-
-import bud.graphics.vulkan;
-// import bud.graphics.d3d12;
+#include "src/graphics/bud.graphics.hpp"
+#include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
+// #include "src/graphics/d3d12/bud.graphics.d3d12.hpp"
 
 namespace bud::graphics {
 

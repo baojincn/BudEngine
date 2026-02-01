@@ -1,4 +1,4 @@
-﻿module;
+﻿#pragma once
 
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -6,35 +6,32 @@
 #include <mutex>
 #include <memory>
 #include <unordered_map>
-#include <SDL3/SDL.h>
 
-export module bud.graphics.vulkan;
+#include "src/io/bud.io.hpp"
+#include "src/core/bud.math.hpp"
+#include "src/platform/bud.platform.hpp"
+#include "src/threading/bud.threading.hpp"
+#include "src/graphics/bud.graphics.rhi.hpp"
+#include "src/graphics/bud.graphics.types.hpp"
 
-import bud.io;
-import bud.math;     
-import bud.platform; 
-import bud.threading;
-import bud.graphics.rhi;
-import bud.graphics.types;
-
-import bud.vulkan.types;      
-import bud.vulkan.memory;     
-import bud.vulkan.pool;       
-import bud.vulkan.pipeline;   
-import bud.vulkan.descriptors;
+#include "src/graphics/vulkan/bud.vulkan.types.hpp"
+#include "src/graphics/vulkan/bud.vulkan.memory.hpp"
+#include "src/graphics/vulkan/bud.vulkan.pool.hpp"
+#include "src/graphics/vulkan/bud.vulkan.pipeline.hpp"
+#include "src/graphics/vulkan/bud.vulkan.descriptors.hpp"
 
 namespace bud::graphics::vulkan {
 
-	export using VkInstance = struct VkInstance_T*;
-	export using VkPhysicalDevice = struct VkPhysicalDevice_T*;
-	export using VkDevice = struct VkDevice_T*;
-	export using VkQueue = struct VkQueue_T*;
-	export using VkSurfaceKHR = struct VkSurfaceKHR_T*;
+	 using VkInstance = struct VkInstance_T*;
+	 using VkPhysicalDevice = struct VkPhysicalDevice_T*;
+	 using VkDevice = struct VkDevice_T*;
+	 using VkQueue = struct VkQueue_T*;
+	 using VkSurfaceKHR = struct VkSurfaceKHR_T*;
 
 	// 工具函数声明
 	VulkanLayoutTransition get_vk_transition(bud::graphics::ResourceState state);
 
-	export class VulkanRHI : public bud::graphics::RHI {
+	 class VulkanRHI : public bud::graphics::RHI {
 	public:
 		~VulkanRHI() = default;
 

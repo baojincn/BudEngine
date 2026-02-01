@@ -1,7 +1,5 @@
-module;
 #include <unordered_map>
-
-module bud.input;
+#include "src/runtime/bud.input.hpp"
 
 namespace bud::input {
 

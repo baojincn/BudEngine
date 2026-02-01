@@ -1,6 +1,5 @@
 ﻿/// The Task Scheduler is the core component that powers the engine's Job System.
 
-module;
 #include <atomic>
 #include <vector>
 #include <thread>
@@ -25,7 +24,7 @@ module;
 #define FrameMark
 #endif
 
-module bud.threading;
+#include "src/threading/bud.threading.hpp"
 
 // Assembly hooks
 #ifdef _WIN64

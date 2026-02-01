@@ -1,13 +1,12 @@
-﻿module;
+﻿#pragma once
+
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <deque>
 
-export module bud.vulkan.descriptors;
-
 namespace bud::graphics::vulkan {
 
-	export class VulkanDescriptorAllocator {
+	 class VulkanDescriptorAllocator {
 	public:
 		struct PoolSizeRatio {
 			VkDescriptorType type;
@@ -30,7 +29,7 @@ namespace bud::graphics::vulkan {
 		std::vector<VkDescriptorPool> free_pools;
 	};
 
-	export class DescriptorLayoutBuilder {
+	 class DescriptorLayoutBuilder {
 	public:
 		struct Binding {
 			uint32_t binding;
@@ -47,7 +46,7 @@ namespace bud::graphics::vulkan {
 		VkDescriptorSetLayout build(VkDevice device, VkShaderStageFlags shader_stages, void* pNext = nullptr, VkDescriptorSetLayoutCreateFlags flags = 0);
 	};
 
-	export class DescriptorWriter {
+	 class DescriptorWriter {
 	public:
 		std::deque<VkDescriptorImageInfo> image_infos;
 		std::deque<VkDescriptorBufferInfo> buffer_infos;

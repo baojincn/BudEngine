@@ -1,14 +1,12 @@
-﻿module;
+﻿#pragma once
 
 #include <vector>
 
-export module bud.scene;
+#include "src/core/bud.math.hpp"
 
-import bud.math;
+namespace bud::scene {
 
-export namespace bud::scene {
-
-	export class Camera {
+	 class Camera {
 	public:
 		bud::math::vec3 position;
 		bud::math::vec3 front;
@@ -36,13 +34,13 @@ export namespace bud::scene {
 		void update_camera_vectors();
 	};
 
-	export struct Entity {
+	 struct Entity {
 		uint32_t mesh_index;
 		bud::math::mat4 transform = bud::math::mat4(1.0f);
 		bool is_static = true;
 	};
 
-	export struct Scene {
+	 struct Scene {
 		Camera main_camera;
 		std::vector<Entity> entities;
 	};

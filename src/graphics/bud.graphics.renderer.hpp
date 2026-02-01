@@ -1,19 +1,18 @@
-﻿module;
+﻿#pragma once
+
 #include <memory>
 #include <vector>
 
-export module bud.graphics.renderer;
+#include "src/io/bud.io.hpp"
+#include "src/core/bud.math.hpp"
+#include "src/runtime/bud.scene.hpp"
 
-import bud.io;
-import bud.math;
-import bud.scene;
+#include "src/graphics/bud.graphics.types.hpp"
+#include "src/graphics/bud.graphics.rhi.hpp"
+#include "src/graphics/graph/bud.graphics.graph.hpp"
+#include "src/graphics/bud.graphics.passes.hpp"
 
-import bud.graphics.types;
-import bud.graphics.rhi;
-import bud.graphics.graph;
-import bud.graphics.passes;
-
-export namespace bud::graphics {
+namespace bud::graphics {
 	class Renderer {
 	public:
 		Renderer(RHI* rhi);

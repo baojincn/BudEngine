@@ -1,6 +1,4 @@
-﻿module;
-
-#include <vector>
+﻿#include <vector>
 #include <string>
 #include <filesystem>
 #include <fstream>
@@ -21,9 +19,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/hash.hpp>
 
-module bud.io;
-
-import bud.threading;
+#include "src/io/bud.io.hpp"
+#include "src/threading/bud.threading.hpp"
 
 using namespace bud::io;
 

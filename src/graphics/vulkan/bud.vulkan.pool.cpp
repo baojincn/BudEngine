@@ -1,4 +1,3 @@
-module;
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <unordered_map>
@@ -7,9 +6,11 @@ module;
 #include <utility>
 #include <stdexcept>
 
-module bud.vulkan.pool;
-
-import bud.vulkan.utils;
+#include "src/graphics/vulkan/bud.vulkan.pool.hpp"
+#include "src/graphics/vulkan/bud.vulkan.utils.hpp"
+#include "src/graphics/vulkan/bud.vulkan.types.hpp"
+#include "src/graphics/vulkan/bud.vulkan.memory.hpp"
+#include "src/graphics/bud.graphics.types.hpp"
 
 namespace bud::graphics::vulkan {
 

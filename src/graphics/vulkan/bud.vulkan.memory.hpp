@@ -1,4 +1,5 @@
-﻿module;
+﻿#pragma once
+
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <mutex>
@@ -6,10 +7,11 @@
 #include <print>
 #include <stdexcept>
 
-export module bud.vulkan.memory;
+#include "src/graphics/bud.graphics.types.hpp"
+#include "src/graphics/bud.graphics.memory.hpp" // For Allocator base if needed, or just types
 
-import bud.graphics.memory;
-import bud.graphics.types;
+// Forward decl
+namespace bud::graphics { struct MemoryBlock; enum class MemoryUsage; enum class ResourceState; class Allocator; }
 
 namespace bud::graphics::vulkan {
 
@@ -25,7 +27,7 @@ namespace bud::graphics::vulkan {
 		void reset();
 	};
 
-	export class VulkanMemoryAllocator : public bud::graphics::Allocator {
+	class VulkanMemoryAllocator : public bud::graphics::Allocator {
 	public:
 		VulkanMemoryAllocator(VkDevice device, VkPhysicalDevice phy_device, uint32_t frames_in_flight);
 

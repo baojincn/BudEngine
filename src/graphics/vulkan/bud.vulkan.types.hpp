@@ -1,15 +1,13 @@
-﻿module;
+﻿#pragma once
 
 #include <vector>
 #include <optional>
 #include <vulkan/vulkan.h>
 
-export module bud.vulkan.types;
+#include "src/core/bud.math.hpp"
+#include "src/graphics/bud.graphics.types.hpp"
 
-import bud.math;
-import bud.graphics.types;
-
-export namespace bud::graphics::vulkan {
+namespace bud::graphics::vulkan {
 	using VkInstance = struct VkInstance_T*;
 	using VkPhysicalDevice = struct VkPhysicalDevice_T*;
 	using VkDevice = struct VkDevice_T*;

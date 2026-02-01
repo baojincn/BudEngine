@@ -1,20 +1,19 @@
-﻿module;
+﻿#pragma once
+
 #include <vector>
 #include <print>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-export module bud.graphics.passes;
+#include "src/core/bud.math.hpp"
+#include "src/runtime/bud.scene.hpp"
+#include "src/io/bud.io.hpp"
 
-import bud.math;
-import bud.scene;
-import bud.io;
+#include "src/graphics/bud.graphics.types.hpp"
+#include "src/graphics/bud.graphics.rhi.hpp"
+#include "src/graphics/graph/bud.graphics.graph.hpp"
 
-import bud.graphics.types;
-import bud.graphics.graph;
-import bud.graphics.rhi;
-
-export namespace bud::graphics {
+namespace bud::graphics {
 
 	class CSMShadowPass {
 		void* pipeline = nullptr;

@@ -1,16 +1,15 @@
-﻿module;
+﻿#pragma once
+
 #include <string>
 #include <vector>
 #include <memory>
 
-export module bud.graphics.rhi;
+#include "src/core/bud.math.hpp"
+#include "src/platform/bud.platform.hpp"
+#include "src/threading/bud.threading.hpp"
+#include "src/graphics/bud.graphics.types.hpp"
 
-import bud.math;
-import bud.platform;
-import bud.threading;
-import bud.graphics.types;
-
-export namespace bud::graphics {
+namespace bud::graphics {
 
 	struct RenderPassBeginInfo {
 		std::vector<Texture*> color_attachments;
@@ -24,7 +23,7 @@ export namespace bud::graphics {
 
 	class ResourcePool;
 
-	export class RHI {
+	class RHI {
 	public:
 		virtual ~RHI() = default;
 		virtual void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation) = 0;

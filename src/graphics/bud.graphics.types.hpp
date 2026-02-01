@@ -1,22 +1,20 @@
-﻿module;
+﻿#pragma once
 
 #include <cstdint>
 #include <vector>
 #include <string>
 
-export module bud.graphics.types;
+#include "src/core/bud.math.hpp"
 
-import bud.math;
-
-export namespace bud::graphics {
+namespace bud::graphics {
 	// Enum, begin
-	export enum class Backend {
+	 enum class Backend {
 		Vulkan,
 		D3D12,
 		Metal
 	};
 
-	export enum class ResourceState {
+	 enum class ResourceState {
 		Undefined,
 		Common,            // D3D12_RESOURCE_STATE_COMMON / VK_IMAGE_LAYOUT_GENERAL
 		VertexBuffer,      // Vertex Buffer / Constant Buffer
@@ -32,7 +30,7 @@ export namespace bud::graphics {
 	};
 
 
-	export enum class ObjectType {
+	 enum class ObjectType {
 		Unknown,
 		Texture,        // VkImage / ID3D12Resource / MTLTexture
 		ImageView,      // VkImageView / D3D12_CPU_DESCRIPTOR_HANDLE (RTV/DSV)
@@ -50,7 +48,7 @@ export namespace bud::graphics {
 		DescriptorSet,  // VkDescriptorSet / ID3D12DescriptorHeap (部分对应)
 	};
 
-	export enum class TextureFormat {
+	 enum class TextureFormat {
 		Undefined,          // [FIX] For depth-only pipelines (no color attachment)
 		RGBA8_UNORM,
 		BGRA8_UNORM,
@@ -60,30 +58,30 @@ export namespace bud::graphics {
 		D24_UNORM_S8_UINT,
 	};
 
-	export enum class TextureType {
+	 enum class TextureType {
 		Texture2D,
 		Texture2DArray,
 		Texture3D,
 		TextureCube
 	};
 
-	export enum class MemoryUsage {
+	 enum class MemoryUsage {
 		GpuOnly,    // Device Local
 		CpuToGpu,   // Host Visible (Upload)
 		GpuToCpu,   // Host Visible (Readback)
 	};
 
-	export enum class CullMode {
+	 enum class CullMode {
 		None,
 		Front,
 		Back
 	};
 
-	export constexpr uint32_t MAX_CASCADES = 4;
+	 constexpr uint32_t MAX_CASCADES = 4;
 	// Enum, end
 
 	// POD, begin
-	export struct TextureDesc {
+	 struct TextureDesc {
 		uint32_t width = 1;
 		uint32_t height = 1;
 		uint32_t depth = 1;
@@ -94,7 +92,7 @@ export namespace bud::graphics {
 		ResourceState initial_state = ResourceState::Undefined;
 	};
 
-	export struct RenderConfig {
+	 struct RenderConfig {
 		uint32_t shadow_map_size = 2048; // [CSM] Reduced per-cascade size
 		float shadow_bias_constant = 1.25f;
 		float shadow_bias_slope = 1.75f;
@@ -115,7 +113,7 @@ export namespace bud::graphics {
 		bool cache_shadows = true;
 	};
 
-	export struct SceneView {
+	 struct SceneView {
 		bud::math::mat4 model = bud::math::mat4(1.0f); // Model/World transform
 		bud::math::mat4 view_matrix;
 		bud::math::mat4 proj_matrix;
@@ -143,24 +141,24 @@ export namespace bud::graphics {
 		}
 	};
 
-	export struct VertexAttribute {
+	 struct VertexAttribute {
 		uint32_t location;
 		uint32_t binding = 0;
 		TextureFormat format;
 		uint32_t offset;
 	};
 
-	export struct VertexInputLayout {
+	 struct VertexInputLayout {
 		std::vector<VertexAttribute> attributes;
 		uint32_t stride = 0;
 	};
 
-	export struct ShaderStage {
+	 struct ShaderStage {
 		std::vector<char> code;
 		std::string entry_point = "main";
 	};
 
-	export struct GraphicsPipelineDesc {
+	 struct GraphicsPipelineDesc {
 		ShaderStage vs;
 		ShaderStage fs;
 		VertexInputLayout vertex_layout;
@@ -174,7 +172,7 @@ export namespace bud::graphics {
 
 	using CommandHandle = void*;
 
-	export struct MemoryBlock {
+	 struct MemoryBlock {
 		void* internal_handle = nullptr;
 		uint64_t offset = 0;
 		uint64_t size = 0;
@@ -183,7 +181,7 @@ export namespace bud::graphics {
 	};
 
 	// 纹理基类
-	export class Texture {
+	 class Texture {
 	public:
 		virtual ~Texture() = default;
 
@@ -197,12 +195,12 @@ export namespace bud::graphics {
 	};
 
 
-	export struct CascadeData {
+	 struct CascadeData {
 		bud::math::mat4 view_proj_matrix;
 		float split_depth;
 	};
 
-	export struct RenderMesh {
+	 struct RenderMesh {
 		MemoryBlock vertex_buffer;
 		MemoryBlock index_buffer;
 		uint32_t index_count = 0;

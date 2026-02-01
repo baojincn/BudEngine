@@ -1,4 +1,4 @@
-﻿module;
+﻿
 
 #include <string>
 #include <memory>
@@ -13,10 +13,17 @@
 #define FrameMark
 #endif
 
-module bud.engine;
+#include "src/runtime/bud.engine.hpp"
 
+#include <print>
 
-using namespace bud::engine;
+// Imports moved to header or replaced by includes in header
+// import bud.core;
+// import bud.io;
+
+#include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
+
+namespace bud::engine {
 
 BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 	window = bud::platform::create_window(window_title, width, height);
@@ -25,6 +32,7 @@ BudEngine::BudEngine(const std::string& window_title, int width, int height) {
 	asset_manager = std::make_unique<bud::io::AssetManager>(task_scheduler.get());
 
 	rhi = bud::graphics::create_rhi(bud::graphics::Backend::Vulkan);
+
 #ifdef _DEBUG
 	bool enable_validation = true; 
 #else
@@ -156,3 +164,4 @@ void BudEngine::perform_rendering(float delta_time) {
 
 	renderer->render(scene, view);
 }
+} // namespace bud::engine

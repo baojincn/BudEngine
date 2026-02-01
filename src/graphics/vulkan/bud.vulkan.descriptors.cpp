@@ -1,9 +1,8 @@
-module;
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <algorithm>
 
-module bud.vulkan.descriptors;
+#include "src/graphics/vulkan/bud.vulkan.descriptors.hpp"
 
 namespace bud::graphics::vulkan {
 

@@ -1,11 +1,11 @@
-﻿module;
+﻿
 #include <cstdint>
 
-export module bud.graphics.memory;
+#pragma once
 
-import bud.graphics.types;
+#include "src/graphics/bud.graphics.types.hpp"
 
-export namespace bud::graphics {
+namespace bud::graphics {
 
 	class Allocator {
 	public:

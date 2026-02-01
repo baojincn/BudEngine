@@ -1,6 +1,4 @@
-﻿module;
-
-#include <vector>
+﻿#include <vector>
 #include <string>
 #include <iostream>
 #include <print>
@@ -14,14 +12,14 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
-module bud.graphics.vulkan;
+#include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
 
-import bud.math;
-import bud.platform;
-import bud.threading;
-import bud.graphics.types;
-import bud.vulkan.types;
-import bud.vulkan.utils;
+#include "src/core/bud.math.hpp"
+#include "src/platform/bud.platform.hpp"
+#include "src/threading/bud.threading.hpp"
+#include "src/graphics/bud.graphics.types.hpp"
+#include "src/graphics/vulkan/bud.vulkan.types.hpp"
+#include "src/graphics/vulkan/bud.vulkan.utils.hpp"
 
 using namespace bud::graphics;
 using namespace bud::graphics::vulkan;

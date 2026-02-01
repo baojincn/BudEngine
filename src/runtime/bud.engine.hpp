@@ -1,32 +1,30 @@
-﻿module;
+﻿#pragma once
 
 #include <string>
 #include <memory>
 #include <functional>
 
-export module bud.engine;
+#include "src/io/bud.io.hpp"
+#include "src/core/bud.core.hpp"
+#include "src/core/bud.math.hpp"
+#include "src/runtime/bud.input.hpp"
+#include "src/runtime/bud.scene.hpp"
+#include "src/threading/bud.threading.hpp"
+#include "src/platform/bud.platform.hpp"
 
-import bud.io;
-import bud.core;
-import bud.math;
-import bud.input;
-import bud.scene;
-import bud.threading;
-import bud.platform;
-
-import bud.graphics;
-import bud.graphics.renderer;
+#include "src/graphics/bud.graphics.hpp"
+#include "src/graphics/bud.graphics.renderer.hpp"
 
 
-export namespace bud::engine {
+namespace bud::engine {
 
-	export enum class EngineMode {
+	enum class EngineMode {
 		TASK_BASED,
 		THREAD_BASED,
 		MIXED
 	};
 
-	export class BudEngine {
+	class BudEngine {
 	public:
 
 		using TickCallback = std::function<void(float)>;

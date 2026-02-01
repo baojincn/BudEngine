@@ -1,4 +1,4 @@
-﻿module;
+﻿#pragma once
 
 #include <vector>
 #include <string>
@@ -16,14 +16,12 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/hash.hpp>
 
-export module bud.io;
+#include "src/threading/bud.threading.hpp"
 
-import bud.threading;
-
-export namespace bud::io {
+namespace bud::io {
 
 
-	export struct MeshData {
+	struct MeshData {
 		struct Vertex {
 			glm::vec3 pos;
 			glm::vec3 color;
@@ -41,7 +39,7 @@ export namespace bud::io {
 }
 
 // 特化 glm::vec3 和 glm::vec2 的哈希函数
-export namespace std {
+namespace std {
 	template<> struct hash<bud::io::MeshData::Vertex> {
 		auto operator()(bud::io::MeshData::Vertex const& vertex) const {
 			auto h1 = hash<glm::vec3>()(vertex.pos);
@@ -55,9 +53,9 @@ export namespace std {
 	};
 }
 
-export namespace bud::io {
+namespace bud::io {
 
-	export class FileSystem {
+	class FileSystem {
 	public:
 		static std::optional<std::filesystem::path> resolve_path(const std::filesystem::path& path);
 
@@ -67,7 +65,7 @@ export namespace bud::io {
 
 
 	// RAII 封装：自动释放 stbi 内存
-	export class Image {
+	class Image {
 	public:
 		int width = 0;
 		int height = 0;
@@ -94,13 +92,13 @@ export namespace bud::io {
 	};
 
 
-	export class ImageLoader {
+	class ImageLoader {
 	public:
 		static std::optional<Image> load(const std::filesystem::path& path);
 	};
 
 
-	export class ModelLoader {
+	class ModelLoader {
 	public:
 		static std::optional<MeshData> load_obj(const std::filesystem::path& path);
 
@@ -109,7 +107,7 @@ export namespace bud::io {
 		static MeshData convert_to_mesh_data(const tinygltf::Model& model);
 	};
 
-	export class AssetManager {
+	class AssetManager {
 	public:
 		AssetManager(bud::threading::TaskScheduler* scheduler);
 

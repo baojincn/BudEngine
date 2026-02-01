@@ -1,15 +1,13 @@
-﻿module;
+﻿#pragma once
 
 // 集中管理 GLM 依赖
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-export module bud.math;
-
-
-export namespace bud::math {
+namespace bud::math {
 	// 导出 GLM 类型，方便其他模块使用
 	using vec2 = glm::vec2;
 	using vec3 = glm::vec3;
@@ -59,25 +57,25 @@ export namespace bud::math {
 	constexpr float ZOOM = 45.0f;
 
 
-	export mat4 ortho_vk(float left, float right, float bottom, float top, float near, float far) {
+	inline mat4 ortho_vk(float left, float right, float bottom, float top, float near, float far) {
 		mat4 proj = glm::ortho(left, right, bottom, top, near, far);
 		proj[1][1] *= -1;
 
 		return proj;
 	}
 
-	export mat4 perspective_vk(float fov, float aspect, float near_plane, float far_plane) {
+	inline mat4 perspective_vk(float fov, float aspect, float near_plane, float far_plane) {
 		mat4 proj = glm::perspective(glm::radians(fov), aspect, near_plane, far_plane);
 		proj[1][1] *= -1; // Vulkan Y-flip
 		return proj;
 	}
 
 	// 几何体
-	export struct BoundingSphere {
+	struct BoundingSphere {
 		vec3 center{ 0.0f };
 		float radius = 0.0f;
 
-		BoundingSphere transform(const mat4& m) const {
+		inline BoundingSphere transform(const mat4& m) const {
 			vec4 new_center = m * vec4(center, 1.0f);
 			// Uniform scale assumption for radius transform
 			float max_scale = std::max(std::max(length(vec3(m[0])), length(vec3(m[1]))), length(vec3(m[2])));
@@ -85,24 +83,24 @@ export namespace bud::math {
 		}
 	};
 
-	export struct AABB {
+	struct AABB {
 		vec3 min{ std::numeric_limits<float>::max() };
 		vec3 max{ std::numeric_limits<float>::lowest() };
 
-		void merge(const vec3& p) {
+		inline void merge(const vec3& p) {
 			min = glm::min(min, p);
 			max = glm::max(max, p);
 		}
 
-		void merge(const AABB& other) {
+		inline void merge(const AABB& other) {
 			min = glm::min(min, other.min);
 			max = glm::max(max, other.max);
 		}
 
-		vec3 center() const { return (min + max) * 0.5f; }
-		vec3 size() const { return max - min; }
+		inline vec3 center() const { return (min + max) * 0.5f; }
+		inline vec3 size() const { return max - min; }
 
-		AABB transform(const mat4& m) const {
+		inline AABB transform(const mat4& m) const {
 			vec3 corners[8] = {
 				{min.x, min.y, min.z}, {min.x, min.y, max.z},
 				{min.x, max.y, min.z}, {min.x, max.y, max.z},
@@ -118,10 +116,10 @@ export namespace bud::math {
 		}
 	};
 
-	export struct Frustum {
+	struct Frustum {
 		vec4 planes[6];
 
-		void update(const mat4& vp) {
+		inline void update(const mat4& vp) {
 			mat4 m = transpose(vp);
 			planes[0] = m[3] + m[0]; // Left
 			planes[1] = m[3] - m[0]; // Right
@@ -137,7 +135,7 @@ export namespace bud::math {
 		}
 	};
 
-	export bool intersect_sphere_frustum(const BoundingSphere& s, const Frustum& f) {
+	inline bool intersect_sphere_frustum(const BoundingSphere& s, const Frustum& f) {
 		for (const auto& plane : f.planes) {
 			if (dot(vec3(plane), s.center) + plane.w < -s.radius)
 				return false;
@@ -145,7 +143,7 @@ export namespace bud::math {
 		return true;
 	}
 
-	export bool intersect_aabb_frustum(const AABB& b, const Frustum& f) {
+	inline bool intersect_aabb_frustum(const AABB& b, const Frustum& f) {
 		// Optimization: Check if all 8 corners are outside one plane
 		for (const auto& plane : f.planes) {
 			int out = 0;
@@ -170,51 +168,51 @@ export namespace bud::math {
 //	return a * b;
 //}
 
-export inline bud::math::mat4 operator*(const bud::math::mat4& a, const bud::math::mat4& b) {
+inline bud::math::mat4 operator*(const bud::math::mat4& a, const bud::math::mat4& b) {
 	using glm::operator*;
 	return a * b;
 }
 
 // Column vector 
-export inline bud::math::vec4 operator*(const bud::math::mat4& m, const bud::math::vec4& v) {
+inline bud::math::vec4 operator*(const bud::math::mat4& m, const bud::math::vec4& v) {
 	using glm::operator*;
 	return m * v;
 }
 
 // Row vector
-export inline bud::math::vec4 operator*(const bud::math::vec4& v, const bud::math::mat4& m) {
+inline bud::math::vec4 operator*(const bud::math::vec4& v, const bud::math::mat4& m) {
 	using glm::operator*;
 	return v * m;
 }
 
-export inline bud::math::vec3 operator+(const bud::math::vec3& v1, const bud::math::vec3& v2) {
+inline bud::math::vec3 operator+(const bud::math::vec3& v1, const bud::math::vec3& v2) {
 	using glm::operator+;
 	return v1 + v2;
 }
 
-export inline bud::math::vec3 operator-(const bud::math::vec3& v1, const bud::math::vec3& v2) {
+inline bud::math::vec3 operator-(const bud::math::vec3& v1, const bud::math::vec3& v2) {
 	using glm::operator-;
 	return v1 - v2;
 }
 
-export inline bud::math::vec4 operator+(const bud::math::vec4& v1, const bud::math::vec4& v2) {
+inline bud::math::vec4 operator+(const bud::math::vec4& v1, const bud::math::vec4& v2) {
 	using glm::operator+;
 	return v1 + v2;
 }
 
-export inline bud::math::vec4 operator-(const bud::math::vec4& v1, const bud::math::vec4& v2) {
+inline bud::math::vec4 operator-(const bud::math::vec4& v1, const bud::math::vec4& v2) {
 	using glm::operator-;
 	return v1 - v2;
 }
 
 
 
-export inline bud::math::mat4 operator*(const bud::math::mat4& m, float scalar) {
+inline bud::math::mat4 operator*(const bud::math::mat4& m, float scalar) {
 	using glm::operator*;
 	return m * scalar;
 }
 
-export inline bud::math::mat4 operator*(float scalar, const bud::math::mat4& m) {
+inline bud::math::mat4 operator*(float scalar, const bud::math::mat4& m) {
 	using glm::operator*;
 	return scalar * m;
 }

@@ -1,13 +1,13 @@
-﻿module;
+﻿
 
 #include <functional>
 
-export module bud.graphics.pool;
+#pragma once
 
-import bud.graphics.types;
-import bud.graphics.memory;
+#include "src/graphics/bud.graphics.types.hpp"
+#include "src/graphics/bud.graphics.memory.hpp"
 
-export namespace bud::graphics {
+namespace bud::graphics {
 
 	// 资源池接口
 	// RenderGraph 在 Compile 阶段会计算好所有的 Transient 资源需求

@@ -1,18 +1,17 @@
-﻿module;
+﻿#pragma once
+
 #include <vulkan/vulkan.h>
 #include <unordered_map>
 #include <vector>
 #include <functional> // for std::hash
 #include <stdexcept>
 
-export module bud.vulkan.pipeline;
+#include "src/graphics/bud.graphics.types.hpp"
 
-import bud.graphics.types;
-
-export namespace bud::graphics::vulkan {
+namespace bud::graphics::vulkan {
 
 	// 这是一个巨大的 Key，包含了创建管线所需的所有状态
-	export struct PipelineKey {
+	 struct PipelineKey {
 		VkShaderModule vert_shader;
 		VkShaderModule frag_shader;
 		VkRenderPass render_pass;
@@ -31,7 +30,7 @@ export namespace bud::graphics::vulkan {
 		}
 	};
 
-	export struct PipelineKeyHash {
+	 struct PipelineKeyHash {
 		std::size_t operator()(const PipelineKey& k) const {
 			return std::hash<void*>()(k.vert_shader) ^
 				(std::hash<void*>()(k.frag_shader) << 1) ^
@@ -41,7 +40,7 @@ export namespace bud::graphics::vulkan {
 	};
 
 
-	export class VulkanPipelineCache {
+	 class VulkanPipelineCache {
 	public:
 		void init(VkDevice device);
 		void cleanup();

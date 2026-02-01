@@ -1,13 +1,12 @@
-﻿module;
+﻿#pragma once
+
 #include <vulkan/vulkan.h>
 #include <stdexcept>
 #include <format>
 
-export module bud.vulkan.utils;
+#include "src/graphics/bud.graphics.types.hpp"
 
-import bud.graphics.types;
-
-export namespace bud::graphics::vulkan {
+namespace bud::graphics::vulkan {
 
 	constexpr VkObjectType to_vk_object_type(bud::graphics::ObjectType type) {
 		switch (type) {
@@ -81,11 +80,7 @@ export namespace bud::graphics::vulkan {
 
 	// --- 4. 状态转换 (Barrier 用) ---
 	// 这个之前写在 RHI 里，现在搬过来统一管理
-	struct VulkanLayoutTransition {
-		VkImageLayout layout;
-		VkAccessFlags access;
-		VkPipelineStageFlags stage;
-	};
+	// struct VulkanLayoutTransition moved to types.hpp
 
 	constexpr VulkanLayoutTransition to_vk_transition(ResourceState state) {
 		switch (state) {

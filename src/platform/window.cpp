@@ -1,17 +1,22 @@
-﻿module;
+﻿
 
 #include <SDL3/SDL.h>
 #include <stdexcept>
+#include "src/platform/bud.platform.hpp"
+
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
 #include <print>
 #include <string>
 #include <memory>
 
-module bud.platform;
+#include "src/runtime/bud.input.hpp"
 
 namespace bud::platform {
 
-	bud::input::Key sdl_to_bud_key(SDL_Keycode sdl_key) {
-		switch (sdl_key) {
+namespace {
+	bud::input::Key sdl_to_bud_key(SDL_Keycode key) {
+		switch (key) {
 		case SDLK_ESCAPE: return bud::input::Key::Escape;
 		case SDLK_SPACE:  return bud::input::Key::Space;
 		case SDLK_RETURN: return bud::input::Key::Enter;
@@ -153,6 +158,8 @@ namespace bud::platform {
 
 	};
 
+} // namespace
+
 	std::unique_ptr<Window> create_window(const std::string& title, int width, int height) {
 #ifdef _WIN32
 		return std::make_unique<WindowWin>(title, width, height);
@@ -160,4 +167,5 @@ namespace bud::platform {
 		throw std::runtime_error("Platform not supported");
 #endif
 	}
-}
+
+} // namespace bud::platform

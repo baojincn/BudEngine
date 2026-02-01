@@ -1,6 +1,7 @@
 ﻿/// The Task Scheduler is the core component that powers the engine's Job System.
 
-module;
+#pragma once
+
 #include <atomic>
 #include <vector>
 #include <thread>
@@ -10,11 +11,7 @@ module;
 #include <mutex>
 #include <deque>
 
-
-
-export module bud.threading;
-
-export namespace bud::threading {
+namespace bud::threading {
 	struct Fiber;
 	class TaskScheduler;
 
@@ -165,10 +162,10 @@ export namespace bud::threading {
 	/// <summary>
 	/// Thread-local pointer that stores a worker thread's stack pointer (RSP) for the current thread.
 	/// </summary>
-	thread_local void* t_worker_rsp = nullptr;
-	thread_local Fiber* t_current_fiber = nullptr;
-	thread_local size_t t_worker_index = 0;
-	thread_local TaskScheduler* t_scheduler = nullptr;
+	inline thread_local void* t_worker_rsp = nullptr;
+	inline thread_local Fiber* t_current_fiber = nullptr;
+	inline thread_local size_t t_worker_index = 0;
+	inline thread_local TaskScheduler* t_scheduler = nullptr;
 
 
 
@@ -247,7 +244,7 @@ export namespace bud::threading {
 	/// -----------------------------------------------------------------------------
 
 
-	export class TaskScheduler {
+	class TaskScheduler {
 		struct alignas(CACHE_LINE) Worker {
 			std::jthread thread;
 			WorkStealingQueue<Fiber*> queue;
