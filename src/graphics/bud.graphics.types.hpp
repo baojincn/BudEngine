@@ -97,11 +97,11 @@ namespace bud::graphics {
 		float shadow_bias_constant = 1.25f;
 		float shadow_bias_slope = 1.75f;
 		float shadow_ortho_size = 35.0f;
-		float shadow_near_plane = 0.1f;
-		float shadow_far_plane = 100.0f;
+		float shadow_near_plane = 1.0f;
+		float shadow_far_plane = 3000.0f;
 
 		uint32_t cascade_count = 4;
-		float cascade_split_lambda = 0.95f; // Practical Split Scheme
+		float cascade_split_lambda = 0.75f; // Practical Split Scheme
 
 		bud::math::vec3 directional_light_position = { 5.0f, 15.0f, 5.0f };
 		bud::math::vec3 directional_light_color = { 1.0f, 1.0f, 1.0f };

@@ -33,9 +33,9 @@ namespace bud::graphics {
 			const bud::scene::Scene& scene, const std::vector<RenderMesh>& meshes);
 	};
 
-	// --- 2. 主光照 Pass ---
+	
 	class MainPass {
-		void* pipeline = nullptr;  // Graphics pipeline handle
+		void* pipeline = nullptr;
 		
 	public:
 		void init(RHI* rhi);

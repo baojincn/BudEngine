@@ -56,8 +56,8 @@ namespace bud::engine {
 
 		// 渲染配置
 		float aspect_ratio{ 16.0f / 9.0f };
-		float far_plane{ 4000.0f };
-		float near_plane{ 0.1f };
+		float far_plane{ 5000.0f };
+		float near_plane{ 1.0f };
 
 		bool running = true;
 	};

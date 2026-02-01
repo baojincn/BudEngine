@@ -28,7 +28,7 @@ public:
 		config.shadow_bias_slope = 0.000f;
 		config.cache_shadows = false;
 		config.ambient_strength = 0.4f;
-		config.debug_cascades = true;
+		config.debug_cascades = false;
 
 		renderer->set_config(config);
 	}

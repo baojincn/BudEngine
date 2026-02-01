@@ -121,6 +121,8 @@ namespace bud::graphics {
         if (!cmd)
             return;
 
+		rhi->set_render_config(render_config);
+
         auto swapchain_tex = rhi->get_current_swapchain_texture();
         auto back_buffer = render_graph.import_texture("Backbuffer", swapchain_tex, ResourceState::RenderTarget);
 
@@ -148,18 +150,23 @@ namespace bud::graphics {
     }
 
     void Renderer::update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb) {
-        auto near = view.near_plane;
-        auto far = view.far_plane;
+        auto cam_near = view.near_plane;
+        auto cam_far = view.far_plane;
+		auto shadow_far = config.shadow_far_plane;
+		if (shadow_far > cam_far) {
+			shadow_far = cam_far;
+		}
+
         auto lambda = config.cascade_split_lambda;
 
         // 1. Calculate Split Depths (Log-Linear)
         float cascade_splits[MAX_CASCADES];
         for (uint32_t i = 0; i < config.cascade_count; ++i) {
             auto p = (float)(i + 1) / (float)config.cascade_count;
-            auto log = near * std::pow(far / near, p);
-            auto uniform = near + (far - near) * p;
+            auto log = cam_near * std::pow(shadow_far / cam_near, p);
+            auto uniform = cam_near + (shadow_far - cam_near) * p;
             auto d = lambda * log + (1.0f - lambda) * uniform;
-            cascade_splits[i] = (d - near) / (far - near);
+            cascade_splits[i] = (d - cam_near) / (cam_far - cam_near);
             view.cascade_split_depths[i] = d;
         }
 

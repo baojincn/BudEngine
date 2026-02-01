@@ -39,7 +39,7 @@ namespace bud::engine {
 		renderer = std::make_unique<bud::graphics::Renderer>(rhi.get(), asset_manager.get());
 
 		scene.main_camera = bud::scene::Camera(bud::math::vec3(0.0f, 100.0f, 0.0f));
-		scene.main_camera.movement_speed = 50.0f;
+		scene.main_camera.movement_speed = 70.0f;
 	}
 
 	BudEngine::~BudEngine() {

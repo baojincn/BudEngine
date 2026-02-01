@@ -200,10 +200,10 @@ void main() {
     vec3 H = normalize(V + L);
 
     vec3 cascadeColors[4] = vec3[](
-        vec3(1.0, 0.2, 0.2),
-        vec3(0.2, 1.0, 0.2),
-        vec3(0.2, 0.2, 1.0),
-        vec3(1.0, 1.0, 0.2)
+        vec3(1.0, 0.1, 0.1),
+        vec3(0.1, 1.0, 0.1),
+        vec3(0.1, 0.1, 1.0),
+        vec3(1.0, 1.0, 0.1)
     );
 
     vec3 F0 = vec3(0.04); 
@@ -243,9 +243,16 @@ void main() {
         int debugLayer = -1;
         vec4 debugViewPos = ubo.view * vec4(frag_world_pos, 1.0);
         float debugDepth = -debugViewPos.z;
-        for (int i = 0; i < 4; ++i) { if (debugDepth < ubo.cascade_split_depths[i]) { debugLayer = i; break; } }
-        if (debugLayer == -1) debugLayer = 3;
-        color = mix(color, albedo * cascadeColors[debugLayer], 0.3);
+        for (int i = 0; i < 4; ++i) {
+			if (debugDepth < ubo.cascade_split_depths[i]) {
+				debugLayer = i;
+				break;
+			}
+		}
+
+        if (debugLayer == -1)
+			debugLayer = 3;
+        color = mix(color, albedo * cascadeColors[debugLayer], 0.5);
     }
 
     color = ACESFilm(color);

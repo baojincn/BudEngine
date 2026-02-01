@@ -57,8 +57,8 @@ namespace bud::math {
 	constexpr float ZOOM = 45.0f;
 
 
-	inline mat4 ortho_vk(float left, float right, float bottom, float top, float near, float far) {
-		mat4 proj = glm::ortho(left, right, bottom, top, near, far);
+	inline mat4 ortho_vk(float left, float right, float bottom, float top, float cam_near, float cam_far) {
+		mat4 proj = glm::ortho(left, right, bottom, top, cam_near, cam_far);
 		proj[1][1] *= -1;
 
 		return proj;
