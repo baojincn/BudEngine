@@ -25,10 +25,10 @@ if(NOT DEFINED BUD_ENABLE_PROFILING)
 	option(BUD_ENABLE_PROFILING "Enable Tracy Profiler" OFF)
 endif()
 
-# MSVC 模块支持
-if(MSVC)
-    set(CMAKE_CXX_SCAN_FOR_MODULES ON)
-endif()
+# MSVC 模块支持 (Removed for now due to ICEs)
+# if(MSVC)
+#     set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+# endif()
 
 # 检测平台
 if(WIN32)
@@ -122,43 +122,62 @@ if(MSVC)
 	target_link_options(bud_engine_core PRIVATE "/CETCOMPAT:NO")
 endif()
 
-# Add assembly sources and module files
+# Add sources (Standard C++ Headers/Sources)
 target_sources(bud_engine_core
     PRIVATE
         "src/platform/windows/switch_context_win_x86_64.asm"
 		"src/platform/window.cpp"
-		"src/runtime/bud_engine.cpp"
+		"src/runtime/bud.engine.cpp"
 		"src/graphics/bud.graphics.cpp"
+        "src/graphics/bud.graphics.passes.cpp"
+        "src/graphics/bud.graphics.renderer.cpp"
+        "src/graphics/graph/bud.graphics.graph.cpp"
+        
 		"src/graphics/vulkan/bud.graphics.vulkan.cpp"
-		"src/third_party/bud_third_party.cpp"
+		"src/graphics/vulkan/bud.vulkan.memory.cpp"
+		"src/graphics/vulkan/bud.vulkan.descriptors.cpp"
+		"src/graphics/vulkan/bud.vulkan.pipeline.cpp"
+		"src/graphics/vulkan/bud.vulkan.pool.cpp"
+
+		"src/io/bud.io.cpp"
+		"src/threading/bud.threading.cpp"
+        "src/third_party/bud_third_party.cpp"
+
+		"src/runtime/bud.input.cpp"
+		"src/runtime/bud.scene.cpp"
+
     PUBLIC
-        FILE_SET CXX_MODULES
-        TYPE CXX_MODULES
-        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src
-        FILES
-            "src/core/bud.core.cppm"
-            "src/core/bud.math.cppm"
-            "src/io/bud.io.cppm"
-            "src/dod/bud.dod.cppm"
-            "src/runtime/bud.engine.cppm"
-            "src/platform/bud.platform.cppm"
-            "src/threading/bud.threading.cppm"
+		# Headers
+		"src/core/bud.core.hpp"
+		"src/core/bud.math.hpp"
+		"src/io/bud.io.hpp"
+		"src/dod/bud.dod.hpp"
+		"src/runtime/bud.engine.hpp"
+		"src/platform/bud.platform.hpp"
+		"src/threading/bud.threading.hpp"
+		"src/runtime/bud.input.hpp"
+		"src/runtime/bud.scene.hpp"
 
-			"src/graphics/bud.graphics.cppm"
+		"src/graphics/bud.graphics.hpp"
+		"src/graphics/bud.graphics.rhi.hpp"
+		"src/graphics/bud.graphics.scene.hpp"
+		"src/graphics/bud.graphics.types.hpp"
+		"src/graphics/bud.graphics.memory.hpp"
+		"src/graphics/bud.graphics.pool.hpp"
+		"src/graphics/bud.graphics.passes.hpp"
+		"src/graphics/bud.graphics.renderer.hpp"
+		"src/graphics/graph/bud.graphics.graph.hpp"
 
-			"src/graphics/vulkan/bud.graphics.vulkan.cppm"
-			"src/graphics/vulkan/bud.vulkan.memory.cppm"
-			"src/graphics/d3d12/bud.graphics.d3d12.cppm"
-			"src/graphics/d3d12/bud.d3d12.memory.cppm"
-			"src/graphics/bud.graphics.passes.cppm"
-			"src/runtime/bud.scene.cppm"
-			"src/graphics/bud.graphics.renderer.cppm"
-			"src/runtime/bud.gameplay.cppm"
-			"src/runtime/bud.input.cppm"
-			"src/graphics/graph/bud.graphics.graph.cppm"
-			"src/graphics/bud.graphics.defs.cppm")
+		"src/graphics/vulkan/bud.graphics.vulkan.hpp"
+		"src/graphics/vulkan/bud.vulkan.memory.hpp"
+		"src/graphics/vulkan/bud.vulkan.descriptors.hpp"
+		"src/graphics/vulkan/bud.vulkan.pipeline.hpp"
+		"src/graphics/vulkan/bud.vulkan.pool.hpp"
+		"src/graphics/vulkan/bud.vulkan.types.hpp"
+		"src/graphics/vulkan/bud.vulkan.utils.hpp"
+)
 
-set_target_properties(bud_engine_core PROPERTIES CXX_SCAN_FOR_MODULES ON)
+# set_target_properties(bud_engine_core PROPERTIES CXX_SCAN_FOR_MODULES ON)
 
 target_link_libraries(
     bud_engine_core
@@ -179,7 +198,7 @@ if(BUD_BUILD_SAMPLES)
     set_target_properties(triangle_sample PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 	set_target_properties(triangle_sample PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
-	set_property(TARGET triangle_sample PROPERTY CXX_SCAN_FOR_MODULES ON)
+	# set_property(TARGET triangle_sample PROPERTY CXX_SCAN_FOR_MODULES ON)
 
 	if(MSVC)
         target_link_options(triangle_sample PRIVATE "/CETCOMPAT:NO")

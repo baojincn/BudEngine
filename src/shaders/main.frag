@@ -1,28 +1,32 @@
 #version 450
 #extension GL_EXT_nonuniform_qualifier : enable
 
-layout(location = 0) in vec3 fragWorldPos;
-layout(location = 1) in vec3 fragNormal;
-layout(location = 2) in vec2 fragTexCoord;
-layout(location = 3) in flat float fragTexIndex;
-layout(location = 4) in vec4 fragPosLightSpace;
+layout(location = 0) in vec3 frag_world_pos;
+layout(location = 1) in vec3 frag_normal;
+layout(location = 2) in vec2 frag_tex_coord;
+layout(location = 3) in flat float frag_tex_index;
+// [CSM] fragPosLightSpace removed, we use worldPos per cascade
 
-layout(location = 0) out vec4 outColor;
+layout(location = 0) out vec4 out_color;
 
 layout(binding = 0) uniform UniformBufferObject {
-    mat4 model;
     mat4 view;
     mat4 proj;
-	mat4 lightSpaceMatrix;
-    vec3 camPos;
-    vec3 lightDir;
-    vec3 lightColor;
-    float lightIntensity;
-    float ambientStrength;
+	// [CSM]
+	mat4 cascade_view_proj[4];
+	vec4 cascade_split_depths;
+	
+    vec3 cam_pos;
+    vec3 light_dir;
+    vec3 light_color;
+    float light_intensity;
+    float ambient_strength;
+	uint cascade_count;
+	uint debug_cascades;
 } ubo;
 
-layout(binding = 1) uniform sampler2D texSamplers[];
-layout(binding = 2) uniform sampler2DShadow shadowMap;
+layout(binding = 1) uniform sampler2D tex_samplers[];
+layout(binding = 2) uniform sampler2DArrayShadow shadow_map;
 
 const float PI = 3.14159265359;
 
@@ -87,61 +91,127 @@ vec2 poissonDisk[16] = vec2[](
    vec2( 0.14383161, -0.14100790 ) 
 );
 
-float ShadowCalculation(vec4 fragPosLightSpace, vec3 N, vec3 L) {
-    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+float SampleCascade(int layer, vec3 world_pos, vec3 N, vec3 L) {
+    vec4 frag_pos_light_space = ubo.cascade_view_proj[layer] * vec4(world_pos, 1.0);
+    vec3 proj_coords = frag_pos_light_space.xyz / frag_pos_light_space.w;
     
-    // [0, 1]
-    projCoords.xy = projCoords.xy * 0.5 + 0.5;
+    // NDC -> [0, 1]
+    proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
 
-    // 超出视锥体
-    if(projCoords.z > 1.0)
-		return 0.0;
+    // 超出视锥体范围，视作无阴影
+    if(proj_coords.z > 1.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 || proj_coords.y < 0.0 || proj_coords.y > 1.0)
+        return 0.0;
 
-    // 解决 Shadow Acne
-    // Bias 越大角度越倾斜
-    float currentDepth = projCoords.z;
-    float bias = max(0.005 * (1.0 - dot(N, L)), 0.001); 
+    // Bias: 既然 C++ 端已经设置了硬件 DepthBias，这里保持 0.0 或者非常小的值即可
+    // 如果发现波纹，可以在这里加一点点: max(0.0005 * (1.0 - dot(N, L)), 0.00005)
+    float bias = 0.0; 
 
-    // Percentage-closer filtering
-    float shadow = 0.0;
-    vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
-	float spread = 0.8;
+    // PCF
+    float shadow_sum = 0.0;
+    vec2 texel_size = 1.0 / textureSize(shadow_map, 0).xy;
+    
+    // Spread: 控制软阴影程度
+    // 技巧：远处的级联 (layer 越大) 纹素覆盖的世界面积越大，
+    // 如果保持 spread 不变，远处阴影会显得非常软（模糊）。这是期望的效果，能掩盖锯齿。
+    float spread = 2.5; 
 
     for(int i = 0; i < 16; ++i) {
-			vec2 offset = poissonDisk[i] * texelSize * spread;
-            float pcf = texture(shadowMap, vec3(projCoords.xy + offset, currentDepth - bias));
-			
-            shadow += pcf;        
+        vec2 offset = poissonDisk[i] * texel_size * spread;
+        // 注意：sampler2DArrayShadow 期望的坐标是 vec4(uv.x, uv.y, layer_index, depth_ref)
+        float pcf_depth = proj_coords.z - bias;
+        shadow_sum += texture(shadow_map, vec4(proj_coords.xy + offset, float(layer), pcf_depth));
     }
 
-    shadow = 1.0 - (shadow / 16.0);
+    // texture 返回的是 "是否通过测试" (1.0 = 被照亮, 0.0 = 在阴影中)
+    // 所以累加后 shadow_sum 是 "光照强度"
+    // 我们最后需要返回 "阴影强度" (1.0 = 全黑)
+    return 1.0 - (shadow_sum / 16.0);
+}
+
+
+float ShadowCalculation(vec3 world_pos, vec3 N, vec3 L) {
+	// 1. Cascade Selection
+	vec4 view_pos = ubo.view * vec4(world_pos, 1.0);
+	float depth = -view_pos.z;
+
+	int layer = -1;
+	float blend_band = 1.5f;
+	float blend_factor = 0.0f;
+	int next_layer = -1;
+
+	for (int i = 0; i < 4; ++i) {
+		if (depth < ubo.cascade_split_depths[i]) {
+			layer = i;
+
+			// Blend between cascades
+			float split_dist = ubo.cascade_split_depths[i];
+			float dist_to_edge = split_dist - depth;
+
+			if (dist_to_edge < blend_band && i < 3) {
+				next_layer = i + 1;
+				blend_factor = 1.0 - (dist_to_edge / blend_band);
+			}
+
+			break;
+		}
+	}
+
+	if (layer == -1)
+		layer = 3;
+
+	// 2. 采样当前层级
+    float shadow = SampleCascade(layer, world_pos, N, L);
+
+    // 3. 如果处于混合带，采样下一层级并插值
+    if (blend_factor > 0.001) {
+        float next_shadow = SampleCascade(layer + 1, world_pos, N, L);
+        
+        // 线性插值：blend_factor 越大，越倾向于 next_shadow
+        shadow = mix(shadow, next_shadow, blend_factor);
+    }
+
     return shadow;
 }
 
 void main() {
-    int texID = int(fragTexIndex + 0.5);
-    vec4 albedoSample = texture(texSamplers[nonuniformEXT(texID)], fragTexCoord);
+    int tex_id = int(frag_tex_index + 0.5);
+    vec4 albedo_sample;
+    
+    // [FIX] Handle unbound texture index 0 or missing textures
+    if (tex_id <= 0) {
+        albedo_sample = vec4(0.8, 0.1, 0.8, 1.0); // Highlight non-textured walls in Magenta
+    } else {
+        albedo_sample = texture(tex_samplers[nonuniformEXT(tex_id)], frag_tex_coord);
+    }
 
-	if (albedoSample.a < 0.5)
+	// [FIX] Disable discard as Sponza wall textures use alpha for Specular/Gloss, not Opacity
+	if (albedo_sample.a < 0.5)
 		discard;
 
-    vec3 albedo = albedoSample.rgb; 
+    vec3 albedo = albedo_sample.rgb; 
 
     float metallic = 0.1; 
     float roughness = 0.5;
     float ao = 1.0;
 
-    vec3 N = normalize(fragNormal);
-    vec3 V = normalize(ubo.camPos - fragWorldPos);
-    vec3 L = normalize(ubo.lightDir); 
+    vec3 N = normalize(frag_normal);
+    vec3 V = normalize(ubo.cam_pos - frag_world_pos);
+    vec3 L = normalize(ubo.light_dir); 
     vec3 H = normalize(V + L);
+
+    vec3 cascadeColors[4] = vec3[](
+        vec3(1.0, 0.1, 0.1),
+        vec3(0.1, 1.0, 0.1),
+        vec3(0.1, 0.1, 1.0),
+        vec3(1.0, 1.0, 0.1)
+    );
 
     vec3 F0 = vec3(0.04); 
     F0 = mix(F0, albedo, metallic);
 
-    vec3 lightColor = ubo.lightColor; 
-    float lightIntensity = ubo.lightIntensity;
-    vec3 radiance = lightColor * lightIntensity; 
+    vec3 light_color = ubo.light_color; 
+    float light_intensity = ubo.light_intensity;
+    vec3 radiance = light_color * light_intensity; 
 
     // Cook-Torrance BRDF
     float NDF = DistributionGGX(N, H, roughness);   
@@ -160,18 +230,35 @@ void main() {
 
     vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
 
-	float shadow = ShadowCalculation(fragPosLightSpace, N, L);
+	float shadow = ShadowCalculation(frag_world_pos, N, L);
 
-    // 应用阴影到 Diffuse 和 Specular
-    Lo *=  (1.0 - shadow);
+    // Apply Shadow
+    Lo *= (1.0 - shadow);
 
-    vec3 ambient = vec3(ubo.ambientStrength) * albedo * ao;
+    vec3 ambient = vec3(ubo.ambient_strength) * albedo * ao;
     vec3 color = ambient + Lo;
+
+    // [DEBUG] Toggle this to visualize cascades
+    if (ubo.debug_cascades > 0) {
+        int debugLayer = -1;
+        vec4 debugViewPos = ubo.view * vec4(frag_world_pos, 1.0);
+        float debugDepth = -debugViewPos.z;
+        for (int i = 0; i < 4; ++i) {
+			if (debugDepth < ubo.cascade_split_depths[i]) {
+				debugLayer = i;
+				break;
+			}
+		}
+
+        if (debugLayer == -1)
+			debugLayer = 3;
+        color = mix(color, albedo * cascadeColors[debugLayer], 0.5);
+    }
 
     color = ACESFilm(color);
 
     // Gamma Correction (Linear -> sRGB)
     color = pow(color, vec3(1.0/2.2)); 
 
-    outColor = vec4(color, albedoSample.a);
+    out_color = vec4(color, albedo_sample.a);
 }

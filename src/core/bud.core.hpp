@@ -1,4 +1,4 @@
-﻿module;
+﻿#pragma once
 
 #include <cstddef>
 #include <concepts>
@@ -10,9 +10,7 @@
 #include <array>
 #include <functional>
 
-export module bud.core;
-
-export namespace bud::core {
+namespace bud::core {
     using byte = std::byte;
 
     template<typename T>

@@ -2,16 +2,16 @@
 #extension GL_EXT_nonuniform_qualifier : enable
 
 
-layout(location = 0) in vec2 fragTexCoord;
-layout(location = 1) in flat float fragTexIndex;
+layout(location = 0) in vec2 frag_tex_coord;
+layout(location = 1) in flat float frag_tex_index;
 
-layout(binding = 1) uniform sampler2D texSamplers[];
+layout(binding = 1) uniform sampler2D tex_samplers[];
 
 void main() {
-    int texID = int(fragTexIndex + 0.5);
-    float alpha = texture(texSamplers[nonuniformEXT(texID)], fragTexCoord).a;
+    int tex_id = int(frag_tex_index + 0.5);
+    float alpha = texture(tex_samplers[nonuniformEXT(tex_id)], frag_tex_coord).a;
     
     if (alpha < 0.5) {
-        discard;
+        discard; 
     }
 }

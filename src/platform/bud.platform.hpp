@@ -1,13 +1,12 @@
-﻿module;
+﻿#pragma once
 
 #include <string>
 #include <memory>
 #include <SDL3/SDL.h>
 
-export module bud.platform;
-import bud.input;
+#include "src/runtime/bud.input.hpp"
 
-export namespace bud::platform {
+namespace bud::platform {
 
     class Window {
     public:

@@ -1,19 +1,17 @@
-// src/bud.dod.cppm
+﻿#pragma once
 
 #include <vector>
 #include <algorithm>
 #include <thread>
 #include <execution>
 
-export module bud.dod;
+#include "src/core/bud.core.hpp"
 
-import bud.core;
-
-export namespace bud::dod {
+namespace bud::dod {
     // Data-Oriented Design Registry
     template<typename... Components>
     class Registry {
-        std::vector<std::vector<std::byte>> component_data_;
+        std::vector<std::vector<std::byte>> component_data;
 
     public:
         template<typename T>
