@@ -1,4 +1,4 @@
-#include <memory>
+﻿#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -15,9 +15,12 @@
 #include "src/runtime/bud.scene.hpp"
 #include "src/core/bud.math.hpp"
 
+
+
 namespace bud::graphics {
 
-    Renderer::Renderer(RHI* rhi) : rhi(rhi), render_graph(rhi) {
+    Renderer::Renderer(RHI* rhi, bud::io::AssetManager* asset_manager)
+		: rhi(rhi), render_graph(rhi), asset_manager(asset_manager) {
         csm_pass = std::make_unique<CSMShadowPass>();
         main_pass = std::make_unique<MainPass>();
         csm_pass->init(rhi);

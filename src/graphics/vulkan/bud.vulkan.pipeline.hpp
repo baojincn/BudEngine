@@ -18,7 +18,7 @@ namespace bud::graphics::vulkan {
 		VkBool32 depth_test;
 		VkBool32 depth_write;
 		VkCullModeFlags cull_mode;
-		VkFormat color_format; // [FIX] Store format in key
+		VkFormat color_format;
 
 		bool operator==(const PipelineKey& other) const {
 			return vert_shader == other.vert_shader &&

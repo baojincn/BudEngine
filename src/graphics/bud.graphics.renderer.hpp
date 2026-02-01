@@ -15,7 +15,7 @@
 namespace bud::graphics {
 	class Renderer {
 	public:
-		Renderer(RHI* rhi);
+		Renderer(RHI* rhi, bud::io::AssetManager* asset_manager);
 		~Renderer();
 
 		uint32_t upload_mesh(const bud::io::MeshData& mesh_data);
