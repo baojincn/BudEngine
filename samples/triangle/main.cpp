@@ -2,9 +2,8 @@
 #include <exception>
 #include <functional>
 
-#include "src/runtime/bud.engine.hpp"
-#include "src/graphics/bud.graphics.hpp"
 #include "src/io/bud.io.hpp"
+#include "src/runtime/bud.engine.hpp"
 
 class GameApp {
 public:
@@ -24,8 +23,8 @@ public:
 		bud::graphics::RenderConfig config;
 		config.directional_light_position = { 50.0f, 500.0f, 50.0f };
 		config.directional_light_intensity = 3.0f;
-		config.shadow_bias_constant = 0.0000f;
-		config.shadow_bias_slope = 0.000f;
+		config.shadow_bias_constant = 0.005f;
+		config.shadow_bias_slope = 1.25f;
 		config.cache_shadows = false;
 		config.ambient_strength = 0.4f;
 		config.debug_cascades = false;
@@ -34,7 +33,28 @@ public:
 	}
 
 	void update(float delta_time) {
-		
+		if (!engine) return;
+
+		auto& input = bud::input::Input::get();
+		auto& scene = engine->get_scene();
+		auto& cam = scene.main_camera;
+
+		if (input.is_key_down(bud::input::Key::W)) cam.process_keyboard(0, delta_time);
+		if (input.is_key_down(bud::input::Key::S)) cam.process_keyboard(1, delta_time);
+		if (input.is_key_down(bud::input::Key::A)) cam.process_keyboard(2, delta_time);
+		if (input.is_key_down(bud::input::Key::D)) cam.process_keyboard(3, delta_time);
+
+		float dx, dy;
+		input.get_mouse_delta(dx, dy);
+
+		if (input.is_mouse_button_down(bud::input::MouseButton::Left)) {
+			if (dx != 0.0f || dy != 0.0f)
+				cam.process_mouse_movement(dx, dy);
+		}
+		else if (input.is_mouse_button_down(bud::input::MouseButton::Right)) {
+			if (dy != 0.0f)
+				cam.process_mouse_drag_zoom(dy);
+		}
 	}
 
 	void shutdown() {

@@ -40,7 +40,7 @@ namespace bud::engine {
 
 	private:
 		void handle_events();
-		void perform_frame_logic(float delta_time);
+
 		void perform_rendering(float delta_time);
 
 	private:
