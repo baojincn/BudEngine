@@ -15,8 +15,6 @@
 
 #include "src/runtime/bud.engine.hpp"
 
-#include <print>
-
 #include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
 
 namespace bud::engine {
@@ -90,7 +88,7 @@ namespace bud::engine {
 			}
 
 
-			perform_frame_logic(delta_time);
+
 
 			perform_rendering(delta_time);
 
@@ -104,29 +102,7 @@ namespace bud::engine {
 		window->poll_events();
 	}
 
-	void BudEngine::perform_frame_logic(float delta_time) {
-		auto& input = bud::input::Input::get();
-		auto& cam = scene.main_camera;
 
-		if (input.is_key_down(bud::input::Key::W)) cam.process_keyboard(0, delta_time);
-		if (input.is_key_down(bud::input::Key::S)) cam.process_keyboard(1, delta_time);
-		if (input.is_key_down(bud::input::Key::A)) cam.process_keyboard(2, delta_time);
-		if (input.is_key_down(bud::input::Key::D)) cam.process_keyboard(3, delta_time);
-
-
-
-		float dx, dy;
-		input.get_mouse_delta(dx, dy);
-
-		if (input.is_mouse_button_down(bud::input::MouseButton::Left)) {
-			if (dx != 0.0f || dy != 0.0f)
-				cam.process_mouse_movement(dx, dy);
-		}
-		else if (input.is_mouse_button_down(bud::input::MouseButton::Right)) {
-			if (dy != 0.0f)
-				cam.process_mouse_drag_zoom(dy);
-		}
-	}
 
 	void BudEngine::perform_rendering(float delta_time) {
 		int width, height;
