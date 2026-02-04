@@ -6,12 +6,14 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "src/core/bud.math.hpp"
-#include "src/runtime/bud.scene.hpp"
 #include "src/io/bud.io.hpp"
 
 #include "src/graphics/bud.graphics.types.hpp"
 #include "src/graphics/bud.graphics.rhi.hpp"
 #include "src/graphics/graph/bud.graphics.graph.hpp"
+
+#include "src/graphics/bud.graphics.scene.hpp"
+#include "src/graphics/bud.graphics.sortkey.hpp"
 
 namespace bud::graphics {
 
@@ -29,8 +31,7 @@ namespace bud::graphics {
 		};
 
 		void init(RHI* rhi);
-		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, 
-			const bud::scene::Scene& scene, const std::vector<RenderMesh>& meshes);
+		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes);
 	};
 
 	
@@ -40,7 +41,10 @@ namespace bud::graphics {
 	public:
 		void init(RHI* rhi);
 		void add_to_graph(RenderGraph& rg, RGHandle shadow_map, RGHandle backbuffer,
-			const bud::scene::Scene& scene, const SceneView& view,
-			const std::vector<RenderMesh>& meshes);
+			const RenderScene& render_scene,     // <--- 改了这里
+			const SceneView& view,
+			const std::vector<RenderMesh>& meshes,
+			const std::vector<SortItem>& sort_list, // <--- 新增
+			size_t instance_count);
 	};
 }

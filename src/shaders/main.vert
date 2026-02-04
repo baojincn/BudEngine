@@ -4,12 +4,12 @@ layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_color;
 layout(location = 2) in vec3 in_normal; 
 layout(location = 3) in vec2 in_tex_coord; 
-layout(location = 4) in float in_tex_index;
+//layout(location = 4) in float in_tex_index;
 
 layout(location = 0) out vec3 frag_world_pos;
 layout(location = 1) out vec3 frag_normal;
 layout(location = 2) out vec2 frag_tex_coord;
-layout(location = 3) out flat float frag_tex_index;
+//layout(location = 3) out flat float frag_tex_index;
 // [CSM] fragPosLightSpace removed, we calculate it in frag shader per cascade
 
 layout(binding = 0) uniform UniformBufferObject {
@@ -41,5 +41,5 @@ void main() {
     gl_Position = ubo.proj * ubo.view * world_pos;
 
     frag_tex_coord = in_tex_coord;
-    frag_tex_index = in_tex_index;
+    //frag_tex_index = in_tex_index;
 }

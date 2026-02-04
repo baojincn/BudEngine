@@ -4,10 +4,16 @@
 layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_normal;
 layout(location = 2) in vec2 frag_tex_coord;
-layout(location = 3) in flat float frag_tex_index;
+//layout(location = 3) in flat float frag_tex_index;
 // [CSM] fragPosLightSpace removed, we use worldPos per cascade
 
 layout(location = 0) out vec4 out_color;
+
+
+layout(push_constant) uniform PushConsts {
+    mat4 model;
+    uint material_id;
+} push;
 
 layout(binding = 0) uniform UniformBufferObject {
     mat4 view;
@@ -174,7 +180,8 @@ float ShadowCalculation(vec3 world_pos, vec3 N, vec3 L) {
 }
 
 void main() {
-    int tex_id = int(frag_tex_index + 0.5);
+    //int tex_id = int(frag_tex_index + 0.5);
+	uint tex_id = push.material_id;
     vec4 albedo_sample;
     
     // [FIX] Handle unbound texture index 0 or missing textures

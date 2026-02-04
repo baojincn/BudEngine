@@ -129,6 +129,7 @@ target_sources(bud_engine_core
 		"src/platform/window.cpp"
 		"src/runtime/bud.engine.cpp"
 		"src/graphics/bud.graphics.cpp"
+		"src/graphics/bud.graphics.scene.cpp"
         "src/graphics/bud.graphics.passes.cpp"
         "src/graphics/bud.graphics.renderer.cpp"
         "src/graphics/graph/bud.graphics.graph.cpp"
@@ -145,6 +146,7 @@ target_sources(bud_engine_core
 
 		"src/runtime/bud.input.cpp"
 		"src/runtime/bud.scene.cpp"
+
 
     PUBLIC
 		# Headers
