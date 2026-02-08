@@ -8,13 +8,13 @@
 
 namespace bud::graphics {
 	// Enum, begin
-	 enum class Backend {
+	enum class Backend {
 		Vulkan,
 		D3D12,
 		Metal
 	};
 
-	 enum class ResourceState {
+	enum class ResourceState {
 		Undefined,
 		Common,            // D3D12_RESOURCE_STATE_COMMON / VK_IMAGE_LAYOUT_GENERAL
 		VertexBuffer,      // Vertex Buffer / Constant Buffer
@@ -30,7 +30,7 @@ namespace bud::graphics {
 	};
 
 
-	 enum class ObjectType {
+	enum class ObjectType {
 		Unknown,
 		Texture,        // VkImage / ID3D12Resource / MTLTexture
 		ImageView,      // VkImageView / D3D12_CPU_DESCRIPTOR_HANDLE (RTV/DSV)
@@ -48,40 +48,40 @@ namespace bud::graphics {
 		DescriptorSet,  // VkDescriptorSet / ID3D12DescriptorHeap (部分对应)
 	};
 
-	 enum class TextureFormat {
-		Undefined,          // [FIX] For depth-only pipelines (no color attachment)
+	enum class TextureFormat {
+		Undefined,
 		RGBA8_UNORM,
 		BGRA8_UNORM,
-		BGRA8_SRGB, // [FIX] Added for Swapchain Match
+		BGRA8_SRGB,
 		R32G32B32_FLOAT,
 		D32_FLOAT,
 		D24_UNORM_S8_UINT,
 	};
 
-	 enum class TextureType {
+	enum class TextureType {
 		Texture2D,
 		Texture2DArray,
 		Texture3D,
 		TextureCube
 	};
 
-	 enum class MemoryUsage {
+	enum class MemoryUsage {
 		GpuOnly,    // Device Local
 		CpuToGpu,   // Host Visible (Upload)
 		GpuToCpu,   // Host Visible (Readback)
 	};
 
-	 enum class CullMode {
+	enum class CullMode {
 		None,
 		Front,
 		Back
 	};
 
-	 constexpr uint32_t MAX_CASCADES = 4;
+	constexpr uint32_t MAX_CASCADES = 4;
 	// Enum, end
 
 	// POD, begin
-	 struct TextureDesc {
+	struct TextureDesc {
 		uint32_t width = 1;
 		uint32_t height = 1;
 		uint32_t depth = 1;
@@ -92,8 +92,21 @@ namespace bud::graphics {
 		ResourceState initial_state = ResourceState::Undefined;
 	};
 
-	 struct RenderConfig {
-		uint32_t shadow_map_size = 2048; // [CSM] Reduced per-cascade size
+	struct EngineConfig {
+		std::string name = "Bud Engine";
+		int width = 1920;
+		int height = 1080;
+		Backend backend = Backend::Vulkan;
+		uint32_t inflight_frame_count = 3;
+		bool enable_validation = true;
+		bool vsync = false;
+	};
+
+	struct RenderConfig {
+		float fixed_logic_timestep = 1.0f / 60.0f;
+		float time_scale = 1.0f;
+
+		uint32_t shadow_map_size = 2048;
 		float shadow_bias_constant = 1.25f;
 		float shadow_bias_slope = 1.75f;
 		float shadow_ortho_size = 35.0f;
@@ -113,8 +126,8 @@ namespace bud::graphics {
 		bool cache_shadows = true;
 	};
 
-	 struct SceneView {
-		bud::math::mat4 model = bud::math::mat4(1.0f); // Model/World transform
+	struct SceneView {
+		bud::math::mat4 model_matrix = bud::math::mat4(1.0f);
 		bud::math::mat4 view_matrix;
 		bud::math::mat4 proj_matrix;
 		bud::math::mat4 view_proj_matrix;
@@ -141,24 +154,24 @@ namespace bud::graphics {
 		}
 	};
 
-	 struct VertexAttribute {
+	struct VertexAttribute {
 		uint32_t location;
 		uint32_t binding = 0;
 		TextureFormat format;
 		uint32_t offset;
 	};
 
-	 struct VertexInputLayout {
+	struct VertexInputLayout {
 		std::vector<VertexAttribute> attributes;
 		uint32_t stride = 0;
 	};
 
-	 struct ShaderStage {
+	struct ShaderStage {
 		std::vector<char> code;
 		std::string entry_point = "main";
 	};
 
-	 struct GraphicsPipelineDesc {
+	struct GraphicsPipelineDesc {
 		ShaderStage vs;
 		ShaderStage fs;
 		VertexInputLayout vertex_layout;
@@ -172,7 +185,7 @@ namespace bud::graphics {
 
 	using CommandHandle = void*;
 
-	 struct MemoryBlock {
+	struct MemoryBlock {
 		void* internal_handle = nullptr;
 		uint64_t offset = 0;
 		uint64_t size = 0;
@@ -181,7 +194,7 @@ namespace bud::graphics {
 	};
 
 	// 纹理基类
-	 class Texture {
+	class Texture {
 	public:
 		virtual ~Texture() = default;
 
@@ -190,26 +203,35 @@ namespace bud::graphics {
 		TextureFormat format = TextureFormat::RGBA8_UNORM;
 		uint32_t mips = 1;
 		uint32_t array_layers = 1;
+		TextureType type = TextureType::Texture2D;
 
 		size_t desc_hash = 0;
 	};
 
 
-	 struct CascadeData {
+	struct CascadeData {
 		bud::math::mat4 view_proj_matrix;
 		float split_depth;
 	};
 
-	 struct RenderMesh {
+	struct SubMesh {
+		uint32_t index_start;
+		uint32_t index_count;
+		uint32_t material_id;
+		bool double_sided = false;
+
+		bud::math::AABB aabb;
+		bud::math::BoundingSphere sphere;
+	};
+
+	struct RenderMesh {
 		MemoryBlock vertex_buffer;
 		MemoryBlock index_buffer;
 		uint32_t index_count = 0;
 		bud::math::AABB aabb;
 		bud::math::BoundingSphere sphere;
-
+		std::vector<SubMesh> submeshes;
 
 		bool is_valid() const { return index_count > 0; }
 	};
-
-
 }

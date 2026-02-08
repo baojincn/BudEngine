@@ -35,7 +35,7 @@ namespace bud::graphics::vulkan {
 	public:
 		~VulkanRHI() = default;
 
-		void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation) override;
+		void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count) override;
 		void cleanup() override;
 		void wait_idle() override;
 

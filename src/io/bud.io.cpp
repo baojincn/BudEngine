@@ -144,109 +144,156 @@ std::optional<MeshData> ModelLoader::load_obj(const std::filesystem::path& path)
 	std::vector<tinyobj::material_t> materials;
 	std::string warn, err;
 
-	// [FIX] Resolve path first
-	auto resolved_opt = FileSystem::resolve_path(path);
-	if (!resolved_opt) {
-		std::println(stderr, "[Asset] OBJ file not found: {}", path.string());
-		return std::nullopt;
-	}
-
-	std::string path_str = resolved_opt->string();
-	std::string base_dir = resolved_opt->parent_path().string() + "/"; // load .mtl logic needs correct base dir
-
-	bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path_str.c_str(), base_dir.c_str());
+	auto base_dir = path.parent_path().string() + "/";
+	bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, 
+	                            path.string().c_str(), base_dir.c_str());
 
 	if (!warn.empty() && warn.find("Both") == std::string::npos)
-		std::println("[OBJ Warn]: {}", warn);
-
+		std::println("[TinyOBJ Warn]: {}", warn);
 	if (!err.empty())
-		std::println("[OBJ Error]: {}", err);
-
+		std::println("[TinyOBJ Error]: {}", err);
 	if (!ret)
 		return std::nullopt;
 
-	MeshData meshData;
-	// 1. 收集所有用到的纹理
-		// map: 材质名 -> 全局纹理 ID (0, 1, 2...)
-	std::unordered_map<int, float> materialToTextureIndex;
+	MeshData mesh_data;
 
-	// 默认纹理 ID 为 0 (我们稍后把 0 号槽位留给那个 1x1 的白图或紫黑格)
-	float defaultTexIndex = 0.0f;
+	const std::string default_texture = "data/textures/default.png";
 
-	// Sponza 的材质里有漫反射贴图 (diffuse_texname)
-	for (size_t i = 0; i < materials.size(); i++) {
-		std::string texName = materials[i].diffuse_texname;
-		if (!texName.empty()) {
-			// 构造完整路径
-			std::string fullPath = base_dir + texName;
+	std::println("[OBJ Parser] Loading {} materials...", materials.size());
+	for (size_t mat_idx = 0; mat_idx < materials.size(); mat_idx++) {
+		auto tex_name = materials[mat_idx].diffuse_texname;
+		std::replace(tex_name.begin(), tex_name.end(), '\\', '/');
 
-			// 存入 list
-			meshData.texture_paths.push_back(fullPath);
-
-			materialToTextureIndex[i] = static_cast<float>(meshData.texture_paths.size());
-			std::println("[Asset] Material '{}' uses texture: {}", materials[i].name, texName);
+		if (!tex_name.empty()) {
+			if (std::filesystem::path(tex_name).is_relative()) {
+				tex_name = base_dir + tex_name;
+			}
+			mesh_data.texture_paths.push_back(tex_name);
+			//std::println("  Material[{}] -> {}", mat_idx, tex_name);
 		}
 		else {
-			materialToTextureIndex[i] = 0.0f; // 没有贴图的材质用默认图
-			std::println("[Asset] Material '{}' has NO diffuse texture.", materials[i].name);
+			mesh_data.texture_paths.push_back(default_texture);
+			std::println("  Material[{}] -> (empty/fallback)", mat_idx);
 		}
 	}
 
-	// 如果一个纹理都没找到，至少保证 lists 不为空
-	if (meshData.texture_paths.empty()) {
-		// 只是为了占位，具体的 fallback 逻辑在 RHI 处理
-	}
+	std::unordered_map<MeshData::Vertex, uint32_t> unique_vertices{};
 
-	std::unordered_map<MeshData::Vertex, uint32_t> uniqueVertices{};
+	int32_t current_material_id = -1;
+	uint32_t current_index_start = 0;
+	uint32_t current_index_count = 0;
+
+	auto flush_subset = [&](int32_t next_mat_id) {
+		if (current_index_count > 0) {
+			uint32_t safe_mat_idx = (current_material_id < 0) ? 0 : static_cast<uint32_t>(current_material_id);
+
+			if (safe_mat_idx >= mesh_data.texture_paths.size()) {
+				//std::println(stderr, 
+				//	"[OBJ Parser ERROR] Material {} out of range! "
+				//	"(Max: {})", 
+				//	safe_mat_idx, mesh_data.texture_paths.size());
+				safe_mat_idx = 0;
+			}
+
+			MeshSubset subset;
+			subset.index_start = current_index_start;
+			subset.index_count = current_index_count;
+			subset.material_index = safe_mat_idx;
+
+			mesh_data.subsets.push_back(subset);
+
+			current_index_start += current_index_count;
+			current_index_count = 0;
+		}
+		current_material_id = next_mat_id;
+	};
+
 
 	for (const auto& shape : shapes) {
 		size_t index_offset = 0;
-		// 遍历每一个面 (Face)
 		for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); f++) {
-			int fv = shape.mesh.num_face_vertices[f]; // 通常是 3 (三角形)
+			int32_t mat_id = shape.mesh.material_ids[f];
 
-			// 获取这个面的材质 ID
-			int mat_id = shape.mesh.material_ids[f];
-			float currentTexIndex = 0.0f;
-			if (mat_id >= 0 && materialToTextureIndex.count(mat_id)) {
-				currentTexIndex = materialToTextureIndex[mat_id];
+			if (mat_id != current_material_id) {
+				//if (f % 1000 == 0) {  // 每1000个面打印一次，避免过多日志
+				//	std::println("[OBJ Parser] Face {}: Material {} -> {}", 
+				//		f, current_material_id, mat_id);
+				//}
+				flush_subset(mat_id);
 			}
 
-			// 遍历面的每个顶点
+			int fv = shape.mesh.num_face_vertices[f];
 			for (size_t v = 0; v < fv; v++) {
 				tinyobj::index_t idx = shape.mesh.indices[index_offset + v];
 
 				MeshData::Vertex vertex{};
-				// ... pos, texCoord 读取逻辑不变 ...
-				vertex.pos = { attrib.vertices[3 * idx.vertex_index + 0], attrib.vertices[3 * idx.vertex_index + 1], attrib.vertices[3 * idx.vertex_index + 2] };
 
-				if (idx.normal_index >= 0) {
-					vertex.normal = { attrib.normals[3 * idx.normal_index + 0], attrib.normals[3 * idx.normal_index + 1], attrib.normals[3 * idx.normal_index + 2] };
+				vertex.pos = {
+					attrib.vertices[3 * idx.vertex_index + 0],
+					attrib.vertices[3 * idx.vertex_index + 1],
+					attrib.vertices[3 * idx.vertex_index + 2]
+				};
+
+				if (!attrib.colors.empty()) {
+					vertex.color = {
+						attrib.colors[3 * idx.vertex_index + 0],
+						attrib.colors[3 * idx.vertex_index + 1],
+						attrib.colors[3 * idx.vertex_index + 2]
+					};
 				}
 				else {
-					// 如果没有法线，给个默认向上的
-					vertex.normal = { 0.0f, 1.0f, 0.0f };
+					vertex.color = { 1.0f, 1.0f, 1.0f };
+				}
+
+				if (idx.normal_index >= 0) {
+					vertex.normal = {
+						attrib.normals[3 * idx.normal_index + 0],
+						attrib.normals[3 * idx.normal_index + 1],
+						attrib.normals[3 * idx.normal_index + 2]
+					};
 				}
 
 				if (idx.texcoord_index >= 0) {
-					vertex.texture_uv = { attrib.texcoords[2 * idx.texcoord_index + 0], 1.0f - attrib.texcoords[2 * idx.texcoord_index + 1] };
+					vertex.texture_uv = {
+						attrib.texcoords[2 * idx.texcoord_index + 0],
+						1.0f - attrib.texcoords[2 * idx.texcoord_index + 1]
+					};
 				}
-				vertex.color = { 1.0f, 1.0f, 1.0f };
 
-				// [新增] 写入纹理索引
-				vertex.texture_index = currentTexIndex;
-
-				if (uniqueVertices.count(vertex) == 0) {
-					uniqueVertices[vertex] = static_cast<uint32_t>(meshData.vertices.size());
-					meshData.vertices.push_back(vertex);
+				if (unique_vertices.count(vertex) == 0) {
+					unique_vertices[vertex] = static_cast<uint32_t>(mesh_data.vertices.size());
+					mesh_data.vertices.push_back(vertex);
 				}
-				meshData.indices.push_back(uniqueVertices[vertex]);
+
+				mesh_data.indices.push_back(unique_vertices[vertex]);
+				current_index_count++;
 			}
+
 			index_offset += fv;
 		}
 	}
 
-	return meshData;
+	// 提交最后一个子网格
+	flush_subset(current_material_id);
+
+	//std::println("\n[OBJ Loader Summary]");
+	//std::println("  File: {}", path.string());
+	//std::println("  Vertices: {}", mesh_data.vertices.size());
+	//std::println("  Indices: {}", mesh_data.indices.size());
+	//std::println("  Materials (textures): {}", mesh_data.texture_paths.size());
+	//std::println("  Subsets: {}", mesh_data.subsets.size());
+	
+	if (mesh_data.subsets.empty() && !mesh_data.indices.empty()) {
+		std::println(stderr, "  ⚠️ WARNING: No subsets found! Creating fallback...");
+		MeshSubset fallback;
+		fallback.index_start = 0;
+		fallback.index_count = (uint32_t)mesh_data.indices.size();
+		fallback.material_index = 0;
+		mesh_data.subsets.push_back(fallback);
+	}
+
+
+	return mesh_data;
 }
 
 std::optional<MeshData> ModelLoader::load_gltf(const std::filesystem::path& path) {
@@ -297,36 +344,49 @@ MeshData ModelLoader::convert_to_mesh_data(const tinygltf::Model& model) {
 		positionBuffer = reinterpret_cast<const float*>(&model.buffers[view.buffer].data[view.byteOffset + accessor.byteOffset]);
 		vertexCount = accessor.count;
 	}
+
 	if (primitive.attributes.find("TEXCOORD_0") != primitive.attributes.end()) {
 		const auto& accessor = model.accessors[primitive.attributes.at("TEXCOORD_0")];
 		const auto& view = model.bufferViews[accessor.bufferView];
 		texCoordBuffer = reinterpret_cast<const float*>(&model.buffers[view.buffer].data[view.byteOffset + accessor.byteOffset]);
 	}
+
 	for (size_t i = 0; i < vertexCount; i++) {
 		MeshData::Vertex vertex{};
-		if (positionBuffer) vertex.pos = glm::vec3(positionBuffer[i * 3 + 0], positionBuffer[i * 3 + 1], positionBuffer[i * 3 + 2]);
+		if (positionBuffer)
+			vertex.pos = glm::vec3(positionBuffer[i * 3 + 0], positionBuffer[i * 3 + 1], positionBuffer[i * 3 + 2]);
+
 		vertex.color = glm::vec3(1.0f, 1.0f, 1.0f);
-		if (texCoordBuffer) vertex.texture_uv = glm::vec2(texCoordBuffer[i * 2 + 0], texCoordBuffer[i * 2 + 1]);
+
+		if (texCoordBuffer)
+			vertex.texture_uv = glm::vec2(texCoordBuffer[i * 2 + 0], texCoordBuffer[i * 2 + 1]);
+
 		meshData.vertices.push_back(vertex);
 	}
+
 	if (primitive.indices >= 0) {
 		const auto& accessor = model.accessors[primitive.indices];
 		const auto& bufferView = model.bufferViews[accessor.bufferView];
 		const auto& buffer = model.buffers[bufferView.buffer];
 		const void* dataPtr = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
+
 		if (accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
 			const uint32_t* buf = static_cast<const uint32_t*>(dataPtr);
-			for (size_t i = 0; i < accessor.count; i++) meshData.indices.push_back(buf[i]);
+			for (size_t i = 0; i < accessor.count; i++)
+				meshData.indices.push_back(buf[i]);
 		}
 		else if (accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
 			const uint16_t* buf = static_cast<const uint16_t*>(dataPtr);
-			for (size_t i = 0; i < accessor.count; i++) meshData.indices.push_back(buf[i]);
+			for (size_t i = 0; i < accessor.count; i++)
+				meshData.indices.push_back(buf[i]);
 		}
 		else if (accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
 			const uint8_t* buf = static_cast<const uint8_t*>(dataPtr);
-			for (size_t i = 0; i < accessor.count; i++) meshData.indices.push_back(buf[i]);
+			for (size_t i = 0; i < accessor.count; i++)
+				meshData.indices.push_back(buf[i]);
 		}
 	}
+
 	return meshData;
 }
 
@@ -339,8 +399,7 @@ void AssetManager::load_mesh_async(const std::string& path, std::function<void(M
 		auto mesh_opt = ModelLoader::load_obj(path);
 
 		if (mesh_opt) {
-			std::println("[Asset] Mesh parsed: {} (v:{}, i:{})", path, mesh_opt->vertices.size(), mesh_opt->indices.size());
-
+			//std::println("[Asset] Mesh parsed: {} (v:{}, i:{})", path, mesh_opt->vertices.size(), mesh_opt->indices.size());
 			task_scheduler->submit_main_thread_task([on_loaded, mesh = std::move(*mesh_opt)]() mutable {
 				on_loaded(std::move(mesh));
 				});
@@ -348,7 +407,7 @@ void AssetManager::load_mesh_async(const std::string& path, std::function<void(M
 		else {
 			std::println(stderr, "[Asset] Failed to load mesh: {}", path);
 		}
-		});
+	});
 }
 
 
@@ -358,7 +417,7 @@ void AssetManager::load_image_async(const std::string& path, std::function<void(
 		auto img_opt = ImageLoader::load(path);
 
 		if (img_opt) {
-			std::println("[Asset] Image decoded: {} ({}x{})", path, img_opt->width, img_opt->height);
+			//std::println("[Asset] Image decoded: {} ({}x{})", path, img_opt->width, img_opt->height);
 
 			task_scheduler->submit_main_thread_task([on_loaded, img = std::move(*img_opt)]() mutable {
 				on_loaded(std::move(img));
@@ -367,7 +426,7 @@ void AssetManager::load_image_async(const std::string& path, std::function<void(
 		else {
 			std::println(stderr, "[Asset] Failed to load image: {}", path);
 		}
-		});
+	});
 }
 
 
@@ -382,7 +441,7 @@ void AssetManager::load_file_async(const std::string& path, std::function<void(s
 		else {
 			std::println(stderr, "[Asset] Failed to read file: {}", path);
 		}
-		});
+	});
 }
 
 

@@ -1,9 +1,15 @@
 ﻿#pragma once
 
-// 集中管理 GLM 依赖
+// Force GLM to use Radians and Vulkan Depth Range (0..1)
+// crucial for consistent matrices across compiled units
+#ifndef GLM_FORCE_RADIANS
 #define GLM_FORCE_RADIANS
+#endif
+#ifndef GLM_FORCE_DEPTH_ZERO_TO_ONE
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#endif
 
+// 集中管理 GLM 依赖
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -56,6 +62,11 @@ namespace bud::math {
 	constexpr float SENSITIVITY = 0.1f;
 	constexpr float ZOOM = 45.0f;
 
+
+	inline float distance2(const vec3& a, const vec3& b) {
+		vec3 diff = a - b;
+		return glm::dot(diff, diff);
+	}
 
 	inline mat4 ortho_vk(float left, float right, float bottom, float top, float cam_near, float cam_far) {
 		mat4 proj = glm::ortho(left, right, bottom, top, cam_near, cam_far);

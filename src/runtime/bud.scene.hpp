@@ -35,9 +35,11 @@ namespace bud::scene {
 	};
 
 	 struct Entity {
-		uint32_t mesh_index;
+		uint32_t mesh_index = 0;
+		uint32_t material_index = 0;
 		bud::math::mat4 transform = bud::math::mat4(1.0f);
 		bool is_static = true;
+		bool is_active = true;
 	};
 
 	 struct Scene {

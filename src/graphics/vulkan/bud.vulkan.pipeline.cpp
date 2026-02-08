@@ -1,4 +1,4 @@
-#include <vulkan/vulkan.h>
+﻿#include <vulkan/vulkan.h>
 #include <unordered_map>
 #include <vector>
 #include <stdexcept>
@@ -48,7 +48,7 @@ namespace bud::graphics::vulkan {
             {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12},    // Color
             {2, 0, VK_FORMAT_R32G32B32_SFLOAT, 24},    // Normal
             {3, 0, VK_FORMAT_R32G32_SFLOAT,    36},    // UV
-            {4, 0, VK_FORMAT_R32_SFLOAT,       44}     // TexIndex
+            //{4, 0, VK_FORMAT_R32_SFLOAT,       44}     // TexIndex
         };
 
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};

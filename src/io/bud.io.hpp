@@ -19,7 +19,11 @@
 #include "src/threading/bud.threading.hpp"
 
 namespace bud::io {
-
+	struct MeshSubset {
+		uint32_t index_start;
+		uint32_t index_count;
+		uint32_t material_index;
+	};
 
 	struct MeshData {
 		struct Vertex {
@@ -35,6 +39,7 @@ namespace bud::io {
 		std::vector<Vertex> vertices;
 		std::vector<uint32_t> indices;
 		std::vector<std::string> texture_paths;
+		std::vector<MeshSubset> subsets;
 	};
 }
 

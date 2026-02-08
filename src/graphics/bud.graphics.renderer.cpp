@@ -3,253 +3,457 @@
 #include <cmath>
 #include <algorithm>
 #include <print>
-#include <cstring> // for std::memcpy
+#include <cstring>
 
 #include "src/graphics/bud.graphics.renderer.hpp"
 
 #include "src/graphics/bud.graphics.rhi.hpp"
-#include "src/graphics/graph/bud.graphics.graph.hpp"
+#include "src/graphics/bud.graphics.graph.hpp"
 #include "src/graphics/bud.graphics.passes.hpp"
 #include "src/graphics/bud.graphics.types.hpp"
 #include "src/io/bud.io.hpp"
 #include "src/runtime/bud.scene.hpp"
 #include "src/core/bud.math.hpp"
-
-
+#include "src/graphics/bud.graphics.sortkey.hpp"
 
 namespace bud::graphics {
 
-    Renderer::Renderer(RHI* rhi, bud::io::AssetManager* asset_manager)
-		: rhi(rhi), render_graph(rhi), asset_manager(asset_manager) {
-        csm_pass = std::make_unique<CSMShadowPass>();
-        main_pass = std::make_unique<MainPass>();
-        csm_pass->init(rhi);
-        main_pass->init(rhi);
-    }
+	Renderer::Renderer(RHI* rhi, bud::io::AssetManager* asset_manager, bud::threading::TaskScheduler* task_scheduler)
+		: rhi(rhi), render_graph(rhi), asset_manager(asset_manager), task_scheduler(task_scheduler) {
+		upload_queue = std::make_shared<UploadQueue>();
+		csm_pass = std::make_unique<CSMShadowPass>();
+		main_pass = std::make_unique<MainPass>();
+		csm_pass->init(rhi);
+		main_pass->init(rhi);
+	}
 
-    Renderer::~Renderer() {
-        for (auto& mesh : meshes) {
-            if (mesh.vertex_buffer.is_valid())
-                rhi->destroy_buffer(mesh.vertex_buffer);
+	Renderer::~Renderer() {
+		flush_upload_queue();
+		upload_queue.reset();
 
-            if (mesh.index_buffer.is_valid())
-                rhi->destroy_buffer(mesh.index_buffer);
-        }
-    }
+		if (csm_pass) {
+			csm_pass->shutdown();
+		}
 
-    uint32_t Renderer::upload_mesh(const bud::io::MeshData& mesh_data) {
-        if (mesh_data.vertices.empty()) return 0;
+		for (auto& mesh : meshes) {
+			if (mesh.vertex_buffer.is_valid())
+				rhi->destroy_buffer(mesh.vertex_buffer);
 
-        // 1. 创建 Staging Buffers (CPU 可写)
-        uint64_t v_size = mesh_data.vertices.size() * sizeof(bud::io::MeshData::Vertex);
-        uint64_t i_size = mesh_data.indices.size() * sizeof(uint32_t);
+			if (mesh.index_buffer.is_valid())
+				rhi->destroy_buffer(mesh.index_buffer);
+		}
+	}
 
-        MemoryBlock v_stage = rhi->create_upload_buffer(v_size);
-        MemoryBlock i_stage = rhi->create_upload_buffer(i_size);
-        
-        // 2. 写入数据 & 计算 AABB
-        std::memcpy(v_stage.mapped_ptr, mesh_data.vertices.data(), v_size);
-        std::memcpy(i_stage.mapped_ptr, mesh_data.indices.data(), i_size);
+	std::vector<bud::math::AABB> Renderer::get_mesh_bounds_snapshot() const {
+		std::lock_guard lock(mesh_bounds_mutex);
+		return mesh_bounds;
+	}
 
-        bud::math::AABB aabb;
-        for (const auto& v : mesh_data.vertices) {
-            aabb.merge(bud::math::vec3(v.pos[0], v.pos[1], v.pos[2]));
-        }
+	MeshAssetHandle Renderer::upload_mesh(const bud::io::MeshData& mesh_data) {
+		if (mesh_data.vertices.empty())
+			return MeshAssetHandle::invalid();
+
+		std::println("\n[Renderer::upload_mesh] Processing mesh with {} subsets",
+			mesh_data.subsets.size());
+
+		std::vector<uint32_t> texture_slot_map;
+		texture_slot_map.reserve(mesh_data.texture_paths.size());
+
+		uint32_t base_material_id = 0;
+
+		bud::math::AABB cpu_aabb;
+		for (const auto& v : mesh_data.vertices) {
+			cpu_aabb.merge(bud::math::vec3(v.pos[0], v.pos[1], v.pos[2]));
+		}
+
+		auto queue = upload_queue;
+		auto queue_weak = std::weak_ptr<UploadQueue>(upload_queue);
+		auto rhi_ptr = rhi;
+
+		if (!mesh_data.texture_paths.empty()) {
+			std::println("[upload_mesh] Allocating {} texture slots...",
+				mesh_data.texture_paths.size());
+
+			for (size_t i = 0; i < mesh_data.texture_paths.size(); ++i) {
+				uint32_t current_slot = next_bindless_slot.fetch_add(1, std::memory_order_relaxed);
+				texture_slot_map.push_back(current_slot);
+
+				if (i == 0) {
+					base_material_id = current_slot;
+				}
+
+				//std::println("  Texture[{}] '{}' -> Slot {}", i, mesh_data.texture_paths[i], current_slot);
+
+				{
+					std::lock_guard lock(queue->mutex);
+					queue->commands.push_back([rhi_ptr, current_slot]() {
+						rhi_ptr->update_bindless_texture(current_slot, rhi_ptr->get_fallback_texture());
+					});
+				}
+
+				auto tex_path = mesh_data.texture_paths[i];
+
+				// 发起异步加载
+				asset_manager->load_image_async(tex_path,
+					[queue_weak, rhi_ptr, current_slot, tex_path](bud::io::Image img) {
+						auto img_ptr = std::make_shared<bud::io::Image>(std::move(img));
+
+						auto queue_locked = queue_weak.lock();
+						if (!queue_locked)
+							return;
+
+						std::lock_guard lock(queue_locked->mutex);
+						queue_locked->commands.push_back([rhi_ptr, current_slot, tex_path, img_ptr]() {
+							// --- Render Thread ---
+							bud::graphics::TextureDesc desc{};
+							desc.width = (uint32_t)img_ptr->width;
+							desc.height = (uint32_t)img_ptr->height;
+							desc.format = bud::graphics::TextureFormat::RGBA8_UNORM;
+							desc.mips = static_cast<uint32_t>(std::floor(std::log2(std::max(desc.width, desc.height)))) + 1;
+
+							auto tex = rhi_ptr->create_texture(desc, (const void*)img_ptr->pixels,
+								(uint64_t)img_ptr->width * img_ptr->height * 4);
+							rhi_ptr->set_debug_name(tex, ObjectType::Texture, tex_path);
+							rhi_ptr->update_bindless_texture(current_slot, tex);
+
+							//std::println("[Renderer] ✓ Texture BOUND: {} -> Slot {}", tex_path, current_slot);
+						});
+					}
+				);
+			}
+		}
+
+		auto mesh_data_copy = std::make_shared<bud::io::MeshData>(mesh_data);
+		uint32_t assigned_mesh_id = 0;
+
+		{
+			std::lock_guard lock(queue->mutex);
+
+			assigned_mesh_id = next_mesh_id.fetch_add(1, std::memory_order_relaxed);
+
+			{
+				std::lock_guard bounds_lock(mesh_bounds_mutex);
+				if (mesh_bounds.size() <= assigned_mesh_id)
+					mesh_bounds.resize(assigned_mesh_id + 1);
+
+				mesh_bounds[assigned_mesh_id] = cpu_aabb;
+			}
+
+			queue->commands.push_back([this, mesh_data_copy, texture_slot_map, assigned_mesh_id, cpu_aabb]() {
+				// --- Render Thread ---
+				RenderMesh new_mesh;
+
+				new_mesh.aabb = cpu_aabb;
+				new_mesh.sphere.center = (cpu_aabb.min + cpu_aabb.max) * 0.5f;
+				new_mesh.sphere.radius = bud::math::distance(cpu_aabb.max, new_mesh.sphere.center);
+				new_mesh.index_count = (uint32_t)mesh_data_copy->indices.size();
+
+				uint64_t v_size = mesh_data_copy->vertices.size() * sizeof(bud::io::MeshData::Vertex);
+				uint64_t i_size = mesh_data_copy->indices.size() * sizeof(uint32_t);
+
+				new_mesh.vertex_buffer = rhi->create_gpu_buffer(v_size, ResourceState::VertexBuffer);
+				new_mesh.index_buffer = rhi->create_gpu_buffer(i_size, ResourceState::IndexBuffer);
+
+				auto v_stage = rhi->create_upload_buffer(v_size);
+				auto i_stage = rhi->create_upload_buffer(i_size);
+
+				std::memcpy(v_stage.mapped_ptr, mesh_data_copy->vertices.data(), v_size);
+				std::memcpy(i_stage.mapped_ptr, mesh_data_copy->indices.data(), i_size);
+
+				rhi->copy_buffer_immediate(v_stage, new_mesh.vertex_buffer, v_size);
+				rhi->copy_buffer_immediate(i_stage, new_mesh.index_buffer, i_size);
+
+				rhi->destroy_buffer(v_stage);
+				rhi->destroy_buffer(i_stage);
+
+				if (!mesh_data_copy->subsets.empty()) {
+					//std::println("[upload_mesh] Mesh[{}]: Processing {} subsets", assigned_mesh_id, mesh_data_copy->subsets.size());
+
+					for (size_t i = 0; i < mesh_data_copy->subsets.size(); ++i) {
+						const auto& subset = mesh_data_copy->subsets[i];
+						SubMesh sub;
+						sub.index_start = subset.index_start;
+						sub.index_count = subset.index_count;
+
+						if (subset.material_index < texture_slot_map.size()) {
+							sub.material_id = texture_slot_map[subset.material_index];
+							//std::println("  Subset[{}]: mat_idx={} -> GPU_slot={}", i, subset.material_index, sub.material_id);
+						}
+						else {
+							std::println(stderr,
+								"  Subset[{}]: INVALID mat_idx={} (max: {}) -> using fallback!",
+								i, subset.material_index, texture_slot_map.size());
+							sub.material_id = 0;
+						}
+
+						// --- Build per-submesh bounds ---
+						bud::math::AABB sub_aabb;
+						for (uint32_t k = 0; k < sub.index_count; ++k) {
+							uint32_t vi = mesh_data_copy->indices[sub.index_start + k];
+							const auto& v = mesh_data_copy->vertices[vi];
+							sub_aabb.merge(bud::math::vec3(v.pos[0], v.pos[1], v.pos[2]));
+						}
+
+						sub.aabb = sub_aabb;
+						sub.sphere.center = (sub_aabb.min + sub_aabb.max) * 0.5f;
+						sub.sphere.radius = bud::math::distance(sub_aabb.max, sub.sphere.center);
+
+						new_mesh.submeshes.push_back(sub);
+					}
+				}
+				else {
+					std::println(stderr, "[upload_mesh] Mesh[{}]: NO SUBSETS! Using fallback",
+						assigned_mesh_id);
+					SubMesh sub;
+					sub.index_start = 0;
+					sub.index_count = (uint32_t)mesh_data_copy->indices.size();
+					sub.material_id = texture_slot_map.empty() ? 0 : texture_slot_map[0];
+					new_mesh.submeshes.push_back(sub);
+				}
+
+				meshes.push_back(std::move(new_mesh));
+
+				std::println("[Renderer] Mesh uploaded. Count: {}", meshes.size());
+			});
+		}
+
+		return { assigned_mesh_id, base_material_id };
+	}
+
+	void Renderer::flush_upload_queue() {
+		auto queue = upload_queue;
+		if (!queue)
+			return;
+
+		std::vector<std::function<void()>> commands_to_run;
+		{
+			std::lock_guard lock(queue->mutex);
+			if (queue->commands.empty())
+				return;
+
+			commands_to_run.swap(queue->commands);
+		}
+
+		for (const auto& rhi_cmd : commands_to_run) {
+			rhi_cmd();
+		}
+	}
 
 
-        // 3. 创建 GPU Buffers (Device Local)
-        RenderMesh render_mesh;
-        render_mesh.vertex_buffer = rhi->create_gpu_buffer(v_size, ResourceState::VertexBuffer);
-        render_mesh.index_buffer = rhi->create_gpu_buffer(i_size, ResourceState::IndexBuffer);
-        render_mesh.index_count = (uint32_t)mesh_data.indices.size();
-        render_mesh.aabb = aabb;
 
-        // [CSM] Calculate Bounding Sphere
-        render_mesh.sphere.center = (aabb.min + aabb.max) * 0.5f;
-        render_mesh.sphere.radius = bud::math::distance(aabb.max, render_mesh.sphere.center);
+	void Renderer::render(const bud::graphics::RenderScene& scene, SceneView& scene_view) {
+		// 先处理所有挂起的上传任务
+		flush_upload_queue();
+
+		size_t instance_count = scene.instance_count.load(std::memory_order_relaxed);
+		if (instance_count == 0) return;
+
+		bud::math::AABB scene_aabb;
+
+		for (size_t i = 0; i < instance_count; ++i) {
+			scene_aabb.merge(scene.world_aabbs[i]);
+		}
+
+		// 更新阴影级联
+		update_cascades(scene_view, render_config, scene_aabb);
+
+		bud::math::Frustum camera_frustum;
+		camera_frustum.update(scene_view.view_proj_matrix);
+
+		// Culling -> (Key Gen & Sort)
+		if (sort_list.size() < instance_count)
+			sort_list.resize(instance_count);
+
+		bud::threading::Counter key_gen_signal;
+		constexpr size_t CHUNK_SIZE = 256;
+
+		task_scheduler->ParallelFor(instance_count, CHUNK_SIZE,
+			[&](size_t start, size_t end) {
+				for (size_t i = start; i < end; ++i) {
+					const auto& aabb = scene.world_aabbs[i];
+					if (!bud::math::intersect_aabb_frustum(aabb, camera_frustum)) {
+						sort_list[i].key = UINT64_MAX;
+						sort_list[i].entity_index = (uint32_t)i;
+						continue;
+					}
+
+					uint32_t mesh_id = scene.mesh_indices[i];
+					uint32_t material_id = scene.material_indices[i];
+					const auto& world_matrix = scene.world_matrices[i];
+
+					auto mesh_pos = bud::math::vec3(world_matrix[3]); // 提取平移部分作为实体位置
+					auto distance = bud::math::distance2(mesh_pos,  scene_view.camera_position);
+
+					uint32_t depth_key = 0;
+					auto depth_normalized = std::clamp(distance / (scene_view.far_plane * scene_view.far_plane), 0.0f, 1.0f);
+					depth_key = static_cast<uint32_t>(depth_normalized * 0x3FFFF); // 18 bits for depth
+
+					sort_list[i].key = DrawKey::generate_opaque(0, 0, material_id, mesh_id, depth_key);
+					sort_list[i].entity_index = (uint32_t)i;
+				}
+			},
+			&key_gen_signal
+		);
+
+		task_scheduler->wait_for_counter(key_gen_signal);
+
+		std::sort(sort_list.begin(), sort_list.begin() + instance_count,
+			[](const SortItem& a, const SortItem& b) { return a.key < b.key; }
+		);
 
 
-        // 4. 执行 GPU 拷贝
-        rhi->copy_buffer_immediate(v_stage, render_mesh.vertex_buffer, v_size);
-        rhi->copy_buffer_immediate(i_stage, render_mesh.index_buffer, i_size);
+		// 使用二分查找找到第一个 UINT64_MAX 的位置, 计算可见物体数量 (剔除 Key == UINT64_MAX 的物体)
+		auto it = std::lower_bound(sort_list.begin(), sort_list.begin() + instance_count, UINT64_MAX,
+			[](const SortItem& item, uint64_t val) { return item.key < val; }
+		);
 
-        std::println("[Renderer] Uploaded mesh: {} vertices, {} indices", mesh_data.vertices.size(), mesh_data.indices.size());
-        
-        for (size_t i = 0; i < mesh_data.texture_paths.size(); ++i) {
-            auto bindless_index = static_cast<uint32_t>(i + 1);
-            rhi->update_bindless_texture(bindless_index, rhi->get_fallback_texture());
+		size_t visible_count = std::distance(sort_list.begin(), it);
 
-            auto tex_path = mesh_data.texture_paths[i];
-            asset_manager->load_image_async(tex_path,
-                [this, bindless_index, tex_path](bud::io::Image img) {
-                    bud::graphics::TextureDesc desc{};
-                    desc.width = (uint32_t)img.width;
-                    desc.height = (uint32_t)img.height;
-                    desc.format = bud::graphics::TextureFormat::RGBA8_UNORM;
-                    desc.mips = static_cast<uint32_t>(std::floor(std::log2(std::max(desc.width, desc.height)))) + 1;
+		// 如果没有东西可见，直接返回，不录制 CommandBuffer
+		if (visible_count == 0)
+			return;
 
-                    auto tex = rhi->create_texture(desc, (const void*)img.pixels, (uint64_t)img.width * img.height * 4);
-
-                    rhi->set_debug_name(tex, ObjectType::Texture, tex_path);
-
-                    rhi->update_bindless_texture(bindless_index, tex);
-
-                    std::println("[Renderer] Texture streamed in: {} -> Slot {}", tex_path, bindless_index);
-                }
-            );
-        }
-
-        rhi->destroy_buffer(v_stage);
-        rhi->destroy_buffer(i_stage);
-
-        meshes.push_back(std::move(render_mesh));
-        return static_cast<uint32_t>(meshes.size() - 1);
-    }
-
-    void Renderer::render(const bud::scene::Scene& scene, SceneView& scene_view) {
-        bud::math::AABB scene_aabb;
-        for (const auto& entity : scene.entities) {
-            if (entity.mesh_index < meshes.size() && meshes[entity.mesh_index].is_valid()) {
-                scene_aabb.merge(meshes[entity.mesh_index].aabb.transform(entity.transform));
-            }
-        }
-
-        update_cascades(scene_view, render_config, scene_aabb);
-
-        auto cmd = rhi->begin_frame();
-
-        if (!cmd)
-            return;
+		auto cmd = rhi->begin_frame();
+		if (!cmd)
+			return;
 
 		rhi->set_render_config(render_config);
 
-        auto swapchain_tex = rhi->get_current_swapchain_texture();
-        auto back_buffer = render_graph.import_texture("Backbuffer", swapchain_tex, ResourceState::RenderTarget);
+		auto swapchain_tex = rhi->get_current_swapchain_texture();
+		auto back_buffer = render_graph.import_texture("Backbuffer", swapchain_tex, ResourceState::RenderTarget);
 
-        auto shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, scene, meshes);
+		auto shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, scene, meshes);
 
-        // Main Pass
-        main_pass->add_to_graph(render_graph, shadow_map, back_buffer, scene, scene_view, meshes);
+		// sort_list 传进去，按照这个顺序画
+		main_pass->add_to_graph(render_graph, shadow_map, back_buffer, scene, scene_view, meshes, sort_list, visible_count);
 
-        render_graph.compile();
+		render_graph.compile();
 
-        rhi->resource_barrier(cmd, swapchain_tex, ResourceState::Undefined, ResourceState::RenderTarget);
+		rhi->resource_barrier(cmd, swapchain_tex, ResourceState::Undefined, ResourceState::RenderTarget);
 
-        render_graph.execute(cmd);
+		render_graph.execute(cmd);
 
-        rhi->resource_barrier(cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::Present);
-        rhi->end_frame(cmd);
-    }
+		rhi->resource_barrier(cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::Present);
+		rhi->end_frame(cmd);
+	}
 
-    void Renderer::set_config(const RenderConfig& config) {
-        render_config = config;
-    }
 
-    const RenderConfig& Renderer::get_config() const {
-        return render_config;
-    }
 
-    void Renderer::update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb) {
-        auto cam_near = view.near_plane;
-        auto cam_far = view.far_plane;
+	void Renderer::set_config(const RenderConfig& config) {
+		render_config = config;
+	}
+
+	const RenderConfig& Renderer::get_config() const {
+		return render_config;
+	}
+
+	void Renderer::update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb) {
+		auto cam_near = view.near_plane;
+		auto cam_far = view.far_plane;
 		auto shadow_far = config.shadow_far_plane;
 		if (shadow_far > cam_far) {
 			shadow_far = cam_far;
 		}
 
-        auto lambda = config.cascade_split_lambda;
+		const uint32_t cascade_count = std::min(config.cascade_count, MAX_CASCADES);
 
-        // 1. Calculate Split Depths (Log-Linear)
-        float cascade_splits[MAX_CASCADES];
-        for (uint32_t i = 0; i < config.cascade_count; ++i) {
-            auto p = (float)(i + 1) / (float)config.cascade_count;
-            auto log = cam_near * std::pow(shadow_far / cam_near, p);
-            auto uniform = cam_near + (shadow_far - cam_near) * p;
-            auto d = lambda * log + (1.0f - lambda) * uniform;
-            cascade_splits[i] = (d - cam_near) / (cam_far - cam_near);
-            view.cascade_split_depths[i] = d;
-        }
+		auto lambda = config.cascade_split_lambda;
 
-        // 2. Calculate Matrices
-        bud::math::mat4 inv_cam_matrix = bud::math::inverse(view.proj_matrix * view.view_matrix);
-        bud::math::vec3 L = bud::math::normalize(view.light_dir); 
-        bud::math::mat4 light_view_matrix = bud::math::lookAt(L * 100.0f, bud::math::vec3(0.0f), bud::math::vec3(0.0f, 1.0f, 0.0f));
+		// 1. Calculate Split Depths (Log-Linear)
+		float cascade_splits[MAX_CASCADES];
+		for (uint32_t i = 0; i < cascade_count; ++i) {
+			auto p = (float)(i + 1) / (float)cascade_count;
+			auto log = cam_near * std::pow(shadow_far / cam_near, p);
+			auto uniform = cam_near + (shadow_far - cam_near) * p;
+			auto d = lambda * log + (1.0f - lambda) * uniform;
+			cascade_splits[i] = (d - cam_near) / (cam_far - cam_near);
+			view.cascade_split_depths[i] = d;
+		}
 
-        auto last_split = 0.0f;
-        for (uint32_t i = 0; i < config.cascade_count; ++i) {
-            auto split = cascade_splits[i];
+		for (uint32_t i = cascade_count; i < MAX_CASCADES; ++i) {
+			view.cascade_split_depths[i] = view.far_plane;
+			view.cascade_view_proj_matrices[i] = bud::math::mat4(1.0f);
+		}
 
-            bud::math::vec3 frustum_corners[8] = {
-                {-1.0f,  1.0f, 0.0f}, { 1.0f,  1.0f, 0.0f}, { 1.0f, -1.0f, 0.0f}, {-1.0f, -1.0f, 0.0f},
-                {-1.0f,  1.0f, 1.0f}, { 1.0f,  1.0f, 1.0f}, { 1.0f, -1.0f, 1.0f}, {-1.0f, -1.0f, 1.0f},
-            };
-            for (uint32_t j = 0; j < 4; ++j) {
-                auto vec_near = inv_cam_matrix * bud::math::vec4(frustum_corners[j], 1.0f);
-                vec_near /= vec_near.w;
-                auto vec_far = inv_cam_matrix * bud::math::vec4(frustum_corners[j + 4], 1.0f);
-                vec_far /= vec_far.w;
+		// 2. Calculate Matrices
+		auto inv_cam_matrix = bud::math::inverse(view.proj_matrix * view.view_matrix);
+		auto L = bud::math::normalize(view.light_dir);
+		auto light_view_matrix = bud::math::lookAt(L * 100.0f, bud::math::vec3(0.0f), bud::math::vec3(0.0f, 1.0f, 0.0f));
 
-                frustum_corners[j] = bud::math::vec3(vec_near + (vec_far - vec_near) * last_split);
-                frustum_corners[j + 4] = bud::math::vec3(vec_near + (vec_far - vec_near) * split);
-            }
+		auto last_split = 0.0f;
+		for (uint32_t i = 0; i < cascade_count; ++i) {
+			auto split = cascade_splits[i];
 
-            // 1. 计算视锥体切片的中心 (用于定位)
-            bud::math::vec3 frustum_center(0.0f);
-            for (const auto& v : frustum_corners)
-                frustum_center += v;
+			bud::math::vec3 frustum_corners[8] = {
+				{-1.0f,  1.0f, 0.0f}, { 1.0f,  1.0f, 0.0f}, { 1.0f, -1.0f, 0.0f}, {-1.0f, -1.0f, 0.0f},
+				{-1.0f,  1.0f, 1.0f}, { 1.0f,  1.0f, 1.0f}, { 1.0f, -1.0f, 1.0f}, {-1.0f, -1.0f, 1.0f},
+			};
+			for (uint32_t j = 0; j < 4; ++j) {
+				auto vec_near = inv_cam_matrix * bud::math::vec4(frustum_corners[j], 1.0f);
+				vec_near /= vec_near.w;
+				auto vec_far = inv_cam_matrix * bud::math::vec4(frustum_corners[j + 4], 1.0f);
+				vec_far /= vec_far.w;
 
-            frustum_center /= 8.0f;
+				frustum_corners[j] = bud::math::vec3(vec_near + (vec_far - vec_near) * last_split);
+				frustum_corners[j + 4] = bud::math::vec3(vec_near + (vec_far - vec_near) * split);
+			}
 
-            // 2. 计算包围球半径 (用于固定投影大小)
-            auto radius = 0.0f;
-            for (const auto& v : frustum_corners)
-                radius = std::max(radius, bud::math::length(v - frustum_center));
+			// 1. 计算视锥体切片的中心 (用于定位)
+			bud::math::vec3 frustum_center(0.0f);
+			for (const auto& v : frustum_corners)
+				frustum_center += v;
 
-            radius = std::max(radius, 50.0f);
-            radius *= 2;
+			frustum_center /= 8.0f;
 
-            // 向上取整半径，消除浮点抖动，保证 absolute stability
-            radius = std::ceil(radius * 16.0f) / 16.0f;
+			// 2. 计算包围球半径 (用于固定投影大小)
+			auto radius = 0.0f;
+			for (const auto& v : frustum_corners)
+				radius = std::max(radius, bud::math::length(v - frustum_center));
 
-            // 3. 构建仅包含旋转的光照 View 矩阵 (消除位置抖动)
-            bud::math::vec3 up = (std::abs(L.y) > 0.99f) ? bud::math::vec3(0.0f, 0.0f, 1.0f) : bud::math::vec3(0.0f, 1.0f, 0.0f);
-            bud::math::mat4 light_rot_matrix = bud::math::lookAt(bud::math::vec3(0.0f), -L, up);
+			radius = std::max(radius, 50.0f);
+			radius *= 2;
 
-            // 将中心点转到光照空间
-            bud::math::vec4 center_of_light_space = light_rot_matrix * bud::math::vec4(frustum_center, 1.0f);
+			// 向上取整半径，消除浮点抖动，保证 absolute stability
+			radius = std::ceil(radius * 16.0f) / 16.0f;
 
-            // 4. 计算固定大小的纹素尺寸
-            float diameter = radius * 2.0f;
-            float shadow_map_size = (float)config.shadow_map_size;
-            float world_units_per_texel = diameter / shadow_map_size;
+			// 3. 构建仅包含旋转的光照 View 矩阵 (消除位置抖动)
+			auto up = (std::abs(L.y) > 0.99f) ? bud::math::vec3(0.0f, 0.0f, 1.0f) : bud::math::vec3(0.0f, 1.0f, 0.0f);
+			auto light_rot_matrix = bud::math::lookAt(bud::math::vec3(0.0f), -L, up);
 
-            // 5. Texel Snapping (对齐中心点)
-            float snapped_x = std::floor(center_of_light_space.x / world_units_per_texel) * world_units_per_texel;
-            float snapped_y = std::floor(center_of_light_space.y / world_units_per_texel) * world_units_per_texel;
+			// 将中心点转到光照空间
+			auto center_of_light_space = light_rot_matrix * bud::math::vec4(frustum_center, 1.0f);
 
-            // 6. 构建正交投影 (基于对齐后的中心)
-            float min_x = snapped_x - radius;
-            float max_x = snapped_x + radius;
-            float min_y = snapped_y - radius;
-            float max_y = snapped_y + radius;
+			// 4. 计算固定大小的纹素尺寸
+			float diameter = radius * 2.0f;
+			float shadow_map_size = (float)config.shadow_map_size;
+			float world_units_per_texel = diameter / shadow_map_size;
 
-            // 7. Z 轴裁剪 (Scene Fitting)
-            // 将场景 AABB 转到光照空间，用于确定准确的 Near/Far
-            bud::math::AABB light_scene_aabb = scene_aabb.transform(light_rot_matrix);
+			// 5. Texel Snapping (对齐中心点)
+			float snapped_x = std::floor(center_of_light_space.x / world_units_per_texel) * world_units_per_texel;
+			float snapped_y = std::floor(center_of_light_space.y / world_units_per_texel) * world_units_per_texel;
 
-            // Z 轴方向：在 View Space 中，相机看 -Z。
-            // 物体越远 Z 越负。light_scene_aabb.min.z 是最远的，max.z 是最近的。
-            // 我们需要包含整个场景：
-            float near_z = -light_scene_aabb.max.z - 100.0f; // 场景最近端 (加缓冲)
-            float far_z = -light_scene_aabb.min.z + 100.0f; // 场景最远端 (加缓冲)
+			// 6. 构建正交投影 (基于对齐后的中心)
+			float min_x = snapped_x - radius;
+			float max_x = snapped_x + radius;
+			float min_y = snapped_y - radius;
+			float max_y = snapped_y + radius;
 
-            // 构建最终矩阵
-            bud::math::mat4 light_proj_matrix = bud::math::ortho_vk(min_x, max_x, min_y, max_y, near_z, far_z);
+			// 7. Z 轴裁剪 (Scene Fitting)
+			// 将场景 AABB 转到光照空间，用于确定准确的 Near/Far
+			auto light_scene_aabb = scene_aabb.transform(light_rot_matrix);
 
-            
-            view.cascade_view_proj_matrices[i] = light_proj_matrix * light_rot_matrix;
+			// Z 轴方向：在 View Space 中，相机看 -Z。
+			// 物体越远 Z 越负。light_scene_aabb.min.z 是最远的，max.z 是最近的。
+			float near_z = -light_scene_aabb.max.z - 100.0f; // 场景最近端 (加缓冲)
+			float far_z = -light_scene_aabb.min.z + 100.0f; // 场景最远端 (加缓冲)
 
-            last_split = split;
-        }
-    }
+			// 构建最终矩阵
+			auto light_proj_matrix = bud::math::ortho_vk(min_x, max_x, min_y, max_y, near_z, far_z);
+
+
+			view.cascade_view_proj_matrices[i] = light_proj_matrix * light_rot_matrix;
+
+			last_split = split;
+		}
+	}
 }

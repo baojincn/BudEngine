@@ -129,9 +129,10 @@ target_sources(bud_engine_core
 		"src/platform/window.cpp"
 		"src/runtime/bud.engine.cpp"
 		"src/graphics/bud.graphics.cpp"
+		"src/graphics/bud.graphics.scene.cpp"
         "src/graphics/bud.graphics.passes.cpp"
         "src/graphics/bud.graphics.renderer.cpp"
-        "src/graphics/graph/bud.graphics.graph.cpp"
+        "src/graphics/bud.graphics.graph.cpp"
         
 		"src/graphics/vulkan/bud.graphics.vulkan.cpp"
 		"src/graphics/vulkan/bud.vulkan.memory.cpp"
@@ -145,6 +146,7 @@ target_sources(bud_engine_core
 
 		"src/runtime/bud.input.cpp"
 		"src/runtime/bud.scene.cpp"
+
 
     PUBLIC
 		# Headers
@@ -166,7 +168,7 @@ target_sources(bud_engine_core
 		"src/graphics/bud.graphics.pool.hpp"
 		"src/graphics/bud.graphics.passes.hpp"
 		"src/graphics/bud.graphics.renderer.hpp"
-		"src/graphics/graph/bud.graphics.graph.hpp"
+		"src/graphics/bud.graphics.graph.hpp"
 
 		"src/graphics/vulkan/bud.graphics.vulkan.hpp"
 		"src/graphics/vulkan/bud.vulkan.memory.hpp"

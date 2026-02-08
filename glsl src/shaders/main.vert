@@ -34,9 +34,9 @@ layout(push_constant) uniform PushConsts {
 void main() {
     vec4 world_pos = push_consts.model * vec4(in_position, 1.0);
     frag_world_pos = world_pos.xyz;
-	// [CSM] No more single lightSpaceMatrix projection here
 
-    frag_normal = in_normal;
+    mat3 normal_matrix = transpose(inverse(mat3(push_consts.model)));
+    frag_normal = normal_matrix * in_normal;
 
     gl_Position = ubo.proj * ubo.view * world_pos;
 

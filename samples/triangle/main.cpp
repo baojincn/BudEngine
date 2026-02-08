@@ -25,8 +25,10 @@ public:
 		config.directional_light_intensity = 3.0f;
 		config.shadow_bias_constant = 0.005f;
 		config.shadow_bias_slope = 1.25f;
-		config.cache_shadows = false;
+		config.cache_shadows = true;
 		config.ambient_strength = 0.4f;
+		config.cascade_count = 4;
+		config.cascade_split_lambda = 0.5;
 		config.debug_cascades = false;
 
 		renderer->set_config(config);
@@ -34,6 +36,19 @@ public:
 
 	void update(float delta_time) {
 		if (!engine) return;
+
+		// 在主线程安全地将新实体加入场景
+		{
+			std::lock_guard lock(entity_mutex);
+			if (!pending_entities.empty()) {
+				auto& scene = engine->get_scene();
+				for (const auto& e : pending_entities) {
+					scene.entities.push_back(e);
+				}
+
+				pending_entities.clear();
+			}
+		}
 
 		auto& input = bud::input::Input::get();
 		auto& scene = engine->get_scene();
@@ -69,24 +84,40 @@ private:
 		auto renderer = engine->get_renderer();
 		auto& scene = engine->get_scene();
 
-		auto idx = renderer->upload_mesh(mesh);
+		auto mesh_handle = renderer->upload_mesh(mesh);
+
+		if (!mesh_handle.is_valid()) {
+			std::println("[Game] Mesh upload failed.");
+			return;
+		}
 
 		bud::scene::Entity entity;
-		entity.mesh_index = idx;
+		entity.mesh_index = mesh_handle.mesh_id;
+		entity.material_index = mesh_handle.material_id;
 		entity.transform = bud::math::scale(bud::math::mat4(1.0f), bud::math::vec3(1.0f));
+		entity.is_static = true;
 
-		scene.entities.push_back(entity);
+		{
+			std::lock_guard lock(entity_mutex);
+			scene.entities.push_back(entity);
+		}
+
 		std::println("[Game] Sponza loaded and spawned via Member Function!");
 	}
 
 private:
 	bud::engine::BudEngine* engine = nullptr;
+	std::mutex entity_mutex;
+	std::vector<bud::scene::Entity> pending_entities;
 };
 
 
 int main(int argc, char* argv[]) {
 	try {
-		bud::engine::BudEngine engine("Bud Engine - Triangle", 1920, 1080);
+		bud::graphics::EngineConfig config;
+		config.name = "Bud Engine - Triangle";
+
+		bud::engine::BudEngine engine(config);
 
 		GameApp app_instance;
 

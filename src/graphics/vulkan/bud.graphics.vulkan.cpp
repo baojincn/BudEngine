@@ -59,29 +59,30 @@ VulkanLayoutTransition bud::graphics::vulkan::get_vk_transition(ResourceState st
 	}
 }
 
-// --- VulkanRHI Implementation ---
 
-void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation) {
+void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count) {
 	this->task_scheduler = task_scheduler;
 	auto window = plat_window->get_sdl_window();
 
-	// 1. 基础构建 (Instance, Surface, Device)
+	max_frames_in_flight = inflight_frame_count;
+
+	// 基础构建 (Instance, Surface, Device)
 	create_instance(window, enable_validation);
 	setup_debug_messenger(enable_validation);
 	create_surface(window);
 	pick_physical_device();
 	create_logical_device(enable_validation);
 
-	// 2. 交换链与呈现资源
+	// 交换链与呈现资源
 	create_swapchain(window);
 	create_image_views();
 
-	// 3. 命令池与同步对象
+	// 命令池与同步对象
 	create_command_pool();
 	create_command_buffer();
 	create_sync_objects();
 
-	// 4. 初始化基础设施 (Subsystems)
+	// 初始化基础设施 (Subsystems)
 	// 接管内存、资源池、管线缓存、描述符分配
 	memory_allocator = std::make_unique<VulkanMemoryAllocator>(device, physical_device, max_frames_in_flight);
 	memory_allocator->init();
@@ -96,7 +97,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		alloc.init(device);
 	}
 
-	// 5. 创建全局 Descriptor Set Layout (Global Bindless Layout)
+	// 创建全局 Descriptor Set Layout (Global Bindless Layout)
 	// Binding 0: UBO (std140)
 	// Binding 1: Sampler2D[] (Bindless, Variable Count / Partial Bound)
 	// Binding 2: ShadowMap (Sampler2DShadow)
@@ -109,7 +110,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 
 	global_set_layout = layout_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
 
-	// 6. 创建 Per-Frame UBO Buffers (Binding 0)
+	// 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = 512; // Enough for matrices + light data (was 256)
 	for (auto& frame : frames) {
 		VkBufferCreateInfo buffer_info{};
@@ -150,7 +151,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		vkMapMemory(device, frame.uniform_memory, 0, ubo_size, 0, &frame.uniform_mapped);
 	}
 
-	// 6.5 创建全局 Descriptor Pool (支持 Bindless + UPDATE_AFTER_BIND)
+	// 创建全局 Descriptor Pool (支持 Bindless + UPDATE_AFTER_BIND)
 	{
 		std::vector<VkDescriptorPoolSize> pool_sizes = {
 			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, (uint32_t)frames.size() },
@@ -168,7 +169,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		}
 	}
 
-	// 7. 创建默认采样器 (用于 Bindless Textures) [Moved Up]
+	// 创建默认采样器 (用于 Bindless Textures)
 	VkSamplerCreateInfo sampler_info{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
 	sampler_info.magFilter = VK_FILTER_LINEAR;
 	sampler_info.minFilter = VK_FILTER_LINEAR;
@@ -189,7 +190,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		throw std::runtime_error("failed to create default sampler!");
 	}
 
-	// [FIX] Create Shadow Sampler (Compare Enable)
+	// Create Shadow Sampler (Compare Enable)
 	VkSamplerCreateInfo shadow_sampler_info = sampler_info;
 	shadow_sampler_info.magFilter = VK_FILTER_LINEAR;
 	shadow_sampler_info.minFilter = VK_FILTER_LINEAR;
@@ -203,7 +204,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		throw std::runtime_error("failed to create shadow sampler!");
 	}
 
-	// [FIX] Create Dummy Depth Texture for Shadow Binding
+	// Create Dummy Depth Texture for Shadow Binding
 	{
 		VkImageCreateInfo image_info{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
 		image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -253,7 +254,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 
 	}
 
-	// 6.6 分配并初始化全局 Descriptor Sets
+	// 分配并初始化全局 Descriptor Sets
 	for (auto& frame : frames) {
 		VkDescriptorSetAllocateInfo alloc_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
 		alloc_info.descriptorPool = global_descriptor_pool;
@@ -271,7 +272,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		writer.update_set(device, frame.global_descriptor_set);
 	}
 
-	// 8. 创建 Fallback 纹理 (Index 0)
+	// 创建 Fallback 纹理 (Index 0)
 	std::println("[Vulkan] Creating Fallback Texture...");
 	{
 		TextureDesc desc{};
@@ -279,7 +280,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		desc.height = 1;
 		desc.format = TextureFormat::RGBA8_UNORM;
 
-		// [DEBUG] Red Fallback to identify missing textures
+		// Red Fallback to identify missing textures
 		uint32_t color = 0xFF0000FF; // R=FF, G=00, B=00, A=FF (Little Endian)
 		fallback_texture_ptr = static_cast<VulkanTexture*>(create_texture(desc, &color, 4));
 		update_bindless_texture(0, fallback_texture_ptr);
@@ -291,64 +292,84 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 void VulkanRHI::cleanup() {
 	wait_idle();
 
-	// [FIX] Cleanup Dummy Resources
-	if (dummy_depth_texture.view) vkDestroyImageView(device, dummy_depth_texture.view, nullptr);
-	if (dummy_depth_texture.image) vkDestroyImage(device, dummy_depth_texture.image, nullptr);
-	if (dummy_depth_texture.memory) vkFreeMemory(device, dummy_depth_texture.memory, nullptr);
+	if (dummy_depth_texture.view)
+		vkDestroyImageView(device, dummy_depth_texture.view, nullptr);
+	if (dummy_depth_texture.image)
+		vkDestroyImage(device, dummy_depth_texture.image, nullptr);
+	if (dummy_depth_texture.memory)
+		vkFreeMemory(device, dummy_depth_texture.memory, nullptr);
 
-	// 1. 销毁基础设施
-	// 注意顺序：先销毁依赖资源的对象
 	descriptor_allocators.clear();
-	if (global_descriptor_pool) vkDestroyDescriptorPool(device, global_descriptor_pool, nullptr);
-	if (global_set_layout) vkDestroyDescriptorSetLayout(device, global_set_layout, nullptr);
+	if (global_descriptor_pool)
+		vkDestroyDescriptorPool(device, global_descriptor_pool, nullptr);
+	if (global_set_layout)
+		vkDestroyDescriptorSetLayout(device, global_set_layout, nullptr);
 
-	if (pipeline_cache) pipeline_cache->cleanup();
-	if (resource_pool) resource_pool->cleanup();
-	if (memory_allocator) memory_allocator->cleanup();
+	if (pipeline_cache)
+		pipeline_cache->cleanup();
+	if (resource_pool)
+		resource_pool->cleanup();
+	if (memory_allocator)
+		memory_allocator->cleanup();
 
 	pipeline_cache.reset();
 	resource_pool.reset();
 	
-	// [FIX] Clean up any remaining buffers before destroying memory allocator
 	if (!buffer_memory_map.empty()) {
 		std::println("[Vulkan] Warning: {} buffers were not explicitly destroyed, cleaning up now...", buffer_memory_map.size());
 		for (auto& [buffer, memory] : buffer_memory_map) {
 			vkDestroyBuffer(device, buffer, nullptr);
-			if (memory) vkFreeMemory(device, memory, nullptr);
+			if (memory)
+				vkFreeMemory(device, memory, nullptr);
 		}
 		buffer_memory_map.clear();
 	}
 	
 	memory_allocator.reset();
 
-	// 2. 销毁同步对象和Per-Frame资源
-	for (auto semaphore : render_finished_semaphores) vkDestroySemaphore(device, semaphore, nullptr);
+	for (auto semaphore : render_finished_semaphores)
+		vkDestroySemaphore(device, semaphore, nullptr);
+
 	for (int i = 0; i < max_frames_in_flight; i++) {
-		if (frames[i].uniform_mapped) vkUnmapMemory(device, frames[i].uniform_memory);
-		if (frames[i].uniform_buffer) vkDestroyBuffer(device, frames[i].uniform_buffer, nullptr);
-		if (frames[i].uniform_memory) vkFreeMemory(device, frames[i].uniform_memory, nullptr);
-		if (frames[i].image_available_semaphore) vkDestroySemaphore(device, frames[i].image_available_semaphore, nullptr);
-		if (frames[i].in_flight_fence) vkDestroyFence(device, frames[i].in_flight_fence, nullptr);
-		if (frames[i].main_command_pool) vkDestroyCommandPool(device, frames[i].main_command_pool, nullptr);
+		if (frames[i].uniform_mapped)
+			vkUnmapMemory(device, frames[i].uniform_memory);
+		if (frames[i].uniform_buffer)
+			vkDestroyBuffer(device, frames[i].uniform_buffer, nullptr);
+		if (frames[i].uniform_memory)
+			vkFreeMemory(device, frames[i].uniform_memory, nullptr);
+		if (frames[i].image_available_semaphore)
+			vkDestroySemaphore(device, frames[i].image_available_semaphore, nullptr);
+		if (frames[i].in_flight_fence)
+			vkDestroyFence(device, frames[i].in_flight_fence, nullptr);
+		if (frames[i].main_command_pool)
+			vkDestroyCommandPool(device, frames[i].main_command_pool, nullptr);
 	}
 
-	// 3. 销毁 Swapchain
-	for (auto imageView : swapchain_image_views) vkDestroyImageView(device, imageView, nullptr);
-	if (swapchain) vkDestroySwapchainKHR(device, swapchain, nullptr);
+	// Swapchain
+	for (auto imageView : swapchain_image_views)
+		vkDestroyImageView(device, imageView, nullptr);
 
-	// [FIX] Destroy pipeline layouts
+	if (swapchain)
+		vkDestroySwapchainKHR(device, swapchain, nullptr);
+
 	for (auto layout : created_layouts) {
 		vkDestroyPipelineLayout(device, layout, nullptr);
 	}
 	created_layouts.clear();
 
-	// 4. 销毁 Device & Instance
-	if (shadow_sampler) vkDestroySampler(device, shadow_sampler, nullptr);
-	if (default_sampler) vkDestroySampler(device, default_sampler, nullptr);
-	if (device) vkDestroyDevice(device, nullptr);
-	if (enable_validation_layers && debug_messenger) destroy_debug_utils_messenger_ext(instance, debug_messenger, nullptr);
-	if (surface) vkDestroySurfaceKHR(instance, surface, nullptr);
-	if (instance) vkDestroyInstance(instance, nullptr);
+	// Device & Instance
+	if (shadow_sampler)
+		vkDestroySampler(device, shadow_sampler, nullptr);
+	if (default_sampler)
+		vkDestroySampler(device, default_sampler, nullptr);
+	if (device)
+		vkDestroyDevice(device, nullptr);
+	if (enable_validation_layers && debug_messenger)
+		destroy_debug_utils_messenger_ext(instance, debug_messenger, nullptr);
+	if (surface)
+		vkDestroySurfaceKHR(instance, surface, nullptr);
+	if (instance)
+		vkDestroyInstance(instance, nullptr);
 }
 
 void VulkanRHI::wait_idle() {
@@ -438,7 +459,6 @@ VkShaderModule create_shader_module(VkDevice device, const std::vector<char>& co
 }
 
 void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
-	// 1. Create Layout (Simplified: Fixed Push Constant Range)
 	VkPushConstantRange push_constant;
 	push_constant.offset = 0;
 	push_constant.size = 256; // Enough for standard matrices
@@ -446,28 +466,7 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipelineLayoutInfo.setLayoutCount = 0; // No Descriptor Sets for now? Wait, shaders use binding 0/1/2.
-	// We need Descriptor Set Layouts for proper bindless or standard binding.
-	// For "Phase 5 Pipeline Implementation", we might need to handle DescriptorSetLayouts.
-	// But to just DRAW geometry (Vertex Shader), we pushed matrices via PushConstants?
-	// The shader says: layout(binding = 0) uniform UniformBufferObject.
-	// And layout(binding = 1) uniform sampler2D.
-	// If we use Push Constants for matrices, we must change the shader OR bind a descriptor set.
-	
-	// OPTION: Use global Bindless Layout (from descriptor_allocators?).
-	// Or create a simple layout.
-	// Let's create a Bindless-compatible layout or just an empty one if we rely on Push Constants.
-	// WAIT: Shader uses UBO at binding 0.
-	// I should probably use PushConstants for UBO data to simplify (avoid buffer creation/update).
-	// BUT I cannot change shader easily (it's in .vert).
-	// User said "Until drawing Sponza".
-	// Maybe I should modify shader to use Push Constants for MVP to make life easier?
-	// "layout(push_constant) uniform PushConsts { mat4 model; ... }"
-	// That avoids DescriptorSet management for Per-Object data.
-	
-	// Decision: I will use PushConstants for MVP to avoid Descriptor Complexity now.
-	// I will update SHADER later. For now, assume Layout has PushConstants.
-	// AND Bindless Descriptor Layout (for textures later).
+	pipelineLayoutInfo.setLayoutCount = 0; 
 	
 	// 使用全局 Descriptor Set Layout
 	std::vector<VkDescriptorSetLayout> setLayouts = { global_set_layout };
@@ -482,11 +481,9 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 		throw std::runtime_error("failed to create pipeline layout!");
 	}
 
-	// 2. Create Shader Modules
 	VkShaderModule vertModule = create_shader_module(device, desc.vs.code);
 	VkShaderModule fragModule = create_shader_module(device, desc.fs.code);
 
-	// 3. Create Pipeline via Cache
 	PipelineKey key{};
 	key.vert_shader = vertModule;
 	key.frag_shader = fragModule;
@@ -494,7 +491,6 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	key.depth_test = desc.depth_test;
 	key.depth_write = desc.depth_write;
 
-	// [FIX] Map CullMode
 	switch (desc.cull_mode) {
 	case bud::graphics::CullMode::None: key.cull_mode = VK_CULL_MODE_NONE; break;
 	case bud::graphics::CullMode::Front: key.cull_mode = VK_CULL_MODE_FRONT_BIT; break;
@@ -502,32 +498,17 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	default: key.cull_mode = VK_CULL_MODE_BACK_BIT; break;
 	}
 
-	// [FIX] Map Color Format
 	key.color_format = to_vk_format(desc.color_attachment_format);
 
-	// [FIX] Detect depth-only pipeline (for shadow maps)
 	bool is_depth_only = (desc.color_attachment_format == bud::graphics::TextureFormat::Undefined);
 
 	VkPipeline pipeline = pipeline_cache->get_pipeline(key, pipelineLayout, is_depth_only);
 
-	// Cleanup Modules (Pipeline Cache creates its own copy or uses them? 
-	// VkCreateGraphicsPipelines uses them. After creation, modules can be destroyed.
-	// BUT PipelineCache might hold them as Key?
-	// PipelineKey holds VkShaderModule by value (pointer/handle).
-	// If we destroy module, key becomes invalid if we ever use it to create again?
-	// `VulkanPipelineCache` naive implementation assumes handle valid?
-	// Correct implementation should own modules or copy bytecode.
-	// For now, LEAK modules or destroy checks?
-	// The `PipelineKey` compares handles. If handles are reused...
-	// Let's destroy them for now. The `get_pipeline` creates immediately.
 	vkDestroyShaderModule(device, vertModule, nullptr);
 	vkDestroyShaderModule(device, fragModule, nullptr);
 
-	// 4. Return Opaque Handle (Pipeline + Layout)
-	// We allocate a wrapper that holds both pipeline and layout.
 	VulkanPipelineObject* pipeObj = new VulkanPipelineObject{ pipeline, pipelineLayout };
 	
-	// [FIX] Track layout for cleanup
 	created_layouts.push_back(pipelineLayout);
 	
 	return pipeObj;
@@ -547,12 +528,12 @@ CommandHandle VulkanRHI::begin_frame() {
 
 	vkResetFences(device, 1, &frames[current_frame].in_flight_fence);
 
-	// [关键] 通知分配器新的一帧开始了 (重置 Linear Allocator)
+	// 通知分配器新的一帧开始了 (重置 Linear Allocator)
 	memory_allocator->on_frame_begin(current_frame);
 	descriptor_allocators[current_frame].reset_frame();
 
 	// 使用 init 时分配的持久化 Global Descriptor Set，仅更新 UBO 绑定
-	// 特别注意：Bindless Textures 是持久化的，不需要每一帧重绑一次，否则会丢失状态导致 GPU Hang
+	// Bindless Textures 是持久化的，不需要每一帧重绑一次，否则会丢失状态导致 GPU Hang
 
 	// 更新 Descriptor Set 指向当前帧的 UBO
 	DescriptorWriter writer;
@@ -689,9 +670,6 @@ void VulkanRHI::cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32
 }
 
 void VulkanRHI::cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) {
-	// Assuming pipeline_layout passed here IS the pipeline object (for convenience)
-	// Or we require user to pass pipe->layout? MainPass doesn't know layout.
-	// So we assume the 'pipeline' pointer is passed here.
 	auto pipeObj = static_cast<VulkanPipelineObject*>(pipeline_layout);
 	vkCmdPushConstants(static_cast<VkCommandBuffer>(cmd), pipeObj->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, size, data);
 }
@@ -769,7 +747,7 @@ uint32_t VulkanRHI::get_current_image_index() {
 	return current_image_index;
 }
 
-// Stubs (to be implemented)
+
 void VulkanRHI::set_render_config(const RenderConfig& new_render_config) {
 	render_config = new_render_config;
 }
@@ -786,7 +764,7 @@ void VulkanRHI::create_instance(SDL_Window* window, bool enable_validation) {
 	enable_validation_layers = enable_validation;
 	VkApplicationInfo app_info{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
 	app_info.pApplicationName = "Bud Engine";
-	app_info.apiVersion = VK_API_VERSION_1_3; // Upgrade to 1.3 for better Dynamic Rendering Support
+	app_info.apiVersion = VK_API_VERSION_1_3;
 
 	VkInstanceCreateInfo create_info{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
 	create_info.pApplicationInfo = &app_info;
@@ -904,7 +882,6 @@ void VulkanRHI::create_swapchain(SDL_Window* window) {
 		image_count = swapchain_support.capabilities.maxImageCount;
 	}
 
-	max_frames_in_flight = 2; // Double buffering
 	frames.resize(max_frames_in_flight);
 
 	VkSwapchainCreateInfoKHR create_info{ VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
@@ -1434,15 +1411,13 @@ bud::graphics::Texture* VulkanRHI::create_texture(const bud::graphics::TextureDe
 
 		this->copy_buffer_to_image(tex->image, static_cast<VkBuffer>(staging.internal_handle), desc.width, desc.height);
 		
-		// [FIX] If mips are requested, generate them. Otherwise transition to ShaderReadOnly.
 		if (desc.mips > 1) {
-			std::println("[Texture] Generating {} mip levels for {}x{} texture", desc.mips, desc.width, desc.height);
+			//std::println("[Texture] Generating {} mip levels for {}x{} texture", desc.mips, desc.width, desc.height);
 			this->generate_mipmaps(tex->image, to_vk_format(desc.format), desc.width, desc.height, desc.mips);
 		} else {
 			this->transition_image_layout_immediate(tex->image, to_vk_format(desc.format), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 		}
 		
-		// [FIX] Destroy staging buffer after texture upload
 		this->destroy_buffer(staging);
 	}
 
@@ -1550,10 +1525,10 @@ std::vector<VkVertexInputAttributeDescription> Vertex::get_attribute_description
 	attributeDescriptions[3].offset = offsetof(Vertex, uv);
 
 	// TexIndex (Location 4) -> Offset 44
-	attributeDescriptions[4].binding = 0;
-	attributeDescriptions[4].location = 4;
-	attributeDescriptions[4].format = VK_FORMAT_R32_SFLOAT;
-	attributeDescriptions[4].offset = offsetof(Vertex, tex_index);
+	//attributeDescriptions[4].binding = 0;
+	//attributeDescriptions[4].location = 4;
+	//attributeDescriptions[4].format = VK_FORMAT_R32_SFLOAT;
+	//attributeDescriptions[4].offset = offsetof(Vertex, tex_index);
 
 	return attributeDescriptions;
 }
