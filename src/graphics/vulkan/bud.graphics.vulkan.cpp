@@ -459,7 +459,6 @@ VkShaderModule create_shader_module(VkDevice device, const std::vector<char>& co
 }
 
 void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
-	// 1. Create Layout (Simplified: Fixed Push Constant Range)
 	VkPushConstantRange push_constant;
 	push_constant.offset = 0;
 	push_constant.size = 256; // Enough for standard matrices
@@ -467,28 +466,7 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipelineLayoutInfo.setLayoutCount = 0; // No Descriptor Sets for now? Wait, shaders use binding 0/1/2.
-	// We need Descriptor Set Layouts for proper bindless or standard binding.
-	// For "Phase 5 Pipeline Implementation", we might need to handle DescriptorSetLayouts.
-	// But to just DRAW geometry (Vertex Shader), we pushed matrices via PushConstants?
-	// The shader says: layout(binding = 0) uniform UniformBufferObject.
-	// And layout(binding = 1) uniform sampler2D.
-	// If we use Push Constants for matrices, we must change the shader OR bind a descriptor set.
-	
-	// OPTION: Use global Bindless Layout (from descriptor_allocators?).
-	// Or create a simple layout.
-	// Let's create a Bindless-compatible layout or just an empty one if we rely on Push Constants.
-	// WAIT: Shader uses UBO at binding 0.
-	// I should probably use PushConstants for UBO data to simplify (avoid buffer creation/update).
-	// BUT I cannot change shader easily (it's in .vert).
-	// User said "Until drawing Sponza".
-	// Maybe I should modify shader to use Push Constants for MVP to make life easier?
-	// "layout(push_constant) uniform PushConsts { mat4 model; ... }"
-	// That avoids DescriptorSet management for Per-Object data.
-	
-	// Decision: I will use PushConstants for MVP to avoid Descriptor Complexity now.
-	// I will update SHADER later. For now, assume Layout has PushConstants.
-	// AND Bindless Descriptor Layout (for textures later).
+	pipelineLayoutInfo.setLayoutCount = 0; 
 	
 	// 使用全局 Descriptor Set Layout
 	std::vector<VkDescriptorSetLayout> setLayouts = { global_set_layout };
@@ -503,11 +481,9 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 		throw std::runtime_error("failed to create pipeline layout!");
 	}
 
-	// 2. Create Shader Modules
 	VkShaderModule vertModule = create_shader_module(device, desc.vs.code);
 	VkShaderModule fragModule = create_shader_module(device, desc.fs.code);
 
-	// 3. Create Pipeline via Cache
 	PipelineKey key{};
 	key.vert_shader = vertModule;
 	key.frag_shader = fragModule;
@@ -515,7 +491,6 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	key.depth_test = desc.depth_test;
 	key.depth_write = desc.depth_write;
 
-	// [FIX] Map CullMode
 	switch (desc.cull_mode) {
 	case bud::graphics::CullMode::None: key.cull_mode = VK_CULL_MODE_NONE; break;
 	case bud::graphics::CullMode::Front: key.cull_mode = VK_CULL_MODE_FRONT_BIT; break;
@@ -523,29 +498,15 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	default: key.cull_mode = VK_CULL_MODE_BACK_BIT; break;
 	}
 
-	// [FIX] Map Color Format
 	key.color_format = to_vk_format(desc.color_attachment_format);
 
-	// [FIX] Detect depth-only pipeline (for shadow maps)
 	bool is_depth_only = (desc.color_attachment_format == bud::graphics::TextureFormat::Undefined);
 
 	VkPipeline pipeline = pipeline_cache->get_pipeline(key, pipelineLayout, is_depth_only);
 
-	// Cleanup Modules (Pipeline Cache creates its own copy or uses them? 
-	// VkCreateGraphicsPipelines uses them. After creation, modules can be destroyed.
-	// BUT PipelineCache might hold them as Key?
-	// PipelineKey holds VkShaderModule by value (pointer/handle).
-	// If we destroy module, key becomes invalid if we ever use it to create again?
-	// `VulkanPipelineCache` naive implementation assumes handle valid?
-	// Correct implementation should own modules or copy bytecode.
-	// For now, LEAK modules or destroy checks?
-	// The `PipelineKey` compares handles. If handles are reused...
-	// Let's destroy them for now. The `get_pipeline` creates immediately.
 	vkDestroyShaderModule(device, vertModule, nullptr);
 	vkDestroyShaderModule(device, fragModule, nullptr);
 
-	// 4. Return Opaque Handle (Pipeline + Layout)
-	// We allocate a wrapper that holds both pipeline and layout.
 	VulkanPipelineObject* pipeObj = new VulkanPipelineObject{ pipeline, pipelineLayout };
 	
 	created_layouts.push_back(pipelineLayout);
@@ -709,9 +670,6 @@ void VulkanRHI::cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32
 }
 
 void VulkanRHI::cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) {
-	// Assuming pipeline_layout passed here IS the pipeline object (for convenience)
-	// Or we require user to pass pipe->layout? MainPass doesn't know layout.
-	// So we assume the 'pipeline' pointer is passed here.
 	auto pipeObj = static_cast<VulkanPipelineObject*>(pipeline_layout);
 	vkCmdPushConstants(static_cast<VkCommandBuffer>(cmd), pipeObj->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, size, data);
 }
@@ -806,7 +764,7 @@ void VulkanRHI::create_instance(SDL_Window* window, bool enable_validation) {
 	enable_validation_layers = enable_validation;
 	VkApplicationInfo app_info{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
 	app_info.pApplicationName = "Bud Engine";
-	app_info.apiVersion = VK_API_VERSION_1_3; // Upgrade to 1.3 for better Dynamic Rendering Support
+	app_info.apiVersion = VK_API_VERSION_1_3;
 
 	VkInstanceCreateInfo create_info{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
 	create_info.pApplicationInfo = &app_info;
@@ -1453,15 +1411,13 @@ bud::graphics::Texture* VulkanRHI::create_texture(const bud::graphics::TextureDe
 
 		this->copy_buffer_to_image(tex->image, static_cast<VkBuffer>(staging.internal_handle), desc.width, desc.height);
 		
-		// [FIX] If mips are requested, generate them. Otherwise transition to ShaderReadOnly.
 		if (desc.mips > 1) {
-			std::println("[Texture] Generating {} mip levels for {}x{} texture", desc.mips, desc.width, desc.height);
+			//std::println("[Texture] Generating {} mip levels for {}x{} texture", desc.mips, desc.width, desc.height);
 			this->generate_mipmaps(tex->image, to_vk_format(desc.format), desc.width, desc.height, desc.mips);
 		} else {
 			this->transition_image_layout_immediate(tex->image, to_vk_format(desc.format), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 		}
 		
-		// [FIX] Destroy staging buffer after texture upload
 		this->destroy_buffer(staging);
 	}
 

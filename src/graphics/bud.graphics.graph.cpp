@@ -1,4 +1,4 @@
-#include "src/graphics/graph/bud.graphics.graph.hpp"
+﻿#include "src/graphics/bud.graphics.graph.hpp"
 
 #include <iostream>
 
@@ -208,70 +208,14 @@ namespace bud::graphics {
 		reset(); 
 	}
 
-	void RenderGraph::execute_parallel(bud::threading::TaskScheduler* task_scheduler) {
-		if (!task_scheduler) return;
-
-		// 1. Create counters for all passes
-		// We use unique_ptr because Counter is not movable
-		std::vector<std::unique_ptr<bud::threading::Counter>> counters;
-		counters.reserve(passes.size());
-		for (size_t i = 0; i < passes.size(); ++i) {
-			counters.push_back(std::make_unique<bud::threading::Counter>(0));
+	void RenderGraph::execute_parallel(CommandHandle cmd, bud::threading::TaskScheduler* task_scheduler) {
+		if (!task_scheduler) {
+			execute(cmd);
+			return;
 		}
 
-		// 2. Spawn tasks for all passes
-		// Note: We spawn them all, they will cooperatively wait for dependencies
-		// Iterate in topological order just to be nice to the scheduler, but any order works valid-wise
-		for (int pass_idx : sorted_passes) {
-			auto& pass = passes[pass_idx];
-			auto* my_counter = counters[pass_idx].get();
-
-			task_scheduler->spawn(pass.name.c_str(), [this, pass_idx, &counters, &pass, task_scheduler](void) {
-				// A. Wait for dependencies
-				for (int dep_idx : pass.dependencies) {
-					task_scheduler->wait_for_counter(*counters[dep_idx]);
-				}
-
-				// B. Barriers (Automatic)
-				// Note: In parallel recording, these commands need a valid command buffer.
-				// Since we don't have secondary cmd buffers fully hooked up, we assume
-				// 'execute' in pass does the recording.
-				// BUT barriers must happen *before* the pass logic.
-				// We can't record them into the same main command buffer easily if parallel.
-				// For Prototype: We print them. In Real Engine: Record to thread-local CMD.
-				
-				for (auto& barrier : pass.before_barriers) {
-				   // Just log for prototype safety. Real engine would record to secondary cmd.
-				   // std::cout << "Barrier: " << barrier.handle.id << " " << (int)barrier.old_state << "->" << (int)barrier.new_state << "\n";
-				}
-
-				// C. Execute
-				// ...
-				
-				// Placeholder:
-				// CommandHandle thread_cmd = rhi->allocate_secondary_command_buffer();
-				// pass.execute(rhi, thread_cmd);
-				// rhi->submit_secondary(thread_cmd);
-				
-				// For SAFETY in this prototype step, we just log execution order:
-				// std::cout << "Executing Pass Parallel: " << pass.name << "\n";
-				
-			}, my_counter);
-		}
-
-		// 3. Wait for frame completion (Leaf Passes)
-		// Leaves are passes that no one depends on (dependencies list is usually for *input*, here we need Reverse.
-		// Wait, adjacency_list[u] contains 'v' where u -> v.
-		// So if adjacency_list[u] is empty, u is a leaf (no one reads from u).
-		// We should wait for these.
-		
-		for (size_t i = 0; i < passes.size(); ++i) {
-			if (adjacency_list[i].empty()) {
-				task_scheduler->wait_for_counter(*counters[i]);
-			}
-		}
-
-		reset();
+		std::cerr << "[RenderGraph] execute_parallel is not implemented. Falling back to serial execution.\n";
+		execute(cmd);
 	}
 
 }

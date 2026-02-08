@@ -25,8 +25,10 @@ public:
 		config.directional_light_intensity = 3.0f;
 		config.shadow_bias_constant = 0.005f;
 		config.shadow_bias_slope = 1.25f;
-		config.cache_shadows = false;
+		config.cache_shadows = true;
 		config.ambient_strength = 0.4f;
+		config.cascade_count = 4;
+		config.cascade_split_lambda = 0.5;
 		config.debug_cascades = false;
 
 		renderer->set_config(config);
@@ -83,6 +85,11 @@ private:
 		auto& scene = engine->get_scene();
 
 		auto mesh_handle = renderer->upload_mesh(mesh);
+
+		if (!mesh_handle.is_valid()) {
+			std::println("[Game] Mesh upload failed.");
+			return;
+		}
 
 		bud::scene::Entity entity;
 		entity.mesh_index = mesh_handle.mesh_id;

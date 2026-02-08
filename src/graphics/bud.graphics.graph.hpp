@@ -12,12 +12,11 @@
 #include "src/graphics/bud.graphics.pool.hpp"
 #include "src/graphics/bud.graphics.rhi.hpp"
 
-// Forward Decl
+
 namespace bud::threading { class TaskScheduler; }
 
 namespace bud::graphics {
 
-	// 1. Defitions
 	struct RGHandle {
 		uint32_t id = 0;
 		bool is_valid() const { return id != 0; }
@@ -26,30 +25,34 @@ namespace bud::graphics {
 
 	struct RGResourceNode {
 		std::string name;
-		Texture* physical_texture = nullptr; // nullptr if transient
+		Texture* physical_texture = nullptr;
 		TextureDesc desc;
 		bool is_transient = true;
-		bool is_external = false; // e.g. imported swapchain image
+		bool is_external = false;
 
-		// Versioning for future SSA
 		uint32_t version = 0;
-		RGHandle parent_handle = { 0 }; // if this is an alias or new version
-		ResourceState initial_state = ResourceState::Undefined; // [FIX] Store Initial State
+		RGHandle parent_handle = { 0 };
+		ResourceState initial_state = ResourceState::Undefined;
 	};
+
 
 	struct RGPassNode {
 		std::string name;
 		std::function<void(RHI*, CommandHandle)> execute;
 
 		// Graph Connectivity
-		struct Access { RGHandle handle; ResourceState state; };
+		struct Access {
+			RGHandle handle;
+			ResourceState state;
+		};
+
 		std::vector<Access> reads;
 		std::vector<Access> writes;
 		std::vector<int> dependencies; // Indices of passes this pass waits for
 
 		// Culling info
 		uint32_t ref_count = 0;
-		bool has_side_effects = false; // e.g. Present, Compute Write to buffer
+		bool has_side_effects = false;
 
 		// Barrier info calculated during compile()
 		struct BarrierInfo { 
@@ -60,7 +63,7 @@ namespace bud::graphics {
 		std::vector<BarrierInfo> before_barriers;
 	};
 
-	// 2. Builder
+
 	class RGBuilder {
 	public:
 		RGBuilder(class RenderGraph& graph, struct RGPassNode& pass)
@@ -81,14 +84,13 @@ namespace bud::graphics {
 		struct RGPassNode& pass_node;
 	};
 
-	// 3. RenderGraph
+
 	class RenderGraph {
 		friend class RGBuilder;
 	public:
 		RenderGraph(RHI* rhi) : rhi(rhi) {}
 
 		void reset() {
-			// Phase 2: Release transient resources back to pool
 			if (rhi) {
 				auto* pool = rhi->get_resource_pool();
 				if (pool) {
@@ -124,12 +126,10 @@ namespace bud::graphics {
 		RGHandle import_texture(const std::string& name, Texture* texture, ResourceState current_state);
 		Texture* get_texture(RGHandle handle) const;
 
-		// --- Core Features ---
 		void compile();
 		void execute(CommandHandle cmd);
 		
-		// Task-based execution (Phase 4)
-		void execute_parallel(bud::threading::TaskScheduler* task_scheduler);
+		void execute_parallel(CommandHandle cmd, bud::threading::TaskScheduler* task_scheduler);
 
 	private:
 		RHI* rhi;

@@ -3,6 +3,8 @@
 #include <string>
 #include <memory>
 #include <functional>
+#include <atomic>
+#include <limits>
 
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.core.hpp"
@@ -54,14 +56,14 @@ namespace bud::engine {
 
 	private:
 
-		// 增加时间累加器和环形缓冲索引
 		double accumulator = 0.0;
 
-		// 逻辑层正在写的帧索引 (0, 1, 2...)
 		uint32_t current_write_index = 0;
 
-		// 逻辑层最新提交完成的帧索引 (原子变量，供渲染线程读取)
 		std::atomic<uint32_t> last_committed_index = 0;
+
+		static constexpr uint32_t invalid_render_index = std::numeric_limits<uint32_t>::max();
+		std::atomic<uint32_t> render_inflight_index = invalid_render_index;
 
 		bud::threading::Counter render_task_counter;
 

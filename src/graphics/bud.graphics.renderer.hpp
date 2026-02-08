@@ -3,20 +3,27 @@
 #include <memory>
 #include <vector>
 #include <mutex>
+#include <limits>
 
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.math.hpp"
 #include "src/graphics/bud.graphics.scene.hpp"
+#include "src/graphics/bud.graphics.sortkey.hpp"
 
 #include "src/graphics/bud.graphics.types.hpp"
 #include "src/graphics/bud.graphics.rhi.hpp"
-#include "src/graphics/graph/bud.graphics.graph.hpp"
+#include "src/graphics/bud.graphics.graph.hpp"
 #include "src/graphics/bud.graphics.passes.hpp"
 
 namespace bud::graphics {
 	struct MeshAssetHandle {
-		uint32_t mesh_id;      // 对应 meshes 数组索引
-		uint32_t material_id;  // 对应 bindless 纹理槽位 (通常是 BaseColor)
+		static constexpr uint32_t invalid_id = std::numeric_limits<uint32_t>::max();
+
+		uint32_t mesh_id;
+		uint32_t material_id;
+
+		static MeshAssetHandle invalid() { return { invalid_id, invalid_id }; }
+		bool is_valid() const { return mesh_id != invalid_id; }
 	};
 
 	class Renderer {
@@ -34,9 +41,15 @@ namespace bud::graphics {
 		void set_config(const RenderConfig& config);
 		const RenderConfig& get_config() const;
 
-		inline const std::vector<RenderMesh>& get_meshes() const { return meshes; }
+		// Game-thread safe snapshot (CPU-side bounds only)
+		std::vector<bud::math::AABB> get_mesh_bounds_snapshot() const;
 
 	private:
+		struct UploadQueue {
+			std::mutex mutex;
+			std::vector<std::function<void()>> commands;
+		};
+
 		void update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb);
 
 		RHI* rhi;
@@ -45,15 +58,18 @@ namespace bud::graphics {
 		bud::io::AssetManager* asset_manager;
 		bud::threading::TaskScheduler* task_scheduler;
 
-		// Pass 实例 (用于保存一些持久化数据，如 Pipeline State)
 		std::unique_ptr<CSMShadowPass> csm_pass;
 		std::unique_ptr<MainPass> main_pass;
 
 		std::vector<RenderMesh> meshes;
-		std::atomic<uint32_t> next_bindless_slot{ 1 };
+		std::vector<bud::math::AABB> mesh_bounds;
+		mutable std::mutex mesh_bounds_mutex;
 
-		std::mutex upload_mutex;
-		std::vector<std::function<void()>> pending_rhi_commands;
-		uint32_t next_mesh_id = 0;
+		std::vector<SortItem> sort_list;
+
+		std::atomic<uint32_t> next_bindless_slot{ 1 };
+		std::atomic<uint32_t> next_mesh_id{ 0 };
+
+		std::shared_ptr<UploadQueue> upload_queue;
 	};
 }

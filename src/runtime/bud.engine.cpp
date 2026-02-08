@@ -1,6 +1,4 @@
-﻿
-
-#include <string>
+﻿#include <string>
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -50,7 +48,7 @@ namespace bud::engine {
 		// Initialize the main thread as a worker
 		task_scheduler->init_main_thread_worker();
 
-		// 获取配置的固定步长 (例如 1/60 秒)
+		// 获取配置的固定步长
 		const double fixed_dt = renderer->get_config().fixed_logic_timestep;
 
 		using Clock = std::chrono::high_resolution_clock;
@@ -60,23 +58,42 @@ namespace bud::engine {
 			task_scheduler->pump_main_thread_tasks();
 			handle_events();
 
+
 			auto now = Clock::now();
 			double frame_time = std::chrono::duration<double>(now - last_time).count();
 			last_time = now;
 
+			// 计算 FPS
+			static auto timer = 0.0f;
+			static auto fps = 0;
+			timer += frame_time;
+			fps++;
+			if (timer >= 1.0f) {
+				auto title = std::format("{} - FPS: {}", engine_config.name, fps);
+				window->set_title(title.c_str());
+				timer = 0.0f;
+				fps = 0;
+			}
+
 			// 防止螺旋死亡
-			if (frame_time > 0.25) frame_time = 0.25;
+			if (frame_time > 0.25)
+				frame_time = 0.25;
 
 			accumulator += frame_time;
 
-			// --- 阶段 A: 逻辑更新 (追赶时间) ---
+			// 阶段 A: 逻辑更新
 			while (accumulator >= fixed_dt) {
-				// 1. 切换到下一个可写的 Buffer
-				current_write_index = (current_write_index + 1) % render_scenes.size();
+				uint32_t next_write_index = (current_write_index + 1) % render_scenes.size();
 
-				// 2. 执行逻辑 (Spawn + Wait)
+				if (next_write_index == render_inflight_index.load(std::memory_order_acquire)) {
+					task_scheduler->wait_for_counter(render_task_counter);
+				}
+
+				current_write_index = next_write_index;
+
 				if (perform_game_logic) {
 					bud::threading::Counter logic_counter;
+
 					task_scheduler->spawn("GameLogic", [&]() {
 						perform_game_logic((float)fixed_dt);
 					}, &logic_counter);
@@ -84,26 +101,24 @@ namespace bud::engine {
 					task_scheduler->wait_for_counter(logic_counter);
 				}
 
-				// 3. 提取数据 (Sync)
-				// 写入到 current_write_index 指向的 buffer
 				extract_scene_data(render_scenes[current_write_index]);
 
-				// 4. 提交这一帧
+				// 提交这一帧
 				last_committed_index.store(current_write_index, std::memory_order_release);
 
 				accumulator -= fixed_dt;
 			}
 
-			// --- 阶段 B: 渲染 (尽可能快) ---
-
-			// 1. 获取最新已提交的帧数据
+			// 阶段 B: 渲染
 			uint32_t render_idx = last_committed_index.load(std::memory_order_acquire);
 
 			perform_rendering((float)frame_time, render_idx);
 
-			// 这里的 FrameMark 统计的是主循环频率
 			FrameMark;
 		}
+
+		// 等待所有渲染任务完成
+		task_scheduler->wait_for_counter(render_task_counter);
 		rhi->wait_idle();
 	}
 
@@ -112,21 +127,15 @@ namespace bud::engine {
 	}
 
 	void BudEngine::extract_scene_data(bud::graphics::RenderScene& render_scene) {
-
-		task_scheduler->wait_for_counter(render_task_counter);
-
-		// 1. [主线程] 准备阶段
 		auto& logic_entities = scene.entities;
 		size_t total_logic_count = logic_entities.size();
-
-		// 预估这一帧需要渲染多少物体 (简单起见，假设所有逻辑实体都可能渲染)
-		// 这一步非常快，只是设置 capacity
 
 		constexpr size_t buffering_size = 128; // 预留一些余量，避免频繁越界
 
 		render_scene.reset(total_logic_count + buffering_size);
 
-		// 2. [任务系统] 启动并行提取
+		auto mesh_bounds = renderer->get_mesh_bounds_snapshot();
+
 		bud::threading::Counter extract_scene_counter;
 
 		// 设定分块大小 (Granularity)。太小会导致调度开销，太大导致负载不均。
@@ -135,33 +144,22 @@ namespace bud::engine {
 
 		task_scheduler->ParallelFor(total_logic_count, CHUNK_SIZE,
 			[&](size_t start, size_t end) {
-				// --- Worker 线程内部 ---
-
-				// 缓存局部变量，减少指针跳转
-				const auto& meshes = renderer->get_meshes(); // 假设能获取 mesh 列表
-
 				for (size_t i = start; i <= end; ++i) {
 					const auto& entity = logic_entities[i];
 
-					// a. 过滤无效实体 (Logic Culling)
-					// 比如：隐藏物体、没有 Mesh 的空节点等
-					if (entity.mesh_index >= meshes.size()) [[unlikely]] {
+					if (entity.mesh_index >= mesh_bounds.size()) [[unlikely]] {
 						continue;
 					}
-					// if (!entity.is_active) continue; 
 
-					// b. 计算数据 (最耗时的部分)
-					// 假设 entity.transform 已经是 World Matrix (或者在这里做 Parent * Local 矩阵乘法)
+					if (!entity.is_active)
+						continue; 
+
 					const auto& world_matrix = entity.transform;
 
-					// 获取 Mesh 的局部 AABB
-					const auto& local_aabb = meshes[entity.mesh_index].aabb;
+					const auto& local_aabb = mesh_bounds[entity.mesh_index];
 
-					// 计算变换后的 AABB (SIMD 优化的数学库在这里发光)
-					// 中有 AABB::transform
 					auto world_aabb = local_aabb.transform(world_matrix);
 
-					// c. 写入 RenderScene (原子申请 Slot，无锁写入)
 					render_scene.add_instance(
 						world_matrix,
 						world_aabb,
@@ -172,17 +170,11 @@ namespace bud::engine {
 
 				}
 			},
-			&extract_scene_counter // 传入 Counter 以便等待
+			&extract_scene_counter
 		);
 
-		// 3. [主线程] 等待提取完成 (Yielding Wait)
-		// 此时主线程不会傻等，它会去“偷”别的 Job 来做 (Work Stealing)
 		task_scheduler->wait_for_counter(extract_scene_counter);
-
-		// extraction 结束！render_scene 现在填满了这一帧的数据。
-		// render_scene.instance_count.load() 就是最终的渲染物体数量。
 	}
-
 
 	void BudEngine::sync_game_to_rendering(uint32_t render_scene_index) {
 		ZoneScoped;
@@ -225,10 +217,12 @@ namespace bud::engine {
 
 		view_snapshot.update_matrices();
 
-		// 3. 发射渲染任务 (Fire and Forget)
-		task_scheduler->spawn("RenderTask", [this, render_scene_index, view_snapshot]() {
-			// 这里调用新的 render 接口
-			renderer->render(render_scenes[render_scene_index], const_cast<bud::graphics::SceneView&>(view_snapshot));
+		render_inflight_index.store(render_scene_index, std::memory_order_release);
+
+		// 发射渲染任务 (Fire and Forget)
+		task_scheduler->spawn("RenderTask", [this, render_scene_index, view_snapshot]() mutable {
+			renderer->render(render_scenes[render_scene_index], view_snapshot);
+			render_inflight_index.store(BudEngine::invalid_render_index, std::memory_order_release);
 		}, &render_task_counter);
 	}
 } // namespace bud::engine

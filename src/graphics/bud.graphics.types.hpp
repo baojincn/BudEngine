@@ -203,6 +203,7 @@ namespace bud::graphics {
 		TextureFormat format = TextureFormat::RGBA8_UNORM;
 		uint32_t mips = 1;
 		uint32_t array_layers = 1;
+		TextureType type = TextureType::Texture2D;
 
 		size_t desc_hash = 0;
 	};
@@ -217,6 +218,10 @@ namespace bud::graphics {
 		uint32_t index_start;
 		uint32_t index_count;
 		uint32_t material_id;
+		bool double_sided = false;
+
+		bud::math::AABB aabb;
+		bud::math::BoundingSphere sphere;
 	};
 
 	struct RenderMesh {
@@ -229,6 +234,4 @@ namespace bud::graphics {
 
 		bool is_valid() const { return index_count > 0; }
 	};
-
-
 }
