@@ -55,5 +55,6 @@ namespace bud::graphics {
 	struct SortItem {
 		uint64_t key;
 		uint32_t entity_index;
+		uint32_t submesh_index;
 	};
 }

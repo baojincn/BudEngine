@@ -1461,8 +1461,8 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	ubo.cam_pos = scene_view.camera_position;
 	ubo.light_dir = scene_view.light_dir;
 	ubo.light_color = scene_view.light_color;
-	ubo.light_intensity = 5.0f;
-	ubo.ambient_strength = 0.05f;
+	ubo.light_intensity = scene_view.light_intensity;
+	ubo.ambient_strength = scene_view.ambient_strength;
 	ubo.debug_cascades = render_config.debug_cascades ? 1 : 0;
 
 	// [FIX] Use current_frame, NOT image_index (swapchain index can be larger than frames vector)

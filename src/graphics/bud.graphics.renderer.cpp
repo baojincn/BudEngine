@@ -260,36 +260,100 @@ namespace bud::graphics {
 		bud::math::Frustum camera_frustum;
 		camera_frustum.update(scene_view.view_proj_matrix);
 
-		// Culling -> (Key Gen & Sort)
-		if (sort_list.size() < instance_count)
-			sort_list.resize(instance_count);
+		// Prepass: compute draw offsets per instance
+		std::vector<uint32_t> draw_offsets(instance_count + 1);
+		size_t total_draw_count = 0;
+
+		for (size_t i = 0; i < instance_count; ++i) {
+			draw_offsets[i] = (uint32_t)total_draw_count;
+
+			uint32_t mesh_id = scene.mesh_indices[i];
+			if (mesh_id >= meshes.size() || !meshes[mesh_id].is_valid()) {
+				continue;
+			}
+
+			const auto& mesh = meshes[mesh_id];
+			uint32_t submesh_count = mesh.submeshes.empty() ? 1u : (uint32_t)mesh.submeshes.size();
+			total_draw_count += submesh_count;
+		}
+
+		draw_offsets[instance_count] = (uint32_t)total_draw_count;
+
+		if (sort_list.size() < total_draw_count)
+			sort_list.resize(total_draw_count);
 
 		bud::threading::Counter key_gen_signal;
-		constexpr size_t CHUNK_SIZE = 256;
+		constexpr size_t CHUNK_SIZE = 64;
 
 		task_scheduler->ParallelFor(instance_count, CHUNK_SIZE,
-			[&](size_t start, size_t end) {
-				for (size_t i = start; i < end; ++i) {
+			[&](size_t start_exclusive, size_t end_exclusive) {
+				for (size_t i = start_exclusive; i < end_exclusive; ++i) {
+					uint32_t draw_start = draw_offsets[i];
+					uint32_t draw_end = draw_offsets[i + 1];
+					uint32_t draw_count = draw_end - draw_start;
+
+					if (draw_count == 0)
+						continue;
+
+					const auto& world_matrix = scene.world_matrices[i];
 					const auto& aabb = scene.world_aabbs[i];
+
+					// coarse cull at instance level
 					if (!bud::math::intersect_aabb_frustum(aabb, camera_frustum)) {
-						sort_list[i].key = UINT64_MAX;
-						sort_list[i].entity_index = (uint32_t)i;
+						for (uint32_t j = 0; j < draw_count; ++j) {
+							auto& item = sort_list[draw_start + j];
+							item.key = UINT64_MAX;
+							item.entity_index = (uint32_t)i;
+							item.submesh_index = j;
+						}
 						continue;
 					}
 
 					uint32_t mesh_id = scene.mesh_indices[i];
-					uint32_t material_id = scene.material_indices[i];
-					const auto& world_matrix = scene.world_matrices[i];
+					if (mesh_id >= meshes.size()) {
+						for (uint32_t j = 0; j < draw_count; ++j) {
+							auto& item = sort_list[draw_start + j];
+							item.key = UINT64_MAX;
+							item.entity_index = (uint32_t)i;
+							item.submesh_index = j;
+						}
+						continue;
+					}
+
+					const auto& mesh = meshes[mesh_id];
 
 					auto mesh_pos = bud::math::vec3(world_matrix[3]); // 提取平移部分作为实体位置
-					auto distance = bud::math::distance2(mesh_pos,  scene_view.camera_position);
+					auto distance = bud::math::distance2(mesh_pos, scene_view.camera_position);
 
 					uint32_t depth_key = 0;
 					auto depth_normalized = std::clamp(distance / (scene_view.far_plane * scene_view.far_plane), 0.0f, 1.0f);
 					depth_key = static_cast<uint32_t>(depth_normalized * 0x3FFFF); // 18 bits for depth
 
-					sort_list[i].key = DrawKey::generate_opaque(0, 0, material_id, mesh_id, depth_key);
-					sort_list[i].entity_index = (uint32_t)i;
+					if (!mesh.submeshes.empty()) {
+						for (uint32_t j = 0; j < draw_count; ++j) {
+							const auto& sub = mesh.submeshes[j];
+							auto world_sub_aabb = sub.aabb.transform(world_matrix);
+
+							auto& item = sort_list[draw_start + j];
+							item.entity_index = (uint32_t)i;
+							item.submesh_index = j;
+
+							if (!bud::math::intersect_aabb_frustum(world_sub_aabb, camera_frustum)) {
+								item.key = UINT64_MAX;
+								continue;
+							}
+
+							item.key = DrawKey::generate_opaque(0, 0, sub.material_id, mesh_id, depth_key);
+						}
+					}
+					else {
+						auto& item = sort_list[draw_start];
+						item.entity_index = (uint32_t)i;
+						item.submesh_index = UINT32_MAX;
+
+						uint32_t material_id = scene.material_indices[i];
+						item.key = DrawKey::generate_opaque(0, 0, material_id, mesh_id, depth_key);
+					}
 				}
 			},
 			&key_gen_signal
@@ -297,13 +361,12 @@ namespace bud::graphics {
 
 		task_scheduler->wait_for_counter(key_gen_signal);
 
-		std::sort(sort_list.begin(), sort_list.begin() + instance_count,
+		std::sort(sort_list.begin(), sort_list.begin() + total_draw_count,
 			[](const SortItem& a, const SortItem& b) { return a.key < b.key; }
 		);
 
-
 		// 使用二分查找找到第一个 UINT64_MAX 的位置, 计算可见物体数量 (剔除 Key == UINT64_MAX 的物体)
-		auto it = std::lower_bound(sort_list.begin(), sort_list.begin() + instance_count, UINT64_MAX,
+		auto it = std::lower_bound(sort_list.begin(), sort_list.begin() + total_draw_count, UINT64_MAX,
 			[](const SortItem& item, uint64_t val) { return item.key < val; }
 		);
 
@@ -312,6 +375,8 @@ namespace bud::graphics {
 		// 如果没有东西可见，直接返回，不录制 CommandBuffer
 		if (visible_count == 0)
 			return;
+
+		//std::println("[Culling] total_draw_count={} visible_count={}", total_draw_count, visible_count);
 
 		auto cmd = rhi->begin_frame();
 		if (!cmd)

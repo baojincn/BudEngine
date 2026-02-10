@@ -1,6 +1,7 @@
 ﻿#include <print>
 #include <exception>
 #include <functional>
+#include <unordered_map>
 
 #include "src/io/bud.io.hpp"
 #include "src/runtime/bud.engine.hpp"
@@ -14,24 +15,28 @@ public:
 
 		auto asset_manager = engine->get_asset_manager();
 		auto renderer = engine->get_renderer();
-		auto scene = &engine->get_scene();
 
 		auto callback = std::bind_front(&GameApp::on_sponza_loaded, this);
 
 		asset_manager->load_mesh_async("data/cryteksponza/sponza.obj", callback);
 
 		bud::graphics::RenderConfig config;
-		config.directional_light_position = { 50.0f, 500.0f, 50.0f };
-		config.directional_light_intensity = 3.0f;
 		config.shadow_bias_constant = 0.005f;
 		config.shadow_bias_slope = 1.25f;
 		config.cache_shadows = true;
-		config.ambient_strength = 0.4f;
 		config.cascade_count = 4;
 		config.cascade_split_lambda = 0.5;
 		config.debug_cascades = false;
 
 		renderer->set_config(config);
+
+		auto& scene = engine->get_scene();
+		scene.directional_light.direction = { 50.0f, 500.0f, 50.0f };
+		scene.directional_light.intensity = 3.0f;
+		scene.ambient_strength = 0.1f;
+
+		scene.main_camera = bud::scene::Camera(bud::math::vec3(0.0f, 100.0f, 0.0f));
+		scene.main_camera.movement_speed = 70.0f;
 	}
 
 	void update(float delta_time) {
@@ -82,27 +87,81 @@ private:
 			return;
 
 		auto renderer = engine->get_renderer();
-		auto& scene = engine->get_scene();
 
-		auto mesh_handle = renderer->upload_mesh(mesh);
+		if (mesh.subsets.empty()) {
+			auto mesh_handle = renderer->upload_mesh(mesh);
 
-		if (!mesh_handle.is_valid()) {
-			std::println("[Game] Mesh upload failed.");
+			if (!mesh_handle.is_valid()) {
+				std::println("[Game] Mesh upload failed.");
+				return;
+			}
+
+			bud::scene::Entity entity;
+			entity.mesh_index = mesh_handle.mesh_id;
+			entity.material_index = mesh_handle.material_id;
+			entity.transform = bud::math::scale(bud::math::mat4(1.0f), bud::math::vec3(1.0f));
+			entity.is_static = true;
+
+			{
+				std::lock_guard lock(entity_mutex);
+				pending_entities.push_back(entity);
+			}
+
+			std::println("[Game] Sponza loaded and spawned via Member Function!");
 			return;
 		}
 
-		bud::scene::Entity entity;
-		entity.mesh_index = mesh_handle.mesh_id;
-		entity.material_index = mesh_handle.material_id;
-		entity.transform = bud::math::scale(bud::math::mat4(1.0f), bud::math::vec3(1.0f));
-		entity.is_static = true;
+		for (const auto& subset : mesh.subsets) {
+			bud::io::MeshData sub_mesh;
+			sub_mesh.subsets.reserve(1);
 
-		{
-			std::lock_guard lock(entity_mutex);
-			scene.entities.push_back(entity);
+			if (subset.material_index < mesh.texture_paths.size()) {
+				sub_mesh.texture_paths.push_back(mesh.texture_paths[subset.material_index]);
+			}
+			else {
+				sub_mesh.texture_paths.push_back("data/textures/default.png");
+			}
+
+			std::unordered_map<uint32_t, uint32_t> index_map;
+			index_map.reserve(subset.index_count);
+			sub_mesh.indices.reserve(subset.index_count);
+
+			for (uint32_t i = 0; i < subset.index_count; ++i) {
+				uint32_t old_index = mesh.indices[subset.index_start + i];
+				auto [it, inserted] = index_map.emplace(old_index, static_cast<uint32_t>(sub_mesh.vertices.size()));
+
+				if (inserted) {
+					sub_mesh.vertices.push_back(mesh.vertices[old_index]);
+				}
+
+				sub_mesh.indices.push_back(it->second);
+			}
+
+			bud::io::MeshSubset sub_subset;
+			sub_subset.index_start = 0;
+			sub_subset.index_count = static_cast<uint32_t>(sub_mesh.indices.size());
+			sub_subset.material_index = 0;
+			sub_mesh.subsets.push_back(sub_subset);
+
+			auto mesh_handle = renderer->upload_mesh(sub_mesh);
+			if (!mesh_handle.is_valid()) {
+				std::println("[Game] Sub-mesh upload failed.");
+				continue;
+			}
+
+			bud::scene::Entity entity;
+			entity.mesh_index = mesh_handle.mesh_id;
+			entity.material_index = mesh_handle.material_id;
+			entity.transform = bud::math::scale(bud::math::mat4(1.0f), bud::math::vec3(1.0f));
+			entity.is_static = true;
+
+			{
+				std::lock_guard lock(entity_mutex);
+				pending_entities.push_back(entity);
+			}
 		}
 
-		std::println("[Game] Sponza loaded and spawned via Member Function!");
+		std::println("[Game] Sponza loaded and spawned as per-subset entities.");
 	}
 
 private:

@@ -42,8 +42,16 @@ namespace bud::scene {
 		bool is_active = true;
 	};
 
+	struct DirectionalLight {
+		bud::math::vec3 direction = { 0.5f, 1.0f, 0.3f };
+		bud::math::vec3 color = { 1.0f, 1.0f, 1.0f };
+		float intensity = 5.0f;
+	};
+
 	 struct Scene {
 		Camera main_camera;
+		DirectionalLight directional_light;
+		float ambient_strength = 0.05f;
 		std::vector<Entity> entities;
 	};
 }
