@@ -495,17 +495,16 @@ namespace bud::graphics {
 					struct PushVars {
 						bud::math::mat4 model;
 						uint32_t material_id;
-						uint32_t padding[3];  
+						uint32_t padding[3];
 					} push_vars;
 
 					push_vars.model = model_matrix;
 
-					if (!mesh.submeshes.empty()) {
-						for (const auto& sub : mesh.submeshes) {
-							push_vars.material_id = sub.material_id;
-							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
-							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, sub.index_start, 0, 0);
-						}
+					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+						const auto& sub = mesh.submeshes[item.submesh_index];
+						push_vars.material_id = sub.material_id;
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
+						rhi->cmd_draw_indexed(cmd, sub.index_count, 1, sub.index_start, 0, 0);
 					}
 					else {
 						push_vars.material_id = material_id;

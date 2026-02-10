@@ -294,10 +294,8 @@ void TaskScheduler::ParallelFor(size_t count, size_t chunk_size, std::function<v
 		auto end = std::min(start + chunk_size, count);
 
 		spawn([start, end, body]() {
-			for (auto j = start; j < end; ++j) {
-				body(j, j);
-			}
-			}, counter);
+			body(start, end);
+		}, counter);
 	}
 }
 

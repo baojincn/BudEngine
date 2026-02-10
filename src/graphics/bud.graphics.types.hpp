@@ -116,11 +116,6 @@ namespace bud::graphics {
 		uint32_t cascade_count = 4;
 		float cascade_split_lambda = 0.75f; // Practical Split Scheme
 
-		bud::math::vec3 directional_light_position = { 5.0f, 15.0f, 5.0f };
-		bud::math::vec3 directional_light_color = { 1.0f, 1.0f, 1.0f };
-		float directional_light_intensity = 5.0f;
-		float ambient_strength = 0.05f;
-
 		bool enable_soft_shadows = true;
 		bool debug_cascades = false;
 		bool cache_shadows = true;
@@ -148,6 +143,8 @@ namespace bud::graphics {
 
 		bud::math::vec3 light_dir = { 0.5f, 1.0f, 0.3f };
 		bud::math::vec3 light_color = { 1.0f, 1.0f, 1.0f };
+		float light_intensity = 5.0f;
+		float ambient_strength = 0.05f;
 
 		void update_matrices() {
 			view_proj_matrix = proj_matrix * view_matrix;

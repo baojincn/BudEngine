@@ -31,9 +31,6 @@ namespace bud::engine {
 		renderer = std::make_unique<bud::graphics::Renderer>(rhi.get(), asset_manager.get(), task_scheduler.get());
 
 		render_scenes.resize(engine_config.inflight_frame_count);
-
-		scene.main_camera = bud::scene::Camera(bud::math::vec3(0.0f, 100.0f, 0.0f));
-		scene.main_camera.movement_speed = 70.0f;
 	}
 
 	BudEngine::~BudEngine() {
@@ -143,8 +140,8 @@ namespace bud::engine {
 		constexpr size_t CHUNK_SIZE = 128;
 
 		task_scheduler->ParallelFor(total_logic_count, CHUNK_SIZE,
-			[&](size_t start, size_t end) {
-				for (size_t i = start; i <= end; ++i) {
+			[&](size_t start, size_t end_exclusive) {
+				for (size_t i = start; i < end_exclusive; ++i) {
 					const auto& entity = logic_entities[i];
 
 					if (entity.mesh_index >= mesh_bounds.size()) [[unlikely]] {
@@ -211,9 +208,10 @@ namespace bud::engine {
 		view_snapshot.near_plane = near_plane;
 		view_snapshot.far_plane = far_plane;
 
-		auto& config = renderer->get_config();
-		view_snapshot.light_dir = bud::math::normalize(config.directional_light_position);
-		view_snapshot.light_color = config.directional_light_color;
+		view_snapshot.light_dir = bud::math::normalize(scene.directional_light.direction);
+		view_snapshot.light_color = scene.directional_light.color;
+		view_snapshot.light_intensity = scene.directional_light.intensity;
+		view_snapshot.ambient_strength = scene.ambient_strength;
 
 		view_snapshot.update_matrices();
 
