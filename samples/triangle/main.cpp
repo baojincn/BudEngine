@@ -176,6 +176,12 @@ int main(int argc, char* argv[]) {
 		bud::graphics::EngineConfig config;
 		config.name = "Bud Engine - Triangle";
 
+		const auto screen = bud::platform::get_current_screen_resolution();
+		if (screen.width > 0 && screen.height > 0) {
+			config.width = screen.width;
+			config.height = screen.height;
+		}
+
 		bud::engine::BudEngine engine(config);
 
 		GameApp app_instance;
