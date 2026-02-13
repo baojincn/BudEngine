@@ -27,6 +27,7 @@ namespace bud::platform {
 		virtual void get_size_in_pixels(int& width, int& height) const = 0;
         virtual bool should_close() const = 0;
         virtual void poll_events() = 0;
+		virtual void create_surface(VkInstance instance, VkSurfaceKHR& out_surface) const = 0;
 
 		virtual void set_title(const std::string& title) = 0;
 		virtual const char* get_title() const = 0;

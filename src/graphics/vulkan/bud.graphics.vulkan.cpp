@@ -63,8 +63,6 @@ VulkanLayoutTransition bud::graphics::vulkan::get_vk_transition(ResourceState st
 void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count) {
 	this->task_scheduler = task_scheduler;
 	platform_window = plat_window;
-	auto window = plat_window->get_sdl_window();
-
 	max_frames_in_flight = inflight_frame_count;
 
 	// 基础构建 (Instance, Surface, Device)
@@ -564,7 +562,8 @@ CommandHandle VulkanRHI::begin_frame() {
 void VulkanRHI::end_frame(CommandHandle cmd) {
 	VkCommandBuffer command_buffer = static_cast<VkCommandBuffer>(cmd);
 
-	if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS) throw std::runtime_error("failed to record command buffer!");
+	if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS)
+		throw std::runtime_error("failed to record command buffer!");
 
 	VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
 	VkSemaphore wait_semaphores[] = { frames[current_frame].image_available_semaphore };
@@ -840,9 +839,11 @@ void VulkanRHI::create_instance(VkInstance& vk_instance, bool enable_validation)
 }
 
 void VulkanRHI::create_surface(bud::platform::Window* window) {
-	if (!SDL_Vulkan_CreateSurface(window->get_sdl_window(), instance, nullptr, &surface)) {
-		throw std::runtime_error("Failed to create Window Surface!");
-	}
+
+	window->create_surface(instance, surface);
+	//if (!SDL_Vulkan_CreateSurface(window->get_sdl_window(), instance, nullptr, &surface)) {
+	//	throw std::runtime_error("Failed to create Window Surface!");
+	//}
 }
 
 void VulkanRHI::pick_physical_device() {
@@ -1523,7 +1524,6 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	ubo.ambient_strength = scene_view.ambient_strength;
 	ubo.debug_cascades = render_config.debug_cascades ? 1 : 0;
 
-	// [FIX] Use current_frame, NOT image_index (swapchain index can be larger than frames vector)
 	if (frames[current_frame].uniform_mapped) {
 		std::memcpy(frames[current_frame].uniform_mapped, &ubo, sizeof(UniformBufferObject));
 	}
@@ -1535,7 +1535,6 @@ void VulkanRHI::update_global_shadow_map(bud::graphics::Texture* texture) {
 
 	for (int i = 0; i < max_frames_in_flight; i++) {
 		DescriptorWriter writer;
-		// [FIX] Use the dedicated shadow sampler (Comparison Enabled)
 		writer.write_image(2, 0, vk_tex->view, shadow_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
 		writer.update_set(device, frames[i].global_descriptor_set);
 	}
@@ -1546,7 +1545,6 @@ bud::graphics::Texture* VulkanRHI::get_fallback_texture() {
 }
 
 
-// [FIX] Implement Vertex Attribute Descriptions to ensure correct offsets (Fix Blue Walls)
 VkVertexInputBindingDescription Vertex::get_binding_description() {
 	VkVertexInputBindingDescription bindingDescription{};
 	bindingDescription.binding = 0;
