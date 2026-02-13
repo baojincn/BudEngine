@@ -124,6 +124,20 @@ namespace bud::platform {
 			height_out = height;
 		}
 
+		void get_size_in_pixels(int& width_out, int& height_out) const override {
+			if (!window) {
+				width_out = 0;
+				height_out = 0;
+				return;
+			}
+
+			if (SDL_GetWindowSizeInPixels(window, &width_out, &height_out) == 0) {
+				return;
+			}
+
+			SDL_GetWindowSize(window, &width_out, &height_out);
+		}
+
 		bool should_close() const override {
 			return close_requested;
 		}
@@ -238,5 +252,4 @@ namespace bud::platform {
 		throw std::runtime_error("Platform not supported");
 #endif
 	}
-
 } // namespace bud::platform

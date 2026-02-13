@@ -6,6 +6,10 @@
 
 #include "src/runtime/bud.input.hpp"
 
+
+using VkInstance = struct VkInstance_T*;
+using VkSurfaceKHR = struct VkSurfaceKHR_T*;
+
 namespace bud::platform {
 
 	struct ScreenResolution {
@@ -20,6 +24,7 @@ namespace bud::platform {
 
 		virtual SDL_Window* get_sdl_window() const = 0;
         virtual void get_size(int& width, int& height) const = 0;
+		virtual void get_size_in_pixels(int& width, int& height) const = 0;
         virtual bool should_close() const = 0;
         virtual void poll_events() = 0;
 

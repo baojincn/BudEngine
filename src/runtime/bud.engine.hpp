@@ -69,6 +69,9 @@ namespace bud::engine {
 
 		std::unique_ptr<bud::platform::Window> window;
 
+		int last_width = 0;
+		int last_height = 0;
+
 		std::unique_ptr<bud::threading::TaskScheduler> task_scheduler;
 		std::unique_ptr<bud::graphics::RHI> rhi;
 		std::unique_ptr<bud::io::AssetManager> asset_manager;
