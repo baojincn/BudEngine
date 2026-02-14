@@ -39,6 +39,8 @@ namespace bud::graphics::vulkan {
 		void cleanup() override;
 		void wait_idle() override;
 
+		void resize_swapchain(uint32_t width, uint32_t height) override;
+
 		bud::graphics::MemoryBlock create_gpu_buffer(uint64_t size, bud::graphics::ResourceState usage_state) override;
 		bud::graphics::MemoryBlock create_upload_buffer(uint64_t size) override;
 		void copy_buffer_immediate(bud::graphics::MemoryBlock src, bud::graphics::MemoryBlock dst, uint64_t size) override;
@@ -98,11 +100,11 @@ namespace bud::graphics::vulkan {
 
 	private:
 		// --- 初始化辅助 ---
-		void create_instance(SDL_Window* window, bool enable_validation);
-		void create_surface(SDL_Window* window);
+		void create_instance(VkInstance& vk_instance, bool enable_validation);
+		void create_surface(bud::platform::Window* window);
 		void pick_physical_device();
 		void create_logical_device(bool enable_validation);
-		void create_swapchain(SDL_Window* window);
+		void create_swapchain(bud::platform::Window* window);
 		void create_image_views();
 		void create_command_pool();
 		void create_command_buffer();
@@ -118,7 +120,7 @@ namespace bud::graphics::vulkan {
 		SwapChainSupportDetails query_swapchain_support(VkPhysicalDevice device);
 		VkSurfaceFormatKHR choose_swap_surface_format(const std::vector<VkSurfaceFormatKHR>& available_formats);
 		VkPresentModeKHR choose_swap_present_mode(const std::vector<VkPresentModeKHR>& available_present_modes);
-		VkExtent2D choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilities, SDL_Window* window);
+		VkExtent2D choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilities, bud::platform::Window* window);
 
 		// Debug
 		VkResult create_debug_utils_messenger_ext(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger);
@@ -141,6 +143,8 @@ namespace bud::graphics::vulkan {
 		};
 
 		
+		bud::platform::Window* platform_window = nullptr;
+
 		VkInstance instance = nullptr;
 		VkPhysicalDevice physical_device = nullptr;
 		VkDevice device = nullptr;

@@ -1,6 +1,4 @@
-﻿
-
-#include <SDL3/SDL.h>
+﻿#include <SDL3/SDL.h>
 #include <stdexcept>
 #include "src/platform/bud.platform.hpp"
 
@@ -14,7 +12,6 @@
 
 namespace bud::platform {
 
-namespace {
 	bud::input::Key sdl_to_bud_key(SDL_Keycode key) {
 		switch (key) {
 		case SDLK_ESCAPE: return bud::input::Key::Escape;
@@ -28,6 +25,43 @@ namespace {
 
 		default:          return bud::input::Key::Unknown;
 		}
+	}
+
+	static void ensure_video_initialized() {
+		if (SDL_WasInit(SDL_INIT_VIDEO) == 0) {
+			if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
+				auto err = SDL_GetError();
+				auto msg = std::format("SDL Error: {}", err ? err : "Unknown error");
+				throw std::runtime_error(msg);
+			}
+		}
+	}
+
+	static SDL_DisplayID get_primary_display_id() {
+		ensure_video_initialized();
+
+		int display_count = 0;
+		auto displays = SDL_GetDisplays(&display_count);
+		if (!displays || display_count == 0) {
+			if (displays) SDL_free(displays);
+			return 0;
+		}
+
+		SDL_DisplayID display = displays[0];
+		SDL_free(displays);
+		return display;
+	}
+
+	static ScreenResolution get_display_resolution(SDL_DisplayID display) {
+		ensure_video_initialized();
+
+		SDL_DisplayMode mode{};
+		const SDL_DisplayMode* currentMode = SDL_GetCurrentDisplayMode(display);
+		if (display == 0 || currentMode == nullptr) {
+			return ScreenResolution{};
+		}
+
+		return ScreenResolution{ currentMode->w, currentMode->h, currentMode->refresh_rate };
 	}
 
 	class WindowWin : public Window {
@@ -56,6 +90,7 @@ namespace {
 			}
 
 			SDL_ShowWindow(window);
+			update_window_size();
 			std::print("Created window: {} ({}x{})\n", title, width, height);
 		}
 
@@ -89,6 +124,20 @@ namespace {
 			height_out = height;
 		}
 
+		void get_size_in_pixels(int& width_out, int& height_out) const override {
+			if (!window) {
+				width_out = 0;
+				height_out = 0;
+				return;
+			}
+
+			if (SDL_GetWindowSizeInPixels(window, &width_out, &height_out) == 0) {
+				return;
+			}
+
+			SDL_GetWindowSize(window, &width_out, &height_out);
+		}
+
 		bool should_close() const override {
 			return close_requested;
 		}
@@ -105,6 +154,12 @@ namespace {
 				switch (event.type) {
 				case SDL_EVENT_QUIT:
 					close_requested = true;
+					break;
+
+				case SDL_EVENT_WINDOW_RESIZED:
+				case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+				case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
+					update_window_size();
 					break;
 
 				case SDL_EVENT_KEY_DOWN:
@@ -149,8 +204,37 @@ namespace {
 			}
 		}
 
+		void create_surface(VkInstance instance, VkSurfaceKHR& out_surface) const override {
+			//if (!window) {
+			//	out_surface = nullptr;
+			//	return;
+			//}
+
+			if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &out_surface)) {
+				out_surface = nullptr;
+				throw std::runtime_error("Failed to create Vulkan surface");
+			}
+		}
 
 	private:
+		void update_window_size() {
+			if (!window) {
+				return;
+			}
+
+			int w = 0;
+			int h = 0;
+			if (SDL_GetWindowSizeInPixels(window, &w, &h) == 0) {
+				width = w;
+				height = h;
+				return;
+			}
+
+			SDL_GetWindowSize(window, &w, &h);
+			width = w;
+			height = h;
+		}
+
 		SDL_Window* window = nullptr;
 		int width = 0;
 		int height = 0;
@@ -158,7 +242,19 @@ namespace {
 
 	};
 
-} // namespace
+
+	ScreenResolution get_current_screen_resolution() {
+		return get_display_resolution(get_primary_display_id());
+	}
+
+	ScreenResolution get_window_screen_resolution(const Window& window) {
+		auto sdl_window = window.get_sdl_window();
+		auto display = sdl_window ? SDL_GetDisplayForWindow(sdl_window) : get_primary_display_id();
+		if (display == 0) {
+			return ScreenResolution{};
+		}
+		return get_display_resolution(display);
+	}
 
 	std::unique_ptr<Window> create_window(const std::string& title, int width, int height) {
 #ifdef _WIN32
@@ -167,5 +263,4 @@ namespace {
 		throw std::runtime_error("Platform not supported");
 #endif
 	}
-
 } // namespace bud::platform

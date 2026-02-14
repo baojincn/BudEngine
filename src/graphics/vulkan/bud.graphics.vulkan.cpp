@@ -62,19 +62,18 @@ VulkanLayoutTransition bud::graphics::vulkan::get_vk_transition(ResourceState st
 
 void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count) {
 	this->task_scheduler = task_scheduler;
-	auto window = plat_window->get_sdl_window();
-
+	platform_window = plat_window;
 	max_frames_in_flight = inflight_frame_count;
 
 	// 基础构建 (Instance, Surface, Device)
-	create_instance(window, enable_validation);
+	create_instance(instance, enable_validation);
 	setup_debug_messenger(enable_validation);
-	create_surface(window);
+	create_surface(plat_window);
 	pick_physical_device();
 	create_logical_device(enable_validation);
 
 	// 交换链与呈现资源
-	create_swapchain(window);
+	create_swapchain(plat_window);
 	create_image_views();
 
 	// 命令池与同步对象
@@ -523,8 +522,18 @@ CommandHandle VulkanRHI::begin_frame() {
 
 	VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, frames[current_frame].image_available_semaphore, VK_NULL_HANDLE, &current_image_index);
 
-	if (result == VK_ERROR_OUT_OF_DATE_KHR) return nullptr;
-	else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) throw std::runtime_error("failed to acquire swap chain image!");
+	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+		int w = 0;
+		int h = 0;
+		if (platform_window) {
+			platform_window->get_size_in_pixels(w, h);
+		}
+		resize_swapchain(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+		return nullptr;
+	}
+	else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+		throw std::runtime_error("failed to acquire swap chain image!");
+	}
 
 	vkResetFences(device, 1, &frames[current_frame].in_flight_fence);
 
@@ -553,7 +562,8 @@ CommandHandle VulkanRHI::begin_frame() {
 void VulkanRHI::end_frame(CommandHandle cmd) {
 	VkCommandBuffer command_buffer = static_cast<VkCommandBuffer>(cmd);
 
-	if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS) throw std::runtime_error("failed to record command buffer!");
+	if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS)
+		throw std::runtime_error("failed to record command buffer!");
 
 	VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
 	VkSemaphore wait_semaphores[] = { frames[current_frame].image_available_semaphore };
@@ -584,6 +594,49 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	current_frame = (current_frame + 1) % max_frames_in_flight;
 }
 
+
+void VulkanRHI::resize_swapchain(uint32_t width, uint32_t height) {
+	if (!device || !platform_window) {
+		return;
+	}
+
+	if (width == 0 || height == 0) {
+		return;
+	}
+
+	vkDeviceWaitIdle(device);
+
+	for (auto imageView : swapchain_image_views) {
+		vkDestroyImageView(device, imageView, nullptr);
+	}
+	swapchain_image_views.clear();
+	swapchain_textures_wrappers.clear();
+
+	for (auto semaphore : render_finished_semaphores) {
+		vkDestroySemaphore(device, semaphore, nullptr);
+	}
+	render_finished_semaphores.clear();
+
+	if (swapchain) {
+		vkDestroySwapchainKHR(device, swapchain, nullptr);
+		swapchain = VK_NULL_HANDLE;
+	}
+
+	create_swapchain(platform_window);
+	create_image_views();
+
+	VkSemaphoreCreateInfo semaphore_info{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+	render_finished_semaphores.resize(swapchain_images.size());
+	for (size_t i = 0; i < swapchain_images.size(); ++i) {
+		if (vkCreateSemaphore(device, &semaphore_info, nullptr, &render_finished_semaphores[i]) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create render finished semaphores!");
+		}
+	}
+
+	current_image_index = 0;
+}
+
+
 // --- Atomic Commands (核心指令集) ---
 
 void VulkanRHI::cmd_begin_render_pass(CommandHandle cmd, const RenderPassBeginInfo& info) {
@@ -593,7 +646,7 @@ void VulkanRHI::cmd_begin_render_pass(CommandHandle cmd, const RenderPassBeginIn
 	// 不需要 VkRenderPass 和 VkFramebuffer 对象
 	VkRenderingInfo rendering_info{ VK_STRUCTURE_TYPE_RENDERING_INFO };
 
-	// 1. 设置 Render Area (默认取第一个附件的大小)
+	// 默认取第一个附件的大小
 	if (!info.color_attachments.empty()) {
 		rendering_info.renderArea = { {0, 0}, {info.color_attachments[0]->width, info.color_attachments[0]->height} };
 	}
@@ -602,7 +655,7 @@ void VulkanRHI::cmd_begin_render_pass(CommandHandle cmd, const RenderPassBeginIn
 	}
 	rendering_info.layerCount = info.layer_count;
 
-	// 2. 准备 Color Attachments
+	// 准备 Color Attachments
 	std::vector<VkRenderingAttachmentInfo> color_attachments;
 	for (auto* tex : info.color_attachments) {
 		auto vk_tex = static_cast<VulkanTexture*>(tex);
@@ -622,7 +675,7 @@ void VulkanRHI::cmd_begin_render_pass(CommandHandle cmd, const RenderPassBeginIn
 	rendering_info.colorAttachmentCount = static_cast<uint32_t>(color_attachments.size());
 	rendering_info.pColorAttachments = color_attachments.data();
 
-	// 3. 准备 Depth Attachment
+	// 准备 Depth Attachment
 	VkRenderingAttachmentInfo depth_attach{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
 	if (info.depth_attachment) {
 		auto vk_depth = static_cast<VulkanTexture*>(info.depth_attachment);
@@ -760,7 +813,7 @@ void VulkanRHI::load_model_async(const std::string& filepath) {}
 
 // --- Boilerplate (Device Creation & Utils) ---
 
-void VulkanRHI::create_instance(SDL_Window* window, bool enable_validation) {
+void VulkanRHI::create_instance(VkInstance& vk_instance, bool enable_validation) {
 	enable_validation_layers = enable_validation;
 	VkApplicationInfo app_info{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
 	app_info.pApplicationName = "Bud Engine";
@@ -782,13 +835,15 @@ void VulkanRHI::create_instance(SDL_Window* window, bool enable_validation) {
 		create_info.ppEnabledLayerNames = validation_layers.data();
 	}
 
-	if (vkCreateInstance(&create_info, nullptr, &instance) != VK_SUCCESS) throw std::runtime_error("Instance creation failed");
+	if (vkCreateInstance(&create_info, nullptr, &vk_instance) != VK_SUCCESS) throw std::runtime_error("Instance creation failed");
 }
 
-void VulkanRHI::create_surface(SDL_Window* window) {
-	if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface)) {
-		throw std::runtime_error("Failed to create Window Surface!");
-	}
+void VulkanRHI::create_surface(bud::platform::Window* window) {
+
+	window->create_surface(instance, surface);
+	//if (!SDL_Vulkan_CreateSurface(window->get_sdl_window(), instance, nullptr, &surface)) {
+	//	throw std::runtime_error("Failed to create Window Surface!");
+	//}
 }
 
 void VulkanRHI::pick_physical_device() {
@@ -871,7 +926,7 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 	vkGetDeviceQueue(device, indices.present_family.value(), 0, &present_queue);
 }
 
-void VulkanRHI::create_swapchain(SDL_Window* window) {
+void VulkanRHI::create_swapchain(bud::platform::Window* window) {
 	SwapChainSupportDetails swapchain_support = query_swapchain_support(physical_device);
 	VkSurfaceFormatKHR surface_format = choose_swap_surface_format(swapchain_support.formats);
 	VkPresentModeKHR present_mode = choose_swap_present_mode(swapchain_support.present_modes);
@@ -1003,7 +1058,7 @@ VkCommandBuffer VulkanRHI::begin_single_time_commands() {
 	VkCommandBufferAllocateInfo alloc_info{};
 	alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 	alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	// 使用第0帧的命令池（注意：这在多线程渲染时可能不安全，但在初始化阶段是安全的）
+	// 使用第0帧的命令池（注意：这在多线程渲染时可能不安全，但在初始化阶段是安全的）	
 	alloc_info.commandPool = frames[0].main_command_pool;
 	alloc_info.commandBufferCount = 1;
 
@@ -1090,18 +1145,21 @@ VkPresentModeKHR VulkanRHI::choose_swap_present_mode(const std::vector<VkPresent
 	return VK_PRESENT_MODE_FIFO_KHR;
 }
 
-VkExtent2D VulkanRHI::choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilities, SDL_Window* window) {
+VkExtent2D VulkanRHI::choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilities, bud::platform::Window* window) {
 	if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
 		return capabilities.currentExtent;
 	}
-	else {
-		int width, height;
-		SDL_GetWindowSizeInPixels(window, &width, &height);
-		VkExtent2D actual_extent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
-		actual_extent.width = std::clamp(actual_extent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
-		actual_extent.height = std::clamp(actual_extent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
-		return actual_extent;
+
+	int width = 0;
+	int height = 0;
+	if (window) {
+		window->get_size_in_pixels(width, height);
 	}
+
+	VkExtent2D actual_extent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
+	actual_extent.width = std::clamp(actual_extent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
+	actual_extent.height = std::clamp(actual_extent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+	return actual_extent;
 }
 
 // --- Debug Utils ---
@@ -1290,9 +1348,10 @@ void VulkanRHI::generate_mipmaps(VkImage image, VkFormat format, int32_t texWidt
 	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	barrier.subresourceRange.baseMipLevel = 0;
+	barrier.subresourceRange.levelCount = 1;
 	barrier.subresourceRange.baseArrayLayer = 0;
 	barrier.subresourceRange.layerCount = 1;
-	barrier.subresourceRange.levelCount = 1;
 
 	int32_t mipWidth = texWidth;
 	int32_t mipHeight = texHeight;
@@ -1465,7 +1524,6 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	ubo.ambient_strength = scene_view.ambient_strength;
 	ubo.debug_cascades = render_config.debug_cascades ? 1 : 0;
 
-	// [FIX] Use current_frame, NOT image_index (swapchain index can be larger than frames vector)
 	if (frames[current_frame].uniform_mapped) {
 		std::memcpy(frames[current_frame].uniform_mapped, &ubo, sizeof(UniformBufferObject));
 	}
@@ -1477,7 +1535,6 @@ void VulkanRHI::update_global_shadow_map(bud::graphics::Texture* texture) {
 
 	for (int i = 0; i < max_frames_in_flight; i++) {
 		DescriptorWriter writer;
-		// [FIX] Use the dedicated shadow sampler (Comparison Enabled)
 		writer.write_image(2, 0, vk_tex->view, shadow_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
 		writer.update_set(device, frames[i].global_descriptor_set);
 	}
@@ -1488,7 +1545,6 @@ bud::graphics::Texture* VulkanRHI::get_fallback_texture() {
 }
 
 
-// [FIX] Implement Vertex Attribute Descriptions to ensure correct offsets (Fix Blue Walls)
 VkVertexInputBindingDescription Vertex::get_binding_description() {
 	VkVertexInputBindingDescription bindingDescription{};
 	bindingDescription.binding = 0;

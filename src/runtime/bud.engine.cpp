@@ -21,6 +21,12 @@ namespace bud::engine {
 		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height);
 		task_scheduler = std::make_unique<bud::threading::TaskScheduler>();
 
+		int initial_width = 0;
+		int initial_height = 0;
+		window->get_size(initial_width, initial_height);
+		last_width = initial_width;
+		last_height = initial_height;
+
 		asset_manager = std::make_unique<bud::io::AssetManager>(task_scheduler.get());
 
 		rhi = bud::graphics::create_rhi(engine_config.backend);
@@ -121,6 +127,20 @@ namespace bud::engine {
 
 	void BudEngine::handle_events() {
 		window->poll_events();
+
+		int width = 0;
+		int height = 0;
+		window->get_size(width, height);
+
+		if (width != last_width || height != last_height) {
+			last_width = width;
+			last_height = height;
+
+			if (width > 0 && height > 0) {
+				task_scheduler->wait_for_counter(render_task_counter);
+				rhi->resize_swapchain(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+			}
+		}
 	}
 
 	void BudEngine::extract_scene_data(bud::graphics::RenderScene& render_scene) {

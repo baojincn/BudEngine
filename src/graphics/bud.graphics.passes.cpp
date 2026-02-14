@@ -425,11 +425,19 @@ namespace bud::graphics {
 			return;
 		}
 
+		const auto* backbuffer_tex = render_graph.get_texture(backbuffer);
+		if (!backbuffer_tex || backbuffer_tex->width == 0 || backbuffer_tex->height == 0) {
+			return;
+		}
+
 		const size_t draw_count = std::min({ instance_count, sort_list.size(), max_scene_count });
 
+		uint32_t target_width = backbuffer_tex->width;
+		uint32_t target_height = backbuffer_tex->height;
+
 		TextureDesc depth_desc;
-		depth_desc.width = (uint32_t)view.viewport_width;
-		depth_desc.height = (uint32_t)view.viewport_height;
+		depth_desc.width = target_width;
+		depth_desc.height = target_height;
 		depth_desc.format = TextureFormat::D32_FLOAT;
 
 		auto depth_h = std::make_shared<RGHandle>();
@@ -458,8 +466,8 @@ namespace bud::graphics {
 
 				rhi->cmd_begin_render_pass(cmd, info);
 				rhi->cmd_bind_pipeline(cmd, pipeline);
-				rhi->cmd_set_viewport(cmd, view.viewport_width, view.viewport_height);
-				rhi->cmd_set_scissor(cmd, (uint32_t)view.viewport_width, (uint32_t)view.viewport_height);
+				rhi->cmd_set_viewport(cmd, (float)target_width, (float)target_height);
+				rhi->cmd_set_scissor(cmd, target_width, target_height);
 
 				// Global Set Bindings
 				rhi->update_global_shadow_map(render_graph.get_texture(shadow_map));
@@ -473,8 +481,6 @@ namespace bud::graphics {
 					const auto& item = sort_list[i];
 					uint32_t idx = item.entity_index;
 
-					// 从 RenderScene 获取扁平化数据 (SoA)
-					// 此时不需要访问 entity 对象，数据都在 RenderScene 的数组里
 					uint32_t mesh_id = render_scene.mesh_indices[idx];
 					uint32_t material_id = render_scene.material_indices[idx];
 					const auto& model_matrix = render_scene.world_matrices[idx];

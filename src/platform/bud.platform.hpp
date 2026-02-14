@@ -6,7 +6,17 @@
 
 #include "src/runtime/bud.input.hpp"
 
+
+using VkInstance = struct VkInstance_T*;
+using VkSurfaceKHR = struct VkSurfaceKHR_T*;
+
 namespace bud::platform {
+
+	struct ScreenResolution {
+		int width = 0;
+		int height = 0;
+		float refresh_rate = 0.0f;
+	};
 
     class Window {
     public:
@@ -14,8 +24,10 @@ namespace bud::platform {
 
 		virtual SDL_Window* get_sdl_window() const = 0;
         virtual void get_size(int& width, int& height) const = 0;
+		virtual void get_size_in_pixels(int& width, int& height) const = 0;
         virtual bool should_close() const = 0;
         virtual void poll_events() = 0;
+		virtual void create_surface(VkInstance instance, VkSurfaceKHR& out_surface) const = 0;
 
 		virtual void set_title(const std::string& title) = 0;
 		virtual const char* get_title() const = 0;
@@ -36,6 +48,9 @@ namespace bud::platform {
 			return bud::input::PassKey<Window>{};
 		}
     };
+
+	ScreenResolution get_current_screen_resolution();
+	ScreenResolution get_window_screen_resolution(const Window& window);
 
     std::unique_ptr<Window> create_window(const std::string& title, int width, int height);
 }

@@ -28,6 +28,8 @@ namespace bud::graphics {
 		virtual ~RHI() = default;
 		virtual void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count) = 0;
 
+		virtual void resize_swapchain(uint32_t width, uint32_t height) = 0;
+
 		virtual CommandHandle begin_frame() = 0;
 		virtual void end_frame(CommandHandle cmd) = 0;
 		virtual void wait_idle() = 0;
