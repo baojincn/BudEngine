@@ -60,7 +60,7 @@ namespace bud::graphics {
 		has_last_config = false;
 	}
 
-    void CSMShadowPass::init(RHI* rhi) {
+	void CSMShadowPass::init(RHI* rhi, const RenderConfig& config) {
         if (!rhi) {
             std::println(stderr, "[CSMShadowPass] ERROR: RHI is null.");
             return;
@@ -74,11 +74,12 @@ namespace bud::graphics {
         if (!vs_code) throw std::runtime_error("[CSMShadowPass] Failed to load shadow.vert.spv");
         if (!fs_code) throw std::runtime_error("[CSMShadowPass] Failed to load shadow.frag.spv");
 
-        GraphicsPipelineDesc desc;
-        desc.vs.code = *vs_code;
-        desc.fs.code = *fs_code;
-        desc.cull_mode = CullMode::Back; // Only render backfaces
-        desc.color_attachment_format = TextureFormat::Undefined;
+		GraphicsPipelineDesc desc;
+		desc.vs.code = *vs_code;
+		desc.fs.code = *fs_code;
+		desc.cull_mode = CullMode::Back; // Only render backfaces
+		desc.color_attachment_format = TextureFormat::Undefined;
+		desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
 
         
         pipeline = rhi->create_graphics_pipeline(desc);
@@ -190,6 +191,7 @@ namespace bud::graphics {
 							RenderPassBeginInfo info;
 							info.depth_attachment = render_graph.get_texture(static_cache_h);
 							info.clear_depth = true;
+							info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
 							info.base_array_layer = i;
 							info.layer_count = 1;
 
@@ -308,6 +310,7 @@ namespace bud::graphics {
 					RenderPassBeginInfo info;
 					info.depth_attachment = active_map;
 					info.clear_depth = !did_copy;
+					info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
 					info.base_array_layer = i;
 					info.layer_count = 1;
 
@@ -379,7 +382,7 @@ namespace bud::graphics {
 		);
 	}
 	
-    void MainPass::init(RHI* rhi) {
+	void MainPass::init(RHI* rhi, const RenderConfig& config) {
         if (!rhi) {
             std::println(stderr, "[MainPass] ERROR: RHI is null.");
             return;
@@ -400,6 +403,7 @@ namespace bud::graphics {
         desc.depth_write = true;
         desc.cull_mode = CullMode::None; // Sponza Cloth (Double Sided)
         desc.color_attachment_format = bud::graphics::TextureFormat::BGRA8_SRGB; 
+		desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
 
         pipeline = rhi->create_graphics_pipeline(desc);
         //std::println("[MainPass] Pipeline created successfully.");
@@ -408,6 +412,7 @@ namespace bud::graphics {
 	void MainPass::add_to_graph(RenderGraph& render_graph, RGHandle shadow_map, RGHandle backbuffer,
 		const RenderScene& render_scene,
 		const SceneView& view,
+		const RenderConfig& config,
 		const std::vector<RenderMesh>& meshes,
 		const std::vector<SortItem>& sort_list,
 		size_t instance_count)
@@ -463,6 +468,7 @@ namespace bud::graphics {
 				info.clear_color = true;
 				info.clear_color_value = { 0.5f, 0.5f, 0.5f, 1.0f };
 				info.clear_depth = true;
+				info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
 
 				rhi->cmd_begin_render_pass(cmd, info);
 				rhi->cmd_bind_pipeline(cmd, pipeline);

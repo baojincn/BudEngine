@@ -17,6 +17,7 @@ namespace bud::graphics::vulkan {
 		VkRenderPass render_pass;
 		VkBool32 depth_test;
 		VkBool32 depth_write;
+		VkCompareOp depth_compare_op;
 		VkCullModeFlags cull_mode;
 		VkFormat color_format;
 
@@ -25,6 +26,7 @@ namespace bud::graphics::vulkan {
 				frag_shader == other.frag_shader &&
 				render_pass == other.render_pass &&
 				depth_test == other.depth_test &&
+				depth_compare_op == other.depth_compare_op &&
 				cull_mode == other.cull_mode &&
 				color_format == other.color_format;
 		}
@@ -35,7 +37,8 @@ namespace bud::graphics::vulkan {
 			return std::hash<void*>()(k.vert_shader) ^
 				(std::hash<void*>()(k.frag_shader) << 1) ^
 				(std::hash<uint32_t>()(k.cull_mode) << 2) ^
-				(std::hash<uint32_t>()(k.color_format) << 3);
+				(std::hash<uint32_t>()(k.color_format) << 3) ^
+				(std::hash<uint32_t>()(k.depth_compare_op) << 4);
 		}
 	};
 

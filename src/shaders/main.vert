@@ -25,6 +25,8 @@ layout(binding = 0) uniform UniformBufferObject {
     float light_intensity;
     float ambient_strength;
 	uint cascade_count;
+	uint reversed_z;
+	uint padding[3];
 } ubo;
 
 layout(push_constant) uniform PushConsts {

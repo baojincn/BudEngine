@@ -77,6 +77,13 @@ namespace bud::graphics {
 		Back
 	};
 
+	enum class CompareOp {
+		Less,
+		LessEqual,
+		Greater,
+		GreaterEqual
+	};
+
 	constexpr uint32_t MAX_CASCADES = 4;
 	// Enum, end
 
@@ -105,6 +112,7 @@ namespace bud::graphics {
 	struct RenderConfig {
 		float fixed_logic_timestep = 1.0f / 60.0f;
 		float time_scale = 1.0f;
+		static constexpr bool reversed_z = false;
 
 		uint32_t shadow_map_size = 2048;
 		float shadow_bias_constant = 1.25f;
@@ -177,6 +185,7 @@ namespace bud::graphics {
 		bool depth_test = true;
 		bool depth_write = true;
 		CullMode cull_mode = CullMode::Back;
+		CompareOp depth_compare_op = CompareOp::Less;
 	};
 	// POD, end
 

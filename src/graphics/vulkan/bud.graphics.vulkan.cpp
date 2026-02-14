@@ -110,7 +110,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	global_set_layout = layout_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
 
 	// 创建 Per-Frame UBO Buffers (Binding 0)
-	VkDeviceSize ubo_size = 512; // Enough for matrices + light data (was 256)
+	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
 	for (auto& frame : frames) {
 		VkBufferCreateInfo buffer_info{};
 		buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -194,7 +194,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	shadow_sampler_info.magFilter = VK_FILTER_LINEAR;
 	shadow_sampler_info.minFilter = VK_FILTER_LINEAR;
 	shadow_sampler_info.compareEnable = VK_TRUE;
-	shadow_sampler_info.compareOp = VK_COMPARE_OP_LESS; // or LESS_OR_EQUAL
+	shadow_sampler_info.compareOp = render_config.reversed_z ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_LESS_OR_EQUAL;
 	shadow_sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; // Depths outside [0,1]?
 	shadow_sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 	shadow_sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
@@ -266,7 +266,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 
 		DescriptorWriter writer;
 		writer.write_buffer(0, frame.uniform_buffer, ubo_size, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-		writer.write_image(2, 0, dummy_depth_texture.view, default_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+		writer.write_image(2, 0, dummy_depth_texture.view, shadow_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
 		
 		writer.update_set(device, frame.global_descriptor_set);
 	}
@@ -489,6 +489,13 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	key.render_pass = VK_NULL_HANDLE;
 	key.depth_test = desc.depth_test;
 	key.depth_write = desc.depth_write;
+	switch (desc.depth_compare_op) {
+	case CompareOp::Less: key.depth_compare_op = VK_COMPARE_OP_LESS; break;
+	case CompareOp::LessEqual: key.depth_compare_op = VK_COMPARE_OP_LESS_OR_EQUAL; break;
+	case CompareOp::Greater: key.depth_compare_op = VK_COMPARE_OP_GREATER; break;
+	case CompareOp::GreaterEqual: key.depth_compare_op = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
+	default: key.depth_compare_op = VK_COMPARE_OP_LESS; break;
+	}
 
 	switch (desc.cull_mode) {
 	case bud::graphics::CullMode::None: key.cull_mode = VK_CULL_MODE_NONE; break;
@@ -688,7 +695,7 @@ void VulkanRHI::cmd_begin_render_pass(CommandHandle cmd, const RenderPassBeginIn
 		depth_attach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 		depth_attach.loadOp = info.clear_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 		depth_attach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		depth_attach.clearValue.depthStencil = { 1.0f, 0 };
+		depth_attach.clearValue.depthStencil = { info.clear_depth_value, 0 };
 		rendering_info.pDepthAttachment = &depth_attach;
 	}
 
@@ -1156,7 +1163,12 @@ VkExtent2D VulkanRHI::choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabil
 		window->get_size_in_pixels(width, height);
 	}
 
-	VkExtent2D actual_extent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
+	if (width == 0 || height == 0) {
+		width = static_cast<int>(capabilities.minImageExtent.width);
+		height = static_cast<int>(capabilities.minImageExtent.height);
+	}
+
+	VkExtent2D actual_extent = { static_cast<uint32_t>(std::max(1, width)), static_cast<uint32_t>(std::max(1, height)) };
 	actual_extent.width = std::clamp(actual_extent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
 	actual_extent.height = std::clamp(actual_extent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
 	return actual_extent;
@@ -1523,6 +1535,7 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	ubo.light_intensity = scene_view.light_intensity;
 	ubo.ambient_strength = scene_view.ambient_strength;
 	ubo.debug_cascades = render_config.debug_cascades ? 1 : 0;
+	ubo.reversed_z = render_config.reversed_z ? 1 : 0;
 
 	if (frames[current_frame].uniform_mapped) {
 		std::memcpy(frames[current_frame].uniform_mapped, &ubo, sizeof(UniformBufferObject));

@@ -23,8 +23,8 @@ namespace bud::graphics {
 		upload_queue = std::make_shared<UploadQueue>();
 		csm_pass = std::make_unique<CSMShadowPass>();
 		main_pass = std::make_unique<MainPass>();
-		csm_pass->init(rhi);
-		main_pass->init(rhi);
+		csm_pass->init(rhi, render_config);
+		main_pass->init(rhi, render_config);
 	}
 
 	Renderer::~Renderer() {
@@ -390,7 +390,7 @@ namespace bud::graphics {
 		auto shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, scene, meshes);
 
 		// sort_list 传进去，按照这个顺序画
-		main_pass->add_to_graph(render_graph, shadow_map, back_buffer, scene, scene_view, meshes, sort_list, visible_count);
+		main_pass->add_to_graph(render_graph, shadow_map, back_buffer, scene, scene_view, render_config, meshes, sort_list, visible_count);
 
 		render_graph.compile();
 
@@ -449,9 +449,11 @@ namespace bud::graphics {
 		for (uint32_t i = 0; i < cascade_count; ++i) {
 			auto split = cascade_splits[i];
 
+			const float ndc_near = config.reversed_z ? 1.0f : 0.0f;
+			const float ndc_far = config.reversed_z ? 0.0f : 1.0f;
 			bud::math::vec3 frustum_corners[8] = {
-				{-1.0f,  1.0f, 0.0f}, { 1.0f,  1.0f, 0.0f}, { 1.0f, -1.0f, 0.0f}, {-1.0f, -1.0f, 0.0f},
-				{-1.0f,  1.0f, 1.0f}, { 1.0f,  1.0f, 1.0f}, { 1.0f, -1.0f, 1.0f}, {-1.0f, -1.0f, 1.0f},
+				{-1.0f,  1.0f, ndc_near}, { 1.0f,  1.0f, ndc_near}, { 1.0f, -1.0f, ndc_near}, {-1.0f, -1.0f, ndc_near},
+				{-1.0f,  1.0f, ndc_far}, { 1.0f,  1.0f, ndc_far}, { 1.0f, -1.0f, ndc_far}, {-1.0f, -1.0f, ndc_far},
 			};
 			for (uint32_t j = 0; j < 4; ++j) {
 				auto vec_near = inv_cam_matrix * bud::math::vec4(frustum_corners[j], 1.0f);
@@ -513,7 +515,9 @@ namespace bud::graphics {
 			float far_z = -light_scene_aabb.min.z + 100.0f; // 场景最远端 (加缓冲)
 
 			// 构建最终矩阵
-			auto light_proj_matrix = bud::math::ortho_vk(min_x, max_x, min_y, max_y, near_z, far_z);
+			auto light_proj_matrix = config.reversed_z
+				? bud::math::ortho_vk_reversed(min_x, max_x, min_y, max_y, near_z, far_z)
+				: bud::math::ortho_vk(min_x, max_x, min_y, max_y, near_z, far_z);
 
 
 			view.cascade_view_proj_matrices[i] = light_proj_matrix * light_rot_matrix;

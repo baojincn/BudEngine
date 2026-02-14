@@ -88,7 +88,7 @@ namespace bud::graphics::vulkan {
         depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
         depthStencil.depthTestEnable = key.depth_test;
         depthStencil.depthWriteEnable = key.depth_write;
-        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+		depthStencil.depthCompareOp = key.depth_compare_op;
         depthStencil.depthBoundsTestEnable = VK_FALSE;
         depthStencil.stencilTestEnable = VK_FALSE;
 

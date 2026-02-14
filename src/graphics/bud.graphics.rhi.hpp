@@ -17,6 +17,7 @@ namespace bud::graphics {
 		bool clear_color = false;
 		bool clear_depth = false;
 		bud::math::vec4 clear_color_value = { 0, 0, 0, 1 };
+		float clear_depth_value = 1.0f;
 		uint32_t base_array_layer = 0;
 		uint32_t layer_count = 1;
 	};

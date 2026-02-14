@@ -222,8 +222,13 @@ namespace bud::engine {
 		view_snapshot.delta_time = delta_time;
 
 		auto aspect = view_snapshot.viewport_width / view_snapshot.viewport_height;
+		auto render_config = renderer->get_config();
 		view_snapshot.view_matrix = scene.main_camera.get_view_matrix();
-		view_snapshot.proj_matrix = bud::math::perspective_vk(scene.main_camera.zoom, aspect, near_plane, far_plane);
+		if (render_config.reversed_z) {
+			view_snapshot.proj_matrix = bud::math::perspective_vk_reversed(scene.main_camera.zoom, aspect, near_plane, far_plane);
+		} else {
+			view_snapshot.proj_matrix = bud::math::perspective_vk(scene.main_camera.zoom, aspect, near_plane, far_plane);
+		}
 		view_snapshot.camera_position = scene.main_camera.position;
 		view_snapshot.near_plane = near_plane;
 		view_snapshot.far_plane = far_plane;
