@@ -489,6 +489,8 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	key.render_pass = VK_NULL_HANDLE;
 	key.depth_test = desc.depth_test;
 	key.depth_write = desc.depth_write;
+	key.depth_bias_enable = desc.enable_depth_bias;
+
 	switch (desc.depth_compare_op) {
 	case CompareOp::Less: key.depth_compare_op = VK_COMPARE_OP_LESS; break;
 	case CompareOp::LessEqual: key.depth_compare_op = VK_COMPARE_OP_LESS_OR_EQUAL; break;
@@ -686,12 +688,13 @@ void VulkanRHI::cmd_begin_render_pass(CommandHandle cmd, const RenderPassBeginIn
 	VkRenderingAttachmentInfo depth_attach{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
 	if (info.depth_attachment) {
 		auto vk_depth = static_cast<VulkanTexture*>(info.depth_attachment);
-		// [CSM] Support rendering to specific layer. Always use layer_views if available for array textures.
+		
 		if (!vk_depth->layer_views.empty()) {
 			depth_attach.imageView = vk_depth->layer_views[info.base_array_layer];
 		} else {
 			depth_attach.imageView = vk_depth->view;
 		}
+
 		depth_attach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 		depth_attach.loadOp = info.clear_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 		depth_attach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;

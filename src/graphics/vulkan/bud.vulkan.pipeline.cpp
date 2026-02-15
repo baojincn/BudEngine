@@ -74,10 +74,9 @@ namespace bud::graphics::vulkan {
         rasterizer.rasterizerDiscardEnable = VK_FALSE;
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
         rasterizer.lineWidth = 1.0f;
-        rasterizer.lineWidth = 1.0f;
         rasterizer.cullMode = key.cull_mode;
         rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        rasterizer.depthBiasEnable = VK_TRUE;
+        rasterizer.depthBiasEnable = key.depth_bias_enable;
 
         VkPipelineMultisampleStateCreateInfo multisampling{};
         multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -104,9 +103,13 @@ namespace bud::graphics::vulkan {
 
         std::vector<VkDynamicState> dynamicStates = {
             VK_DYNAMIC_STATE_VIEWPORT,
-            VK_DYNAMIC_STATE_SCISSOR,
-            VK_DYNAMIC_STATE_DEPTH_BIAS
+            VK_DYNAMIC_STATE_SCISSOR
         };
+
+        if (key.depth_bias_enable) {
+            dynamicStates.push_back(VK_DYNAMIC_STATE_DEPTH_BIAS);
+        }
+
         VkPipelineDynamicStateCreateInfo dynamicState{};
         dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
         dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
@@ -139,7 +142,7 @@ namespace bud::graphics::vulkan {
         VkGraphicsPipelineCreateInfo pipelineInfo{};
         pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
         pipelineInfo.pNext = &renderingInfo;
-        pipelineInfo.stageCount = 2;
+        pipelineInfo.stageCount = 2; 
         pipelineInfo.pStages = shaderStages;
         pipelineInfo.pVertexInputState = &vertexInputInfo;
         pipelineInfo.pInputAssemblyState = &inputAssembly;

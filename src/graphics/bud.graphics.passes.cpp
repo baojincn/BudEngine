@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 #include "src/graphics/bud.graphics.passes.hpp"
 
@@ -40,6 +41,149 @@ namespace bud::graphics {
 				&& std::abs(a.shadow_bias_constant - b.shadow_bias_constant) < 1e-6f
 				&& std::abs(a.shadow_bias_slope - b.shadow_bias_slope) < 1e-6f;
 		}
+	}
+
+	void ZPrepass::init(RHI* rhi, const RenderConfig& config) {
+		if (!rhi) {
+			std::println(stderr, "[ZPrepass] ERROR: RHI is null.");
+			return;
+		}
+
+		auto vs_code = bud::io::FileSystem::read_binary("src/shaders/zprepass.vert.spv");
+		auto fs_code = bud::io::FileSystem::read_binary("src/shaders/zprepass.frag.spv");
+
+		if (!vs_code || !fs_code) {
+			if (!vs_code)
+				std::println(stderr, "[ZPrepass] Missing shader: src/shaders/zprepass.vert.spv");
+
+			if (!fs_code)
+				std::println(stderr, "[ZPrepass] Missing shader: src/shaders/zprepass.frag.spv");
+
+			return;
+		}
+
+		GraphicsPipelineDesc desc;
+		desc.vs.code = *vs_code;
+		desc.fs.code = *fs_code;
+		desc.depth_test = true;
+		desc.depth_write = false;
+		desc.cull_mode = CullMode::None;
+		desc.color_attachment_format = TextureFormat::Undefined;
+		desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
+		desc.enable_depth_bias = false; // Disable depth bias for Z-prepass pipeline
+
+		pipeline = rhi->create_graphics_pipeline(desc);
+	}
+
+	RGHandle ZPrepass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer,
+		const RenderScene& render_scene,
+		const SceneView& view,
+		const RenderConfig& config,
+		const std::vector<RenderMesh>& meshes,
+		const std::vector<SortItem>& sort_list,
+		size_t instance_count) {
+		if (!pipeline) {
+			std::println(stderr, "[ZPrepass] ERROR: Pipeline is null.");
+			return {};
+		}
+
+		const size_t max_scene_count = std::min({
+			render_scene.world_matrices.size(),
+			render_scene.world_aabbs.size(),
+			render_scene.mesh_indices.size(),
+			render_scene.material_indices.size(),
+			render_scene.flags.size()
+		});
+
+		if (max_scene_count == 0 || sort_list.empty()) {
+			std::println(stderr, "[ZPrepass] ERROR: RenderScene or sort list is empty.");
+			return {};
+		}
+
+		const auto* backbuffer_tex = render_graph.get_texture(backbuffer);
+		if (!backbuffer_tex || backbuffer_tex->width == 0 || backbuffer_tex->height == 0) {
+			return {};
+		}
+
+		const size_t draw_count = std::min({ instance_count, sort_list.size(), max_scene_count });
+		uint32_t target_width = backbuffer_tex->width;
+		uint32_t target_height = backbuffer_tex->height;
+
+		TextureDesc depth_desc;
+		depth_desc.width = target_width;
+		depth_desc.height = target_height;
+		depth_desc.format = TextureFormat::D32_FLOAT;
+
+		auto depth_h = std::make_shared<RGHandle>();
+
+		return render_graph.add_pass("Z Prepass",
+			[=](RGBuilder& builder) {
+				*depth_h = builder.create("MainDepth", depth_desc);
+				builder.write(*depth_h, ResourceState::DepthWrite);
+				return *depth_h;
+			},
+			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) {
+					std::println(stderr, "[ZPrepass] ERROR: Pipeline is null.");
+					return;
+				}
+
+				RenderPassBeginInfo info;
+				info.depth_attachment = render_graph.get_texture(*depth_h);
+				info.clear_depth = true;
+				info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
+
+				rhi->cmd_begin_render_pass(cmd, info);
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_set_viewport(cmd, (float)target_width, (float)target_height);
+				rhi->cmd_set_scissor(cmd, target_width, target_height);
+
+				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
+				rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
+
+				uint32_t last_mesh = std::numeric_limits<uint32_t>::max();
+
+				for (size_t i = 0; i < draw_count; ++i) {
+					const auto& item = sort_list[i];
+					uint32_t idx = item.entity_index;
+
+					uint32_t mesh_id = render_scene.mesh_indices[idx];
+					uint32_t material_id = render_scene.material_indices[idx];
+					const auto& model_matrix = render_scene.world_matrices[idx];
+
+					if (mesh_id >= meshes.size()) continue;
+					const auto& mesh = meshes[mesh_id];
+					if (!mesh.is_valid()) continue;
+
+					if (mesh_id != last_mesh) {
+						rhi->cmd_bind_vertex_buffer(cmd, mesh.vertex_buffer.internal_handle);
+						rhi->cmd_bind_index_buffer(cmd, mesh.index_buffer.internal_handle);
+						last_mesh = mesh_id;
+					}
+
+					struct PushVars {
+						bud::math::mat4 model;
+						uint32_t material_id;
+						uint32_t padding[3];
+					} push_vars;
+
+					push_vars.model = model_matrix;
+
+					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+						const auto& sub = mesh.submeshes[item.submesh_index];
+						push_vars.material_id = sub.material_id;
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
+						rhi->cmd_draw_indexed(cmd, sub.index_count, 1, sub.index_start, 0, 0);
+					} else {
+						push_vars.material_id = material_id;
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
+						rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, 0, 0, 0);
+					}
+				}
+
+				rhi->cmd_end_render_pass(cmd);
+			}
+		);
 	}
 
 	CSMShadowPass::~CSMShadowPass() {
@@ -80,6 +224,7 @@ namespace bud::graphics {
 		desc.cull_mode = CullMode::Back; // Only render backfaces
 		desc.color_attachment_format = TextureFormat::Undefined;
 		desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
+		desc.enable_depth_bias = true;
 
         
         pipeline = rhi->create_graphics_pipeline(desc);
@@ -404,12 +549,13 @@ namespace bud::graphics {
         desc.cull_mode = CullMode::None; // Sponza Cloth (Double Sided)
         desc.color_attachment_format = bud::graphics::TextureFormat::BGRA8_SRGB; 
 		desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
+		desc.enable_depth_bias = false;
 
         pipeline = rhi->create_graphics_pipeline(desc);
         //std::println("[MainPass] Pipeline created successfully.");
     }
 
-	void MainPass::add_to_graph(RenderGraph& render_graph, RGHandle shadow_map, RGHandle backbuffer,
+	void MainPass::add_to_graph(RenderGraph& render_graph, RGHandle shadow_map, RGHandle backbuffer, RGHandle depth_buffer,
 		const RenderScene& render_scene,
 		const SceneView& view,
 		const RenderConfig& config,
@@ -440,20 +586,12 @@ namespace bud::graphics {
 		uint32_t target_width = backbuffer_tex->width;
 		uint32_t target_height = backbuffer_tex->height;
 
-		TextureDesc depth_desc;
-		depth_desc.width = target_width;
-		depth_desc.height = target_height;
-		depth_desc.format = TextureFormat::D32_FLOAT;
-
-		auto depth_h = std::make_shared<RGHandle>();
-
 		render_graph.add_pass("Main Lighting Pass",
 			[=](RGBuilder& builder) {
 				builder.write(backbuffer, ResourceState::RenderTarget);
 				builder.read(shadow_map, ResourceState::DepthRead);
-				*depth_h = builder.create("MainDepth", depth_desc);
-				builder.write(*depth_h, ResourceState::DepthWrite);
-				return *depth_h;
+				builder.write(depth_buffer, ResourceState::DepthWrite);
+				return depth_buffer;
 			},
 
 			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
@@ -464,11 +602,10 @@ namespace bud::graphics {
 
 				RenderPassBeginInfo info;
 				info.color_attachments.push_back(render_graph.get_texture(backbuffer));
-				info.depth_attachment = render_graph.get_texture(*depth_h);
+				info.depth_attachment = render_graph.get_texture(depth_buffer);
 				info.clear_color = true;
 				info.clear_color_value = { 0.5f, 0.5f, 0.5f, 1.0f };
-				info.clear_depth = true;
-				info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
+				info.clear_depth = false;
 
 				rhi->cmd_begin_render_pass(cmd, info);
 				rhi->cmd_bind_pipeline(cmd, pipeline);

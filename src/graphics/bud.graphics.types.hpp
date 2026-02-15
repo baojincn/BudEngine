@@ -184,6 +184,7 @@ namespace bud::graphics {
 		TextureFormat depth_attachment_format = TextureFormat::D32_FLOAT;
 		bool depth_test = true;
 		bool depth_write = true;
+		bool enable_depth_bias = false;
 		CullMode cull_mode = CullMode::Back;
 		CompareOp depth_compare_op = CompareOp::Less;
 	};

@@ -71,6 +71,12 @@ file(GLOB SHADER_FILES
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rchit"	# Ray Closest Hit Shader
 )
 
+# Ensure new prepass shaders are included
+list(APPEND SHADER_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/zprepass.vert"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/zprepass.frag"
+)
+
 # Find glslc compiler and set up custom commands to compile shaders
 find_program(GLSLC_EXECUTABLE NAMES glslc HINTS "$ENV{VULKAN_SDK}/Bin")
 
