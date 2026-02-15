@@ -20,6 +20,11 @@
 #include "src/graphics/vulkan/bud.vulkan.pipeline.hpp"
 #include "src/graphics/vulkan/bud.vulkan.descriptors.hpp"
 
+
+#ifdef BUD_ENABLE_AFTERMATH
+#include <GFSDK_Aftermath.h>
+#endif
+
 namespace bud::graphics::vulkan {
 
 	 using VkInstance = struct VkInstance_T*;
@@ -130,6 +135,10 @@ namespace bud::graphics::vulkan {
 
 		void set_object_debug_name(uint64_t object_handle, ObjectType object_type, const std::string& name);
 
+#ifdef BUD_ENABLE_AFTERMATH
+		bool init_aftermath();
+#endif
+
 	private:
 		struct FrameData {
 			VkSemaphore image_available_semaphore = nullptr;
@@ -153,6 +162,7 @@ namespace bud::graphics::vulkan {
 		VkQueue present_queue = nullptr;
 		VkDebugUtilsMessengerEXT debug_messenger = nullptr;
 		bool enable_validation_layers = false;
+		bool aftermath_initialized = false;
 
 		const std::vector<const char*> validation_layers = { "VK_LAYER_KHRONOS_validation" };
 		std::vector<const char*> device_extensions = {

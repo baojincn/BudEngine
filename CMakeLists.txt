@@ -1,6 +1,6 @@
 ﻿cmake_minimum_required(VERSION 4.0)
 
-# 设置vcpkg工具链
+# Setup vcpkg toolchain
 if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
         CACHE STRING "")
@@ -20,17 +20,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 enable_language(ASM_MASM)
 
-# Profiler support, CMakePresets can override this option
+# Profiler support
 if(NOT DEFINED BUD_ENABLE_PROFILING)
 	option(BUD_ENABLE_PROFILING "Enable Tracy Profiler" OFF)
 endif()
 
-# MSVC 模块支持 (Removed for now due to ICEs)
-# if(MSVC)
-#     set(CMAKE_CXX_SCAN_FOR_MODULES ON)
-# endif()
+# Nsight Aftermath integration
+if(NOT DEFINED BUD_ENABLE_AFTERMATH)
+    option(BUD_ENABLE_AFTERMATH "Enable NVIDIA Nsight Aftermath GPU crash dumps" ON)
+endif()
 
-# 检测平台
+# Platform detection
 if(WIN32)
     set(PLATFORM_WINDOWS ON)
     message(STATUS "Building for Windows")
@@ -52,23 +52,40 @@ if(BUD_ENABLE_PROFILING)
 endif()
 # End, find dependencies
 
-set(BUD_THIRD_PARTY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+# ---------------------------------------------------------------------------
+# Nsight Aftermath SDK Configuration (Simplified)
+# ---------------------------------------------------------------------------
+set(AFTERMATH_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/vendor/NsightAftermath)
+set(AFTERMATH_INCLUDE_DIR ${AFTERMATH_ROOT}/include)
+set(AFTERMATH_LIB_DIR ${AFTERMATH_ROOT}/lib/x64)
+
+if(BUD_ENABLE_AFTERMATH)
+    # Find the base library for linking (crash-dump lib not required)
+	find_library(AFTERMATH_LIB NAMES GFSDK_Aftermath_Lib.x64 PATHS ${AFTERMATH_LIB_DIR} NO_DEFAULT_PATH)
+
+	if(AFTERMATH_LIB)
+		message(STATUS "Nsight Aftermath base lib found in ${AFTERMATH_LIB_DIR}")
+	else()
+		message(WARNING "BUD_ENABLE_AFTERMATH=ON but GFSDK_Aftermath_Lib.x64.lib not found in ${AFTERMATH_LIB_DIR}. Disabling.")
+		set(BUD_ENABLE_AFTERMATH OFF CACHE BOOL "" FORCE)
+	endif()
+endif()
 # End, global settings
 
-# Begin, define engine core library
 
+# Begin, define engine core library
 file(GLOB SHADER_FILES
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.vert"	# Vertex Shader
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.frag"	# Fragment Shader
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.comp"	# Compute Shader
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.geom"	# Geometry Shader
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.tesc"	# Tessellation Control Shader
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.tese"	# Tessellation Evaluation Shader
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.mesh"	# Mesh Shader
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.task"	# Task Shader
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rgen"	# Ray Generation Shader
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rmiss"	# Ray Miss Shader
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rchit"	# Ray Closest Hit Shader
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.vert"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.frag"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.comp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.geom"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.tesc"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.tese"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.mesh"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.task"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rgen"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rmiss"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rchit"
 )
 
 # Ensure new prepass shaders are included
@@ -77,7 +94,7 @@ list(APPEND SHADER_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/zprepass.frag"
 )
 
-# Find glslc compiler and set up custom commands to compile shaders
+# Find glslc compiler
 find_program(GLSLC_EXECUTABLE NAMES glslc HINTS "$ENV{VULKAN_SDK}/Bin")
 
 if(NOT GLSLC_EXECUTABLE)
@@ -110,9 +127,7 @@ endif()
 
 source_group("Shaders" FILES ${SHADER_FILES})
 
-add_library(bud_engine_core STATIC
-	${SHADER_FILES}
-  )
+add_library(bud_engine_core STATIC ${SHADER_FILES})
 
 # Ensure shaders are compiled before building the core library
 if(TARGET CompileShaders)
@@ -124,11 +139,19 @@ if (BUD_ENABLE_PROFILING)
 	target_link_libraries(bud_engine_core PUBLIC Tracy::TracyClient)
 endif()
 
+if(BUD_ENABLE_AFTERMATH)
+	target_include_directories(bud_engine_core PRIVATE ${AFTERMATH_INCLUDE_DIR})
+	if(AFTERMATH_LIB)
+		target_compile_definitions(bud_engine_core PUBLIC BUD_ENABLE_AFTERMATH)
+		target_link_libraries(bud_engine_core PRIVATE ${AFTERMATH_LIB})
+	endif()
+endif()
+
 if(MSVC)
 	target_link_options(bud_engine_core PRIVATE "/CETCOMPAT:NO")
 endif()
 
-# Add sources (Standard C++ Headers/Sources)
+# Add sources
 target_sources(bud_engine_core
     PRIVATE
         "src/platform/windows/switch_context_win_x86_64.asm"
@@ -153,9 +176,7 @@ target_sources(bud_engine_core
 		"src/runtime/bud.input.cpp"
 		"src/runtime/bud.scene.cpp"
 
-
     PUBLIC
-		# Headers
 		"src/core/bud.core.hpp"
 		"src/core/bud.math.hpp"
 		"src/io/bud.io.hpp"
@@ -185,17 +206,9 @@ target_sources(bud_engine_core
 		"src/graphics/vulkan/bud.vulkan.utils.hpp"
 )
 
-# set_target_properties(bud_engine_core PROPERTIES CXX_SCAN_FOR_MODULES ON)
-
-target_link_libraries(
-    bud_engine_core
-    PUBLIC
-        SDL3::SDL3
-        Vulkan::Vulkan
-)
+target_link_libraries(bud_engine_core PUBLIC SDL3::SDL3 Vulkan::Vulkan)
 
 target_include_directories(bud_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-
 # End, define engine core library
 
 # Begin, triangle_sample
@@ -203,13 +216,25 @@ if(BUD_BUILD_SAMPLES)
     add_executable(triangle_sample samples/triangle/main.cpp)
     target_link_libraries(triangle_sample PRIVATE bud_engine_core)
     target_include_directories(triangle_sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    
+    # Output directory
     set_target_properties(triangle_sample PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 	set_target_properties(triangle_sample PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-
-	# set_property(TARGET triangle_sample PROPERTY CXX_SCAN_FOR_MODULES ON)
 
 	if(MSVC)
         target_link_options(triangle_sample PRIVATE "/CETCOMPAT:NO")
     endif()
+
+    # -----------------------------------------------------------------------
+    # Simple Copy Logic: Directly Copy DLL to the Exe Directory
+    # -----------------------------------------------------------------------
+	if(BUD_ENABLE_AFTERMATH)
+		add_custom_command(TARGET triangle_sample POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			"${CMAKE_CURRENT_SOURCE_DIR}/vendor/NsightAftermath/lib/x64/GFSDK_Aftermath_Lib.x64.dll"
+			$<TARGET_FILE_DIR:triangle_sample>
+			COMMENT "Copying Aftermath DLL into output binary directory"
+		)
+	endif()
 endif()
 # End, triangle_sample
