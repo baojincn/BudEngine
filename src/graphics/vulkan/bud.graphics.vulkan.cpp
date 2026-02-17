@@ -44,7 +44,12 @@ struct VulkanPipelineObject {
 };
 
 #ifdef BUD_ENABLE_AFTERMATH
+std::mutex aftermath_mutex;
+std::once_flag aftermath_enable_once;
+
 void gpu_crash_dump_callback(const void* pGpuCrashDump, const uint32_t gpuCrashDumpSize, void* /*pUserData*/) {
+	std::lock_guard lock(aftermath_mutex);
+
 	namespace fs = std::filesystem;
 	std::error_code ec;
 	const fs::path dump_dir = fs::current_path(ec) / "aftermath_dumps";
@@ -58,32 +63,28 @@ void gpu_crash_dump_callback(const void* pGpuCrashDump, const uint32_t gpuCrashD
 	if (file.is_open()) {
 		file.write(reinterpret_cast<const char*>(pGpuCrashDump), gpuCrashDumpSize);
 		file.flush();
-		std::println("[Aftermath] GPU crash dump written to {}", dump_path.string());
-	}
-	else {
-		std::println(stderr, "[Aftermath] Failed to write GPU crash dump to {}", dump_path.string());
 	}
 }
-#endif
 
-#ifdef BUD_ENABLE_AFTERMATH
+void enable_aftermath_crash_dumps() {
+	std::call_once(aftermath_enable_once, []() {
+		GFSDK_Aftermath_Result res = GFSDK_Aftermath_EnableGpuCrashDumps(
+			GFSDK_Aftermath_Version_API,
+			GFSDK_Aftermath_GpuCrashDumpWatchedApiFlags_Vulkan,
+			GFSDK_Aftermath_GpuCrashDumpFeatureFlags_Default,
+			gpu_crash_dump_callback,
+			nullptr,
+			nullptr,
+			nullptr,
+			nullptr);
+
+		if (res != GFSDK_Aftermath_Result_Success) {
+			std::println(stderr, "[Aftermath] EnableGpuCrashDumps failed: {}", (int)res);
+		}
+	});
+}
+
 bool VulkanRHI::init_aftermath() {
-	GFSDK_Aftermath_Result res = GFSDK_Aftermath_EnableGpuCrashDumps(
-		GFSDK_Aftermath_Version_API,
-		GFSDK_Aftermath_GpuCrashDumpWatchedApiFlags_Vulkan,
-		GFSDK_Aftermath_GpuCrashDumpFeatureFlags_Default,
-		gpu_crash_dump_callback, // gpuCrashDumpCb
-		nullptr, // shaderDebugInfoCb
-		nullptr, // descriptionCb
-		nullptr, // resolveMarkerCb
-		nullptr  // pUserData
-	);
-
-	if (res != GFSDK_Aftermath_Result_Success) {
-		std::println(stderr, "[Aftermath] EnableGpuCrashDumps failed: {}", (int)res);
-		return false;
-	}
-
 	std::println("[Aftermath] Initialized (GPU crash dumps enabled).");
 	return true;
 }
@@ -118,6 +119,10 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	this->task_scheduler = task_scheduler;
 	platform_window = plat_window;
 	max_frames_in_flight = inflight_frame_count;
+
+#ifdef BUD_ENABLE_AFTERMATH
+	enable_aftermath_crash_dumps();
+#endif
 
 	// 基础构建 (Instance, Surface, Device)
 	create_instance(instance, enable_validation);
@@ -969,9 +974,35 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 	device_features2.pNext = &features11;
 	device_features2.features.samplerAnisotropy = VK_TRUE;
 
+#ifdef BUD_ENABLE_AFTERMATH
+	// Enable NV_device_diagnostic_checkpoints extension to be able to
+	// use Aftermath event markers.
+	device_extensions.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+
+	// Enable NV_device_diagnostics_config extension to configure Aftermath
+	// features.
+	device_extensions.push_back(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME);
+
+	// Set up device creation info for Aftermath feature flag configuration.
+	VkDeviceDiagnosticsConfigFlagsNV aftermathFlags =
+		VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_AUTOMATIC_CHECKPOINTS_BIT_NV |  // Enable automatic call stack checkpoints.
+		VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_RESOURCE_TRACKING_BIT_NV |      // Enable tracking of resources.
+		VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_DEBUG_INFO_BIT_NV |      // Generate debug information for shaders.
+		VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_ERROR_REPORTING_BIT_NV;  // Enable additional runtime shader error reporting.
+
+	VkDeviceDiagnosticsConfigCreateInfoNV aftermathInfo = {};
+	aftermathInfo.sType = VK_STRUCTURE_TYPE_DEVICE_DIAGNOSTICS_CONFIG_CREATE_INFO_NV;
+	aftermathInfo.flags = aftermathFlags;
+	aftermathInfo.pNext = &device_features2;  // Chain to the main device features struct
+#endif
+
 	VkDeviceCreateInfo create_info{};
 	create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+#ifdef BUD_ENABLE_AFTERMATH
+	create_info.pNext = &aftermathInfo;  // Chain Aftermath config into device creation
+#else
 	create_info.pNext = &device_features2;
+#endif
 	create_info.queueCreateInfoCount = static_cast<uint32_t>(queue_infos.size());
 	create_info.pQueueCreateInfos = queue_infos.data();
 	create_info.pEnabledFeatures = nullptr;
