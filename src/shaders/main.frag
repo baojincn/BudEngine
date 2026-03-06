@@ -30,6 +30,8 @@ layout(binding = 0) uniform UniformBufferObject {
     float ambient_strength;
 	uint cascade_count;
 	uint debug_cascades;
+	uint reversed_z;
+	uint padding[3];
 } ubo;
 
 layout(binding = 1) uniform sampler2D tex_samplers[];
@@ -106,7 +108,7 @@ float SampleCascade(int layer, vec3 world_pos, vec3 N, vec3 L) {
     proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
 
     // 超出视锥体范围，视作无阴影
-    if(proj_coords.z > 1.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 || proj_coords.y < 0.0 || proj_coords.y > 1.0)
+    if(proj_coords.z > 1.0 || proj_coords.z < 0.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 || proj_coords.y < 0.0 || proj_coords.y > 1.0)
         return 1.0;
 
     float bias = 0.0; 
@@ -119,9 +121,10 @@ float SampleCascade(int layer, vec3 world_pos, vec3 N, vec3 L) {
     // 远处的级联 (layer 越大) 纹素覆盖的世界面积越大，
     float spread = 2.5; 
 
+    bool is_reversed = ubo.reversed_z != 0u;
     for(int i = 0; i < 16; ++i) {
         vec2 offset = poissonDisk[i] * texel_size * spread;
-        float pcf_depth = proj_coords.z - bias;
+        float pcf_depth = is_reversed ? (proj_coords.z + bias) : (proj_coords.z - bias);
         shadow_sum += texture(shadow_map, vec4(proj_coords.xy + offset, float(layer), pcf_depth));
     }
 
@@ -242,7 +245,7 @@ void main() {
     if (ubo.debug_cascades > 0) {
         int debugLayer = -1;
         vec4 debugViewPos = ubo.view * vec4(frag_world_pos, 1.0);
-        float debugDepth = -debugViewPos.z;
+		float debugDepth = -debugViewPos.z;
         for (int i = 0; i < 4; ++i) {
 			if (debugDepth < ubo.cascade_split_depths[i]) {
 				debugLayer = i;

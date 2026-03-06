@@ -17,6 +17,7 @@ namespace bud::graphics {
 		bool clear_color = false;
 		bool clear_depth = false;
 		bud::math::vec4 clear_color_value = { 0, 0, 0, 1 };
+		float clear_depth_value = 1.0f;
 		uint32_t base_array_layer = 0;
 		uint32_t layer_count = 1;
 	};
@@ -29,6 +30,7 @@ namespace bud::graphics {
 		virtual void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count) = 0;
 
 		virtual void resize_swapchain(uint32_t width, uint32_t height) = 0;
+		virtual bool is_swapchain_out_of_date() const { return false; }
 
 		virtual CommandHandle begin_frame() = 0;
 		virtual void end_frame(CommandHandle cmd) = 0;

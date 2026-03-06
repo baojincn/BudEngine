@@ -59,6 +59,7 @@ namespace bud::graphics {
 		bud::threading::TaskScheduler* task_scheduler;
 
 		std::unique_ptr<CSMShadowPass> csm_pass;
+		std::unique_ptr<ZPrepass> z_prepass;
 		std::unique_ptr<MainPass> main_pass;
 
 		std::vector<RenderMesh> meshes;

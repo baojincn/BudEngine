@@ -46,6 +46,8 @@ namespace bud::graphics::vulkan {
 		float ambient_strength;
 		uint32_t cascade_count;
 		uint32_t debug_cascades;
+		uint32_t reversed_z;
+		uint32_t padding[3];
 	};
 
 	struct Vertex {

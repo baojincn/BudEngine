@@ -7,9 +7,13 @@ A full fiber-based task driven lightweight 3D Game Engine.
 * **Modern C++23 Standard**: Built with the latest language features (Concepts, std::print, designated initializers) ensuring high performance and type safety.
 * **Robust Architecture**: Traditional Header/Source (`.hpp`/`.cpp`) structure ensures maximum compiler compatibility and stability across MSVC/Clang/GCC.
 * **Fiber-Based Task System**: A lightweight, multi-threaded job system (`TaskScheduler`) for high-performance parallel processing.
+  * *Why Fibers (Stackful Coroutines) over C++20 Stackless Coroutines?* In game engine architecture, tasks often need to yield execution from deep within complex, traditional C++ call stacks (e.g., waiting for physics constraints or asset loads inside nested functions). Stackless coroutines suffer from the "function color" problem, forcing every function in the chain to explicitly become a coroutine (`co_await`), which is highly invasive. Fibers allow transparent, arbitrary-depth suspension and full call-stack preservation, making them far more suitable for integrating large game subsystems and third-party libraries without polluting the codebase.
 * **Game Logic Decoupling**: Application layer is separated from the core engine using dependency injection (`GameApp`), allowing the engine to run as a library.
 * **Crash Handling**: Integrated **Stacktrace** for rapid debugging and stability monitoring.
-* **Integrated Profiling**: Full instrumentation using **Tracy Profiler** for real-time CPU performance analysis and frame time monitoring.
+* **Integrated Profiling & GPU Debugging**: 
+    * Full instrumentation using **Tracy Profiler** for real-time CPU performance analysis and frame time monitoring.
+    * Integrated **NVIDIA Nsight Aftermath** for capturing and analyzing GPU crash dumps (TDRs) and resolving device lost errors.
+    * Robust **RenderDoc** compatibility achieved through thread affinity mechanisms, ensuring stable frame captures and precise API-level debugging.
 
 ### Rendering & Vulkan Backend
 * **Physically Based Rendering (PBR)**: Implemented standard Cook-Torrance BRDF lighting model for realistic material rendering.
@@ -37,7 +41,7 @@ A full fiber-based task driven lightweight 3D Game Engine.
 
 * **Pipeline & Rendering**:
     * **GPU-Driven Rendering**: 
-        * **Culling Architecture**: **LBVH (Linear BVH)** traversal and **Hi-Z** occlusion culling.
+         * **Spatial Partitioning**: Implement dynamic **HLBVH (Hierarchical Linear BVH)** construction on CPU for efficient scene queries.
         * **Dual-Pipeline Support**: Designed to support both standard **Compute Shader** (Indirect Draw) and modern **Mesh Shader** (Task Shader amplification) workflows.
     * **Advanced Shading**: Forward+ or Deferred Shading.
 

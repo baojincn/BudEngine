@@ -67,6 +67,7 @@ void Fiber::reset(std::move_only_function<void()>&& w, Counter* c, void (*entry_
 	next_waiting = nullptr;
 	next_pool = nullptr;
 	pending_wait_counter = nullptr;
+	target_thread_index = -1;
 
 #if defined(_DEBUG)
 	debug_name = nullptr;
@@ -137,8 +138,6 @@ Fiber* LockFreeFiberPool::pop() {
 	return old_head;
 }
 
-
-
 TaskScheduler::TaskScheduler(size_t n)
 	: num_threads(n) {
 
@@ -156,20 +155,19 @@ TaskScheduler::TaskScheduler(size_t n)
 	for (size_t i = 1; i < n; ++i) {
 		workers[i]->thread = std::jthread([this, i](std::stop_token st) {
 			worker_loop(i, st);
-			});
+		});
 	}
 }
 
 TaskScheduler::~TaskScheduler() {
 	stop();
 	for (auto w : workers) {
+		for (auto f : w->pinned_queue)
+			delete f;
+		w->pinned_queue.clear();
 		delete w;
 	}
 	workers.clear();
-
-	for (auto f : main_thread_incoming_queue)
-		delete f;
-	main_thread_incoming_queue.clear();
 
 	Fiber* f = nullptr;
 	while ((f = fiber_pool.pop()) != nullptr) {
@@ -196,10 +194,10 @@ void TaskScheduler::pump_main_thread_tasks() {
 	while (true) {
 		Fiber* f = nullptr;
 		{
-			std::unique_lock lock(main_queue_mtx, std::try_to_lock);
-			if (lock.owns_lock() && !main_thread_incoming_queue.empty()) {
-				f = main_thread_incoming_queue.front();
-				main_thread_incoming_queue.pop_front();
+			std::unique_lock lock(workers[0]->pinned_mtx, std::try_to_lock);
+			if (lock.owns_lock() && !workers[0]->pinned_queue.empty()) {
+				f = workers[0]->pinned_queue.front();
+				workers[0]->pinned_queue.pop_front();
 			}
 		}
 
@@ -239,18 +237,34 @@ void TaskScheduler::spawn(std::move_only_function<void()> work, Counter* counter
 }
 
 
-void TaskScheduler::submit_main_thread_task(std::move_only_function<void()> work, Counter* counter) {
+void TaskScheduler::spawn_on_thread(uint32_t thread_index, const char* name, std::move_only_function<void()> work, Counter* counter) {
+	if (thread_index >= num_threads) thread_index = 0;
 	auto f = allocate_fiber();
-	f->reset(std::move(work), counter, &fiber_entry_stub);
-	if (counter) counter->fetch_add(1, std::memory_order_relaxed);
 
-	if (t_scheduler && t_worker_index == 0) {
-		workers[0]->queue.push(f);
-	}
-	else {
-		std::lock_guard lock(main_queue_mtx);
-		main_thread_incoming_queue.push_back(f);
-	}
+#if defined(_DEBUG)
+	f->debug_name = name;
+#endif
+
+#if defined(_DEBUG) && defined(BUD_TRACK_TASK_SOURCE)
+	f->creation_stack = std::stacktrace::current();
+#endif
+
+	f->reset(std::move(work), counter, &fiber_entry_stub);
+	f->target_thread_index = static_cast<int>(thread_index);
+	if (counter)
+		counter->fetch_add(1, std::memory_order_relaxed);
+
+	std::lock_guard lock(workers[thread_index]->pinned_mtx);
+	workers[thread_index]->pinned_queue.push_back(f);
+}
+
+void TaskScheduler::spawn_on_thread(uint32_t thread_index, std::move_only_function<void()> work, Counter* counter) {
+	spawn_on_thread(thread_index, nullptr, std::move(work), counter);
+}
+
+
+void TaskScheduler::submit_main_thread_task(std::move_only_function<void()> work, Counter* counter) {
+	spawn_on_thread(0, nullptr, std::move(work), counter);
 }
 
 void TaskScheduler::wait_for_counter(Counter& counter, std::function<void()> on_idle) {
@@ -327,7 +341,13 @@ void TaskScheduler::fiber_entry_stub(Fiber* f_dummy) {
 			while (waiting_head) {
 				auto next = waiting_head->next_waiting;
 				waiting_head->next_waiting = nullptr;
-				scheduler->workers[t_worker_index]->queue.push(waiting_head);
+				if (waiting_head->target_thread_index != -1) {
+					auto tidx = waiting_head->target_thread_index;
+					std::lock_guard lock(scheduler->workers[tidx]->pinned_mtx);
+					scheduler->workers[tidx]->pinned_queue.push_back(waiting_head);
+				} else {
+					scheduler->workers[t_worker_index]->queue.push(waiting_head);
+				}
 				waiting_head = next;
 			}
 		}
@@ -364,7 +384,13 @@ void TaskScheduler::execute_task(Fiber* f) {
 			while (wake_list) {
 				auto next = wake_list->next_waiting;
 				wake_list->next_waiting = nullptr;
-				workers[t_worker_index]->queue.push(wake_list);
+				if (wake_list->target_thread_index != -1) {
+					auto tidx = wake_list->target_thread_index;
+					std::lock_guard lock(workers[tidx]->pinned_mtx);
+					workers[tidx]->pinned_queue.push_back(wake_list);
+				} else {
+					workers[t_worker_index]->queue.push(wake_list);
+				}
 				wake_list = next;
 			}
 		}
@@ -406,11 +432,11 @@ void TaskScheduler::worker_loop(size_t index, std::stop_token st) {
 	while (running && !st.stop_requested()) {
 		Fiber* f = nullptr;
 
-		if (index == 0) {
-			std::unique_lock lock(main_queue_mtx, std::try_to_lock);
-			if (lock.owns_lock() && !main_thread_incoming_queue.empty()) {
-				f = main_thread_incoming_queue.front();
-				main_thread_incoming_queue.pop_front();
+		{
+			std::unique_lock lock(workers[index]->pinned_mtx, std::try_to_lock);
+			if (lock.owns_lock() && !workers[index]->pinned_queue.empty()) {
+				f = workers[index]->pinned_queue.front();
+				workers[index]->pinned_queue.pop_front();
 			}
 		}
 

@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <limits>
 #include <mutex>
+#include <filesystem>
+#include <fstream>
+#include <chrono>
 
 #include <vulkan/vulkan.h>
 #include <SDL3/SDL.h>
@@ -21,6 +24,11 @@
 #include "src/graphics/vulkan/bud.vulkan.types.hpp"
 #include "src/graphics/vulkan/bud.vulkan.utils.hpp"
 
+#ifdef BUD_ENABLE_AFTERMATH
+#include <GFSDK_Aftermath.h>
+#include <GFSDK_Aftermath_GpuCrashDump.h>
+#endif
+
 using namespace bud::graphics;
 using namespace bud::graphics::vulkan;
 
@@ -34,6 +42,53 @@ struct VulkanPipelineObject {
 	VkPipeline pipeline;
 	VkPipelineLayout layout;
 };
+
+#ifdef BUD_ENABLE_AFTERMATH
+std::mutex aftermath_mutex;
+std::once_flag aftermath_enable_once;
+
+void gpu_crash_dump_callback(const void* pGpuCrashDump, const uint32_t gpuCrashDumpSize, void* /*pUserData*/) {
+	std::lock_guard lock(aftermath_mutex);
+
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	const fs::path dump_dir = fs::current_path(ec) / "aftermath_dumps";
+	fs::create_directories(dump_dir, ec);
+
+	const auto now = std::chrono::system_clock::now().time_since_epoch();
+	const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+	fs::path dump_path = dump_dir / ("gpu_crash_" + std::to_string(ns) + ".nv-gpudmp");
+
+	std::ofstream file(dump_path, std::ios::binary);
+	if (file.is_open()) {
+		file.write(reinterpret_cast<const char*>(pGpuCrashDump), gpuCrashDumpSize);
+		file.flush();
+	}
+}
+
+void enable_aftermath_crash_dumps() {
+	std::call_once(aftermath_enable_once, []() {
+		GFSDK_Aftermath_Result res = GFSDK_Aftermath_EnableGpuCrashDumps(
+			GFSDK_Aftermath_Version_API,
+			GFSDK_Aftermath_GpuCrashDumpWatchedApiFlags_Vulkan,
+			GFSDK_Aftermath_GpuCrashDumpFeatureFlags_Default,
+			gpu_crash_dump_callback,
+			nullptr,
+			nullptr,
+			nullptr,
+			nullptr);
+
+		if (res != GFSDK_Aftermath_Result_Success) {
+			std::println(stderr, "[Aftermath] EnableGpuCrashDumps failed: {}", (int)res);
+		}
+	});
+}
+
+bool VulkanRHI::init_aftermath() {
+	std::println("[Aftermath] Initialized (GPU crash dumps enabled).");
+	return true;
+}
+#endif
 
 
 VulkanLayoutTransition bud::graphics::vulkan::get_vk_transition(ResourceState state) {
@@ -64,6 +119,10 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	this->task_scheduler = task_scheduler;
 	platform_window = plat_window;
 	max_frames_in_flight = inflight_frame_count;
+
+#ifdef BUD_ENABLE_AFTERMATH
+	enable_aftermath_crash_dumps();
+#endif
 
 	// 基础构建 (Instance, Surface, Device)
 	create_instance(instance, enable_validation);
@@ -103,14 +162,14 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 
 	DescriptorLayoutBuilder layout_builder;
 	layout_builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
-	layout_builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1000, 
+	layout_builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1000,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	layout_builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 
 	global_set_layout = layout_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
 
 	// 创建 Per-Frame UBO Buffers (Binding 0)
-	VkDeviceSize ubo_size = 512; // Enough for matrices + light data (was 256)
+	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
 	for (auto& frame : frames) {
 		VkBufferCreateInfo buffer_info{};
 		buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -194,7 +253,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	shadow_sampler_info.magFilter = VK_FILTER_LINEAR;
 	shadow_sampler_info.minFilter = VK_FILTER_LINEAR;
 	shadow_sampler_info.compareEnable = VK_TRUE;
-	shadow_sampler_info.compareOp = VK_COMPARE_OP_LESS; // or LESS_OR_EQUAL
+	shadow_sampler_info.compareOp = render_config.reversed_z ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_LESS_OR_EQUAL;
 	shadow_sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; // Depths outside [0,1]?
 	shadow_sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 	shadow_sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
@@ -218,18 +277,18 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		image_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 		image_info.samples = VK_SAMPLE_COUNT_1_BIT;
 		image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-		
+
 		if (vkCreateImage(device, &image_info, nullptr, &dummy_depth_texture.image) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create dummy depth");
 		}
-		
+
 		VkMemoryRequirements mem_reqs;
 		vkGetImageMemoryRequirements(device, dummy_depth_texture.image, &mem_reqs);
-		
+
 		MemoryBlock block = memory_allocator->alloc_static(mem_reqs.size, mem_reqs.alignment, mem_reqs.memoryTypeBits, MemoryUsage::GpuOnly);
 		vkBindImageMemory(device, dummy_depth_texture.image, (VkDeviceMemory)block.internal_handle, block.offset);
 		dummy_depth_texture.memory = (VkDeviceMemory)block.internal_handle; // [FIX] Store for cleanup
-		
+
 		VkImageViewCreateInfo view_info{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
 		view_info.image = dummy_depth_texture.image;
 		view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -239,11 +298,11 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		view_info.subresourceRange.levelCount = 1;
 		view_info.subresourceRange.baseArrayLayer = 0;
 		view_info.subresourceRange.layerCount = 1;
-		
+
 		if (vkCreateImageView(device, &view_info, nullptr, &dummy_depth_texture.view) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create dummy depth view");
 		}
-		
+
 		transition_image_layout_immediate(dummy_depth_texture.image, VK_FORMAT_D32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
 
 		transition_image_layout_immediate(dummy_depth_texture.image, VK_FORMAT_D32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
@@ -266,8 +325,8 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 
 		DescriptorWriter writer;
 		writer.write_buffer(0, frame.uniform_buffer, ubo_size, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-		writer.write_image(2, 0, dummy_depth_texture.view, default_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-		
+		writer.write_image(2, 0, dummy_depth_texture.view, shadow_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+
 		writer.update_set(device, frame.global_descriptor_set);
 	}
 
@@ -313,7 +372,7 @@ void VulkanRHI::cleanup() {
 
 	pipeline_cache.reset();
 	resource_pool.reset();
-	
+
 	if (!buffer_memory_map.empty()) {
 		std::println("[Vulkan] Warning: {} buffers were not explicitly destroyed, cleaning up now...", buffer_memory_map.size());
 		for (auto& [buffer, memory] : buffer_memory_map) {
@@ -323,7 +382,7 @@ void VulkanRHI::cleanup() {
 		}
 		buffer_memory_map.clear();
 	}
-	
+
 	memory_allocator.reset();
 
 	for (auto semaphore : render_finished_semaphores)
@@ -465,11 +524,11 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipelineLayoutInfo.setLayoutCount = 0; 
-	
+	pipelineLayoutInfo.setLayoutCount = 0;
+
 	// 使用全局 Descriptor Set Layout
 	std::vector<VkDescriptorSetLayout> setLayouts = { global_set_layout };
-	
+
 	pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
 	pipelineLayoutInfo.pSetLayouts = setLayouts.data();
 	pipelineLayoutInfo.pushConstantRangeCount = 1;
@@ -489,6 +548,15 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	key.render_pass = VK_NULL_HANDLE;
 	key.depth_test = desc.depth_test;
 	key.depth_write = desc.depth_write;
+	key.depth_bias_enable = desc.enable_depth_bias;
+
+	switch (desc.depth_compare_op) {
+	case CompareOp::Less: key.depth_compare_op = VK_COMPARE_OP_LESS; break;
+	case CompareOp::LessEqual: key.depth_compare_op = VK_COMPARE_OP_LESS_OR_EQUAL; break;
+	case CompareOp::Greater: key.depth_compare_op = VK_COMPARE_OP_GREATER; break;
+	case CompareOp::GreaterEqual: key.depth_compare_op = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
+	default: key.depth_compare_op = VK_COMPARE_OP_LESS; break;
+	}
 
 	switch (desc.cull_mode) {
 	case bud::graphics::CullMode::None: key.cull_mode = VK_CULL_MODE_NONE; break;
@@ -507,15 +575,15 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	vkDestroyShaderModule(device, fragModule, nullptr);
 
 	VulkanPipelineObject* pipeObj = new VulkanPipelineObject{ pipeline, pipelineLayout };
-	
+
 	created_layouts.push_back(pipelineLayout);
-	
+
 	return pipeObj;
 }
 
 // Helpers are implemented at the end of the file.
 
-// --- Frame Control ---
+// Frame Control
 
 CommandHandle VulkanRHI::begin_frame() {
 	vkWaitForFences(device, 1, &frames[current_frame].in_flight_fence, VK_TRUE, UINT64_MAX);
@@ -523,12 +591,7 @@ CommandHandle VulkanRHI::begin_frame() {
 	VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, frames[current_frame].image_available_semaphore, VK_NULL_HANDLE, &current_image_index);
 
 	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-		int w = 0;
-		int h = 0;
-		if (platform_window) {
-			platform_window->get_size_in_pixels(w, h);
-		}
-		resize_swapchain(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+		swapchain_out_of_date.store(true, std::memory_order_release);
 		return nullptr;
 	}
 	else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
@@ -567,7 +630,7 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 
 	VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
 	VkSemaphore wait_semaphores[] = { frames[current_frame].image_available_semaphore };
-	VkPipelineStageFlags wait_stages[] = { VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT };
+	VkPipelineStageFlags wait_stages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
 	submit_info.waitSemaphoreCount = 1;
 	submit_info.pWaitSemaphores = wait_semaphores;
 	submit_info.pWaitDstStageMask = wait_stages;
@@ -590,21 +653,27 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	present_info.pSwapchains = swap_chains;
 	present_info.pImageIndices = &current_image_index;
 
-	vkQueuePresentKHR(present_queue, &present_info);
+	VkResult present_result = vkQueuePresentKHR(present_queue, &present_info);
+	if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
+		swapchain_out_of_date.store(true, std::memory_order_release);
+	} else if (present_result != VK_SUCCESS) {
+		throw std::runtime_error("failed to present swap chain image!");
+	}
+
 	current_frame = (current_frame + 1) % max_frames_in_flight;
 }
 
 
 void VulkanRHI::resize_swapchain(uint32_t width, uint32_t height) {
-	if (!device || !platform_window) {
+	if (!device || !platform_window)
 		return;
-	}
 
-	if (width == 0 || height == 0) {
+	if (width == 0 || height == 0)
 		return;
-	}
 
 	vkDeviceWaitIdle(device);
+
+	swapchain_out_of_date.store(false, std::memory_order_release);
 
 	for (auto imageView : swapchain_image_views) {
 		vkDestroyImageView(device, imageView, nullptr);
@@ -637,58 +706,56 @@ void VulkanRHI::resize_swapchain(uint32_t width, uint32_t height) {
 }
 
 
-// --- Atomic Commands (核心指令集) ---
-
 void VulkanRHI::cmd_begin_render_pass(CommandHandle cmd, const RenderPassBeginInfo& info) {
 	VkCommandBuffer vk_cmd = static_cast<VkCommandBuffer>(cmd);
-
-	// 使用 Vulkan 1.3 Dynamic Rendering
-	// 不需要 VkRenderPass 和 VkFramebuffer 对象
 	VkRenderingInfo rendering_info{ VK_STRUCTURE_TYPE_RENDERING_INFO };
 
-	// 默认取第一个附件的大小
 	if (!info.color_attachments.empty()) {
 		rendering_info.renderArea = { {0, 0}, {info.color_attachments[0]->width, info.color_attachments[0]->height} };
 	}
 	else if (info.depth_attachment) {
 		rendering_info.renderArea = { {0, 0}, {info.depth_attachment->width, info.depth_attachment->height} };
 	}
+
 	rendering_info.layerCount = info.layer_count;
 
-	// 准备 Color Attachments
 	std::vector<VkRenderingAttachmentInfo> color_attachments;
 	for (auto* tex : info.color_attachments) {
 		auto vk_tex = static_cast<VulkanTexture*>(tex);
 		VkRenderingAttachmentInfo attach{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-		// [CSM] Support rendering to specific layer. Always use layer_views if available for array textures.
+
 		if (!vk_tex->layer_views.empty()) {
 			attach.imageView = vk_tex->layer_views[info.base_array_layer];
-		} else {
+		}
+		else {
 			attach.imageView = vk_tex->view;
 		}
-		attach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; // Graph 必须保证这一点
+
+		attach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		attach.loadOp = info.clear_color ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 		attach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 		attach.clearValue.color = { info.clear_color_value.r, info.clear_color_value.g, info.clear_color_value.b, info.clear_color_value.a };
 		color_attachments.push_back(attach);
 	}
+
 	rendering_info.colorAttachmentCount = static_cast<uint32_t>(color_attachments.size());
 	rendering_info.pColorAttachments = color_attachments.data();
 
-	// 准备 Depth Attachment
 	VkRenderingAttachmentInfo depth_attach{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
 	if (info.depth_attachment) {
 		auto vk_depth = static_cast<VulkanTexture*>(info.depth_attachment);
-		// [CSM] Support rendering to specific layer. Always use layer_views if available for array textures.
+
 		if (!vk_depth->layer_views.empty()) {
 			depth_attach.imageView = vk_depth->layer_views[info.base_array_layer];
-		} else {
+		}
+		else {
 			depth_attach.imageView = vk_depth->view;
 		}
+
 		depth_attach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 		depth_attach.loadOp = info.clear_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 		depth_attach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		depth_attach.clearValue.depthStencil = { 1.0f, 0 };
+		depth_attach.clearValue.depthStencil = { info.clear_depth_value, 0 };
 		rendering_info.pDepthAttachment = &depth_attach;
 	}
 
@@ -748,7 +815,7 @@ void VulkanRHI::cmd_set_depth_bias(CommandHandle cmd, float constant, float clam
 void VulkanRHI::cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint32_t set_index) {
 	auto pipeObj = static_cast<VulkanPipelineObject*>(pipeline);
 	auto& frame = frames[current_frame];
-	
+
 	vkCmdBindDescriptorSets(
 		static_cast<VkCommandBuffer>(cmd),
 		VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -756,7 +823,8 @@ void VulkanRHI::cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint3
 		set_index,  // first set
 		1,          // descriptor set count
 		&frame.global_descriptor_set,
-		0, nullptr  // dynamic offsets
+		0,
+		nullptr  // dynamic offsets
 	);
 }
 
@@ -773,12 +841,12 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::Texture* text
 	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barrier.image = vk_tex->image;
-	bool is_depth = (texture->format == TextureFormat::D32_FLOAT || 
-					 texture->format == TextureFormat::D24_UNORM_S8_UINT);
+	bool is_depth = (texture->format == TextureFormat::D32_FLOAT ||
+		texture->format == TextureFormat::D24_UNORM_S8_UINT);
 
 	barrier.subresourceRange.aspectMask = is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
 	if (is_depth && texture->format == TextureFormat::D24_UNORM_S8_UINT) barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
-	
+
 	barrier.subresourceRange.baseMipLevel = 0;
 	barrier.subresourceRange.levelCount = texture->mips > 0 ? texture->mips : 1;
 	barrier.subresourceRange.baseArrayLayer = 0;
@@ -811,7 +879,7 @@ void VulkanRHI::reload_shaders_async() {}
 void VulkanRHI::load_model_async(const std::string& filepath) {}
 
 
-// --- Boilerplate (Device Creation & Utils) ---
+// Boilerplate (Device Creation & Utils)
 
 void VulkanRHI::create_instance(VkInstance& vk_instance, bool enable_validation) {
 	enable_validation_layers = enable_validation;
@@ -839,11 +907,7 @@ void VulkanRHI::create_instance(VkInstance& vk_instance, bool enable_validation)
 }
 
 void VulkanRHI::create_surface(bud::platform::Window* window) {
-
 	window->create_surface(instance, surface);
-	//if (!SDL_Vulkan_CreateSurface(window->get_sdl_window(), instance, nullptr, &surface)) {
-	//	throw std::runtime_error("Failed to create Window Surface!");
-	//}
 }
 
 void VulkanRHI::pick_physical_device() {
@@ -883,7 +947,7 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 	}
 
 	VkPhysicalDeviceVulkan13Features features13{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
-	features13.pNext = nullptr; 
+	features13.pNext = nullptr;
 	features13.dynamicRendering = VK_TRUE;
 	features13.synchronization2 = VK_TRUE;
 
@@ -903,9 +967,35 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 	device_features2.pNext = &features11;
 	device_features2.features.samplerAnisotropy = VK_TRUE;
 
+#ifdef BUD_ENABLE_AFTERMATH
+	// Enable NV_device_diagnostic_checkpoints extension to be able to
+	// use Aftermath event markers.
+	device_extensions.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+
+	// Enable NV_device_diagnostics_config extension to configure Aftermath
+	// features.
+	device_extensions.push_back(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME);
+
+	// Set up device creation info for Aftermath feature flag configuration.
+	VkDeviceDiagnosticsConfigFlagsNV aftermathFlags =
+		VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_AUTOMATIC_CHECKPOINTS_BIT_NV |  // Enable automatic call stack checkpoints.
+		VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_RESOURCE_TRACKING_BIT_NV |      // Enable tracking of resources.
+		VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_DEBUG_INFO_BIT_NV |      // Generate debug information for shaders.
+		VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_ERROR_REPORTING_BIT_NV;  // Enable additional runtime shader error reporting.
+
+	VkDeviceDiagnosticsConfigCreateInfoNV aftermathInfo = {};
+	aftermathInfo.sType = VK_STRUCTURE_TYPE_DEVICE_DIAGNOSTICS_CONFIG_CREATE_INFO_NV;
+	aftermathInfo.flags = aftermathFlags;
+	aftermathInfo.pNext = &device_features2;  // Chain to the main device features struct
+#endif
+
 	VkDeviceCreateInfo create_info{};
 	create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+#ifdef BUD_ENABLE_AFTERMATH
+	create_info.pNext = &aftermathInfo;  // Chain Aftermath config into device creation
+#else
 	create_info.pNext = &device_features2;
+#endif
 	create_info.queueCreateInfoCount = static_cast<uint32_t>(queue_infos.size());
 	create_info.pQueueCreateInfos = queue_infos.data();
 	create_info.pEnabledFeatures = nullptr;
@@ -921,6 +1011,10 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 		throw std::runtime_error("Device creation failed");
 	}
 	std::println("[Vulkan] Logical Device created successfully.");
+
+#ifdef BUD_ENABLE_AFTERMATH
+	aftermath_initialized = init_aftermath();
+#endif
 
 	vkGetDeviceQueue(device, indices.graphics_family.value(), 0, &graphics_queue);
 	vkGetDeviceQueue(device, indices.present_family.value(), 0, &present_queue);
@@ -966,7 +1060,8 @@ void VulkanRHI::create_swapchain(bud::platform::Window* window) {
 	create_info.clipped = VK_TRUE;
 	create_info.oldSwapchain = VK_NULL_HANDLE;
 
-	if (vkCreateSwapchainKHR(device, &create_info, nullptr, &swapchain) != VK_SUCCESS) throw std::runtime_error("Failed to create swapchain!");
+	if (vkCreateSwapchainKHR(device, &create_info, nullptr, &swapchain) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create swapchain!");
 
 	vkGetSwapchainImagesKHR(device, swapchain, &image_count, nullptr);
 	swapchain_images.resize(image_count);
@@ -989,7 +1084,8 @@ void VulkanRHI::create_image_views() {
 		create_info.subresourceRange.baseArrayLayer = 0;
 		create_info.subresourceRange.layerCount = 1;
 
-		if (vkCreateImageView(device, &create_info, nullptr, &swapchain_image_views[i]) != VK_SUCCESS) throw std::runtime_error("Failed to create image views!");
+		if (vkCreateImageView(device, &create_info, nullptr, &swapchain_image_views[i]) != VK_SUCCESS)
+			throw std::runtime_error("Failed to create image views!");
 	}
 
 	// 包装为 Engine Texture Handle
@@ -1058,7 +1154,7 @@ VkCommandBuffer VulkanRHI::begin_single_time_commands() {
 	VkCommandBufferAllocateInfo alloc_info{};
 	alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 	alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	// 使用第0帧的命令池（注意：这在多线程渲染时可能不安全，但在初始化阶段是安全的）	
+	// 使用第0帧的命令池（这在多线程渲染时可能不安全，但在初始化阶段是安全的）	
 	alloc_info.commandPool = frames[0].main_command_pool;
 	alloc_info.commandBufferCount = 1;
 
@@ -1156,7 +1252,12 @@ VkExtent2D VulkanRHI::choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabil
 		window->get_size_in_pixels(width, height);
 	}
 
-	VkExtent2D actual_extent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
+	if (width == 0 || height == 0) {
+		width = static_cast<int>(capabilities.minImageExtent.width);
+		height = static_cast<int>(capabilities.minImageExtent.height);
+	}
+
+	VkExtent2D actual_extent = { static_cast<uint32_t>(std::max(1, width)), static_cast<uint32_t>(std::max(1, height)) };
 	actual_extent.width = std::clamp(actual_extent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
 	actual_extent.height = std::clamp(actual_extent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
 	return actual_extent;
@@ -1166,13 +1267,16 @@ VkExtent2D VulkanRHI::choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabil
 
 VkResult VulkanRHI::create_debug_utils_messenger_ext(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
 	auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
-	if (func != nullptr) return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
+	if (func != nullptr)
+		return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
+
 	return VK_ERROR_EXTENSION_NOT_PRESENT;
 }
 
 void VulkanRHI::destroy_debug_utils_messenger_ext(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator) {
 	auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
-	if (func != nullptr) func(instance, debugMessenger, pAllocator);
+	if (func != nullptr)
+		func(instance, debugMessenger, pAllocator);
 }
 
 void VulkanRHI::setup_debug_messenger(bool enable) {
@@ -1265,7 +1369,7 @@ void VulkanRHI::copy_buffer_immediate(bud::graphics::MemoryBlock src, bud::graph
 	VkCommandBuffer cmd = this->begin_single_time_commands();
 
 	VkBufferCopy copy_region{};
-	copy_region.srcOffset = 0; 
+	copy_region.srcOffset = 0;
 	copy_region.dstOffset = 0;
 	copy_region.size = size;
 
@@ -1274,32 +1378,32 @@ void VulkanRHI::copy_buffer_immediate(bud::graphics::MemoryBlock src, bud::graph
 	this->end_single_time_commands(cmd);
 }
 
-	// [CSM] Shadow Caching Copy
-	void VulkanRHI::cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) {
-		VulkanTexture* vk_src = static_cast<VulkanTexture*>(src);
-		VulkanTexture* vk_dst = static_cast<VulkanTexture*>(dst);
+// [CSM] Shadow Caching Copy
+void VulkanRHI::cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) {
+	VulkanTexture* vk_src = static_cast<VulkanTexture*>(src);
+	VulkanTexture* vk_dst = static_cast<VulkanTexture*>(dst);
 
-		VkImageCopy region{};
-		region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT; // Assuming Depth for ShadowMap
-		region.srcSubresource.baseArrayLayer = 0;
-		region.srcSubresource.layerCount = src->array_layers;
-		region.srcSubresource.mipLevel = 0;
-		region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-		region.dstSubresource.baseArrayLayer = 0;
-		region.dstSubresource.layerCount = dst->array_layers;
-		region.dstSubresource.mipLevel = 0;
-		region.extent.width = src->width;
-		region.extent.height = src->height;
-		region.extent.depth = 1;
+	VkImageCopy region{};
+	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT; // Assuming Depth for ShadowMap
+	region.srcSubresource.baseArrayLayer = 0;
+	region.srcSubresource.layerCount = src->array_layers;
+	region.srcSubresource.mipLevel = 0;
+	region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	region.dstSubresource.baseArrayLayer = 0;
+	region.dstSubresource.layerCount = dst->array_layers;
+	region.dstSubresource.mipLevel = 0;
+	region.extent.width = src->width;
+	region.extent.height = src->height;
+	region.extent.depth = 1;
 
-		// Note: We assume caller handles barriers (TRANSFER_SRC / TRANSFER_DST) via RenderGraph
-		// But for safety, we could inject them here. RenderGraph logic is preferred.
-		
-		vkCmdCopyImage(static_cast<VkCommandBuffer>(cmd), 
-			vk_src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-			vk_dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			1, &region);
-	}
+	// Note: We assume caller handles barriers (TRANSFER_SRC / TRANSFER_DST) via RenderGraph
+	// But for safety, we could inject them here. RenderGraph logic is preferred.
+
+	vkCmdCopyImage(static_cast<VkCommandBuffer>(cmd),
+		vk_src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		vk_dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		1, &region);
+}
 
 bud::graphics::MemoryBlock VulkanRHI::create_upload_buffer(uint64_t size) {
 	VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
@@ -1317,17 +1421,17 @@ bud::graphics::MemoryBlock VulkanRHI::create_upload_buffer(uint64_t size) {
 
 	// [FIX] Align to nonCoherentAtomSize (typically 64-256) to ensure vkFlushMappedMemoryRanges is valid
 	// Using 256 as a safe conservative default.
-	VkDeviceSize align = std::max(mem_reqs.alignment, (VkDeviceSize)256); 
+	VkDeviceSize align = std::max(mem_reqs.alignment, (VkDeviceSize)256);
 
 	bud::graphics::MemoryBlock mem_block = memory_allocator->alloc_staging(mem_reqs.size, align);
 	vkBindBufferMemory(device, buffer, static_cast<VkDeviceMemory>(mem_block.internal_handle), mem_block.offset);
 
 	bud::graphics::MemoryBlock result = mem_block;
 	result.internal_handle = buffer;
-	
+
 	// [FIX] Track staging buffers for proper cleanup
 	buffer_memory_map[buffer] = static_cast<VkDeviceMemory>(mem_block.internal_handle);
-	
+
 	return result;
 }
 
@@ -1378,7 +1482,7 @@ void VulkanRHI::generate_mipmaps(VkImage image, VkFormat format, int32_t texWidt
 		dstBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 		dstBarrier.srcAccessMask = 0;
 		dstBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-		
+
 		vkCmdPipelineBarrier(commandBuffer,
 			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
 			0, nullptr,
@@ -1442,7 +1546,7 @@ void VulkanRHI::generate_mipmaps(VkImage image, VkFormat format, int32_t texWidt
 
 bud::graphics::Texture* VulkanRHI::create_texture(const bud::graphics::TextureDesc& desc, const void* initial_data, uint64_t size) {
 	auto tex = dynamic_cast<VulkanTexture*>(resource_pool->acquire_texture(desc));
-	
+
 	tex->width = desc.width;
 	tex->height = desc.height;
 	tex->format = desc.format;
@@ -1454,7 +1558,7 @@ bud::graphics::Texture* VulkanRHI::create_texture(const bud::graphics::TextureDe
 		std::memcpy(staging.mapped_ptr, initial_data, size);
 
 		this->transition_image_layout_immediate(tex->image, to_vk_format(desc.format), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-		
+
 		// [FIX] Explicitly flush memory to guarantee GPU visibility (fixes corruption on some vendors/drivers if Coherent bit is missing/ignored)
 		if (buffer_memory_map.count(static_cast<VkBuffer>(staging.internal_handle))) {
 			VkMappedMemoryRange range{};
@@ -1462,21 +1566,22 @@ bud::graphics::Texture* VulkanRHI::create_texture(const bud::graphics::TextureDe
 			range.memory = buffer_memory_map[static_cast<VkBuffer>(staging.internal_handle)];
 			range.offset = staging.offset;
 			range.size = VK_WHOLE_SIZE; // Flush everything from this offset to end (safe for linear allocator)
-			
+
 			// Handle alignment for non-coherent atom size (simplification: assume offset is aligned, length is whole)
 			// Ideally we query physicalDeviceProperties.limits.nonCoherentAtomSize
-			vkFlushMappedMemoryRanges(device, 1, &range); 
+			vkFlushMappedMemoryRanges(device, 1, &range);
 		}
 
 		this->copy_buffer_to_image(tex->image, static_cast<VkBuffer>(staging.internal_handle), desc.width, desc.height);
-		
+
 		if (desc.mips > 1) {
 			//std::println("[Texture] Generating {} mip levels for {}x{} texture", desc.mips, desc.width, desc.height);
 			this->generate_mipmaps(tex->image, to_vk_format(desc.format), desc.width, desc.height, desc.mips);
-		} else {
+		}
+		else {
 			this->transition_image_layout_immediate(tex->image, to_vk_format(desc.format), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 		}
-		
+
 		this->destroy_buffer(staging);
 	}
 
@@ -1489,9 +1594,9 @@ void VulkanRHI::update_bindless_texture(uint32_t index, bud::graphics::Texture* 
 	auto vk_tex = static_cast<VulkanTexture*>(texture);
 
 	for (int i = 0; i < max_frames_in_flight; i++) {
-		if (frames[i].global_descriptor_set == VK_NULL_HANDLE) { 
+		if (frames[i].global_descriptor_set == VK_NULL_HANDLE) {
 			std::println(stderr, "[Vulkan] ERROR: global_descriptor_set at frame {} is NULL!", i);
-			continue; 
+			continue;
 		}
 
 		DescriptorWriter writer;
@@ -1523,6 +1628,7 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	ubo.light_intensity = scene_view.light_intensity;
 	ubo.ambient_strength = scene_view.ambient_strength;
 	ubo.debug_cascades = render_config.debug_cascades ? 1 : 0;
+	ubo.reversed_z = render_config.reversed_z ? 1 : 0;
 
 	if (frames[current_frame].uniform_mapped) {
 		std::memcpy(frames[current_frame].uniform_mapped, &ubo, sizeof(UniformBufferObject));

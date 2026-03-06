@@ -10,6 +10,7 @@
 #endif
 
 // 集中管理 GLM 依赖
+#include <cmath>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -75,9 +76,27 @@ namespace bud::math {
 		return proj;
 	}
 
+	inline mat4 ortho_vk_reversed(float left, float right, float bottom, float top, float cam_near, float cam_far) {
+		mat4 proj = glm::ortho(left, right, bottom, top, cam_far, cam_near);
+		proj[1][1] *= -1;
+
+		return proj;
+	}
+
 	inline mat4 perspective_vk(float fov, float aspect, float near_plane, float far_plane) {
 		mat4 proj = glm::perspective(glm::radians(fov), aspect, near_plane, far_plane);
 		proj[1][1] *= -1; // Vulkan Y-flip
+		return proj;
+	}
+
+	inline mat4 perspective_vk_reversed(float fov, float aspect, float near_plane, float far_plane) {
+		const float f = 1.0f / std::tan(glm::radians(fov) * 0.5f);
+		mat4 proj(0.0f);
+		proj[0][0] = f / aspect;
+		proj[1][1] = -f; // Vulkan Y-flip
+		proj[2][2] = near_plane / (far_plane - near_plane);
+		proj[2][3] = -1.0f;
+		proj[3][2] = (far_plane * near_plane) / (far_plane - near_plane);
 		return proj;
 	}
 

@@ -205,10 +205,10 @@ namespace bud::platform {
 		}
 
 		void create_surface(VkInstance instance, VkSurfaceKHR& out_surface) const override {
-			//if (!window) {
-			//	out_surface = nullptr;
-			//	return;
-			//}
+			if (!window) {
+				out_surface = nullptr;
+				return;
+			}
 
 			if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &out_surface)) {
 				out_surface = nullptr;
@@ -218,9 +218,8 @@ namespace bud::platform {
 
 	private:
 		void update_window_size() {
-			if (!window) {
+			if (!window)
 				return;
-			}
 
 			int w = 0;
 			int h = 0;
@@ -263,4 +262,4 @@ namespace bud::platform {
 		throw std::runtime_error("Platform not supported");
 #endif
 	}
-} // namespace bud::platform
+}

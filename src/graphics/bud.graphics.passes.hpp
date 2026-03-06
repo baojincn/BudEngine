@@ -16,6 +16,20 @@
 #include "src/graphics/bud.graphics.sortkey.hpp"
 
 namespace bud::graphics {
+	class ZPrepass {
+		void* pipeline = nullptr;
+
+	public:
+		void init(RHI* rhi, const RenderConfig& config);
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer,
+			const RenderScene& render_scene,
+			const SceneView& view,
+			const RenderConfig& config,
+			const std::vector<RenderMesh>& meshes,
+			const std::vector<SortItem>& sort_list,
+			size_t instance_count);
+	};
+
 
 	class CSMShadowPass {
 		void* pipeline = nullptr;
@@ -37,7 +51,7 @@ namespace bud::graphics {
 			bud::math::vec4 light_dir;
 		};
 
-		void init(RHI* rhi);
+		void init(RHI* rhi, const RenderConfig& config);
 		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes);
 	};
 
@@ -46,10 +60,11 @@ namespace bud::graphics {
 		void* pipeline = nullptr;
 		
 	public:
-		void init(RHI* rhi);
-		void add_to_graph(RenderGraph& rg, RGHandle shadow_map, RGHandle backbuffer,
+		void init(RHI* rhi, const RenderConfig& config);
+		void add_to_graph(RenderGraph& rg, RGHandle shadow_map, RGHandle backbuffer, RGHandle depth_buffer,
 			const RenderScene& render_scene,
 			const SceneView& view,
+			const RenderConfig& config,
 			const std::vector<RenderMesh>& meshes,
 			const std::vector<SortItem>& sort_list,
 			size_t instance_count);
