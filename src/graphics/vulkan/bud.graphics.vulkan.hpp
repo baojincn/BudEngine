@@ -45,6 +45,7 @@ namespace bud::graphics::vulkan {
 		void wait_idle() override;
 
 		void resize_swapchain(uint32_t width, uint32_t height) override;
+		bool is_swapchain_out_of_date() const override { return swapchain_out_of_date.load(std::memory_order_acquire); }
 
 		bud::graphics::MemoryBlock create_gpu_buffer(uint64_t size, bud::graphics::ResourceState usage_state) override;
 		bud::graphics::MemoryBlock create_upload_buffer(uint64_t size) override;
@@ -207,5 +208,6 @@ namespace bud::graphics::vulkan {
 		std::vector<VkPipelineLayout> created_layouts;
 
 		VulkanTexture* fallback_texture_ptr = nullptr;
+		std::atomic<bool> swapchain_out_of_date{false};
 	};
 }

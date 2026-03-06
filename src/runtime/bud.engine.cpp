@@ -130,9 +130,9 @@ namespace bud::engine {
 
 		int width = 0;
 		int height = 0;
-		window->get_size(width, height);
+		window->get_size_in_pixels(width, height);
 
-		if (width != last_width || height != last_height) {
+		if (width != last_width || height != last_height || rhi->is_swapchain_out_of_date()) {
 			last_width = width;
 			last_height = height;
 
@@ -207,8 +207,14 @@ namespace bud::engine {
 
 		int width, height;
 		window->get_size(width, height);
-		if (height == 0)
-			height = 1;
+
+		// If the window is minimized or invisible, do not attempt to render.
+		// Hammering vkAcquireNextImageKHR on a 0x0 un-resized window causes AMD/NVIDIA driver TDRs (Hang/BSOD).
+		if (width == 0 || height == 0) {
+			render_inflight_index.store(BudEngine::invalid_render_index, std::memory_order_release);
+			std::this_thread::sleep_for(std::chrono::milliseconds(16)); // prevent 100% CPU spin
+			return;
+		}
 
 		// 更新 SceneView
 		bud::graphics::SceneView view_snapshot;
@@ -242,8 +248,8 @@ namespace bud::engine {
 
 		render_inflight_index.store(render_scene_index, std::memory_order_release);
 
-		// 发射渲染任务 (Fire and Forget)
-		task_scheduler->spawn("RenderTask", [this, render_scene_index, view_snapshot]() mutable {
+		// 发射渲染任务 (Fire and Forget), Pin to Worker 1 for RenderDoc stability and Vulkan WSI safety
+		task_scheduler->spawn_on_thread(1, "RenderTask", [this, render_scene_index, view_snapshot]() mutable {
 			renderer->render(render_scenes[render_scene_index], view_snapshot);
 			render_inflight_index.store(BudEngine::invalid_render_index, std::memory_order_release);
 		}, &render_task_counter);

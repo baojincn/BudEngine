@@ -52,6 +52,7 @@ namespace bud::threading {
 		Counter* signal_counter = nullptr;
 
 		bool is_finished = false;
+		int target_thread_index = -1;
 
 		// Solved: "Double Run" Issue
 		Counter* pending_wait_counter = nullptr;
@@ -248,16 +249,14 @@ namespace bud::threading {
 		struct alignas(CACHE_LINE) Worker {
 			std::jthread thread;
 			WorkStealingQueue<Fiber*> queue;
+			std::deque<Fiber*> pinned_queue;
+			std::mutex pinned_mtx;
 		};
 
 		std::vector<Worker*> workers;
 		LockFreeFiberPool fiber_pool;
 		std::atomic<bool> running{ true };
 		size_t num_threads{ 0 };
-
-		// Only for main thread tasks
-		std::deque<Fiber*> main_thread_incoming_queue;
-		std::mutex main_queue_mtx;
 
 		static constexpr size_t MAX_FIBERS_PER_THREAD = 128;
 
@@ -297,6 +296,10 @@ namespace bud::threading {
 		void spawn(const char* name, std::move_only_function<void()> work, Counter* counter = nullptr);
 
 		void spawn(std::move_only_function<void()> work, Counter* counter = nullptr);
+
+		void spawn_on_thread(uint32_t thread_index, const char* name, std::move_only_function<void()> work, Counter* counter = nullptr);
+
+		void spawn_on_thread(uint32_t thread_index, std::move_only_function<void()> work, Counter* counter = nullptr);
 
 		/// <summary>
 		/// Submit a task that must be executed on the main thread.

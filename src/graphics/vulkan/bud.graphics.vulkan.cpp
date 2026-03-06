@@ -583,7 +583,7 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 
 // Helpers are implemented at the end of the file.
 
-// --- Frame Control ---
+// Frame Control
 
 CommandHandle VulkanRHI::begin_frame() {
 	vkWaitForFences(device, 1, &frames[current_frame].in_flight_fence, VK_TRUE, UINT64_MAX);
@@ -591,12 +591,7 @@ CommandHandle VulkanRHI::begin_frame() {
 	VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, frames[current_frame].image_available_semaphore, VK_NULL_HANDLE, &current_image_index);
 
 	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-		int w = 0;
-		int h = 0;
-		if (platform_window) {
-			platform_window->get_size_in_pixels(w, h);
-		}
-		resize_swapchain(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+		swapchain_out_of_date.store(true, std::memory_order_release);
 		return nullptr;
 	}
 	else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
@@ -635,7 +630,7 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 
 	VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
 	VkSemaphore wait_semaphores[] = { frames[current_frame].image_available_semaphore };
-	VkPipelineStageFlags wait_stages[] = { VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT };
+	VkPipelineStageFlags wait_stages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
 	submit_info.waitSemaphoreCount = 1;
 	submit_info.pWaitSemaphores = wait_semaphores;
 	submit_info.pWaitDstStageMask = wait_stages;
@@ -658,21 +653,27 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	present_info.pSwapchains = swap_chains;
 	present_info.pImageIndices = &current_image_index;
 
-	vkQueuePresentKHR(present_queue, &present_info);
+	VkResult present_result = vkQueuePresentKHR(present_queue, &present_info);
+	if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
+		swapchain_out_of_date.store(true, std::memory_order_release);
+	} else if (present_result != VK_SUCCESS) {
+		throw std::runtime_error("failed to present swap chain image!");
+	}
+
 	current_frame = (current_frame + 1) % max_frames_in_flight;
 }
 
 
 void VulkanRHI::resize_swapchain(uint32_t width, uint32_t height) {
-	if (!device || !platform_window) {
+	if (!device || !platform_window)
 		return;
-	}
 
-	if (width == 0 || height == 0) {
+	if (width == 0 || height == 0)
 		return;
-	}
 
 	vkDeviceWaitIdle(device);
+
+	swapchain_out_of_date.store(false, std::memory_order_release);
 
 	for (auto imageView : swapchain_image_views) {
 		vkDestroyImageView(device, imageView, nullptr);
@@ -705,46 +706,41 @@ void VulkanRHI::resize_swapchain(uint32_t width, uint32_t height) {
 }
 
 
-// --- Atomic Commands (核心指令集) ---
-
 void VulkanRHI::cmd_begin_render_pass(CommandHandle cmd, const RenderPassBeginInfo& info) {
 	VkCommandBuffer vk_cmd = static_cast<VkCommandBuffer>(cmd);
-
-	// 使用 Vulkan 1.3 Dynamic Rendering
-	// 不需要 VkRenderPass 和 VkFramebuffer 对象
 	VkRenderingInfo rendering_info{ VK_STRUCTURE_TYPE_RENDERING_INFO };
 
-	// 默认取第一个附件的大小
 	if (!info.color_attachments.empty()) {
 		rendering_info.renderArea = { {0, 0}, {info.color_attachments[0]->width, info.color_attachments[0]->height} };
 	}
 	else if (info.depth_attachment) {
 		rendering_info.renderArea = { {0, 0}, {info.depth_attachment->width, info.depth_attachment->height} };
 	}
+
 	rendering_info.layerCount = info.layer_count;
 
-	// 准备 Color Attachments
 	std::vector<VkRenderingAttachmentInfo> color_attachments;
 	for (auto* tex : info.color_attachments) {
 		auto vk_tex = static_cast<VulkanTexture*>(tex);
 		VkRenderingAttachmentInfo attach{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-		// [CSM] Support rendering to specific layer. Always use layer_views if available for array textures.
+
 		if (!vk_tex->layer_views.empty()) {
 			attach.imageView = vk_tex->layer_views[info.base_array_layer];
 		}
 		else {
 			attach.imageView = vk_tex->view;
 		}
-		attach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; // Graph 必须保证这一点
+
+		attach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		attach.loadOp = info.clear_color ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 		attach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 		attach.clearValue.color = { info.clear_color_value.r, info.clear_color_value.g, info.clear_color_value.b, info.clear_color_value.a };
 		color_attachments.push_back(attach);
 	}
+
 	rendering_info.colorAttachmentCount = static_cast<uint32_t>(color_attachments.size());
 	rendering_info.pColorAttachments = color_attachments.data();
 
-	// 准备 Depth Attachment
 	VkRenderingAttachmentInfo depth_attach{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
 	if (info.depth_attachment) {
 		auto vk_depth = static_cast<VulkanTexture*>(info.depth_attachment);
@@ -827,7 +823,8 @@ void VulkanRHI::cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint3
 		set_index,  // first set
 		1,          // descriptor set count
 		&frame.global_descriptor_set,
-		0, nullptr  // dynamic offsets
+		0,
+		nullptr  // dynamic offsets
 	);
 }
 
@@ -882,7 +879,7 @@ void VulkanRHI::reload_shaders_async() {}
 void VulkanRHI::load_model_async(const std::string& filepath) {}
 
 
-// --- Boilerplate (Device Creation & Utils) ---
+// Boilerplate (Device Creation & Utils)
 
 void VulkanRHI::create_instance(VkInstance& vk_instance, bool enable_validation) {
 	enable_validation_layers = enable_validation;
@@ -910,11 +907,7 @@ void VulkanRHI::create_instance(VkInstance& vk_instance, bool enable_validation)
 }
 
 void VulkanRHI::create_surface(bud::platform::Window* window) {
-
 	window->create_surface(instance, surface);
-	//if (!SDL_Vulkan_CreateSurface(window->get_sdl_window(), instance, nullptr, &surface)) {
-	//	throw std::runtime_error("Failed to create Window Surface!");
-	//}
 }
 
 void VulkanRHI::pick_physical_device() {
@@ -1067,7 +1060,8 @@ void VulkanRHI::create_swapchain(bud::platform::Window* window) {
 	create_info.clipped = VK_TRUE;
 	create_info.oldSwapchain = VK_NULL_HANDLE;
 
-	if (vkCreateSwapchainKHR(device, &create_info, nullptr, &swapchain) != VK_SUCCESS) throw std::runtime_error("Failed to create swapchain!");
+	if (vkCreateSwapchainKHR(device, &create_info, nullptr, &swapchain) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create swapchain!");
 
 	vkGetSwapchainImagesKHR(device, swapchain, &image_count, nullptr);
 	swapchain_images.resize(image_count);
@@ -1090,7 +1084,8 @@ void VulkanRHI::create_image_views() {
 		create_info.subresourceRange.baseArrayLayer = 0;
 		create_info.subresourceRange.layerCount = 1;
 
-		if (vkCreateImageView(device, &create_info, nullptr, &swapchain_image_views[i]) != VK_SUCCESS) throw std::runtime_error("Failed to create image views!");
+		if (vkCreateImageView(device, &create_info, nullptr, &swapchain_image_views[i]) != VK_SUCCESS)
+			throw std::runtime_error("Failed to create image views!");
 	}
 
 	// 包装为 Engine Texture Handle
@@ -1159,7 +1154,7 @@ VkCommandBuffer VulkanRHI::begin_single_time_commands() {
 	VkCommandBufferAllocateInfo alloc_info{};
 	alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 	alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	// 使用第0帧的命令池（注意：这在多线程渲染时可能不安全，但在初始化阶段是安全的）	
+	// 使用第0帧的命令池（这在多线程渲染时可能不安全，但在初始化阶段是安全的）	
 	alloc_info.commandPool = frames[0].main_command_pool;
 	alloc_info.commandBufferCount = 1;
 
@@ -1272,13 +1267,16 @@ VkExtent2D VulkanRHI::choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabil
 
 VkResult VulkanRHI::create_debug_utils_messenger_ext(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
 	auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
-	if (func != nullptr) return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
+	if (func != nullptr)
+		return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
+
 	return VK_ERROR_EXTENSION_NOT_PRESENT;
 }
 
 void VulkanRHI::destroy_debug_utils_messenger_ext(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator) {
 	auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
-	if (func != nullptr) func(instance, debugMessenger, pAllocator);
+	if (func != nullptr)
+		func(instance, debugMessenger, pAllocator);
 }
 
 void VulkanRHI::setup_debug_messenger(bool enable) {
