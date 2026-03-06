@@ -1,4 +1,4 @@
-﻿```markdown
+﻿
 # Engine Development Notes
 
 ## Core Concept: RAII vs. Smart Pointers in Low-Level Engine Systems
