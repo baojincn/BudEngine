@@ -327,12 +327,10 @@ namespace bud::graphics {
 						if (!pipeline) return;
 
 						for (uint32_t i = 0; i < cascade_count; ++i) {
-							// ... Viewport, Scissor, Bind Pipeline (保持不变) ...
 							auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
 							bud::math::Frustum cascade_view_frustum_dbg;
 							cascade_view_frustum_dbg.update(cascade_light_view_proj);
 
-							// Setup RenderPass ...
 							RenderPassBeginInfo info;
 							info.depth_attachment = render_graph.get_texture(static_cache_h);
 							info.clear_depth = true;
@@ -348,7 +346,6 @@ namespace bud::graphics {
 							rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, 0.0f, config.shadow_bias_slope);
 							rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
 
-							// PushConsts Setup (light info)...
 							struct PushConsts {
 								bud::math::mat4 light_view_proj;
 								bud::math::mat4 model;
@@ -360,14 +357,15 @@ namespace bud::graphics {
 							push_consts.light_view_proj = cascade_light_view_proj;
 							push_consts.light_dir = bud::math::vec4(bud::math::normalize(view.light_dir), 0.0f);
 
-							// [核心修改] 遍历 RenderScene
-							size_t count = std::min(
-								render_scene.instance_count.load(std::memory_order_relaxed),
-								max_scene_count);
+							std::vector<uint32_t> visible_instances;
+							render_scene.cull_frustum(cascade_view_frustum_dbg, visible_instances);
 
-							for (size_t idx = 0; idx < count; ++idx) {
+							size_t _max_count = std::min(visible_instances.size(), max_scene_count);
 
-								// 1. 检查是否是静态物体 (利用我们刚加的 flags)
+							for (size_t i = 0; i < _max_count; ++i) {
+								size_t idx = visible_instances[i];
+
+								// 1. 检查是否是静态物体, 利用flags
 								auto is_static = (render_scene.flags[idx] & 1) != 0;
 								if (!is_static) continue; // ONLY STATIC for cache
 
@@ -383,10 +381,6 @@ namespace bud::graphics {
 								const auto& model_matrix = render_scene.world_matrices[idx];
 								bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
 								if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) continue;
-
-								// 使用 RenderScene 里预计算好的 World AABB (更快！)
-								const auto& world_aabb = render_scene.world_aabbs[idx];
-								if (!bud::math::intersect_aabb_frustum(world_aabb, cascade_view_frustum_dbg)) continue;
 
 								// 3. Draw
 								push_consts.model = model_matrix;
@@ -478,8 +472,13 @@ namespace bud::graphics {
 					push_consts.light_view_proj = cascade_light_view_proj;
 					push_consts.light_dir = bud::math::vec4(bud::math::normalize(view.light_dir), 0.0f);
 
-					size_t count = render_scene.instance_count.load(std::memory_order_relaxed);
-					for (size_t idx = 0; idx < count; ++idx) {
+					std::vector<uint32_t> visible_instances;
+					render_scene.cull_frustum(cascade_view_frustum_dbg, visible_instances);
+					size_t count = visible_instances.size();
+
+					for (size_t i = 0; i < count; ++i) {
+						size_t idx = visible_instances[i];
+
 						bool is_static = (render_scene.flags[idx] & 1) != 0;
 						if (did_copy && is_static) continue;
 
@@ -494,10 +493,8 @@ namespace bud::graphics {
 						bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
 						if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) continue;
 
-						const auto& world_aabb = render_scene.world_aabbs[idx];
-						if (!bud::math::intersect_aabb_frustum(world_aabb, cascade_view_frustum_dbg)) continue;
-
 						// Draw
+						push_consts.model = model_matrix;
 						rhi->cmd_bind_vertex_buffer(cmd, mesh.vertex_buffer.internal_handle);
 						rhi->cmd_bind_index_buffer(cmd, mesh.index_buffer.internal_handle);
 

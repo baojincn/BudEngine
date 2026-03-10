@@ -85,31 +85,30 @@ namespace bud::engine {
 			accumulator += frame_time;
 
 			// 阶段 A: 逻辑更新
+			bool logic_updated = false;
 			while (accumulator >= fixed_dt) {
-				uint32_t next_write_index = (current_write_index + 1) % render_scenes.size();
+				if (perform_game_logic) {
+					bud::threading::Counter logic_counter;
+					task_scheduler->spawn("GameLogic", [&]() {
+						perform_game_logic((float)fixed_dt);
+					}, &logic_counter);
+					task_scheduler->wait_for_counter(logic_counter);
+				}
 
+				accumulator -= fixed_dt;
+				logic_updated = true;
+			}
+
+			if (logic_updated) {
+				uint32_t next_write_index = (current_write_index + 1) % render_scenes.size();
 				if (next_write_index == render_inflight_index.load(std::memory_order_acquire)) {
 					task_scheduler->wait_for_counter(render_task_counter);
 				}
 
 				current_write_index = next_write_index;
 
-				if (perform_game_logic) {
-					bud::threading::Counter logic_counter;
-
-					task_scheduler->spawn("GameLogic", [&]() {
-						perform_game_logic((float)fixed_dt);
-					}, &logic_counter);
-
-					task_scheduler->wait_for_counter(logic_counter);
-				}
-
 				extract_scene_data(render_scenes[current_write_index]);
-
-				// 提交这一帧
 				last_committed_index.store(current_write_index, std::memory_order_release);
-
-				accumulator -= fixed_dt;
 			}
 
 			// 阶段 B: 渲染
@@ -191,6 +190,8 @@ namespace bud::engine {
 		);
 
 		task_scheduler->wait_for_counter(extract_scene_counter);
+
+		render_scene.build_lbvh();
 	}
 
 	void BudEngine::sync_game_to_rendering(uint32_t render_scene_index) {

@@ -243,17 +243,17 @@ namespace bud::graphics {
 
 
 
-	void Renderer::render(const bud::graphics::RenderScene& scene, SceneView& scene_view) {
+	void Renderer::render(const bud::graphics::RenderScene& render_scene, SceneView& scene_view) {
 		// 先处理所有挂起的上传任务
 		flush_upload_queue();
 
-		size_t instance_count = scene.instance_count.load(std::memory_order_relaxed);
+		size_t instance_count = render_scene.instance_count.load(std::memory_order_relaxed);
 		if (instance_count == 0) return;
 
 		bud::math::AABB scene_aabb;
 
 		for (size_t i = 0; i < instance_count; ++i) {
-			scene_aabb.merge(scene.world_aabbs[i]);
+			scene_aabb.merge(render_scene.world_aabbs[i]);
 		}
 
 		// 更新阴影级联
@@ -262,14 +262,19 @@ namespace bud::graphics {
 		bud::math::Frustum camera_frustum;
 		camera_frustum.update(scene_view.view_proj_matrix);
 
-		// Prepass: compute draw offsets per instance
-		std::vector<uint32_t> draw_offsets(instance_count + 1);
+		std::vector<uint32_t> visible_instances;
+		render_scene.cull_frustum(camera_frustum, visible_instances);
+
+		// Prepass: compute draw offsets per visible instance
+		size_t visible_count_initial = visible_instances.size();
+		std::vector<uint32_t> draw_offsets(visible_count_initial + 1);
 		size_t total_draw_count = 0;
 
-		for (size_t i = 0; i < instance_count; ++i) {
-			draw_offsets[i] = (uint32_t)total_draw_count;
+		for (size_t k = 0; k < visible_count_initial; ++k) {
+			draw_offsets[k] = (uint32_t)total_draw_count;
+			uint32_t i = visible_instances[k];
 
-			uint32_t mesh_id = scene.mesh_indices[i];
+			uint32_t mesh_id = render_scene.mesh_indices[i];
 			if (mesh_id >= meshes.size() || !meshes[mesh_id].is_valid()) {
 				continue;
 			}
@@ -279,7 +284,7 @@ namespace bud::graphics {
 			total_draw_count += submesh_count;
 		}
 
-		draw_offsets[instance_count] = (uint32_t)total_draw_count;
+		draw_offsets[visible_count_initial] = (uint32_t)total_draw_count;
 
 		if (sort_list.size() < total_draw_count)
 			sort_list.resize(total_draw_count);
@@ -287,40 +292,19 @@ namespace bud::graphics {
 		bud::threading::Counter key_gen_signal;
 		constexpr size_t CHUNK_SIZE = 64;
 
-		task_scheduler->ParallelFor(instance_count, CHUNK_SIZE,
+		task_scheduler->ParallelFor(visible_count_initial, CHUNK_SIZE,
 			[&](size_t start_exclusive, size_t end_exclusive) {
-				for (size_t i = start_exclusive; i < end_exclusive; ++i) {
-					uint32_t draw_start = draw_offsets[i];
-					uint32_t draw_end = draw_offsets[i + 1];
+				for (size_t k = start_exclusive; k < end_exclusive; ++k) {
+					uint32_t i = visible_instances[k];
+					uint32_t draw_start = draw_offsets[k];
+					uint32_t draw_end = draw_offsets[k + 1];
 					uint32_t draw_count = draw_end - draw_start;
 
 					if (draw_count == 0)
 						continue;
 
-					const auto& world_matrix = scene.world_matrices[i];
-					const auto& aabb = scene.world_aabbs[i];
-
-					// coarse cull at instance level
-					if (!bud::math::intersect_aabb_frustum(aabb, camera_frustum)) {
-						for (uint32_t j = 0; j < draw_count; ++j) {
-							auto& item = sort_list[draw_start + j];
-							item.key = UINT64_MAX;
-							item.entity_index = (uint32_t)i;
-							item.submesh_index = j;
-						}
-						continue;
-					}
-
-					uint32_t mesh_id = scene.mesh_indices[i];
-					if (mesh_id >= meshes.size()) {
-						for (uint32_t j = 0; j < draw_count; ++j) {
-							auto& item = sort_list[draw_start + j];
-							item.key = UINT64_MAX;
-							item.entity_index = (uint32_t)i;
-							item.submesh_index = j;
-						}
-						continue;
-					}
+					const auto& world_matrix = render_scene.world_matrices[i];
+					uint32_t mesh_id = render_scene.mesh_indices[i];
 
 					const auto& mesh = meshes[mesh_id];
 
@@ -353,7 +337,7 @@ namespace bud::graphics {
 						item.entity_index = (uint32_t)i;
 						item.submesh_index = UINT32_MAX;
 
-						uint32_t material_id = scene.material_indices[i];
+						uint32_t material_id = render_scene.material_indices[i];
 						item.key = DrawKey::generate_opaque(0, 0, material_id, mesh_id, depth_key);
 					}
 				}
@@ -367,14 +351,13 @@ namespace bud::graphics {
 			[](const SortItem& a, const SortItem& b) { return a.key < b.key; }
 		);
 
-		// 使用二分查找找到第一个 UINT64_MAX 的位置, 计算可见物体数量 (剔除 Key == UINT64_MAX 的物体)
+		// 使用二分查找第一个 UINT64_MAX 的位置, 计算可见物体数量 (剔除 Key == UINT64_MAX 的物体)
 		auto it = std::lower_bound(sort_list.begin(), sort_list.begin() + total_draw_count, UINT64_MAX,
 			[](const SortItem& item, uint64_t val) { return item.key < val; }
 		);
 
 		size_t visible_count = std::distance(sort_list.begin(), it);
 
-		// 如果没有东西可见，直接返回，不录制 CommandBuffer
 		if (visible_count == 0)
 			return;
 
@@ -389,13 +372,14 @@ namespace bud::graphics {
 		auto swapchain_tex = rhi->get_current_swapchain_texture();
 		auto back_buffer = render_graph.import_texture("Backbuffer", swapchain_tex, ResourceState::RenderTarget);
 
-		auto shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, scene, meshes);
-		auto depth_prepass = z_prepass->add_to_graph(render_graph, back_buffer, scene, scene_view, render_config, meshes, sort_list, visible_count);
+		auto depth_prepass = z_prepass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count);
 		if (!depth_prepass.is_valid())
 			return;
 
+		auto shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes);
+
 		// sort_list 传进去，按照这个顺序画
-		main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, scene, scene_view, render_config, meshes, sort_list, visible_count);
+		main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count);
 
 		render_graph.compile();
 
