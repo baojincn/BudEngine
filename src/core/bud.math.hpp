@@ -11,6 +11,7 @@
 
 // 集中管理 GLM 依赖
 #include <cmath>
+#include <algorithm>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -190,6 +191,44 @@ namespace bud::math {
 			if (out == 8) return false;
 		}
 		return true;
+	}
+
+	// ------------------------------------------------------------------------
+	// Morton Code / Z-Order Curve Utilities for (H)LBVH
+	// ------------------------------------------------------------------------
+
+	// Expands a 10-bit integer into 30 bits
+	// by inserting 2 zeros after each bit.
+	inline uint32_t expand_bits(uint32_t v) {
+		v = (v * 0x00010001u) & 0xFF0000FFu;
+		v = (v * 0x00000101u) & 0x0F00F00Fu;
+		v = (v * 0x00000011u) & 0xC30C30C3u;
+		v = (v * 0x00000005u) & 0x49249249u;
+		return v;
+	}
+
+	// Calculates a 30-bit Morton code for a 3D point
+	// Assumes x, y, and z are normalized to the range [0.0, 1.0]
+	inline uint32_t morton_3d(float x, float y, float z) {
+		x = std::clamp(x * 1024.0f, 0.0f, 1023.0f);
+		y = std::clamp(y * 1024.0f, 0.0f, 1023.0f);
+		z = std::clamp(z * 1024.0f, 0.0f, 1023.0f);
+		uint32_t xx = expand_bits(static_cast<uint32_t>(x));
+		uint32_t yy = expand_bits(static_cast<uint32_t>(y));
+		uint32_t zz = expand_bits(static_cast<uint32_t>(z));
+		return (xx << 2) | (yy << 1) | zz;
+	}
+
+	// Calculates a 30-bit Morton code for a point inside a given AABB
+	inline uint32_t compute_morton_code(const vec3& point, const AABB& global_bounds) {
+		vec3 size = global_bounds.size();
+		// Avoid division by zero
+		if (size.x == 0.0f) size.x = 0.0001f;
+		if (size.y == 0.0f) size.y = 0.0001f;
+		if (size.z == 0.0f) size.z = 0.0001f;
+
+		vec3 centroid_normalized = (point - global_bounds.min) / size;
+		return morton_3d(centroid_normalized.x, centroid_normalized.y, centroid_normalized.z);
 	}
 
 }

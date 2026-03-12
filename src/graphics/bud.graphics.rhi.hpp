@@ -86,5 +86,8 @@ namespace bud::graphics {
 		virtual void set_debug_name(Texture* texture, ObjectType object_type, const std::string& name) = 0;
 		virtual void set_debug_name(const MemoryBlock& buffer, ObjectType object_type, const std::string& name) = 0;
 		virtual void set_debug_name(CommandHandle cmd, ObjectType object_type, const std::string& name) = 0;
+
+		virtual RenderStats get_stats() const = 0;
+		virtual void add_culling_stats(uint32_t total, uint32_t visible, uint32_t casters) = 0;
 	};
 }

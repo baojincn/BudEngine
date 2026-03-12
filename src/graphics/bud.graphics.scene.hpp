@@ -20,6 +20,28 @@ namespace bud::graphics {
 		// 标志位 (Bit 0 = IsStatic, Bit 1 = CastShadow ...)
 		std::vector<uint8_t> flags;
 
+		struct LBVHNode {
+			uint32_t instance_index;
+			uint32_t morton_code;
+
+			bool operator<(const LBVHNode& other) const {
+				return morton_code < other.morton_code;
+			}
+		};
+
+		struct BVHNode {
+			bud::math::AABB aabb;
+			uint32_t left_child{ ~0u };
+			uint32_t right_child{ ~0u };
+			uint32_t instance_index{ ~0u };
+			bool is_leaf{ false };
+		};
+
+		std::vector<LBVHNode> lbvh_nodes;
+		std::vector<BVHNode> bvh_nodes;
+		bud::math::AABB scene_bounds;
+		uint32_t bvh_root{ ~0u };
+
 		std::atomic<size_t> instance_count{ 0 };
 		std::atomic<size_t> dropped_instances{ 0 };
 
@@ -33,6 +55,9 @@ namespace bud::graphics {
 		RenderScene& operator=(const RenderScene&) = delete;
 
 		void reset(size_t estimated_capacity);
+		void build_lbvh();
+
+		void cull_frustum(const bud::math::Frustum& frustum, std::vector<uint32_t>& out_indices) const;
 
 		inline void add_instance(const bud::math::mat4& transform, const bud::math::AABB& aabb, uint32_t mesh_index, uint32_t material_index, bool is_static) {
 			size_t idx = instance_count.fetch_add(1, std::memory_order_relaxed);

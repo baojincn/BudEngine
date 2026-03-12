@@ -9,6 +9,13 @@
 				"vulkan"
 			]
 		},
+		{
+			"name": "imgui",
+			"features": [
+				"sdl3-binding",
+				"vulkan-binding"
+			]
+		},
 		"vulkan",
 		"vulkan-memory-allocator",
 		"glm",

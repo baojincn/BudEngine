@@ -8,6 +8,8 @@
 #include <string>
 #include <memory>
 
+#include <imgui_impl_sdl3.h>
+
 #include "src/runtime/bud.input.hpp"
 
 namespace bud::platform {
@@ -22,6 +24,7 @@ namespace bud::platform {
 		case SDLK_S:      return bud::input::Key::S;
 		case SDLK_D:      return bud::input::Key::D;
 		case SDLK_R:      return bud::input::Key::R;
+		case SDLK_F3:     return bud::input::Key::F3;
 
 		default:          return bud::input::Key::Unknown;
 		}
@@ -120,22 +123,25 @@ namespace bud::platform {
 		}
 
 		void get_size(int& width_out, int& height_out) const override {
+			if (window && (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)) {
+				width_out = 0;
+				height_out = 0;
+				return;
+			}
 			width_out = width;
 			height_out = height;
 		}
 
 		void get_size_in_pixels(int& width_out, int& height_out) const override {
-			if (!window) {
+			if (!window || (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)) {
 				width_out = 0;
 				height_out = 0;
 				return;
 			}
 
-			if (SDL_GetWindowSizeInPixels(window, &width_out, &height_out) == 0) {
-				return;
+			if (!SDL_GetWindowSizeInPixels(window, &width_out, &height_out)) {
+				SDL_GetWindowSize(window, &width_out, &height_out);
 			}
-
-			SDL_GetWindowSize(window, &width_out, &height_out);
 		}
 
 		bool should_close() const override {
@@ -151,6 +157,8 @@ namespace bud::platform {
 
 			SDL_Event event;
 			while (SDL_PollEvent(&event)) {
+				ImGui_ImplSDL3_ProcessEvent(&event);
+
 				switch (event.type) {
 				case SDL_EVENT_QUIT:
 					close_requested = true;
@@ -223,13 +231,9 @@ namespace bud::platform {
 
 			int w = 0;
 			int h = 0;
-			if (SDL_GetWindowSizeInPixels(window, &w, &h) == 0) {
-				width = w;
-				height = h;
-				return;
+			if (!SDL_GetWindowSizeInPixels(window, &w, &h)) {
+				SDL_GetWindowSize(window, &w, &h);
 			}
-
-			SDL_GetWindowSize(window, &w, &h);
 			width = w;
 			height = h;
 		}

@@ -19,7 +19,8 @@ namespace bud::input {
 		D,
 		R,
 		Q,
-		E
+		E,
+		F3, // Enable debug overlay
 	};
 
 	 enum class MouseButton {

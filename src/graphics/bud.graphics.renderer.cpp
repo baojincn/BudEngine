@@ -24,9 +24,11 @@ namespace bud::graphics {
 		csm_pass = std::make_unique<CSMShadowPass>();
 		z_prepass = std::make_unique<ZPrepass>();
 		main_pass = std::make_unique<MainPass>();
+		ui_pass = std::make_unique<UIPass>();
 		csm_pass->init(rhi, render_config);
 		z_prepass->init(rhi, render_config);
 		main_pass->init(rhi, render_config);
+		ui_pass->init(rhi, render_config);
 	}
 
 	Renderer::~Renderer() {
@@ -35,6 +37,10 @@ namespace bud::graphics {
 
 		if (csm_pass) {
 			csm_pass->shutdown();
+		}
+
+		if (ui_pass) {
+			ui_pass->shutdown(rhi);
 		}
 
 		for (auto& mesh : meshes) {
@@ -142,7 +148,6 @@ namespace bud::graphics {
 			}
 
 			queue->commands.push_back([this, mesh_data_copy, texture_slot_map, assigned_mesh_id, cpu_aabb]() {
-				// --- Render Thread ---
 				RenderMesh new_mesh;
 
 				new_mesh.aabb = cpu_aabb;
@@ -241,161 +246,242 @@ namespace bud::graphics {
 		}
 	}
 
+	void Renderer::update_ui_draw_data(ImDrawData* draw_data) {
+		if (ui_pass) {
+			ui_pass->update_draw_data(draw_data);
+		}
+	}
 
 
-	void Renderer::render(const bud::graphics::RenderScene& scene, SceneView& scene_view) {
+
+	void Renderer::render(const bud::graphics::RenderScene& render_scene, SceneView& scene_view) {
 		// 先处理所有挂起的上传任务
 		flush_upload_queue();
 
-		size_t instance_count = scene.instance_count.load(std::memory_order_relaxed);
-		if (instance_count == 0) return;
+		size_t instance_count = render_scene.instance_count.load(std::memory_order_relaxed);
+		const uint32_t cascade_count = std::min(render_config.cascade_count, (uint32_t)MAX_CASCADES);
+		uint32_t total_shadow_casters = 0;
+		size_t visible_count = 0;
+		std::vector<std::vector<uint32_t>> culled_results(1 + cascade_count);
 
-		bud::math::AABB scene_aabb;
+		if (instance_count > 0) {
+			bud::math::AABB scene_aabb;
 
-		for (size_t i = 0; i < instance_count; ++i) {
-			scene_aabb.merge(scene.world_aabbs[i]);
-		}
-
-		// 更新阴影级联
-		update_cascades(scene_view, render_config, scene_aabb);
-
-		bud::math::Frustum camera_frustum;
-		camera_frustum.update(scene_view.view_proj_matrix);
-
-		// Prepass: compute draw offsets per instance
-		std::vector<uint32_t> draw_offsets(instance_count + 1);
-		size_t total_draw_count = 0;
-
-		for (size_t i = 0; i < instance_count; ++i) {
-			draw_offsets[i] = (uint32_t)total_draw_count;
-
-			uint32_t mesh_id = scene.mesh_indices[i];
-			if (mesh_id >= meshes.size() || !meshes[mesh_id].is_valid()) {
-				continue;
+			for (size_t i = 0; i < instance_count; ++i) {
+				scene_aabb.merge(render_scene.world_aabbs[i]);
 			}
 
-			const auto& mesh = meshes[mesh_id];
-			uint32_t submesh_count = mesh.submeshes.empty() ? 1u : (uint32_t)mesh.submeshes.size();
-			total_draw_count += submesh_count;
+			update_cascades(scene_view, render_config, scene_aabb);
+
+			constexpr uint32_t main_camera_count = 1;
+			const uint32_t total_views = main_camera_count + cascade_count;
+
+			std::vector<bud::math::Frustum> view_frustums(total_views);
+			view_frustums[0].update(scene_view.view_proj_matrix);
+			for (uint32_t i = 0; i < cascade_count; ++i) {
+				view_frustums[i + 1].update(scene_view.cascade_view_proj_matrices[i]);
+			}
+
+			const bud::math::Frustum& main_camera_frustum = view_frustums[0];
+
+			constexpr size_t CULL_CHUNK_SIZE = 256;
+			size_t num_chunks = (instance_count + CULL_CHUNK_SIZE - 1) / CULL_CHUNK_SIZE;
+
+			std::vector<std::vector<std::vector<uint32_t>>> chunked_results(num_chunks, std::vector<std::vector<uint32_t>>(total_views));
+
+			for (size_t chunk_idx = 0; chunk_idx < num_chunks; ++chunk_idx) {
+				size_t instance_start = chunk_idx * CULL_CHUNK_SIZE;
+				size_t instance_end = std::min(instance_start + CULL_CHUNK_SIZE, instance_count);
+				for (size_t v = 0; v < total_views; ++v) {
+					chunked_results[chunk_idx][v].reserve(instance_end - instance_start);
+				}
+			}
+
+			bud::threading::Counter culling_counter;
+
+			task_scheduler->ParallelFor(num_chunks, 1,
+				[&](size_t start, size_t end) {
+					for (size_t chunk_idx = start; chunk_idx < end; ++chunk_idx) {
+						size_t instance_start = chunk_idx * CULL_CHUNK_SIZE;
+						size_t instance_end = std::min(instance_start + CULL_CHUNK_SIZE, instance_count);
+
+						for (size_t i = instance_start; i < instance_end; ++i) {
+							const auto& aabb = render_scene.world_aabbs[i];
+							for (size_t v = 0; v < total_views; ++v) {
+								if (bud::math::intersect_aabb_frustum(aabb, view_frustums[v])) {
+									chunked_results[chunk_idx][v].push_back(static_cast<uint32_t>(i));
+								}
+							}
+						}
+					}
+				},
+				&culling_counter
+			);
+
+			task_scheduler->wait_for_counter(culling_counter);
+
+			culled_results.assign(total_views, {});
+			for (size_t v = 0; v < total_views; ++v) {
+				size_t total_visible = 0;
+				for (size_t c = 0; c < num_chunks; ++c) {
+					total_visible += chunked_results[c][v].size();
+				}
+				culled_results[v].reserve(total_visible);
+				for (size_t c = 0; c < num_chunks; ++c) {
+					culled_results[v].insert(
+						culled_results[v].end(),
+						chunked_results[c][v].begin(),
+						chunked_results[c][v].end()
+					);
+				}
+				if (v > 0) total_shadow_casters += (uint32_t)total_visible;
+			}
+
+			const auto& visible_instances = culled_results[0];
+			size_t visible_count_initial = visible_instances.size();
+			std::vector<uint32_t> draw_offsets(visible_count_initial + 1);
+			size_t total_draw_count = 0;
+
+			for (size_t k = 0; k < visible_count_initial; ++k) {
+				draw_offsets[k] = (uint32_t)total_draw_count;
+				uint32_t i = visible_instances[k];
+
+				uint32_t mesh_id = render_scene.mesh_indices[i];
+				if (mesh_id >= meshes.size() || !meshes[mesh_id].is_valid()) {
+					continue;
+				}
+
+				const auto& mesh = meshes[mesh_id];
+				uint32_t submesh_count = mesh.submeshes.empty() ? 1u : (uint32_t)mesh.submeshes.size();
+				total_draw_count += submesh_count;
+			}
+
+			draw_offsets[visible_count_initial] = (uint32_t)total_draw_count;
+
+			if (sort_list.size() < total_draw_count)
+				sort_list.resize(total_draw_count);
+
+			bud::threading::Counter key_gen_signal;
+			constexpr size_t KEY_GEN_CHUNK_SIZE = 256;
+
+			task_scheduler->ParallelFor(visible_count_initial, KEY_GEN_CHUNK_SIZE,
+				[&](size_t start_exclusive, size_t end_exclusive) {
+					for (size_t k = start_exclusive; k < end_exclusive; ++k) {
+						uint32_t i = visible_instances[k];
+						uint32_t draw_start = draw_offsets[k];
+						uint32_t draw_end = draw_offsets[k + 1];
+						uint32_t draw_count = draw_end - draw_start;
+
+						if (draw_count == 0)
+							continue;
+
+						const auto& world_matrix = render_scene.world_matrices[i];
+						uint32_t mesh_id = render_scene.mesh_indices[i];
+
+						const auto& mesh = meshes[mesh_id];
+
+						auto mesh_pos = bud::math::vec3(world_matrix[3]);
+						auto distance = bud::math::distance2(mesh_pos, scene_view.camera_position);
+
+						uint32_t depth_key = 0;
+						auto depth_normalized = std::clamp(distance / (scene_view.far_plane * scene_view.far_plane), 0.0f, 1.0f);
+						depth_key = static_cast<uint32_t>(depth_normalized * 0x3FFFF);
+
+						if (!mesh.submeshes.empty()) {
+							for (uint32_t j = 0; j < draw_count; ++j) {
+								const auto& sub = mesh.submeshes[j];
+								auto world_sub_aabb = sub.aabb.transform(world_matrix);
+
+								auto& item = sort_list[draw_start + j];
+								item.entity_index = (uint32_t)i;
+								item.submesh_index = j;
+
+								if (!bud::math::intersect_aabb_frustum(world_sub_aabb, main_camera_frustum)) {
+									item.key = UINT64_MAX;
+									continue;
+								}
+
+								item.key = DrawKey::generate_opaque(0, 0, sub.material_id, mesh_id, depth_key);
+							}
+						}
+						else {
+							auto& item = sort_list[draw_start];
+							item.entity_index = (uint32_t)i;
+							item.submesh_index = UINT32_MAX;
+
+							uint32_t material_id = render_scene.material_indices[i];
+							item.key = DrawKey::generate_opaque(0, 0, material_id, mesh_id, depth_key);
+						}
+					}
+				},
+				&key_gen_signal
+			);
+
+			task_scheduler->wait_for_counter(key_gen_signal);
+
+			std::sort(sort_list.begin(), sort_list.begin() + total_draw_count,
+				[](const SortItem& a, const SortItem& b) { return a.key < b.key; }
+			);
+
+			auto it = std::lower_bound(sort_list.begin(), sort_list.begin() + total_draw_count, UINT64_MAX,
+				[](const SortItem& item, uint64_t val) { return item.key < val; }
+			);
+
+			visible_count = std::distance(sort_list.begin(), it);
 		}
 
-		draw_offsets[instance_count] = (uint32_t)total_draw_count;
-
-		if (sort_list.size() < total_draw_count)
-			sort_list.resize(total_draw_count);
-
-		bud::threading::Counter key_gen_signal;
-		constexpr size_t CHUNK_SIZE = 64;
-
-		task_scheduler->ParallelFor(instance_count, CHUNK_SIZE,
-			[&](size_t start_exclusive, size_t end_exclusive) {
-				for (size_t i = start_exclusive; i < end_exclusive; ++i) {
-					uint32_t draw_start = draw_offsets[i];
-					uint32_t draw_end = draw_offsets[i + 1];
-					uint32_t draw_count = draw_end - draw_start;
-
-					if (draw_count == 0)
-						continue;
-
-					const auto& world_matrix = scene.world_matrices[i];
-					const auto& aabb = scene.world_aabbs[i];
-
-					// coarse cull at instance level
-					if (!bud::math::intersect_aabb_frustum(aabb, camera_frustum)) {
-						for (uint32_t j = 0; j < draw_count; ++j) {
-							auto& item = sort_list[draw_start + j];
-							item.key = UINT64_MAX;
-							item.entity_index = (uint32_t)i;
-							item.submesh_index = j;
-						}
-						continue;
-					}
-
-					uint32_t mesh_id = scene.mesh_indices[i];
-					if (mesh_id >= meshes.size()) {
-						for (uint32_t j = 0; j < draw_count; ++j) {
-							auto& item = sort_list[draw_start + j];
-							item.key = UINT64_MAX;
-							item.entity_index = (uint32_t)i;
-							item.submesh_index = j;
-						}
-						continue;
-					}
-
-					const auto& mesh = meshes[mesh_id];
-
-					auto mesh_pos = bud::math::vec3(world_matrix[3]); // 提取平移部分作为实体位置
-					auto distance = bud::math::distance2(mesh_pos, scene_view.camera_position);
-
-					uint32_t depth_key = 0;
-					auto depth_normalized = std::clamp(distance / (scene_view.far_plane * scene_view.far_plane), 0.0f, 1.0f);
-					depth_key = static_cast<uint32_t>(depth_normalized * 0x3FFFF); // 18 bits for depth
-
-					if (!mesh.submeshes.empty()) {
-						for (uint32_t j = 0; j < draw_count; ++j) {
-							const auto& sub = mesh.submeshes[j];
-							auto world_sub_aabb = sub.aabb.transform(world_matrix);
-
-							auto& item = sort_list[draw_start + j];
-							item.entity_index = (uint32_t)i;
-							item.submesh_index = j;
-
-							if (!bud::math::intersect_aabb_frustum(world_sub_aabb, camera_frustum)) {
-								item.key = UINT64_MAX;
-								continue;
-							}
-
-							item.key = DrawKey::generate_opaque(0, 0, sub.material_id, mesh_id, depth_key);
-						}
-					}
-					else {
-						auto& item = sort_list[draw_start];
-						item.entity_index = (uint32_t)i;
-						item.submesh_index = UINT32_MAX;
-
-						uint32_t material_id = scene.material_indices[i];
-						item.key = DrawKey::generate_opaque(0, 0, material_id, mesh_id, depth_key);
-					}
-				}
-			},
-			&key_gen_signal
-		);
-
-		task_scheduler->wait_for_counter(key_gen_signal);
-
-		std::sort(sort_list.begin(), sort_list.begin() + total_draw_count,
-			[](const SortItem& a, const SortItem& b) { return a.key < b.key; }
-		);
-
-		// 使用二分查找找到第一个 UINT64_MAX 的位置, 计算可见物体数量 (剔除 Key == UINT64_MAX 的物体)
-		auto it = std::lower_bound(sort_list.begin(), sort_list.begin() + total_draw_count, UINT64_MAX,
-			[](const SortItem& item, uint64_t val) { return item.key < val; }
-		);
-
-		size_t visible_count = std::distance(sort_list.begin(), it);
-
-		// 如果没有东西可见，直接返回，不录制 CommandBuffer
-		if (visible_count == 0)
-			return;
-
-		//std::println("[Culling] total_draw_count={} visible_count={}", total_draw_count, visible_count);
+		// std::println("[Culling] total_draw_count={} visible_count={}", total_draw_count, visible_count);
 
 		auto cmd = rhi->begin_frame();
 		if (!cmd)
 			return;
+
+		// 汇报剔除统计
+		rhi->add_culling_stats(
+			(uint32_t)instance_count, 
+			(uint32_t)culled_results[0].size(), 
+			total_shadow_casters
+		);
 
 		rhi->set_render_config(render_config);
 
 		auto swapchain_tex = rhi->get_current_swapchain_texture();
 		auto back_buffer = render_graph.import_texture("Backbuffer", swapchain_tex, ResourceState::RenderTarget);
 
-		auto shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, scene, meshes);
-		auto depth_prepass = z_prepass->add_to_graph(render_graph, back_buffer, scene, scene_view, render_config, meshes, sort_list, visible_count);
-		if (!depth_prepass.is_valid())
-			return;
+		bool has_main_pass = false;
+		if (visible_count > 0) {
+			auto depth_prepass = z_prepass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count);
+			if (depth_prepass.is_valid()) {
+				std::vector<std::vector<uint32_t>> csm_visible_instances(cascade_count);
+				for (uint32_t i = 0; i < cascade_count; ++i) {
+					csm_visible_instances[i] = std::move(culled_results[i + 1]);
+				}
 
-		// sort_list 传进去，按照这个顺序画
-		main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, scene, scene_view, render_config, meshes, sort_list, visible_count);
+				auto shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances));
+				if (shadow_map.is_valid()) {
+					main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count);
+					has_main_pass = true;
+				}
+			}
+		}
+
+		if (!has_main_pass) {
+			render_graph.add_pass("UI Clear Pass",
+				[=](RGBuilder& builder) {
+					builder.write(back_buffer, ResourceState::RenderTarget);
+				},
+				[this, back_buffer](RHI* rhi, CommandHandle cmd) {
+					RenderPassBeginInfo info;
+					info.color_attachments.push_back(render_graph.get_texture(back_buffer));
+					info.clear_color = true;
+					info.clear_color_value = { 0.5f, 0.5f, 0.5f, 1.0f };
+					rhi->cmd_begin_render_pass(cmd, info);
+					rhi->cmd_end_render_pass(cmd);
+				}
+			);
+		}
+
+		ui_pass->add_to_graph(render_graph, back_buffer);
 
 		render_graph.compile();
 

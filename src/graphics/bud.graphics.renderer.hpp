@@ -35,6 +35,7 @@ namespace bud::graphics {
 
 		// Only work on Rendering Thread
 		void flush_upload_queue();
+		void update_ui_draw_data(ImDrawData* draw_data);
 
 		void render(const bud::graphics::RenderScene& render_scene, SceneView& scene_view);
 
@@ -61,6 +62,7 @@ namespace bud::graphics {
 		std::unique_ptr<CSMShadowPass> csm_pass;
 		std::unique_ptr<ZPrepass> z_prepass;
 		std::unique_ptr<MainPass> main_pass;
+		std::unique_ptr<UIPass> ui_pass;
 
 		std::vector<RenderMesh> meshes;
 		std::vector<bud::math::AABB> mesh_bounds;

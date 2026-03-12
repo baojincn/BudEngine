@@ -3,9 +3,6 @@
 #include <iostream>
 
 namespace bud::graphics {
-
-	// --- Implementation ---
-
 	RGHandle RGBuilder::read(RGHandle handle, ResourceState state) {
 		pass_node.reads.push_back({ handle, state });
 		return handle;
@@ -29,8 +26,6 @@ namespace bud::graphics {
 		render_graph.resources.push_back(node);
 		RGHandle handle = RGHandle{ static_cast<uint32_t>(render_graph.resources.size() - 1) };
 		
-		// Auto declare write if creating? Usually yes, or pass explicit writes.
-		// For now we just register existence. Pass needs to call write(handle) to actually write.
 		return handle;
 	}
 
@@ -43,8 +38,7 @@ namespace bud::graphics {
 		node.physical_texture = texture;
 		node.is_external = (texture != nullptr);
 		node.is_transient = !node.is_external;
-		node.initial_state = current_state; // [FIX] Capture imported state
-		// node.desc = ... get from texture if possible
+		node.initial_state = current_state;
 		
 		resources.push_back(node);
 		return RGHandle{ static_cast<uint32_t>(resources.size() - 1) };
@@ -63,6 +57,25 @@ namespace bud::graphics {
 		adjacency_list.assign(passes.size(), {});
 		std::vector<int> in_degree(passes.size(), 0);
 
+		auto add_dependency = [&](int producer, int consumer) {
+			if (producer < 0 || consumer < 0 || producer == consumer)
+				return;
+
+			auto& deps = passes[consumer].dependencies;
+			if (std::find(deps.begin(), deps.end(), producer) != deps.end())
+				return;
+
+			adjacency_list[producer].push_back(consumer);
+			deps.push_back(producer);
+			in_degree[consumer]++;
+		};
+
+		for (auto& pass : passes) {
+			pass.dependencies.clear();
+			pass.before_barriers.clear();
+			pass.has_side_effects = false;
+		}
+
 		// Map: ResourceHandle -> Last Writing Pass Index
 		std::unordered_map<uint32_t, int> resource_writers;
 
@@ -71,6 +84,10 @@ namespace bud::graphics {
 			
 			// Who writes what?
 			for (auto& access : pass.writes) {
+				if (resource_writers.contains(access.handle.id)) {
+					add_dependency(resource_writers[access.handle.id], i);
+				}
+
 				resource_writers[access.handle.id] = i;
 
 				// If this writes to backbuffer, it has side effects (root)
@@ -83,10 +100,7 @@ namespace bud::graphics {
 			for (auto& access : pass.reads) {
 				if (resource_writers.contains(access.handle.id)) {
 					int producer = resource_writers[access.handle.id];
-					// Dependency: Producer -> Consumer (i)
-					adjacency_list[producer].push_back(i);
-					passes[i].dependencies.push_back(producer); // Add this
-					in_degree[i]++;
+					add_dependency(producer, i);
 				}
 			}
 		}
@@ -131,8 +145,7 @@ namespace bud::graphics {
 		for (size_t i = 1; i < resources.size(); ++i) {
 			if (resources[i].is_external) {
 				// Assume external starts as Undefined or Present. For backbuffer usually starts effectively undefined for us until we acquire it
-				// But we imported it with 'current_state'.
-				resource_states[i].current_state = resources[i].initial_state; // [FIX] Use stored initial state
+				resource_states[i].current_state = resources[i].initial_state;
 			}
 		}
 
@@ -145,7 +158,7 @@ namespace bud::graphics {
 				ResourceState old_state = resource_states[rid].current_state;
 				ResourceState new_state = access.state;
 
-				// [FIX] Always transition if old_state is Undefined to ensure initial layout is set correctly
+				// Always transition if old_state is Undefined to ensure initial layout is set correctly
 				if (old_state != new_state || old_state == ResourceState::Undefined) {
 					// Add barrier
 					pass.before_barriers.push_back({ access.handle, old_state, new_state });
@@ -159,7 +172,6 @@ namespace bud::graphics {
 				ResourceState old_state = resource_states[rid].current_state;
 				ResourceState new_state = access.state;
 
-				// [FIX] Always transition if old_state is Undefined
 				bool needs_barrier = (old_state != new_state) || (old_state == ResourceState::RenderTarget) || (old_state == ResourceState::Undefined); 
 
 				if (needs_barrier) {

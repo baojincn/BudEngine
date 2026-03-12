@@ -47,6 +47,7 @@ option(BUD_BUILD_SAMPLES "Build samples" ON)
 # Begin, find dependencies
 find_package(SDL3 CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
+find_package(imgui CONFIG REQUIRED)
 if(BUD_ENABLE_PROFILING)
 	find_package(Tracy CONFIG REQUIRED)
 endif()
@@ -90,8 +91,10 @@ file(GLOB SHADER_FILES
 
 # Ensure new prepass shaders are included
 list(APPEND SHADER_FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/zprepass.vert"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/zprepass.frag"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/zprepass.vert"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/zprepass.frag"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/debug_ui.vert"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/debug_ui.frag"
 )
 
 # Find glslc compiler
@@ -206,7 +209,7 @@ target_sources(bud_engine_core
 		"src/graphics/vulkan/bud.vulkan.utils.hpp"
 )
 
-target_link_libraries(bud_engine_core PUBLIC SDL3::SDL3 Vulkan::Vulkan)
+target_link_libraries(bud_engine_core PUBLIC SDL3::SDL3 Vulkan::Vulkan imgui::imgui)
 
 target_include_directories(bud_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # End, define engine core library
@@ -225,9 +228,7 @@ if(BUD_BUILD_SAMPLES)
         target_link_options(triangle_sample PRIVATE "/CETCOMPAT:NO")
     endif()
 
-    # -----------------------------------------------------------------------
-    # Simple Copy Logic: Directly Copy DLL to the Exe Directory
-    # -----------------------------------------------------------------------
+    # Directly Copy DLL to the Exe Directory
 	if(BUD_ENABLE_AFTERMATH)
 		add_custom_command(TARGET triangle_sample POST_BUILD
 			COMMAND ${CMAKE_COMMAND} -E copy_if_different

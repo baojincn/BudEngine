@@ -11,14 +11,15 @@ public:
 	void init(bud::engine::BudEngine* engine_instance) {
 		engine = engine_instance;
 
-		std::println("[Game] App initialized. Loading Sponza...");
+		std::println("[Game] App initialized. Loading Default Scene...");
 
 		auto asset_manager = engine->get_asset_manager();
 		auto renderer = engine->get_renderer();
 
 		auto callback = std::bind_front(&GameApp::on_sponza_loaded, this);
-
 		asset_manager->load_mesh_async("data/cryteksponza/sponza.obj", callback);
+
+		//load_forest_test_scene();
 
 		bud::graphics::RenderConfig config;
 		config.shadow_bias_constant = 0.005f;
@@ -161,7 +162,60 @@ private:
 			}
 		}
 
-		std::println("[Game] Sponza loaded and spawned as per-subset entities.");
+		// std::println("[Game] Sponza loaded and spawned as per-subset entities.");
+	}
+
+	void load_forest_test_scene() {
+		std::println("[Game] Generating massive test forest/stones scene...");
+		auto asset_manager = engine->get_asset_manager();
+
+		// 加载松树
+		auto pine_cb = [this](bud::io::MeshData mesh) {
+			this->on_tree_loaded(mesh, 10); 
+		};
+		asset_manager->load_mesh_async("data/pine/scrubPine.obj", pine_cb);
+
+		// 加载另一种树
+		auto oak_cb = [this](bud::io::MeshData mesh) {
+			this->on_tree_loaded(mesh, 10); 
+		};
+		asset_manager->load_mesh_async("data/white_oak/white_oak.obj", oak_cb);
+	}
+
+	void on_tree_loaded(bud::io::MeshData mesh, int grid_size) {
+		if (!engine || mesh.vertices.empty()) return;
+
+		auto renderer = engine->get_renderer();
+		auto base_handle = renderer->upload_mesh(mesh);
+		if (!base_handle.is_valid()) return;
+
+		std::vector<bud::scene::Entity> batch;
+		batch.reserve((grid_size * 2) * (grid_size * 2));
+
+		const float offset = 20.0f; // 间距
+		for (int x = -grid_size; x < grid_size; ++x) {
+			for (int z = -grid_size; z < grid_size; ++z) {
+				bud::scene::Entity e;
+				e.mesh_index = base_handle.mesh_id;
+				e.material_index = base_handle.material_id;
+
+				float rx = x * offset + (rand() % 10 - 5);
+				float rz = z * offset + (rand() % 10 - 5);
+				float scale = 0.005f + (rand() % 10) / 100.0f; // 缩减100倍
+
+				e.transform = bud::math::translate(bud::math::mat4(1.0f), bud::math::vec3(rx, 0.0f, rz));
+				e.transform = bud::math::scale(e.transform, bud::math::vec3(scale));
+				e.is_static = true;
+
+				batch.push_back(e);
+			}
+		}
+
+		{
+			std::lock_guard lock(entity_mutex);
+			pending_entities.insert(pending_entities.end(), batch.begin(), batch.end());
+		}
+		std::println("[Game] Spawned {} tree entities.", batch.size());
 	}
 
 private:

@@ -22,7 +22,6 @@ namespace bud::graphics::vulkan {
     VkPipeline VulkanPipelineCache::get_pipeline(const PipelineKey& key, VkPipelineLayout layout, bool is_depth_only) {
         if (cache.contains(key)) return cache[key];
 
-        // 缓存未命中，执行昂贵的创建操作
         VkPipeline new_pipe = create_pipeline_internal(key, layout, is_depth_only);
         cache[key] = new_pipe;
         return new_pipe;
@@ -40,16 +39,27 @@ namespace bud::graphics::vulkan {
         // But input state is needed.
         VkVertexInputBindingDescription bindingDescription{};
         bindingDescription.binding = 0;
-        bindingDescription.stride = sizeof(float) * (3+3+3+2+1); // Vertex struct size
         bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-        std::vector<VkVertexInputAttributeDescription> attributeDescriptions = {
-            {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},     // Pos
-            {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12},    // Color
-            {2, 0, VK_FORMAT_R32G32B32_SFLOAT, 24},    // Normal
-            {3, 0, VK_FORMAT_R32G32_SFLOAT,    36},    // UV
-            //{4, 0, VK_FORMAT_R32_SFLOAT,       44}     // TexIndex
-        };
+        std::vector<VkVertexInputAttributeDescription> attributeDescriptions;
+
+        if (key.is_ui_layout) {
+            bindingDescription.stride = sizeof(float) * 2 + sizeof(float) * 2 + sizeof(uint32_t); // pos(vec2), uv(vec2), col(uint32)
+            attributeDescriptions = {
+                {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},     // Pos
+                {1, 0, VK_FORMAT_R32G32_SFLOAT, 8},     // UV
+                {2, 0, VK_FORMAT_R8G8B8A8_UNORM, 16}    // Color (ImU32)
+            };
+        } else {
+            bindingDescription.stride = sizeof(float) * (3+3+3+2+1); // Vertex struct size
+            attributeDescriptions = {
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},     // Pos
+                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12},    // Color
+                {2, 0, VK_FORMAT_R32G32B32_SFLOAT, 24},    // Normal
+                {3, 0, VK_FORMAT_R32G32_SFLOAT,    36},    // UV
+                //{4, 0, VK_FORMAT_R32_SFLOAT,       44}     // TexIndex
+            };
+        }
 
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -93,7 +103,17 @@ namespace bud::graphics::vulkan {
 
         VkPipelineColorBlendAttachmentState colorBlendAttachment{};
         colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        colorBlendAttachment.blendEnable = VK_FALSE; // No Blending for Opaque
+        if (key.blending_enable) {
+            colorBlendAttachment.blendEnable = VK_TRUE;
+            colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+            colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        } else {
+            colorBlendAttachment.blendEnable = VK_FALSE;
+        }
 
         VkPipelineColorBlendStateCreateInfo colorBlending{};
         colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -120,11 +140,11 @@ namespace bud::graphics::vulkan {
         if (colorFormat == VK_FORMAT_UNDEFINED && !is_depth_only) {
             colorFormat = VK_FORMAT_B8G8R8A8_SRGB;
         }
-        VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
+		VkFormat depthFormat = key.depth_format;
 
         VkPipelineRenderingCreateInfo renderingInfo{};
-        renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR; // Use KHR for compatibility
-        renderingInfo.pNext = nullptr;
+        renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+		renderingInfo.pNext = nullptr;
         renderingInfo.viewMask = 0;
         
         // Support depth-only pipelines (shadow maps)
