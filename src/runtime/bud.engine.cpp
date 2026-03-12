@@ -2,6 +2,7 @@
 #include <memory>
 #include <thread>
 #include <chrono>
+#include <cmath>
 #include <print>
 
 #ifdef TRACY_ENABLE
@@ -80,18 +81,6 @@ namespace bud::engine {
 			auto now = Clock::now();
 			double frame_time = std::chrono::duration<double>(now - last_time).count();
 			last_time = now;
-
-			// 计算 FPS
-			static auto timer = 0.0f;
-			static auto fps = 0;
-			timer += frame_time;
-			fps++;
-			if (timer >= 1.0f) {
-				auto title = std::format("{} - FPS: {}", engine_config.name, fps);
-				window->set_title(title.c_str());
-				timer = 0.0f;
-				fps = 0;
-			}
 
 			// 防止螺旋死亡
 			if (frame_time > 0.25)
@@ -286,6 +275,7 @@ namespace bud::engine {
 				static float update_timer = 0.0f;
 				static float display_fps = 0.0f;
 				static float display_ms = 0.0f;
+				static constexpr float fps_ema_tau_seconds = 0.8f;
 				static uint32_t display_draw_calls = 0;
 				static uint32_t display_triangles = 0;
 				static uint32_t display_pipeline_binds = 0;
@@ -293,10 +283,20 @@ namespace bud::engine {
 				static uint32_t display_visible_objs = 0;
 				static uint32_t display_shadow_casters = 0;
 
+				float current_ms = view_snapshot.delta_time * 1000.0f;
+				float ema_alpha = (view_snapshot.delta_time > 0.0f)
+					? (1.0f - std::exp(-view_snapshot.delta_time / fps_ema_tau_seconds))
+					: 1.0f;
+				if (display_ms <= 0.0f) {
+					display_ms = current_ms;
+				}
+				else {
+					display_ms = ema_alpha * current_ms + (1.0f - ema_alpha) * display_ms;
+				}
+				display_fps = (display_ms > 0.0f) ? (1000.0f / display_ms) : 0.0f;
+
 				update_timer += view_snapshot.delta_time;
-				if (update_timer >= 0.5f || display_fps == 0.0f) {
-					display_fps = 1.0f / view_snapshot.delta_time;
-					display_ms = view_snapshot.delta_time * 1000.0f;
+				if (update_timer >= 0.5f) {
 					display_draw_calls = stats.draw_calls;
 					display_triangles = stats.drawn_triangles;
 					display_pipeline_binds = stats.pipeline_binds;
