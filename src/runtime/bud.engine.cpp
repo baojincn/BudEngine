@@ -14,6 +14,10 @@
 #include "src/runtime/bud.engine.hpp"
 #include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
 
+#include <imgui.h>
+#include <imgui_impl_sdl3.h>
+#include <imgui_impl_vulkan.h>
+
 namespace bud::engine {
 
 	BudEngine::BudEngine(const bud::graphics::EngineConfig config) : engine_config(config) {
@@ -34,6 +38,14 @@ namespace bud::engine {
 		auto enable_validation = engine_config.enable_validation;
 		rhi->init(window.get(), task_scheduler.get(), enable_validation, engine_config.inflight_frame_count);
 
+		IMGUI_CHECKVERSION();
+		ImGui::CreateContext();
+		ImGuiIO& imgui_io = ImGui::GetIO();
+		imgui_io.IniFilename = "ui/config/imgui.ini";
+		imgui_io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+		ImGui::StyleColorsDark();
+		ImGui_ImplSDL3_InitForOther((SDL_Window*)window->get_sdl_window());
+
 		renderer = std::make_unique<bud::graphics::Renderer>(rhi.get(), asset_manager.get(), task_scheduler.get());
 
 		render_scenes.resize(engine_config.inflight_frame_count);
@@ -43,6 +55,10 @@ namespace bud::engine {
 		task_scheduler->stop();
 		asset_manager.reset();
 		renderer.reset();
+
+		ImGui_ImplSDL3_Shutdown();
+		ImGui::DestroyContext();
+
 		rhi->cleanup();
 		rhi.reset();
 	}
@@ -51,7 +67,6 @@ namespace bud::engine {
 		// Initialize the main thread as a worker
 		task_scheduler->init_main_thread_worker();
 
-		// 获取配置的固定步长
 		const double fixed_dt = renderer->get_config().fixed_logic_timestep;
 
 		using Clock = std::chrono::high_resolution_clock;
@@ -127,6 +142,13 @@ namespace bud::engine {
 	void BudEngine::handle_events() {
 		window->poll_events();
 
+		static bool was_f3_down = false;
+		bool is_f3_down = bud::input::Input::get().is_key_down(bud::input::Key::F3);
+		if (is_f3_down && !was_f3_down) {
+			show_debug_stats = !show_debug_stats;
+		}
+		was_f3_down = is_f3_down;
+
 		int width = 0;
 		int height = 0;
 		window->get_size_in_pixels(width, height);
@@ -190,8 +212,6 @@ namespace bud::engine {
 		);
 
 		task_scheduler->wait_for_counter(extract_scene_counter);
-
-		render_scene.build_lbvh();
 	}
 
 	void BudEngine::sync_game_to_rendering(uint32_t render_scene_index) {
@@ -213,7 +233,7 @@ namespace bud::engine {
 		// Hammering vkAcquireNextImageKHR on a 0x0 un-resized window causes AMD/NVIDIA driver TDRs (Hang/BSOD).
 		if (width == 0 || height == 0) {
 			render_inflight_index.store(BudEngine::invalid_render_index, std::memory_order_release);
-			std::this_thread::sleep_for(std::chrono::milliseconds(16)); // prevent 100% CPU spin
+			std::this_thread::sleep_for(std::chrono::nanoseconds(1)); // prevent 100% CPU spin
 			return;
 		}
 
@@ -245,11 +265,76 @@ namespace bud::engine {
 		view_snapshot.light_intensity = scene.directional_light.intensity;
 		view_snapshot.ambient_strength = scene.ambient_strength;
 
+		view_snapshot.show_debug_stats = show_debug_stats;
+
 		view_snapshot.update_matrices();
 
 		render_inflight_index.store(render_scene_index, std::memory_order_release);
 
-		// 发射渲染任务 (Fire and Forget), Pin to Worker 1 for RenderDoc stability and Vulkan WSI safety
+		ImGui_ImplSDL3_NewFrame();
+		ImGui::NewFrame();
+
+		if (show_debug_stats) {
+			auto stats = rhi->get_stats();
+			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
+			ImGui::SetNextWindowBgAlpha(0.35f);
+			bool window_open = ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+			if (window_open) {
+				static float update_timer = 0.0f;
+				static float display_fps = 0.0f;
+				static float display_ms = 0.0f;
+				static uint32_t display_draw_calls = 0;
+				static uint32_t display_triangles = 0;
+				static uint32_t display_pipeline_binds = 0;
+				static uint32_t display_total_objs = 0;
+				static uint32_t display_visible_objs = 0;
+				static uint32_t display_shadow_casters = 0;
+
+				update_timer += view_snapshot.delta_time;
+				if (update_timer >= 0.5f || display_fps == 0.0f) {
+					display_fps = 1.0f / view_snapshot.delta_time;
+					display_ms = view_snapshot.delta_time * 1000.0f;
+					display_draw_calls = stats.draw_calls;
+					display_triangles = stats.drawn_triangles;
+					display_pipeline_binds = stats.pipeline_binds;
+					display_total_objs = stats.total_objects;
+					display_visible_objs = stats.visible_objects;
+					display_shadow_casters = stats.shadow_casters;
+					update_timer = 0.0f;
+				}
+
+				ImGui::SetWindowFontScale(1.5f);
+
+				ImVec4 color_good(0.4f, 1.0f, 0.4f, 1.0f);
+				ImVec4 color_warn(1.0f, 1.0f, 0.4f, 1.0f);
+				ImVec4 color_bad(1.0f, 0.4f, 0.4f, 1.0f);
+				ImVec4 color_neutral(0.9f, 0.9f, 0.9f, 1.0f);
+
+				ImVec4 fps_color = display_fps >= 60.0f ? color_good : (display_fps >= 30.0f ? color_warn : color_bad);
+				ImVec4 dc_color = display_draw_calls <= 5000 ? color_good : (display_draw_calls <= 10000 ? color_warn : color_bad);
+				ImVec4 tri_color = display_triangles <= 2000000 ? color_good : (display_triangles <= 5000000 ? color_warn : color_bad);
+				ImVec4 pipe_color = display_pipeline_binds <= 100 ? color_good : (display_pipeline_binds <= 500 ? color_warn : color_bad);
+
+				ImGui::TextColored(fps_color, "FPS: %.1f (%.2f ms)", display_fps, display_ms);
+				ImGui::Separator();
+				ImGui::TextColored(color_neutral, "--- Draw Stats ---");
+				ImGui::TextColored(dc_color, "Draw Calls: %u", display_draw_calls);
+				ImGui::TextColored(tri_color, "Triangles: %u", display_triangles);
+				ImGui::TextColored(pipe_color, "Pipeline Binds: %u", display_pipeline_binds);
+
+				ImGui::Separator();
+				ImGui::TextColored(color_neutral, "--- Culling Stats ---");
+				ImGui::TextColored(color_neutral, "Total Objects: %u", display_total_objs);
+				ImGui::TextColored(color_neutral, "Visible Objects: %u", display_visible_objs);
+				ImGui::TextColored(color_neutral, "Shadow Casters: %u", display_shadow_casters);
+			}
+			ImGui::End();
+		}
+
+		ImGui::Render();
+		renderer->update_ui_draw_data(ImGui::GetDrawData());
+
+		// 发射渲染任务 (Fire and Forget), Pin to Worker 1 for Vulkan WSI safety
 		task_scheduler->spawn_on_thread(1, "RenderTask", [this, render_scene_index, view_snapshot]() mutable {
 			renderer->render(render_scenes[render_scene_index], view_snapshot);
 			render_inflight_index.store(BudEngine::invalid_render_index, std::memory_order_release);

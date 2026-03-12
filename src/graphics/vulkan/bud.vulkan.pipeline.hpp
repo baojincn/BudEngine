@@ -10,7 +10,7 @@
 
 namespace bud::graphics::vulkan {
 
-	// 这是一个巨大的 Key，包含了创建管线所需的所有状态
+	// 创建管线所需的所有状态
 	 struct PipelineKey {
 		VkShaderModule vert_shader;
 		VkShaderModule frag_shader;
@@ -18,9 +18,12 @@ namespace bud::graphics::vulkan {
 		VkBool32 depth_test;
 		VkBool32 depth_write;
 		VkBool32 depth_bias_enable;
+		VkBool32 blending_enable;
+		VkBool32 is_ui_layout;
 		VkCompareOp depth_compare_op;
 		VkCullModeFlags cull_mode;
 		VkFormat color_format;
+		VkFormat depth_format;
 
 		bool operator==(const PipelineKey& other) const {
 			return vert_shader == other.vert_shader &&
@@ -29,9 +32,12 @@ namespace bud::graphics::vulkan {
 				depth_test == other.depth_test &&
 				depth_write == other.depth_write &&
 				depth_bias_enable == other.depth_bias_enable &&
+				blending_enable == other.blending_enable &&
+				is_ui_layout == other.is_ui_layout &&
 				depth_compare_op == other.depth_compare_op &&
 				cull_mode == other.cull_mode &&
-				color_format == other.color_format;
+				color_format == other.color_format &&
+				depth_format == other.depth_format;
 		}
 	};
 
@@ -43,7 +49,10 @@ namespace bud::graphics::vulkan {
 				(std::hash<uint32_t>()(k.color_format) << 3) ^
 				(std::hash<uint32_t>()(k.depth_compare_op) << 4) ^
 				(std::hash<uint32_t>()(k.depth_write) << 5) ^
-				(std::hash<uint32_t>()(k.depth_bias_enable) << 6);
+				(std::hash<uint32_t>()(k.blending_enable) << 6) ^
+				(std::hash<uint32_t>()(k.is_ui_layout) << 7) ^
+				(std::hash<uint32_t>()(k.depth_bias_enable) << 8) ^
+				(std::hash<uint32_t>()(k.depth_format) << 9);
 		}
 	};
 

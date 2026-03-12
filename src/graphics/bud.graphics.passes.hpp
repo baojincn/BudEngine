@@ -1,9 +1,11 @@
 ﻿#pragma once
 
 #include <vector>
+#include <mutex>
 #include <print>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <imgui.h>
 
 #include "src/core/bud.math.hpp"
 #include "src/io/bud.io.hpp"
@@ -52,13 +54,13 @@ namespace bud::graphics {
 		};
 
 		void init(RHI* rhi, const RenderConfig& config);
-		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes);
+		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances);
 	};
 
 	
 	class MainPass {
 		void* pipeline = nullptr;
-		
+
 	public:
 		void init(RHI* rhi, const RenderConfig& config);
 		void add_to_graph(RenderGraph& rg, RGHandle shadow_map, RGHandle backbuffer, RGHandle depth_buffer,
@@ -68,5 +70,63 @@ namespace bud::graphics {
 			const std::vector<RenderMesh>& meshes,
 			const std::vector<SortItem>& sort_list,
 			size_t instance_count);
+	};
+
+	struct UIDrawCmdSnapshot {
+		ImVec4 clip_rect{};
+		uint32_t elem_count = 0;
+		uint32_t idx_offset = 0;
+		uint32_t vtx_offset = 0;
+		uint32_t texture_id = 0;
+	};
+
+	struct UIDrawListSnapshot {
+		std::vector<ImDrawVert> vertices;
+		std::vector<uint32_t> indices;
+		std::vector<UIDrawCmdSnapshot> commands;
+	};
+
+	struct UIDrawDataSnapshot {
+		ImVec2 display_pos{};
+		ImVec2 display_size{};
+		ImVec2 framebuffer_scale{ 1.0f, 1.0f };
+		std::vector<UIDrawListSnapshot> lists;
+
+		bool has_data() const { return !lists.empty(); }
+
+		uint32_t total_vtx_count() const {
+			uint32_t total = 0;
+			for (const auto& list : lists)
+				total += static_cast<uint32_t>(list.vertices.size());
+			return total;
+		}
+
+		uint32_t total_idx_count() const {
+			uint32_t total = 0;
+			for (const auto& list : lists)
+				total += static_cast<uint32_t>(list.indices.size());
+			return total;
+		}
+	};
+
+	class UIPass {
+		void* pipeline = nullptr;
+		Texture* font_texture = nullptr;
+
+		MemoryBlock vertex_buffer;
+		MemoryBlock index_buffer;
+		uint32_t current_vertex_buffer_size = 0;
+		uint32_t current_index_buffer_size = 0;
+
+		uint32_t font_bindless_index = 0;
+		std::mutex draw_data_mutex;
+		UIDrawDataSnapshot cached_draw_data;
+
+	public:
+		~UIPass();
+		void shutdown(RHI* rhi);
+		void init(RHI* rhi, const RenderConfig& config);
+		void update_draw_data(ImDrawData* draw_data);
+		void add_to_graph(RenderGraph& rg, RGHandle backbuffer);
 	};
 }

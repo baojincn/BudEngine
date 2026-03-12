@@ -15,6 +15,10 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
+#include <imgui.h>
+#include <imgui_impl_sdl3.h>
+#include <imgui_impl_vulkan.h>
+
 #include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
 
 #include "src/core/bud.math.hpp"
@@ -367,8 +371,6 @@ void VulkanRHI::cleanup() {
 		pipeline_cache->cleanup();
 	if (resource_pool)
 		resource_pool->cleanup();
-	if (memory_allocator)
-		memory_allocator->cleanup();
 
 	pipeline_cache.reset();
 	resource_pool.reset();
@@ -376,12 +378,18 @@ void VulkanRHI::cleanup() {
 	if (!buffer_memory_map.empty()) {
 		std::println("[Vulkan] Warning: {} buffers were not explicitly destroyed, cleaning up now...", buffer_memory_map.size());
 		for (auto& [buffer, memory] : buffer_memory_map) {
+			if (memory_allocator && memory) {
+				bud::graphics::MemoryBlock mem_block;
+				mem_block.internal_handle = memory;
+				memory_allocator->free(mem_block);
+			}
 			vkDestroyBuffer(device, buffer, nullptr);
-			if (memory)
-				vkFreeMemory(device, memory, nullptr);
 		}
 		buffer_memory_map.clear();
 	}
+
+	if (memory_allocator)
+		memory_allocator->cleanup();
 
 	memory_allocator.reset();
 
@@ -549,12 +557,15 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	key.depth_test = desc.depth_test;
 	key.depth_write = desc.depth_write;
 	key.depth_bias_enable = desc.enable_depth_bias;
+	key.blending_enable = desc.blending_enable;
+	key.is_ui_layout = desc.is_ui_layout;
 
 	switch (desc.depth_compare_op) {
 	case CompareOp::Less: key.depth_compare_op = VK_COMPARE_OP_LESS; break;
 	case CompareOp::LessEqual: key.depth_compare_op = VK_COMPARE_OP_LESS_OR_EQUAL; break;
 	case CompareOp::Greater: key.depth_compare_op = VK_COMPARE_OP_GREATER; break;
 	case CompareOp::GreaterEqual: key.depth_compare_op = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
+	case CompareOp::Always: key.depth_compare_op = VK_COMPARE_OP_ALWAYS; break;
 	default: key.depth_compare_op = VK_COMPARE_OP_LESS; break;
 	}
 
@@ -566,6 +577,7 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	}
 
 	key.color_format = to_vk_format(desc.color_attachment_format);
+	key.depth_format = to_vk_format(desc.depth_attachment_format);
 
 	bool is_depth_only = (desc.color_attachment_format == bud::graphics::TextureFormat::Undefined);
 
@@ -599,6 +611,8 @@ CommandHandle VulkanRHI::begin_frame() {
 	}
 
 	vkResetFences(device, 1, &frames[current_frame].in_flight_fence);
+
+	current_stats.reset();
 
 	// 通知分配器新的一帧开始了 (重置 Linear Allocator)
 	memory_allocator->on_frame_begin(current_frame);
@@ -769,6 +783,7 @@ void VulkanRHI::cmd_end_render_pass(CommandHandle cmd) {
 void VulkanRHI::cmd_bind_pipeline(CommandHandle cmd, void* pipeline) {
 	auto pipeObj = static_cast<VulkanPipelineObject*>(pipeline);
 	vkCmdBindPipeline(static_cast<VkCommandBuffer>(cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeObj->pipeline);
+	current_stats.pipeline_binds++;
 }
 
 void VulkanRHI::cmd_bind_vertex_buffer(CommandHandle cmd, void* buffer) {
@@ -783,10 +798,14 @@ void VulkanRHI::cmd_bind_index_buffer(CommandHandle cmd, void* buffer) {
 
 void VulkanRHI::cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) {
 	vkCmdDraw(static_cast<VkCommandBuffer>(cmd), vertex_count, instance_count, first_vertex, first_instance);
+	current_stats.draw_calls++;
+	current_stats.drawn_triangles += (vertex_count / 3) * instance_count;
 }
 
 void VulkanRHI::cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset, uint32_t first_instance) {
 	vkCmdDrawIndexed(static_cast<VkCommandBuffer>(cmd), index_count, instance_count, first_index, vertex_offset, first_instance);
+	current_stats.draw_calls++;
+	current_stats.drawn_triangles += (index_count / 3) * instance_count;
 }
 
 void VulkanRHI::cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) {
@@ -1243,7 +1262,12 @@ VkPresentModeKHR VulkanRHI::choose_swap_present_mode(const std::vector<VkPresent
 
 VkExtent2D VulkanRHI::choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilities, bud::platform::Window* window) {
 	if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
-		return capabilities.currentExtent;
+		VkExtent2D extent = capabilities.currentExtent;
+		if (extent.width == 0 || extent.height == 0) {
+			extent.width = std::max(1u, extent.width);
+			extent.height = std::max(1u, extent.height);
+		}
+		return extent;
 	}
 
 	int width = 0;
@@ -1253,13 +1277,13 @@ VkExtent2D VulkanRHI::choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabil
 	}
 
 	if (width == 0 || height == 0) {
-		width = static_cast<int>(capabilities.minImageExtent.width);
-		height = static_cast<int>(capabilities.minImageExtent.height);
+		width = static_cast<int>(std::max(1u, capabilities.minImageExtent.width));
+		height = static_cast<int>(std::max(1u, capabilities.minImageExtent.height));
 	}
 
 	VkExtent2D actual_extent = { static_cast<uint32_t>(std::max(1, width)), static_cast<uint32_t>(std::max(1, height)) };
-	actual_extent.width = std::clamp(actual_extent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
-	actual_extent.height = std::clamp(actual_extent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+	actual_extent.width = std::clamp(actual_extent.width, std::max(1u, capabilities.minImageExtent.width), capabilities.maxImageExtent.width);
+	actual_extent.height = std::clamp(actual_extent.height, std::max(1u, capabilities.minImageExtent.height), capabilities.maxImageExtent.height);
 	return actual_extent;
 }
 
@@ -1378,13 +1402,12 @@ void VulkanRHI::copy_buffer_immediate(bud::graphics::MemoryBlock src, bud::graph
 	this->end_single_time_commands(cmd);
 }
 
-// [CSM] Shadow Caching Copy
 void VulkanRHI::cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) {
 	VulkanTexture* vk_src = static_cast<VulkanTexture*>(src);
 	VulkanTexture* vk_dst = static_cast<VulkanTexture*>(dst);
 
 	VkImageCopy region{};
-	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT; // Assuming Depth for ShadowMap
+	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
 	region.srcSubresource.baseArrayLayer = 0;
 	region.srcSubresource.layerCount = src->array_layers;
 	region.srcSubresource.mipLevel = 0;
@@ -1396,9 +1419,6 @@ void VulkanRHI::cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) {
 	region.extent.height = src->height;
 	region.extent.depth = 1;
 
-	// Note: We assume caller handles barriers (TRANSFER_SRC / TRANSFER_DST) via RenderGraph
-	// But for safety, we could inject them here. RenderGraph logic is preferred.
-
 	vkCmdCopyImage(static_cast<VkCommandBuffer>(cmd),
 		vk_src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		vk_dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1408,7 +1428,7 @@ void VulkanRHI::cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) {
 bud::graphics::MemoryBlock VulkanRHI::create_upload_buffer(uint64_t size) {
 	VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	buffer_info.size = size;
-	buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT; // Allow using upload buffer directly for dynamic UI
 	buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
 	VkBuffer buffer;
@@ -1419,7 +1439,6 @@ bud::graphics::MemoryBlock VulkanRHI::create_upload_buffer(uint64_t size) {
 	VkMemoryRequirements mem_reqs;
 	vkGetBufferMemoryRequirements(device, buffer, &mem_reqs);
 
-	// [FIX] Align to nonCoherentAtomSize (typically 64-256) to ensure vkFlushMappedMemoryRanges is valid
 	// Using 256 as a safe conservative default.
 	VkDeviceSize align = std::max(mem_reqs.alignment, (VkDeviceSize)256);
 
@@ -1429,7 +1448,6 @@ bud::graphics::MemoryBlock VulkanRHI::create_upload_buffer(uint64_t size) {
 	bud::graphics::MemoryBlock result = mem_block;
 	result.internal_handle = buffer;
 
-	// [FIX] Track staging buffers for proper cleanup
 	buffer_memory_map[buffer] = static_cast<VkDeviceMemory>(mem_block.internal_handle);
 
 	return result;
@@ -1559,7 +1577,6 @@ bud::graphics::Texture* VulkanRHI::create_texture(const bud::graphics::TextureDe
 
 		this->transition_image_layout_immediate(tex->image, to_vk_format(desc.format), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-		// [FIX] Explicitly flush memory to guarantee GPU visibility (fixes corruption on some vendors/drivers if Coherent bit is missing/ignored)
 		if (buffer_memory_map.count(static_cast<VkBuffer>(staging.internal_handle))) {
 			VkMappedMemoryRange range{};
 			range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
@@ -1567,8 +1584,6 @@ bud::graphics::Texture* VulkanRHI::create_texture(const bud::graphics::TextureDe
 			range.offset = staging.offset;
 			range.size = VK_WHOLE_SIZE; // Flush everything from this offset to end (safe for linear allocator)
 
-			// Handle alignment for non-coherent atom size (simplification: assume offset is aligned, length is whole)
-			// Ideally we query physicalDeviceProperties.limits.nonCoherentAtomSize
 			vkFlushMappedMemoryRanges(device, 1, &range);
 		}
 
@@ -1610,17 +1625,18 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	ubo.view = scene_view.view_matrix;
 	ubo.proj = scene_view.proj_matrix;
 
-	// [CSM] Populate cascade matrices and depths
 	for (uint32_t i = 0; i < MAX_CASCADES; ++i) {
 		ubo.cascade_view_proj[i] = scene_view.cascade_view_proj_matrices[i];
 	}
+
 	ubo.cascade_split_depths = bud::math::vec4(
 		scene_view.cascade_split_depths[0],
 		scene_view.cascade_split_depths[1],
 		scene_view.cascade_split_depths[2],
 		scene_view.cascade_split_depths[3]
 	);
-	ubo.cascade_count = 4; // Or from config if dynamic
+
+	ubo.cascade_count = render_config.cascade_count;
 
 	ubo.cam_pos = scene_view.camera_position;
 	ubo.light_dir = scene_view.light_dir;
@@ -1730,7 +1746,6 @@ void VulkanRHI::set_debug_name(Texture* texture, ObjectType object_type, const s
 
 	auto vk_tex = dynamic_cast<VulkanTexture*>(texture);
 
-	// 给 Image 命名
 	set_object_debug_name(reinterpret_cast<uint64_t>(vk_tex->image), object_type, name);
 
 	if (vk_tex->view) {
@@ -1750,4 +1765,6 @@ void VulkanRHI::set_debug_name(CommandHandle cmd, ObjectType object_type, const 
 	auto vk_cmd = static_cast<VkCommandBuffer>(cmd);
 	set_object_debug_name(reinterpret_cast<uint64_t>(vk_cmd), object_type, name);
 }
+
+
 

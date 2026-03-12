@@ -81,7 +81,8 @@ namespace bud::graphics {
 		Less,
 		LessEqual,
 		Greater,
-		GreaterEqual
+		GreaterEqual,
+		Always
 	};
 
 	constexpr uint32_t MAX_CASCADES = 4;
@@ -154,6 +155,8 @@ namespace bud::graphics {
 		float light_intensity = 5.0f;
 		float ambient_strength = 0.05f;
 
+		bool show_debug_stats = false;
+
 		void update_matrices() {
 			view_proj_matrix = proj_matrix * view_matrix;
 		}
@@ -180,11 +183,13 @@ namespace bud::graphics {
 		ShaderStage vs;
 		ShaderStage fs;
 		VertexInputLayout vertex_layout;
+		bool is_ui_layout = false;
 		TextureFormat color_attachment_format = TextureFormat::RGBA8_UNORM;
 		TextureFormat depth_attachment_format = TextureFormat::D32_FLOAT;
 		bool depth_test = true;
 		bool depth_write = true;
 		bool enable_depth_bias = false;
+		bool blending_enable = false; // Add blending for UI
 		CullMode cull_mode = CullMode::Back;
 		CompareOp depth_compare_op = CompareOp::Less;
 	};
@@ -200,7 +205,6 @@ namespace bud::graphics {
 		bool is_valid() const { return internal_handle != nullptr; }
 	};
 
-	// 纹理基类
 	class Texture {
 	public:
 		virtual ~Texture() = default;
@@ -240,5 +244,32 @@ namespace bud::graphics {
 		std::vector<SubMesh> submeshes;
 
 		bool is_valid() const { return index_count > 0; }
+	};
+
+	struct RenderStats {
+		// 耗时 (ms)
+		float fps = 0.0f;
+		float frame_time = 0.0f;
+		float cpu_render_time = 0.0f;
+		float gpu_render_time = 0.0f; // 需通过 Vulkan Timestamps 实现，暂时预留
+
+		// 绘制指标
+		uint32_t draw_calls = 0;
+		uint32_t drawn_triangles = 0;
+		uint32_t pipeline_binds = 0;
+
+		// 剔除指标
+		uint32_t total_objects = 0;
+		uint32_t visible_objects = 0;
+		uint32_t shadow_casters = 0;
+
+		void reset() {
+			draw_calls = 0;
+			drawn_triangles = 0;
+			pipeline_binds = 0;
+			total_objects = 0;
+			visible_objects = 0;
+			shadow_casters = 0;
+		}
 	};
 }

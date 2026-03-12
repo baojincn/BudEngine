@@ -6,6 +6,7 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <imgui.h>
 
 #include "src/graphics/bud.graphics.passes.hpp"
 
@@ -20,6 +21,8 @@
 namespace bud::graphics {
 
 	namespace {
+		constexpr uint32_t imgui_font_bindless_slot = 999;
+
 		bool mat4_nearly_equal(const bud::math::mat4& a, const bud::math::mat4& b, float eps = 1e-4f) {
 			for (int c = 0; c < 4; ++c) {
 				for (int r = 0; r < 4; ++r) {
@@ -237,7 +240,8 @@ namespace bud::graphics {
 
 	RGHandle CSMShadowPass::add_to_graph(RenderGraph& render_graph, const SceneView& view, const RenderConfig& config,
 		const RenderScene& render_scene,
-		const std::vector<RenderMesh>& meshes)
+		const std::vector<RenderMesh>& meshes,
+		std::vector<std::vector<uint32_t>> csm_visible_instances)
 	{
 		if (config.shadow_map_size == 0 || config.cascade_count == 0) {
 			std::println(stderr, "[CSMShadowPass] ERROR: Invalid shadow config (size={}, cascades={}).",
@@ -323,7 +327,7 @@ namespace bud::graphics {
 						builder.write(static_cache_h, ResourceState::DepthWrite);
 						return static_cache_h;
 					},
-					[=, &render_graph, &render_scene, &meshes, &view](RHI* rhi, CommandHandle cmd) {
+					[=, csm_vis = csm_visible_instances, &render_graph, &render_scene, &meshes, &view](RHI* rhi, CommandHandle cmd) {
 						if (!pipeline) return;
 
 						for (uint32_t i = 0; i < cascade_count; ++i) {
@@ -357,8 +361,7 @@ namespace bud::graphics {
 							push_consts.light_view_proj = cascade_light_view_proj;
 							push_consts.light_dir = bud::math::vec4(bud::math::normalize(view.light_dir), 0.0f);
 
-							std::vector<uint32_t> visible_instances;
-							render_scene.cull_frustum(cascade_view_frustum_dbg, visible_instances);
+							const auto& visible_instances = csm_vis[i];
 
 							size_t _max_count = std::min(visible_instances.size(), max_scene_count);
 
@@ -425,7 +428,7 @@ namespace bud::graphics {
 
 				return *shadow_map_h;
 			},
-			[=, &render_graph, &render_scene, &meshes, &view](RHI* rhi, CommandHandle cmd) {
+			[=, csm_vis = std::move(csm_visible_instances), &render_graph, &render_scene, &meshes, &view](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) return;
 
 				auto active_map = render_graph.get_texture(*shadow_map_h);
@@ -472,8 +475,7 @@ namespace bud::graphics {
 					push_consts.light_view_proj = cascade_light_view_proj;
 					push_consts.light_dir = bud::math::vec4(bud::math::normalize(view.light_dir), 0.0f);
 
-					std::vector<uint32_t> visible_instances;
-					render_scene.cull_frustum(cascade_view_frustum_dbg, visible_instances);
+					const auto& visible_instances = csm_vis[i];
 					size_t count = visible_instances.size();
 
 					for (size_t i = 0; i < count; ++i) {
@@ -657,6 +659,222 @@ namespace bud::graphics {
 						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
 						rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, 0, 0, 0);
 					}
+				}
+
+				rhi->cmd_end_render_pass(cmd);
+			}
+		);
+	}
+
+	UIPass::~UIPass() {}
+
+	void UIPass::shutdown(RHI* rhi) {
+		if (font_texture && rhi) {
+			auto* pool = rhi->get_resource_pool();
+			if (pool) pool->release_texture(font_texture);
+			font_texture = nullptr;
+		}
+		if (current_vertex_buffer_size > 0 && rhi) {
+			rhi->destroy_buffer(vertex_buffer);
+			current_vertex_buffer_size = 0;
+		}
+		if (current_index_buffer_size > 0 && rhi) {
+			rhi->destroy_buffer(index_buffer);
+			current_index_buffer_size = 0;
+		}
+	}
+
+	void UIPass::init(RHI* rhi, const RenderConfig& config) {
+		// Build font texture FIRST to avoid nullptr exceptions in NewFrame later
+		ImGuiIO& imgui_io = ImGui::GetIO();
+		unsigned char* pixels;
+		int width, height;
+		imgui_io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+
+		TextureDesc tex_desc;
+		tex_desc.width = width;
+		tex_desc.height = height;
+		tex_desc.format = TextureFormat::RGBA8_UNORM;
+		tex_desc.mips = 1;
+
+		font_texture = rhi->create_texture(tex_desc, pixels, width * height * 4);
+		rhi->set_debug_name(font_texture, ObjectType::Texture, "ImGui_Font_Atlas");
+
+		// Register bindless slot for font texture (e.g. index 1)
+		font_bindless_index = imgui_font_bindless_slot;
+		rhi->update_bindless_texture(font_bindless_index, font_texture);
+		imgui_io.Fonts->SetTexID((ImTextureID)(intptr_t)font_bindless_index);
+
+		auto vs_code = bud::io::FileSystem::read_binary("src/shaders/debug_ui.vert.spv");
+		auto fs_code = bud::io::FileSystem::read_binary("src/shaders/debug_ui.frag.spv");
+
+		if (!vs_code || !fs_code) {
+			std::println(stderr, "[UIPass] Failed to load ImGui shaders!");
+			return;
+		}
+
+		GraphicsPipelineDesc desc;
+		desc.vs.code = *vs_code;
+		desc.fs.code = *fs_code;
+		desc.depth_test = false;
+		desc.depth_write = false;
+		desc.cull_mode = CullMode::None;
+		desc.color_attachment_format = bud::graphics::TextureFormat::BGRA8_SRGB;
+		desc.depth_attachment_format = bud::graphics::TextureFormat::Undefined;
+		desc.depth_compare_op = CompareOp::Always;
+		desc.enable_depth_bias = false;
+		desc.is_ui_layout = true;
+		desc.blending_enable = true; // Essential for UI font text
+
+		pipeline = rhi->create_graphics_pipeline(desc);
+	}
+
+	void UIPass::update_draw_data(ImDrawData* draw_data) {
+		UIDrawDataSnapshot ui_draw_data_snapshot;
+
+		if (draw_data && draw_data->CmdListsCount > 0) {
+			ui_draw_data_snapshot.display_pos = draw_data->DisplayPos;
+			ui_draw_data_snapshot.display_size = draw_data->DisplaySize;
+			ui_draw_data_snapshot.framebuffer_scale = draw_data->FramebufferScale;
+			ui_draw_data_snapshot.lists.reserve(draw_data->CmdListsCount);
+
+			for (int n = 0; n < draw_data->CmdListsCount; ++n) {
+				const ImDrawList* src_list = draw_data->CmdLists[n];
+				UIDrawListSnapshot dst_list;
+				dst_list.vertices.assign(src_list->VtxBuffer.Data, src_list->VtxBuffer.Data + src_list->VtxBuffer.Size);
+				dst_list.indices.reserve(src_list->IdxBuffer.Size);
+				dst_list.commands.reserve(src_list->CmdBuffer.Size);
+
+				for (int i = 0; i < src_list->IdxBuffer.Size; ++i) {
+					dst_list.indices.push_back(static_cast<uint32_t>(src_list->IdxBuffer.Data[i]));
+				}
+
+				for (int cmd_i = 0; cmd_i < src_list->CmdBuffer.Size; ++cmd_i) {
+					const ImDrawCmd& src_cmd = src_list->CmdBuffer[cmd_i];
+					dst_list.commands.push_back({
+						.clip_rect = src_cmd.ClipRect,
+						.elem_count = src_cmd.ElemCount,
+						.idx_offset = src_cmd.IdxOffset,
+						.vtx_offset = src_cmd.VtxOffset,
+						.texture_id = static_cast<uint32_t>(reinterpret_cast<uintptr_t>((void*)src_cmd.TextureId))
+					});
+				}
+
+				ui_draw_data_snapshot.lists.push_back(std::move(dst_list));
+			}
+		}
+
+		std::lock_guard lock(draw_data_mutex);
+		cached_draw_data = std::move(ui_draw_data_snapshot);
+	}
+
+	void UIPass::add_to_graph(RenderGraph& rg, RGHandle backbuffer) {
+		rg.add_pass("UIPass (ImGui)",
+			[&](RGBuilder& builder) {
+				builder.write(backbuffer, ResourceState::RenderTarget);
+			},
+			[=, this](RHI* rhi, CommandHandle cmd) {
+				UIDrawDataSnapshot draw_data;
+				{
+					std::lock_guard lock(draw_data_mutex);
+					draw_data = cached_draw_data;
+				}
+
+				if (!draw_data.has_data()) {
+					return;
+				}
+
+				if (!pipeline) return;
+
+				// Create or resize buffers
+				uint32_t needed_vb_size = draw_data.total_vtx_count() * sizeof(ImDrawVert);
+				uint32_t needed_ib_size = draw_data.total_idx_count() * sizeof(uint32_t);
+
+				if (needed_vb_size > current_vertex_buffer_size) {
+					if (current_vertex_buffer_size > 0) rhi->destroy_buffer(vertex_buffer);
+					current_vertex_buffer_size = needed_vb_size + 4096;
+					vertex_buffer = rhi->create_upload_buffer(current_vertex_buffer_size); 
+				}
+
+				if (needed_ib_size > current_index_buffer_size) {
+					if (current_index_buffer_size > 0) rhi->destroy_buffer(index_buffer);
+					current_index_buffer_size = needed_ib_size + 4096;
+					index_buffer = rhi->create_upload_buffer(current_index_buffer_size);
+				}
+
+				auto* vtx_dst = (ImDrawVert*)vertex_buffer.mapped_ptr;
+				auto* idx_dst = (uint32_t*)index_buffer.mapped_ptr;
+
+				for (const auto& cmd_list : draw_data.lists) {
+					std::memcpy(vtx_dst, cmd_list.vertices.data(), cmd_list.vertices.size() * sizeof(ImDrawVert));
+					vtx_dst += cmd_list.vertices.size();
+					std::memcpy(idx_dst, cmd_list.indices.data(), cmd_list.indices.size() * sizeof(uint32_t));
+					idx_dst += cmd_list.indices.size();
+				}
+
+				RenderPassBeginInfo ui_pass_info;
+				ui_pass_info.color_attachments.push_back(rg.get_texture(backbuffer));
+				ui_pass_info.clear_color = false;
+				ui_pass_info.clear_depth = false;
+
+				rhi->cmd_begin_render_pass(cmd, ui_pass_info);
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+
+				rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
+
+				rhi->cmd_bind_vertex_buffer(cmd, vertex_buffer.internal_handle);
+				rhi->cmd_bind_index_buffer(cmd, index_buffer.internal_handle);
+
+				float fb_width = draw_data.display_size.x * draw_data.framebuffer_scale.x;
+				float fb_height = draw_data.display_size.y * draw_data.framebuffer_scale.y;
+
+				rhi->cmd_set_viewport(cmd, fb_width, fb_height);
+
+				struct PushConst {
+					bud::math::vec2 scale;
+					bud::math::vec2 translate;
+					uint32_t texture_id;
+					uint32_t padding[3];
+				} push_const;
+
+				push_const.scale[0] = 2.0f / draw_data.display_size.x;
+				push_const.scale[1] = 2.0f / draw_data.display_size.y;
+				push_const.translate[0] = -1.0f - draw_data.display_pos.x * push_const.scale[0];
+				push_const.translate[1] = -1.0f - draw_data.display_pos.y * push_const.scale[1];
+				push_const.texture_id = font_bindless_index;
+
+				rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConst), &push_const);
+
+				int global_vtx_offset = 0;
+				int global_idx_offset = 0;
+				ImVec2 clip_off = draw_data.display_pos;
+				ImVec2 clip_scale = draw_data.framebuffer_scale;
+
+				for (const auto& cmd_list : draw_data.lists) {
+					for (const auto& pcmd : cmd_list.commands) {
+
+						// Setup clip rectangle
+						ImVec2 clip_min((pcmd.clip_rect.x - clip_off.x) * clip_scale.x, (pcmd.clip_rect.y - clip_off.y) * clip_scale.y);
+						ImVec2 clip_max((pcmd.clip_rect.z - clip_off.x) * clip_scale.x, (pcmd.clip_rect.w - clip_off.y) * clip_scale.y);
+
+						if (clip_min.x < 0.0f) { clip_min.x = 0.0f; }
+						if (clip_min.y < 0.0f) { clip_min.y = 0.0f; }
+						if (clip_max.x > fb_width) { clip_max.x = fb_width; }
+						if (clip_max.y > fb_height) { clip_max.y = fb_height; }
+						if (clip_max.x <= clip_min.x || clip_max.y <= clip_min.y)
+							continue;
+
+						// Scissor setup
+						rhi->cmd_set_scissor(cmd, (int32_t)clip_min.x, (int32_t)clip_min.y, (uint32_t)(clip_max.x - clip_min.x), (uint32_t)(clip_max.y - clip_min.y));
+
+						push_const.texture_id = pcmd.texture_id;
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConst), &push_const);
+
+						// Draw
+						rhi->cmd_draw_indexed(cmd, pcmd.elem_count, 1, pcmd.idx_offset + global_idx_offset, pcmd.vtx_offset + global_vtx_offset, 0);
+					}
+					global_idx_offset += static_cast<int>(cmd_list.indices.size());
+					global_vtx_offset += static_cast<int>(cmd_list.vertices.size());
 				}
 
 				rhi->cmd_end_render_pass(cmd);

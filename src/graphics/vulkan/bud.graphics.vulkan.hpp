@@ -104,6 +104,13 @@ namespace bud::graphics::vulkan {
 		void set_debug_name(const MemoryBlock& buffer, ObjectType object_type, const std::string& name) override;
 		void set_debug_name(CommandHandle cmd, ObjectType object_type, const std::string& name) override;
 
+		RenderStats get_stats() const override { return current_stats; }
+		void add_culling_stats(uint32_t total, uint32_t visible, uint32_t casters) override {
+			current_stats.total_objects += total;
+			current_stats.visible_objects += visible;
+			current_stats.shadow_casters += casters;
+		}
+
 	private:
 		// --- 初始化辅助 ---
 		void create_instance(VkInstance& vk_instance, bool enable_validation);
@@ -209,5 +216,7 @@ namespace bud::graphics::vulkan {
 
 		VulkanTexture* fallback_texture_ptr = nullptr;
 		std::atomic<bool> swapchain_out_of_date{false};
+
+		RenderStats current_stats;
 	};
 }
