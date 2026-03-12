@@ -48,9 +48,9 @@ namespace bud::engine {
 	private:
 		void handle_events();
 
-		void extract_scene_data(bud::graphics::RenderScene& render_scene);
+		void extract_render_scene_data(bud::graphics::RenderScene& render_scene);
 
-		void sync_game_to_rendering(uint32_t render_scene_index);
+		void prepare_render_scene(uint32_t render_scene_index);
 
 		void perform_rendering(float delta_time, uint32_t render_scene_index);
 

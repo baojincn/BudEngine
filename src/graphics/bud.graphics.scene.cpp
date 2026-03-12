@@ -1,6 +1,8 @@
 ﻿#include "src/graphics/bud.graphics.scene.hpp"
 #include <bit>
 
+#include "src/threading/bud.threading.hpp"
+
 namespace bud::graphics {
 
 	RenderScene::RenderScene(RenderScene&& other) noexcept {
@@ -111,9 +113,12 @@ namespace bud::graphics {
 		}
 	}
 
-	void RenderScene::build_lbvh() {
+	void RenderScene::build_culling_lbvh() {
 		size_t count = size();
 		if (count == 0) {
+			lbvh_nodes.clear();
+			bvh_nodes.clear();
+			scene_bounds = bud::math::AABB();
 			bvh_root = ~0u;
 			return;
 		}
@@ -137,6 +142,67 @@ namespace bud::graphics {
 		std::sort(lbvh_nodes.begin(), lbvh_nodes.end());
 
 		// 4. Build Tree
+		bvh_nodes.clear();
+		bvh_nodes.reserve(count * 2 - 1);
+		bvh_root = generate_hierarchy(bvh_nodes, lbvh_nodes, world_aabbs, 0, static_cast<uint32_t>(count - 1));
+	}
+
+	void RenderScene::build_culling_lbvh_parallel(bud::threading::TaskScheduler* task_scheduler) {
+		size_t count = size();
+		if (count == 0) {
+			lbvh_nodes.clear();
+			bvh_nodes.clear();
+			scene_bounds = bud::math::AABB();
+			bvh_root = ~0u;
+			return;
+		}
+
+		if (!task_scheduler || count < 512) {
+			build_culling_lbvh();
+			return;
+		}
+
+		constexpr size_t LBVH_CHUNK_SIZE = 256;
+		size_t chunk_count = (count + LBVH_CHUNK_SIZE - 1) / LBVH_CHUNK_SIZE;
+
+		std::vector<bud::math::AABB> chunk_bounds(chunk_count);
+		bud::threading::Counter bounds_counter;
+		task_scheduler->ParallelFor(count, LBVH_CHUNK_SIZE,
+			[&](size_t start, size_t end_exclusive) {
+				bud::math::AABB local_bounds;
+				for (size_t i = start; i < end_exclusive; ++i) {
+					local_bounds.merge(world_aabbs[i]);
+				}
+				chunk_bounds[start / LBVH_CHUNK_SIZE] = local_bounds;
+			},
+			&bounds_counter
+		);
+		task_scheduler->wait_for_counter(bounds_counter);
+
+		scene_bounds = bud::math::AABB();
+		for (const auto& chunk_bound : chunk_bounds) {
+			scene_bounds.merge(chunk_bound);
+		}
+
+		lbvh_nodes.clear();
+		lbvh_nodes.resize(count);
+
+		bud::threading::Counter morton_counter;
+		task_scheduler->ParallelFor(count, LBVH_CHUNK_SIZE,
+			[&](size_t start, size_t end_exclusive) {
+				for (size_t i = start; i < end_exclusive; ++i) {
+					lbvh_nodes[i] = {
+						static_cast<uint32_t>(i),
+						bud::math::compute_morton_code(world_aabbs[i].center(), scene_bounds)
+					};
+				}
+			},
+			&morton_counter
+		);
+		task_scheduler->wait_for_counter(morton_counter);
+
+		std::sort(lbvh_nodes.begin(), lbvh_nodes.end());
+
 		bvh_nodes.clear();
 		bvh_nodes.reserve(count * 2 - 1);
 		bvh_root = generate_hierarchy(bvh_nodes, lbvh_nodes, world_aabbs, 0, static_cast<uint32_t>(count - 1));
