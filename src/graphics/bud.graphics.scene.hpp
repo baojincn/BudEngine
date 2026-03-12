@@ -7,6 +7,10 @@
 
 #include "src/core/bud.math.hpp"
 
+namespace bud::threading {
+	class TaskScheduler;
+}
+
 namespace bud::graphics {
 
 	// SoA (Structure of Arrays) accelerate Cache effeciency and multi-threading processing
@@ -55,7 +59,8 @@ namespace bud::graphics {
 		RenderScene& operator=(const RenderScene&) = delete;
 
 		void reset(size_t estimated_capacity);
-		void build_lbvh();
+		void build_culling_lbvh();
+		void build_culling_lbvh_parallel(bud::threading::TaskScheduler* task_scheduler);
 
 		void cull_frustum(const bud::math::Frustum& frustum, std::vector<uint32_t>& out_indices) const;
 

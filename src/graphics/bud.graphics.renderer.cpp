@@ -265,13 +265,7 @@ namespace bud::graphics {
 		std::vector<std::vector<uint32_t>> culled_results(1 + cascade_count);
 
 		if (instance_count > 0) {
-			bud::math::AABB scene_aabb;
-
-			for (size_t i = 0; i < instance_count; ++i) {
-				scene_aabb.merge(render_scene.world_aabbs[i]);
-			}
-
-			update_cascades(scene_view, render_config, scene_aabb);
+			update_cascades(scene_view, render_config, render_scene.scene_bounds);
 
 			constexpr uint32_t main_camera_count = 1;
 			const uint32_t total_views = main_camera_count + cascade_count;
@@ -284,35 +278,14 @@ namespace bud::graphics {
 
 			const bud::math::Frustum& main_camera_frustum = view_frustums[0];
 
-			constexpr size_t CULL_CHUNK_SIZE = 256;
-			size_t num_chunks = (instance_count + CULL_CHUNK_SIZE - 1) / CULL_CHUNK_SIZE;
-
-			std::vector<std::vector<std::vector<uint32_t>>> chunked_results(num_chunks, std::vector<std::vector<uint32_t>>(total_views));
-
-			for (size_t chunk_idx = 0; chunk_idx < num_chunks; ++chunk_idx) {
-				size_t instance_start = chunk_idx * CULL_CHUNK_SIZE;
-				size_t instance_end = std::min(instance_start + CULL_CHUNK_SIZE, instance_count);
-				for (size_t v = 0; v < total_views; ++v) {
-					chunked_results[chunk_idx][v].reserve(instance_end - instance_start);
-				}
-			}
-
 			bud::threading::Counter culling_counter;
 
-			task_scheduler->ParallelFor(num_chunks, 1,
+			task_scheduler->ParallelFor(total_views, 1,
 				[&](size_t start, size_t end) {
-					for (size_t chunk_idx = start; chunk_idx < end; ++chunk_idx) {
-						size_t instance_start = chunk_idx * CULL_CHUNK_SIZE;
-						size_t instance_end = std::min(instance_start + CULL_CHUNK_SIZE, instance_count);
-
-						for (size_t i = instance_start; i < instance_end; ++i) {
-							const auto& aabb = render_scene.world_aabbs[i];
-							for (size_t v = 0; v < total_views; ++v) {
-								if (bud::math::intersect_aabb_frustum(aabb, view_frustums[v])) {
-									chunked_results[chunk_idx][v].push_back(static_cast<uint32_t>(i));
-								}
-							}
-						}
+					for (size_t view_index = start; view_index < end; ++view_index) {
+						auto& visible_instances = culled_results[view_index];
+						visible_instances.clear();
+						render_scene.cull_frustum(view_frustums[view_index], visible_instances);
 					}
 				},
 				&culling_counter
@@ -320,21 +293,8 @@ namespace bud::graphics {
 
 			task_scheduler->wait_for_counter(culling_counter);
 
-			culled_results.assign(total_views, {});
-			for (size_t v = 0; v < total_views; ++v) {
-				size_t total_visible = 0;
-				for (size_t c = 0; c < num_chunks; ++c) {
-					total_visible += chunked_results[c][v].size();
-				}
-				culled_results[v].reserve(total_visible);
-				for (size_t c = 0; c < num_chunks; ++c) {
-					culled_results[v].insert(
-						culled_results[v].end(),
-						chunked_results[c][v].begin(),
-						chunked_results[c][v].end()
-					);
-				}
-				if (v > 0) total_shadow_casters += (uint32_t)total_visible;
+			for (size_t v = 1; v < total_views; ++v) {
+				total_shadow_casters += static_cast<uint32_t>(culled_results[v].size());
 			}
 
 			const auto& visible_instances = culled_results[0];

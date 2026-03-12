@@ -121,8 +121,7 @@ namespace bud::engine {
 				}
 
 				current_write_index = next_write_index;
-
-				extract_scene_data(render_scenes[current_write_index]);
+				prepare_render_scene(current_write_index);
 				last_committed_index.store(current_write_index, std::memory_order_release);
 			}
 
@@ -164,7 +163,8 @@ namespace bud::engine {
 		}
 	}
 
-	void BudEngine::extract_scene_data(bud::graphics::RenderScene& render_scene) {
+	void BudEngine::extract_render_scene_data(bud::graphics::RenderScene& render_scene) {
+		ZoneScoped;
 		auto& logic_entities = scene.entities;
 		size_t total_logic_count = logic_entities.size();
 
@@ -212,12 +212,15 @@ namespace bud::engine {
 		);
 
 		task_scheduler->wait_for_counter(extract_scene_counter);
+
+		FrameMark;
 	}
 
-	void BudEngine::sync_game_to_rendering(uint32_t render_scene_index) {
+	void BudEngine::prepare_render_scene(uint32_t render_scene_index) {
 		ZoneScoped;
 		
-		extract_scene_data(render_scenes[render_scene_index]);
+		extract_render_scene_data(render_scenes[render_scene_index]);
+		render_scenes[render_scene_index].build_culling_lbvh_parallel(task_scheduler.get());
 
 		FrameMark;
 	}
