@@ -52,7 +52,7 @@ CSM Shadow
 ![](samples/screenshots/csm_shadow_debug.png)
 
 Performance tracing tool's test 
-![](samples/screenshots/performance_tracing.png)
+![](samples/screenshots/tracing0.png)
 
 
 
