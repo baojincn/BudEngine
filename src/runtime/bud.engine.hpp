@@ -86,6 +86,6 @@ namespace bud::engine {
 		float far_plane{ 5000.0f };
 		float near_plane{ 1.0f };
 
-		bool show_debug_stats = false;
+		bool show_debug_stats = true;
 	};
 }

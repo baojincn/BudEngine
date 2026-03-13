@@ -51,14 +51,6 @@ A full fiber-based task driven lightweight 3D Game Engine.
 CSM Shadow
 ![](samples/screenshots/csm_shadow_debug.png)
 
-PBR and PCF Shadow
-![](samples/screenshots/pbr_shadow.png)
-
-
-Mipmaps
-![](samples/screenshots/hello_mipmaps.png)
-
-
 Performance tracing tool's test 
 ![](samples/screenshots/performance_tracing.png)
 
