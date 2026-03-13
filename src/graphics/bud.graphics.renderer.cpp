@@ -267,35 +267,40 @@ namespace bud::graphics {
 		if (instance_count > 0) {
 			update_cascades(scene_view, render_config, render_scene.scene_bounds);
 
-			constexpr uint32_t main_camera_count = 1;
-			const uint32_t total_views = main_camera_count + cascade_count;
-
-			std::vector<bud::math::Frustum> view_frustums(total_views);
+			std::vector<bud::math::Frustum> view_frustums(1 + cascade_count);
 			view_frustums[0].update(scene_view.view_proj_matrix);
-			for (uint32_t i = 0; i < cascade_count; ++i) {
-				view_frustums[i + 1].update(scene_view.cascade_view_proj_matrices[i]);
+
+			auto& main_visible_instances = culled_results[0];
+			main_visible_instances.clear();
+			render_scene.cull_frustum(view_frustums[0], main_visible_instances);
+
+			if (!main_visible_instances.empty() && cascade_count > 0) {
+				for (uint32_t i = 0; i < cascade_count; ++i) {
+					view_frustums[i + 1].update(scene_view.cascade_view_proj_matrices[i]);
+				}
+
+				bud::threading::Counter culling_counter;
+
+				task_scheduler->ParallelFor(cascade_count, 1,
+					[&](size_t start, size_t end) {
+						for (size_t cascade_idx = start; cascade_idx < end; ++cascade_idx) {
+							auto result_index = cascade_idx + 1;
+							auto& visible_instances = culled_results[result_index];
+							visible_instances.clear();
+							render_scene.cull_frustum(view_frustums[result_index], visible_instances);
+						}
+					},
+					&culling_counter
+				);
+
+				task_scheduler->wait_for_counter(culling_counter);
+
+				for (uint32_t v = 1; v <= cascade_count; ++v) {
+					total_shadow_casters += static_cast<uint32_t>(culled_results[v].size());
+				}
 			}
 
 			const bud::math::Frustum& main_camera_frustum = view_frustums[0];
-
-			bud::threading::Counter culling_counter;
-
-			task_scheduler->ParallelFor(total_views, 1,
-				[&](size_t start, size_t end) {
-					for (size_t view_index = start; view_index < end; ++view_index) {
-						auto& visible_instances = culled_results[view_index];
-						visible_instances.clear();
-						render_scene.cull_frustum(view_frustums[view_index], visible_instances);
-					}
-				},
-				&culling_counter
-			);
-
-			task_scheduler->wait_for_counter(culling_counter);
-
-			for (size_t v = 1; v < total_views; ++v) {
-				total_shadow_casters += static_cast<uint32_t>(culled_results[v].size());
-			}
 
 			const auto& visible_instances = culled_results[0];
 			size_t visible_count_initial = visible_instances.size();

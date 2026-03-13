@@ -42,10 +42,10 @@ namespace bud::engine {
 		IMGUI_CHECKVERSION();
 		ImGui::CreateContext();
 		ImGuiIO& imgui_io = ImGui::GetIO();
-		imgui_io.IniFilename = "ui/config/imgui.ini";
+		imgui_io.IniFilename = "src/ui/config/imgui.ini";
 		imgui_io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 		ImGui::StyleColorsDark();
-		ImGui_ImplSDL3_InitForOther((SDL_Window*)window->get_sdl_window());
+		ImGui_ImplSDL3_InitForOther(window->get_sdl_window());
 
 		renderer = std::make_unique<bud::graphics::Renderer>(rhi.get(), asset_manager.get(), task_scheduler.get());
 

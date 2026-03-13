@@ -545,7 +545,7 @@ namespace bud::graphics {
         desc.fs.code = *fs_code;
         desc.depth_test = true;
         desc.depth_write = true;
-        desc.cull_mode = CullMode::None; // Sponza Cloth (Double Sided)
+        desc.cull_mode = CullMode::None; // Double Sided
         desc.color_attachment_format = bud::graphics::TextureFormat::BGRA8_SRGB; 
 		desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
 		desc.enable_depth_bias = false;
@@ -769,7 +769,7 @@ namespace bud::graphics {
 	}
 
 	void UIPass::add_to_graph(RenderGraph& rg, RGHandle backbuffer) {
-		rg.add_pass("UIPass (ImGui)",
+		rg.add_pass("UIPass",
 			[&](RGBuilder& builder) {
 				builder.write(backbuffer, ResourceState::RenderTarget);
 			},
@@ -780,11 +780,11 @@ namespace bud::graphics {
 					draw_data = cached_draw_data;
 				}
 
-				if (!draw_data.has_data()) {
+				if (!draw_data.has_data())
 					return;
-				}
 
-				if (!pipeline) return;
+				if (!pipeline)
+					return;
 
 				// Create or resize buffers
 				uint32_t needed_vb_size = draw_data.total_vtx_count() * sizeof(ImDrawVert);
