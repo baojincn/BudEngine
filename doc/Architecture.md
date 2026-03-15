@@ -29,3 +29,24 @@ private:
 * **Scalability:** By avoiding global state, we leave the door open to instantiate multiple `BudEngine` objects safely in the same process domain.
 
 By strictly disabling copying on our core managers (`= delete`) and wrapping them in `std::unique_ptr` within a master `BudEngine` class, we perfectly emulate the "there is only one" intent of a Singleton, but with 100% thread-safety, deterministic destruction, and clean architectural boundaries.
+
+## Rendering Architecture Rollout Status
+
+To keep architecture and implementation aligned, the rendering pipeline is rolled out incrementally.
+
+### Current implemented scope
+- Stage 1 (`CPU Macro-Culling`) is implemented.
+- The engine currently performs CPU-side instance visibility filtering before deeper GPU-side filtering.
+
+### Planned next scope
+- Stage 2: `GPU Instance-Culling` (Z-prepass + Hi-Z + occlusion culling) is planned.
+- Stage 3: `GPU Meshlet/Micro-Culling` (high-end profile) is planned.
+- Stage 4: `Indirect/Visibility-Buffer Dispatch` is planned.
+- Stage 5: `Neural Rendering` (AI denoise + neural super-resolution) is planned.
+
+### Responsibility boundaries (unchanged)
+- `BudEngine`: orchestration and lifecycle.
+- `RHI`: device/swapchain/synchronization ownership.
+- `Renderer`: pass graph, culling algorithms, and draw dispatch.
+
+Detailed data flow and pass-level notes are tracked in `doc/Graphics.md`.

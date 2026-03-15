@@ -42,3 +42,50 @@ vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
 By pinpointing the color attachment output stage, we are enabling the GPU to start executing the command buffer immediately. The GPU can perform vertex fetching, run vertex shaders, and do depth testing for the incoming frame *concurrently* while waiting for the monitor/OS to release the image. 
 
 The pipeline will only stall at the very end—the `Color Attachment Output` stage—because that is the exact physical moment the hardware needs the memory address of the swapchain image to write the final pixels. This overlap maximizes GPU utilization and drastically improves framerates.
+
+## BudEngine Multi-stage Rendering Path (Implementation Status)
+
+This section records the current progress of the multi-level culling/rendering design.
+
+### Stage 1: CPU Macro-Culling (Implemented)
+**Status:** Implemented
+
+**Current result**
+- CPU-side frustum culling at instance level (LBVH-oriented broad filtering).
+- Produces a compact visible instance list for downstream rendering.
+
+**Benefit**
+- Early rejection of out-of-frustum objects.
+- Lower draw preparation cost and lower downstream GPU candidate count.
+
+### Stage 2: GPU Instance-Culling (Planned)
+**Status:** Planned
+
+- Z-prepass (major occluders).
+- Hi-Z/depth pyramid build.
+- GPU instance occlusion culling to a survived instance buffer.
+
+### Stage 3: GPU Meshlet/Micro-Culling (Planned, high-end profile)
+**Status:** Planned
+
+- Instance-to-meshlet expansion with LOD-aware dispatch.
+- Meshlet frustum + normal-cone/backface + Hi-Z occlusion culling.
+
+### Stage 4: Raster Dispatch (Planned)
+**Status:** Planned
+
+- Build indirect draw commands from survived buffers.
+- Execute through `vkCmdDrawIndexedIndirect`.
+- Optional visibility buffer route.
+
+### Stage 5: Neural Rendering (Planned)
+**Status:** Planned
+
+- Optional AI denoise pass.
+- Neural super-resolution from low-res `color/depth/motion vectors` (and history/exposure when enabled).
+- Post-process and present to swapchain.
+
+### Platform Routing Strategy
+- **Mobile/TBDR:** CPU-heavy conservative path, strict bandwidth and thermal control.
+- **Mainstream PC/Console:** GPU instance-culling as the default path.
+- **High-end:** meshlet path + neural rendering path enabled.
