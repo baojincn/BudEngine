@@ -10,6 +10,11 @@ jobs:
     runs-on: windows-latest
 
     steps:
+    - name: Check Vulkan SDK
+      run: |
+        echo "VULKAN_SDK=$env:VULKAN_SDK"
+        $env:VULKAN_SDK\Bin\vulkaninfo.exe
+
     - name: Checkout code
       uses: actions/checkout@v3
 
@@ -19,7 +24,7 @@ jobs:
         vcpkgArguments: '--triplet x64-windows'
 
     - name: Set up CMake
-      uses: lukka/get-cmake@v3
+      uses: lukka/get-cmake@v3.25.0
       with:
         cmakeVersion: '4.0.0'
 
@@ -30,7 +35,7 @@ jobs:
       run: cmake --build build --config Release -- -j
 
     - name: Upload Build Artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v3.1.2
       with:
         name: BudEngine-Windows-Release
         path: build/
