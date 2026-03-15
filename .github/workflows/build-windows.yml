@@ -1,0 +1,36 @@
+﻿name: Build Windows Release
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up vcpkg
+      uses: lukka/get-vcpkg@v11
+      with:
+        vcpkgArguments: '--triplet x64-windows'
+
+    - name: Set up CMake
+      uses: lukka/get-cmake@v3
+      with:
+        cmakeVersion: '4.0.0'
+
+    - name: Configure CMake
+      run: cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUD_ENABLE_PROFILING=OFF -DBUD_ENABLE_AFTERMATH=ON -DBUD_BUILD_SAMPLES=ON -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+
+    - name: Build
+      run: cmake --build build --config Release -- -j
+
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: BudEngine-Windows-Release
+        path: build/
