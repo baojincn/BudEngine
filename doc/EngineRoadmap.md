@@ -15,13 +15,14 @@ This document is the top-level milestone roadmap for BudEngine across rendering,
 | Milestone | Focus | Target Outcome | Status |
 |---|---|---|---|
 | M0 | Foundation | Stable `BudEngine` orchestration (`Engine`/`RHI`/`Renderer` boundaries) | Done |
-| M1 | Rendering Stage 1 | CPU macro-culling (LBVH-oriented frustum filtering) | Done |
+| M1 | Rendering Stage 1 | CPU macro-culling (LBVH-oriented frustum filtering & screen-area heuristic) | Done |
+| M1.5| Asset & Shader Toolchain| `cgltf` scene parsing, file-watcher hot-reload, and DXC (HLSL->SPIR-V) compiler pipeline | Planned |
 | M2 | Rendering Stage 2 | GPU instance culling (`Z-Prepass` + `Hi-Z` + occlusion compaction) | Planned |
 | M3 | Rendering Stage 3 | High-end meshlet/micro-culling path (Task/Mesh or Compute fallback) | Planned |
 | M4 | Rendering Stage 4 | Indirect draw / optional visibility-buffer dispatch path | Planned |
 | M5 | Rendering Stage 5 | Neural rendering path (AI denoise + in-house CNN neural super-resolution) | Planned |
 | M6 | Cross-system Vertical Slice | Integrate rendering + physics + animation + audio in one playable sample | Planned |
-| M7 | Runtime and Tools | Blender Live Link bridge, asset dependency tracking, hot-reload workflow, and in-engine debug panels | Planned |
+| M7 | Runtime and Tools | Blender Live Link bridge (Socket-based), asset dependency tracking, in-engine debug panels | Planned |
 | M8 | Physics and Animation Upgrade | Constraints, retargeting, IK baseline, and gameplay-ready character stack | Planned |
 | M9 | Audio and Platform Integration | Spatial audio, bus/mixer policy, input mapping, and save/load versioning | Planned |
 | M10 | Production Hardening | Automated regression tests, performance gates, and crash replay package pipeline | Planned |
@@ -37,12 +38,40 @@ Rendering is implemented as a scalable multi-profile pipeline:
 ### Rendering Milestones
 
 - **R1 (Done):** CPU macro-culling at instance level.
+- **R1.5:** Unified HLSL shader compilation pipeline & glTF data ingestion.
 - **R2:** GPU instance-level occlusion culling pipeline.
 - **R3:** Meshlet-level fine-grained culling pipeline.
 - **R4:** Low-resolution internal raster + robust motion vector output.
 - **R5:** Neural upscaling/denoise integration before present.
 
+### Milestone Definition of Done (DoD) Snapshots
+
+- **M1.5 / R1.5 (Asset and Shader Toolchain)**
+  - `cgltf` scene load path can import at least one representative `.gltf` sample end-to-end.
+  - File watcher detects changed assets and triggers hot-reload without restarting runtime.
+  - DXC-based HLSL-to-SPIR-V compilation is integrated in build/runtime workflow with clear error reporting.
+
+- **R2 (GPU Instance Culling)**
+  - `Z-Prepass + Hi-Z + occlusion compaction` path is functional and can be toggled for A/B comparison.
+  - GPU culling path produces deterministic visible-instance counts across repeated runs in same camera state.
+  - Frame-time or GPU-pass metrics are captured before/after enabling R2 for baseline comparison.
+
+- **R5 (Neural Rendering / Super-resolution)**
+  - In-house CNN super-resolution pass is integrated as a stable post-process compute stage.
+  - Runtime path supports required inputs (`low_res_color`, `depth`, `motion_vectors`, optional history).
+  - Quality/performance gates are reported (`PSNR/SSIM` offline, frame-time budget online).
+
+- **L0 (Blender File-based Hot Reload Foundation)**
+  - Blender-exported `.gltf` modifications appear in BudEngine through file-based hot reload.
+  - Transform/hierarchy updates can be applied interactively without process restart.
+  - Failed asset reload keeps previous valid runtime state (safe fallback behavior).
+
 ### Rendering Extension Tracks (Planned)
+
+- **Shader & Pipeline Track (Crucial Infrastructure)**
+  - HLSL as the single source of truth for all shader stages.
+  - Runtime/Offline DXC integration (HLSL to SPIR-V).
+  - Automated SPIR-V reflection to generate C++ Descriptor Set Layouts.
 
 - **Geometry Track**
   - GPU-driven culling completion (`Hi-Z` occlusion in compute path).
@@ -77,7 +106,11 @@ BudEngine uses Blender as the primary external content editor to avoid building 
 
 ### Live Link Phases
 
-- **L1:** One-way session from Blender to BudEngine using local transport.
+- **L0: File-Based Hot Reloading (The Foundation)**
+  - Integrate `cgltf` to parse `.gltf` scenes as the Single Source of Truth.
+  - OS-level file watcher (e.g., `std::filesystem` last write time) to detect Blender exports.
+  - Instant runtime scene reconstruction (Transform/Hierarchy updates) upon file change.
+- **L1:** One-way socket session from Blender to BudEngine using local transport (127.0.0.1).
 - **L2:** Incremental scene patch sync (`create`, `update`, `delete`) with stable object UUID mapping.
 - **L3:** Real-time lightweight updates (transform/light/camera/material scalar parameters).
 - **L4:** Asynchronous heavy asset refresh (mesh/skeleton/animation/texture) with safe hot-reload fallback.

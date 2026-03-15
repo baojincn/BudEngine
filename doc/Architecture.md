@@ -36,17 +36,19 @@ To keep architecture and implementation aligned, the rendering pipeline is rolle
 
 ### Current implemented scope
 - Stage 1 (`CPU Macro-Culling`) is implemented.
-- The engine currently performs CPU-side instance visibility filtering before deeper GPU-side filtering.
+- The engine currently performs CPU-side instance visibility filtering (Frustum + Screen-Area Heuristic) before deeper GPU-side filtering.
 
 ### Planned next scope
+- Stage 1.5: `Asset & Shader Toolchain` (`cgltf` parsing, HLSL->SPIR-V via DXC) is planned.
 - Stage 2: `GPU Instance-Culling` (Z-prepass + Hi-Z + occlusion culling) is planned.
 - Stage 3: `GPU Meshlet/Micro-Culling` (high-end profile) is planned.
 - Stage 4: `Indirect/Visibility-Buffer Dispatch` is planned.
 - Stage 5: `Neural Rendering` (AI denoise + neural super-resolution) is planned.
 
 ### Responsibility boundaries (unchanged)
-- `BudEngine`: orchestration and lifecycle.
-- `RHI`: device/swapchain/synchronization ownership.
-- `Renderer`: pass graph, culling algorithms, and draw dispatch.
+- `BudEngine`: Orchestration, OS window events, and systems lifecycle.
+- `RHI`: Device, swapchain, Vulkan sync primitives, and pure GPU resource handles (VMA).
+- `Renderer`: Culling algorithms, materials, and draw dispatch.
+- **`RenderGraph` (Owned by Renderer):** Acts as the central data-flow orchestrator. It manages pass dependencies, transient GPU memory aliasing, and automated image/buffer barrier generation.
 
 Detailed data flow and pass-level notes are tracked in `doc/Graphics.md`.
