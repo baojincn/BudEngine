@@ -95,3 +95,19 @@ public:
     TaskScheduler& operator=(const TaskScheduler&) = delete;
 };
 ```
+## 6. GPU Memory Management (VRAM)
+
+Managing GPU memory requires entirely different paradigms than CPU memory. BudEngine strictly avoids manual `vkAllocateMemory` calls in favor of a dedicated memory allocator and graph-based lifetimes.
+
+### 6.1 Vulkan Memory Allocator (VMA)
+BudEngine utilizes AMD's Vulkan Memory Allocator (VMA) under the hood of the `RHI`. 
+* **Reason:** Vulkan has strict limits on the maximum number of memory allocations (often 4096). Attempting to allocate a raw `VkDeviceMemory` block for every single texture or buffer will cause crashes. VMA allocates large blocks of VRAM and sub-allocates them to engine resources efficiently.
+
+### 6.2 Render Graph & Transient Memory Aliasing
+Modern rendering pipelines (like BudEngine's multi-stage GPU culling and neural rendering) generate dozens of intermediate Render Targets (e.g., Z-Prepass Depth, Hi-Z Mipmaps, Culling bitmasks).
+* **The Strategy:** The `RenderGraph` analyzes the dependency chain of passes. If Pass C runs after Pass A finishes, and Pass C doesn't need Pass A's output, they can share the exact same physical VRAM address. This is called **Transient Memory Aliasing**, and it is critical for keeping 4K rendering within reasonable VRAM budgets.
+
+### 6.3 CPU-GPU Data Streaming (Ring Buffers)
+When streaming data (like Instance Matrices or Material params) from the CPU to the GPU, BudEngine uses **Per-Frame Ring Buffers**.
+* **Rule:** If the Swapchain has 3 images in flight, dynamic GPU buffers must be allocated with a size of `DataSize * 3`.
+* **Execution:** The CPU only maps and writes to the memory segment corresponding to the `current_frame_index`. This prevents the CPU from overwriting data that the GPU is currently reading for a previous frame in flight, completely eliminating tearing and race conditions.
