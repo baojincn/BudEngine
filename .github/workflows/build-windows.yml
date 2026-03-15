@@ -18,11 +18,11 @@ jobs:
       with:
         vulkan-query-version: latest
         vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang, SPIRV-Tools
-
+	
     - name: Check Vulkan SDK
       run: |
         echo "VULKAN_SDK=$env:VULKAN_SDK"
-        $env:VULKAN_SDK\Bin\vulkaninfo.exe
+        & "$env:VULKAN_SDK\Bin\vulkaninfo.exe"
 
     - name: Set up vcpkg
       uses: lukka/run-vcpkg@v11
