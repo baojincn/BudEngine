@@ -22,11 +22,22 @@ jobs:
     - name: Setup Ninja
       uses: seanmiddleditch/gha-setup-ninja@v4
 
-    - name: Install Vulkan SDK
-      uses: humbletim/install-vulkan-sdk@v1.2
-      with:
-        version: '1.3.268.0'
-        cache: true
+    - name: Hardcore Vulkan SDK Install (1.4.335.0)
+      shell: pwsh
+      run: |
+        $Version = "1.4.335.0"
+        $Url = "https://sdk.lunarg.com/sdk/download/$Version/windows/VulkanSDK-$Version-Installer.exe"
+        $Installer = "$env:TEMP\VulkanSDK.exe"
+        
+        Write-Host "Downloading Vulkan $Version directly from LunarG..."
+        Invoke-WebRequest -Uri $Url -OutFile $Installer
+        
+        Write-Host "Running silent installation..."
+        Start-Process -FilePath $Installer -ArgumentList "--root", "C:\VulkanSDK\$Version", "--accept-licenses", "--default-answer", "--confirm-command", "install" -Wait -NoNewWindow
+        
+        Write-Host "Exporting Environment Variables..."
+        echo "VULKAN_SDK=C:\VulkanSDK\$Version" >> $env:GITHUB_ENV
+        echo "C:\VulkanSDK\$Version\Bin" >> $env:GITHUB_PATH
 
     - name: Set up vcpkg
       uses: lukka/run-vcpkg@v11
