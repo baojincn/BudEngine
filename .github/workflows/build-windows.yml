@@ -42,8 +42,15 @@ jobs:
     - name: Build
       run: cmake --build build --config Release
 
+    - name: Install Build Artifacts
+      run: cmake --install build --prefix build/install
+
+    - name: Organize Build Artifacts
+      run: |
+        pwsh ./pack_assets.ps1
+
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: BudEngine-Windows-Release
-        path: build/
+        path: build/install
