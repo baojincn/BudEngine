@@ -14,7 +14,13 @@ jobs:
       uses: actions/checkout@v4
       with:
         submodules: recursive
+        fetch-depth: 0
 
+    - name: Setup MSVC Environment
+      uses: ilammy/msvc-dev-cmd@v1  
+
+    - name: Setup Ninja
+      uses: ninja-actions/setup-ninja@v1.1.1
 
     - name: Setup Vulkan SDK
       uses: humbletim/setup-vulkan-sdk@v1.2.1
