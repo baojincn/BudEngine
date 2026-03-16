@@ -20,7 +20,7 @@ jobs:
       uses: ilammy/msvc-dev-cmd@v1  
 
     - name: Setup Ninja
-      uses: ninja-actions/setup-ninja@v1.1.1
+      uses: seanmiddleditch/gha-setup-ninja@v4
 
     - name: Setup Vulkan SDK
       uses: humbletim/setup-vulkan-sdk@v1.2.1
