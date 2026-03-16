@@ -40,7 +40,7 @@ jobs:
       run: cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUD_ENABLE_PROFILING=OFF -DBUD_ENABLE_AFTERMATH=ON -DBUD_BUILD_SAMPLES=ON -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 
     - name: Build
-      run: cmake --build build --config Release -- -j
+      run: cmake --build build --config Release
 
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
