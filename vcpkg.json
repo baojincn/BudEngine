@@ -1,57 +1,59 @@
-﻿{
-	"name": "bud-engine",
-	"version-string": "1.0.0",
-	"builtin-baseline": "b1b19307e2d2ec1eefbdb7ea069de7d4bcd31f01",
-	"dependencies": [
-		{
-			"name": "sdl3",
-			"features": [
-				"vulkan"
-			]
-		},
-		{
-			"name": "imgui",
-			"features": [
-				"sdl3-binding",
-				"vulkan-binding"
-			]
-		},
-		"vulkan",
-		"vulkan-memory-allocator",
-		"glm",
-		"tracy",
-		"tinygltf",
-		"tinyobjloader"
-	],
-	"overrides": [
-		{
-			"name": "sdl3",
-			"version-string": "3.2.8"
-		},
-		{
-			"name": "vulkan",
-			"version-string": "1.3.268.0"
-		},
-		{
-			"name": "vulkan-memory-allocator",
-			"version-string": "3.1.0"
-		},
-		{
-			"name": "glm",
-			"version-string": "1.0.2"
-		},
-		{
-			"name": "tracy",
-			"version-string": "0.11.1"
-		},
-		{
-			"name": "tinygltf",
-			"version-string": "2.9.6"
-		},
-		{
-			"name": "tinyobjloader",
-			"version-string": "2.0.0rc13"
-		}
-	],
-	"description": "Bud Engine - A full task-driven Game Engine."
+{
+  "name": "bud-engine",
+  "version-string": "1.0.0",
+  "builtin-baseline": "4b77da7fed37817f124936239197833469f1b9a8",
+  "dependencies": [
+    {
+      "name": "sdl3",
+      "features": [
+        "vulkan"
+      ]
+    },
+    {
+      "name": "imgui",
+      "features": [
+        "sdl3-binding",
+        "vulkan-binding"
+      ]
+    },
+    "vulkan",
+    "vulkan-memory-allocator",
+    "glm",
+    "tracy",
+    "tinygltf",
+    "tinyobjloader",
+    "pybind11",
+    "onnxruntime"
+  ],
+  "overrides": [
+    {
+      "name": "sdl3",
+      "version-string": "3.2.8"
+    },
+    {
+      "name": "vulkan",
+      "version-string": "1.3.268.0"
+    },
+    {
+      "name": "vulkan-memory-allocator",
+      "version-string": "3.1.0"
+    },
+    {
+      "name": "glm",
+      "version-string": "1.0.2"
+    },
+    {
+      "name": "tracy",
+      "version-string": "0.11.1"
+    },
+    {
+      "name": "tinygltf",
+      "version-string": "2.9.6"
+    },
+    {
+      "name": "tinyobjloader",
+      "version-string": "2.0.0rc13"
+    }
+  ],
+  "description": "Bud Engine - A full task-driven Game Engine."
 }

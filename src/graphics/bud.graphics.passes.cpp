@@ -756,7 +756,7 @@ namespace bud::graphics {
 						.elem_count = src_cmd.ElemCount,
 						.idx_offset = src_cmd.IdxOffset,
 						.vtx_offset = src_cmd.VtxOffset,
-						.texture_id = static_cast<uint32_t>(reinterpret_cast<uintptr_t>((void*)src_cmd.TextureId))
+						.texture_id = static_cast<uint32_t>(reinterpret_cast<uintptr_t>((void*)src_cmd.GetTexID()))
 					});
 				}
 

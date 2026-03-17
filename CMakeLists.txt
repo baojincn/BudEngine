@@ -51,6 +51,8 @@ find_package(imgui CONFIG REQUIRED)
 if(BUD_ENABLE_PROFILING)
 	find_package(Tracy CONFIG REQUIRED)
 endif()
+find_package(onnxruntime CONFIG REQUIRED)
+find_package(pybind11 CONFIG REQUIRED)
 # End, find dependencies
 
 # ---------------------------------------------------------------------------
@@ -209,7 +211,13 @@ target_sources(bud_engine_core
 		"src/graphics/vulkan/bud.vulkan.utils.hpp"
 )
 
-target_link_libraries(bud_engine_core PUBLIC SDL3::SDL3 Vulkan::Vulkan imgui::imgui)
+target_link_libraries(bud_engine_core
+	PUBLIC
+		SDL3::SDL3
+		Vulkan::Vulkan
+		imgui::imgui
+		onnxruntime::onnxruntime
+)
 
 target_include_directories(bud_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # End, define engine core library
