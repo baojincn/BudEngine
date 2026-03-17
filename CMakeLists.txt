@@ -209,6 +209,9 @@ target_sources(bud_engine_core
 		"src/graphics/vulkan/bud.vulkan.pool.hpp"
 		"src/graphics/vulkan/bud.vulkan.types.hpp"
 		"src/graphics/vulkan/bud.vulkan.utils.hpp"
+
+		"src/ml/bud.ml.tensor.hpp"
+		"src/ml/bud.ml.backend.hpp"
 )
 
 target_link_libraries(bud_engine_core
