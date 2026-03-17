@@ -1,4 +1,4 @@
-﻿#include <vector>
+#include <vector>
 #include <string>
 #include <iostream>
 #include <print>
@@ -45,6 +45,7 @@ PFN_vkSetDebugUtilsObjectNameEXT fpSetDebugUtilsObjectNameEXT = nullptr;
 struct VulkanPipelineObject {
 	VkPipeline pipeline;
 	VkPipelineLayout layout;
+	VkPipelineBindPoint bind_point;
 };
 
 #ifdef BUD_ENABLE_AFTERMATH
@@ -113,6 +114,8 @@ VulkanLayoutTransition bud::graphics::vulkan::get_vk_transition(ResourceState st
 		return { VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT };
 	case ResourceState::TransferSrc:
 		return { VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT };
+	case ResourceState::UnorderedAccess:
+		return { VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT };
 	default:
 		return { VK_IMAGE_LAYOUT_GENERAL, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT };
 	}
@@ -171,6 +174,13 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	layout_builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 
 	global_set_layout = layout_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
+
+	// Compute Pipeline Layout (Max 4 storage buffers at binding 0..3)
+	DescriptorLayoutBuilder compute_builder;
+	for (int i = 0; i < 4; i++) {
+		compute_builder.add_binding(i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+	}
+	compute_set_layout = compute_builder.build(device, 0, nullptr, 0);
 
 	// 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
@@ -366,6 +376,8 @@ void VulkanRHI::cleanup() {
 		vkDestroyDescriptorPool(device, global_descriptor_pool, nullptr);
 	if (global_set_layout)
 		vkDestroyDescriptorSetLayout(device, global_set_layout, nullptr);
+	if (compute_set_layout)
+		vkDestroyDescriptorSetLayout(device, compute_set_layout, nullptr);
 
 	if (pipeline_cache)
 		pipeline_cache->cleanup();
@@ -456,6 +468,12 @@ bud::graphics::MemoryBlock VulkanRHI::create_gpu_buffer(uint64_t size, bud::grap
 	}
 	else if (usage_state == ResourceState::IndexBuffer) {
 		buffer_info.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+	}
+	else if (usage_state == ResourceState::UnorderedAccess) {
+		buffer_info.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	}
+	else if (usage_state == ResourceState::ShaderResource) {
+		buffer_info.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 	}
 
 	VkBuffer buffer;
@@ -586,11 +604,59 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	vkDestroyShaderModule(device, vertModule, nullptr);
 	vkDestroyShaderModule(device, fragModule, nullptr);
 
-	VulkanPipelineObject* pipeObj = new VulkanPipelineObject{ pipeline, pipelineLayout };
+	VulkanPipelineObject* pipeObj = new VulkanPipelineObject{ pipeline, pipelineLayout, VK_PIPELINE_BIND_POINT_GRAPHICS };
 
 	created_layouts.push_back(pipelineLayout);
 
 	return pipeObj;
+}
+
+void* VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& desc) {
+	VkPushConstantRange push_constant{};
+	push_constant.offset = 0;
+	push_constant.size = 256; 
+	push_constant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+
+	std::vector<VkDescriptorSetLayout> setLayouts = { compute_set_layout };
+	pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
+	pipelineLayoutInfo.pSetLayouts = setLayouts.data();
+	pipelineLayoutInfo.pushConstantRangeCount = 1;
+	pipelineLayoutInfo.pPushConstantRanges = &push_constant;
+
+	VkPipelineLayout pipelineLayout;
+	if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+		throw std::runtime_error("failed to create compute pipeline layout!");
+	}
+
+	VkShaderModule computeModule = create_shader_module(device, desc.cs.code);
+	VkPipeline pipeline = pipeline_cache->create_compute_pipeline(computeModule, pipelineLayout);
+
+	vkDestroyShaderModule(device, computeModule, nullptr);
+
+	VulkanPipelineObject* pipeObj = new VulkanPipelineObject{ pipeline, pipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE };
+	created_layouts.push_back(pipelineLayout);
+
+	return pipeObj;
+}
+
+void VulkanRHI::cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group_y, uint32_t group_z) {
+	if (current_compute_pipeline) {
+		auto pipeObj = static_cast<VulkanPipelineObject*>(current_compute_pipeline);
+		VkDescriptorSet compute_set;
+		if (descriptor_allocators[current_frame].allocate(compute_set_layout, compute_set)) {
+			DescriptorWriter writer;
+			for (auto& kv : current_compute_bindings) {
+				writer.write_buffer(kv.first, static_cast<VkBuffer>(kv.second.internal_handle), kv.second.size, kv.second.offset, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+			}
+			writer.update_set(device, compute_set);
+			vkCmdBindDescriptorSets(static_cast<VkCommandBuffer>(cmd), VK_PIPELINE_BIND_POINT_COMPUTE, pipeObj->layout, 0, 1, &compute_set, 0, nullptr);
+		}
+	}
+
+	vkCmdDispatch(static_cast<VkCommandBuffer>(cmd), group_x, group_y, group_z);
 }
 
 // Helpers are implemented at the end of the file.
@@ -780,9 +846,21 @@ void VulkanRHI::cmd_end_render_pass(CommandHandle cmd) {
 	vkCmdEndRendering(static_cast<VkCommandBuffer>(cmd));
 }
 
+void VulkanRHI::cmd_copy_buffer(CommandHandle cmd, MemoryBlock src, MemoryBlock dst, uint64_t size) {
+	VkBufferCopy copy_region{};
+	copy_region.srcOffset = src.offset;
+	copy_region.dstOffset = dst.offset;
+	copy_region.size = size;
+	vkCmdCopyBuffer(static_cast<VkCommandBuffer>(cmd), static_cast<VkBuffer>(src.internal_handle), static_cast<VkBuffer>(dst.internal_handle), 1, &copy_region);
+}
+
 void VulkanRHI::cmd_bind_pipeline(CommandHandle cmd, void* pipeline) {
 	auto pipeObj = static_cast<VulkanPipelineObject*>(pipeline);
-	vkCmdBindPipeline(static_cast<VkCommandBuffer>(cmd), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeObj->pipeline);
+	if (pipeObj->bind_point == VK_PIPELINE_BIND_POINT_COMPUTE) {
+		current_compute_pipeline = pipeObj;
+		current_compute_bindings.clear();
+	}
+	vkCmdBindPipeline(static_cast<VkCommandBuffer>(cmd), pipeObj->bind_point, pipeObj->pipeline);
 	current_stats.pipeline_binds++;
 }
 
@@ -810,7 +888,10 @@ void VulkanRHI::cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32
 
 void VulkanRHI::cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) {
 	auto pipeObj = static_cast<VulkanPipelineObject*>(pipeline_layout);
-	vkCmdPushConstants(static_cast<VkCommandBuffer>(cmd), pipeObj->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, size, data);
+	VkShaderStageFlags stage = (pipeObj->bind_point == VK_PIPELINE_BIND_POINT_COMPUTE) 
+		? VK_SHADER_STAGE_COMPUTE_BIT 
+		: (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+	vkCmdPushConstants(static_cast<VkCommandBuffer>(cmd), pipeObj->layout, stage, 0, size, data);
 }
 
 void VulkanRHI::cmd_set_viewport(CommandHandle cmd, float width, float height) {
@@ -837,7 +918,7 @@ void VulkanRHI::cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint3
 
 	vkCmdBindDescriptorSets(
 		static_cast<VkCommandBuffer>(cmd),
-		VK_PIPELINE_BIND_POINT_GRAPHICS,
+		pipeObj->bind_point,
 		pipeObj->layout,
 		set_index,  // first set
 		1,          // descriptor set count
@@ -845,6 +926,10 @@ void VulkanRHI::cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint3
 		0,
 		nullptr  // dynamic offsets
 	);
+}
+
+void VulkanRHI::cmd_bind_storage_buffer(CommandHandle cmd, void* pipeline, uint32_t binding, bud::graphics::MemoryBlock buffer) {
+	current_compute_bindings[binding] = buffer;
 }
 
 void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::Texture* texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) {

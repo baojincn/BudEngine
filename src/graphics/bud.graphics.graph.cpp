@@ -25,8 +25,12 @@ namespace bud::graphics {
 		
 		render_graph.resources.push_back(node);
 		RGHandle handle = RGHandle{ static_cast<uint32_t>(render_graph.resources.size() - 1) };
-		
+
 		return handle;
+	}
+
+	void RGBuilder::set_side_effect(bool value) {
+		pass_node.has_side_effects = value;
 	}
 
 	RGHandle RenderGraph::import_texture(const std::string& name, Texture* texture, ResourceState current_state) {
@@ -44,11 +48,34 @@ namespace bud::graphics {
 		return RGHandle{ static_cast<uint32_t>(resources.size() - 1) };
 	}
 
+	RGHandle RenderGraph::import_buffer(const std::string& name, MemoryBlock buffer, ResourceState current_state) {
+		if (resources.empty())
+			resources.emplace_back();
+
+		RGResourceNode node;
+		node.name = name;
+		node.physical_buffer = buffer;
+		node.is_buffer = true;
+		node.is_external = buffer.is_valid();
+		node.is_transient = !node.is_external;
+		node.initial_state = current_state;
+
+		resources.push_back(node);
+		return RGHandle{ static_cast<uint32_t>(resources.size() - 1) };
+	}
+
 	Texture* RenderGraph::get_texture(RGHandle handle) const {
 		if (handle.id == 0 || handle.id >= resources.size())
 			return nullptr;
 
 		return resources[handle.id].physical_texture;
+	}
+
+	MemoryBlock RenderGraph::get_buffer(RGHandle handle) const {
+		if (handle.id == 0 || handle.id >= resources.size())
+			return MemoryBlock{};
+
+		return resources[handle.id].physical_buffer;
 	}
 
 	void RenderGraph::compile() {
@@ -203,10 +230,15 @@ namespace bud::graphics {
 			// Inject Barriers (Phase 3)
 			for (auto& barrier : pass.before_barriers) {
 				auto tex = get_texture(barrier.handle);
+				auto buf = get_buffer(barrier.handle);
 				auto& debug_name = resources[barrier.handle.id].name;
 				if (tex) {
 					rhi->set_debug_name(tex, ObjectType::Texture, debug_name);
 					rhi->resource_barrier(cmd, tex, barrier.old_state, barrier.new_state);
+				} else if (buf.is_valid()) {
+					// [TODO] Implement rhi->resource_barrier(cmd, buffer, old_state, new_state)
+					// Currently no-op for buffers, but we can set debug name
+					rhi->set_debug_name(buf, ObjectType::Buffer, debug_name);
 				}
 			}
 

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <memory>
 #include <vector>
@@ -14,7 +14,6 @@
 #include "src/graphics/bud.graphics.rhi.hpp"
 #include "src/graphics/bud.graphics.graph.hpp"
 #include "src/graphics/bud.graphics.passes.hpp"
-
 namespace bud::graphics {
 	struct MeshAssetHandle {
 		static constexpr uint32_t invalid_id = std::numeric_limits<uint32_t>::max();

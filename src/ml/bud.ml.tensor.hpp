@@ -2,6 +2,7 @@
 #include <vector>
 #include <string_view>
 #include <variant>
+#include <cassert>
 #include "src/graphics/bud.graphics.types.hpp"
 
 namespace bud::ml {

@@ -43,12 +43,17 @@ namespace bud::graphics {
 		virtual void copy_buffer_immediate(MemoryBlock src, MemoryBlock dst, uint64_t size) = 0;
 		virtual void destroy_buffer(MemoryBlock block) = 0;
 		virtual void* create_graphics_pipeline(const GraphicsPipelineDesc& desc) = 0;
+		virtual void* create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
+
+		virtual void cmd_copy_buffer(CommandHandle cmd, MemoryBlock src, MemoryBlock dst, uint64_t size) = 0;
 
 		// 现有接口
 		virtual void resource_barrier(CommandHandle cmd, Texture* texture, ResourceState old_state, ResourceState new_state) = 0;
 		virtual void cmd_bind_pipeline(CommandHandle cmd, void* pipeline) = 0;
 		virtual void cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint32_t set_index) = 0;
+		virtual void cmd_bind_storage_buffer(CommandHandle cmd, void* pipeline, uint32_t binding, MemoryBlock buffer) = 0;
 		virtual void cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) = 0;
+		virtual void cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group_y, uint32_t group_z) = 0;
 		virtual Texture* get_current_swapchain_texture() = 0;
 		virtual uint32_t get_current_image_index() = 0;
 		virtual void update_global_uniforms(uint32_t image_index, const SceneView& scene_view) = 0;

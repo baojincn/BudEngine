@@ -17,6 +17,11 @@ namespace bud::graphics::vulkan {
             vkDestroyPipeline(device, pipe, nullptr);
         }
         cache.clear();
+
+        for (auto pipe : compute_pipelines) {
+            vkDestroyPipeline(device, pipe, nullptr);
+        }
+        compute_pipelines.clear();
     }
 
     VkPipeline VulkanPipelineCache::get_pipeline(const PipelineKey& key, VkPipelineLayout layout, bool is_depth_only) {
@@ -190,4 +195,21 @@ namespace bud::graphics::vulkan {
         return graphicsPipeline;
     }
 
+    VkPipeline VulkanPipelineCache::create_compute_pipeline(VkShaderModule compute_shader, VkPipelineLayout layout) {
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        pipelineInfo.stage.module = compute_shader;
+        pipelineInfo.stage.pName = "main";
+        pipelineInfo.layout = layout;
+
+        VkPipeline computePipeline;
+        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create compute pipeline!");
+        }
+
+        compute_pipelines.push_back(computePipeline);
+        return computePipeline;
+    }
 }

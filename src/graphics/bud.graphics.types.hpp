@@ -193,9 +193,11 @@ namespace bud::graphics {
 		CullMode cull_mode = CullMode::Back;
 		CompareOp depth_compare_op = CompareOp::Less;
 	};
-	// POD, end
 
-	using CommandHandle = void*;
+	struct ComputePipelineDesc {
+		ShaderStage cs;
+	};
+	// POD, end
 
 	struct MemoryBlock {
 		void* internal_handle = nullptr;
@@ -204,6 +206,13 @@ namespace bud::graphics {
 		void* mapped_ptr = nullptr;
 		bool is_valid() const { return internal_handle != nullptr; }
 	};
+
+	class Texture;
+
+	using CommandHandle = void*;
+
+	using BufferHandle = MemoryBlock;
+	using ImageHandle = Texture*;
 
 	class Texture {
 	public:

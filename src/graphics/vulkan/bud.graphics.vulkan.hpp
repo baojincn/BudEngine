@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -89,9 +89,15 @@ namespace bud::graphics::vulkan {
 		void reload_shaders_async() override;
 		void load_model_async(const std::string& filepath) override;
 
-		
+
 		void* create_graphics_pipeline(const bud::graphics::GraphicsPipelineDesc& desc) override;
+		void* create_compute_pipeline(const bud::graphics::ComputePipelineDesc& desc) override;
+
+		void cmd_copy_buffer(CommandHandle cmd, bud::graphics::MemoryBlock src, bud::graphics::MemoryBlock dst, uint64_t size) override;
+
 		void cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint32_t set_index) override;
+		void cmd_bind_storage_buffer(CommandHandle cmd, void* pipeline, uint32_t binding, bud::graphics::MemoryBlock buffer) override;
+		void cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group_y, uint32_t group_z) override;
 
 		VulkanMemoryAllocator* get_memory_allocator() { return memory_allocator.get(); }
 		bud::graphics::ResourcePool* get_resource_pool() override { return resource_pool.get(); }
@@ -205,6 +211,7 @@ namespace bud::graphics::vulkan {
 
 		// UBO
 		VkDescriptorSetLayout global_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_set_layout = VK_NULL_HANDLE; // Used for per-dispatch storage buffer binding
 		VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
 		VkSampler default_sampler = VK_NULL_HANDLE;
 		VkSampler shadow_sampler = VK_NULL_HANDLE;
@@ -213,6 +220,10 @@ namespace bud::graphics::vulkan {
 		std::unordered_map<VkBuffer, VkDeviceMemory> buffer_memory_map;
 	
 		std::vector<VkPipelineLayout> created_layouts;
+
+		// Compute Binding state
+		std::unordered_map<uint32_t, bud::graphics::MemoryBlock> current_compute_bindings;
+		void* current_compute_pipeline = nullptr;
 
 		VulkanTexture* fallback_texture_ptr = nullptr;
 		std::atomic<bool> swapchain_out_of_date{false};

@@ -26,6 +26,8 @@ namespace bud::graphics {
 	struct RGResourceNode {
 		std::string name;
 		Texture* physical_texture = nullptr;
+		MemoryBlock physical_buffer;
+		bool is_buffer = false;
 		TextureDesc desc;
 		bool is_transient = true;
 		bool is_external = false;
@@ -79,6 +81,9 @@ namespace bud::graphics {
 		// Create new transient resource
 		RGHandle create(const std::string& name, const TextureDesc& desc);
 
+		// Mark pass as having side effects (cannot be culled)
+		void set_side_effect(bool value = true);
+
 	private:
 		class RenderGraph& render_graph;
 		struct RGPassNode& pass_node;
@@ -124,7 +129,9 @@ namespace bud::graphics {
 		}
 
 		RGHandle import_texture(const std::string& name, Texture* texture, ResourceState current_state);
+		RGHandle import_buffer(const std::string& name, MemoryBlock buffer, ResourceState current_state);
 		Texture* get_texture(RGHandle handle) const;
+		MemoryBlock get_buffer(RGHandle handle) const;
 
 		void compile();
 		void execute(CommandHandle cmd);

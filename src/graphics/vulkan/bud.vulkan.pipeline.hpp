@@ -62,10 +62,12 @@ namespace bud::graphics::vulkan {
 		void init(VkDevice device);
 		void cleanup();
 		VkPipeline get_pipeline(const PipelineKey& key, VkPipelineLayout layout, bool is_depth_only = false);
+		VkPipeline create_compute_pipeline(VkShaderModule compute_shader, VkPipelineLayout layout);
 
 	private:
 		VkDevice device;
 		std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> cache;
+		std::vector<VkPipeline> compute_pipelines;
 
 		VkPipeline create_pipeline_internal(const PipelineKey& key, VkPipelineLayout layout, bool is_depth_only);
 	};

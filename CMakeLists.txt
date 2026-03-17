@@ -165,8 +165,9 @@ target_sources(bud_engine_core
 		"src/graphics/bud.graphics.cpp"
 		"src/graphics/bud.graphics.scene.cpp"
         "src/graphics/bud.graphics.passes.cpp"
-        "src/graphics/bud.graphics.renderer.cpp"
-        "src/graphics/bud.graphics.graph.cpp"
+		"src/graphics/bud.graphics.renderer.cpp"
+		"src/graphics/bud.graphics.graph.cpp"
+		"src/graphics/bud.ml_passes.cpp"
         
 		"src/graphics/vulkan/bud.graphics.vulkan.cpp"
 		"src/graphics/vulkan/bud.vulkan.memory.cpp"
