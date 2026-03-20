@@ -1,5 +1,5 @@
 ﻿#include <vector>
-#include <print>
+#include <iostream>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <stdexcept>
@@ -7,7 +7,8 @@
 #include <algorithm>
 #include <limits>
 #include <imgui.h>
-
+#include <format>
+#include <atomic>
 #include "src/graphics/bud.graphics.passes.hpp"
 
 #include "src/io/bud.io.hpp"
@@ -19,6 +20,33 @@
 #include "src/graphics/bud.graphics.scene.hpp"
 
 namespace bud::graphics {
+
+	void RenderPass::load_shaders_async(bud::io::AssetManager* asset_manager, 
+									   const std::vector<std::string>& paths, 
+									   std::function<void(std::vector<std::vector<char>>)> on_loaded) {
+		if (paths.empty()) {
+			on_loaded({});
+			return;
+		}
+
+		struct Context {
+			std::vector<std::vector<char>> results;
+			std::atomic<size_t> loaded_count{ 0 };
+			std::function<void(std::vector<std::vector<char>>)> on_loaded;
+		};
+		auto ctx = std::make_shared<Context>();
+		ctx->results.resize(paths.size());
+		ctx->on_loaded = std::move(on_loaded);
+
+		for (size_t i = 0; i < paths.size(); ++i) {
+			asset_manager->load_file_async(paths[i], [ctx, i, count = paths.size()](std::vector<char> code) {
+				ctx->results[i] = std::move(code);
+				if (++ctx->loaded_count == count) {
+					ctx->on_loaded(ctx->results);
+				}
+			});
+		}
+	}
 
 	namespace {
 		constexpr uint32_t imgui_font_bindless_slot = 999;
@@ -46,36 +74,219 @@ namespace bud::graphics {
 		}
 	}
 
-	void ZPrepass::init(RHI* rhi, const RenderConfig& config) {
-		if (!rhi) {
-			std::println(stderr, "[ZPrepass] ERROR: RHI is null.");
-			return;
+	void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) return;
+
+		load_shaders_async(asset_manager, { "src/shaders/hiz_cull.comp.spv" }, [this, rhi](const auto& shaders) {
+			ComputePipelineDesc desc;
+			desc.cs.code = shaders[0];
+			pipeline = rhi->create_compute_pipeline(desc);
+			if (pipeline) {
+				bud::print("[HiZCullingPass] Shader loaded and pipeline created.");
+			}
+		});
+	}
+
+	RGHandle HiZCullingPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, RGHandle hiz_pyramid, const SceneView& view, size_t instance_count) {
+		if (!pipeline) return {};
+
+		return render_graph.add_pass("Hi-Z Culling Pass",
+			[=](RGBuilder& builder) {
+				builder.set_side_effect();
+				builder.read(instance_buffer, ResourceState::ShaderResource);
+				builder.read(hiz_pyramid, ResourceState::UnorderedAccess); // Keep in GENERAL so we can sample it in GENERAL layout
+				builder.write(indirect_draw_buffer, ResourceState::UnorderedAccess);
+				builder.write(stats_buffer, ResourceState::UnorderedAccess);
+				return RGHandle{}; 
+			},
+			[=, &render_graph, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				auto inst_buf = render_graph.get_buffer(instance_buffer);
+				auto ind_buf = render_graph.get_buffer(indirect_draw_buffer);
+				auto stat_buf = render_graph.get_buffer(stats_buffer);
+				auto depth_tex = render_graph.get_texture(hiz_pyramid);
+
+				if (!inst_buf.is_valid() || !ind_buf.is_valid() || !stat_buf.is_valid() || !depth_tex) {
+					static bool printed = false;
+					if(!printed) {
+						bud::print("[HiZCullingPass] Warning: Missing resources! inst={} ind={} stat={} depth={}", 
+							inst_buf.is_valid(), ind_buf.is_valid(), stat_buf.is_valid(), (bool)depth_tex);
+						printed = true;
+					}
+					return;
+				}
+
+				// Clear stats buffer (all counters = 0)
+				GPUStats zero_stats{};
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(GPUStats), &zero_stats);
+
+				// Barrier: ensure the UpdateBuffer write is visible to the compute shader
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, ind_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, stat_buf);
+				rhi->cmd_bind_compute_texture(cmd, pipeline, 3, depth_tex, ALL_MIPS, false, true); // is_general=true: pyramid was written as storage image
+				rhi->cmd_bind_compute_ubo(cmd, pipeline, 4);
+
+				struct PushConsts {
+					uint32_t instanceCount;
+				} pc;
+				pc.instanceCount = static_cast<uint32_t>(instance_count);
+
+				rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
+
+				// Dispatch 1 thread per instance
+				uint32_t group_x = (static_cast<uint32_t>(instance_count) + 255) / 256;
+				rhi->cmd_dispatch(cmd, group_x, 1, 1);
+			}
+		);
+	}
+
+	void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) return;
+
+		load_shaders_async(asset_manager, { "src/shaders/hiz_mip.comp.spv" }, [this, rhi](const auto& shaders) {
+			ComputePipelineDesc desc;
+			desc.cs.code = shaders[0];
+			pipeline = rhi->create_compute_pipeline(desc);
+			if (pipeline) {
+				bud::print("[HiZMipPass] Shader loaded and pipeline created.");
+			}
+		});
+	}
+
+	RGHandle HiZMipPass::add_to_graph(RenderGraph& rg, RGHandle depth_buffer, const RenderConfig& config) {
+		if (!pipeline) return {};
+		
+		auto depth_desc = rg.get_texture_desc(depth_buffer);
+		if (depth_desc.width == 0 || depth_desc.height == 0) return {};
+
+		// Create a POT pyramid texture for easy mip generation
+		uint32_t pot_w = 1 << (uint32_t)std::ceil(std::log2((float)depth_desc.width));
+		uint32_t pot_h = 1 << (uint32_t)std::ceil(std::log2((float)depth_desc.height));
+		uint32_t size = std::max(pot_w, pot_h);
+		uint32_t mip_count = (uint32_t)std::floor(std::log2((float)size)) + 1;
+
+		TextureDesc desc;
+		desc.width = size;
+		desc.height = size;
+		desc.mips = mip_count;
+		desc.format = bud::graphics::TextureFormat::R32_FLOAT; // Standard format for HiZ
+		desc.is_storage = true;
+		desc.initial_state = bud::graphics::ResourceState::Undefined;
+
+		auto pyramid_h_ptr = std::make_shared<RGHandle>();
+
+		for (uint32_t i = 0; i < mip_count; ++i) {
+			rg.add_pass(std::format("Hi-Z Mip {}", i),
+				[=](RGBuilder& builder) {
+					if (i == 0) {
+						*pyramid_h_ptr = builder.create("HiZPyramid", desc);
+					}
+					RGHandle current_pyramid = *pyramid_h_ptr;
+					RGHandle src_handle = (i == 0) ? depth_buffer : current_pyramid;
+					ResourceState src_read_state = (i == 0) ? ResourceState::ShaderResource : ResourceState::UnorderedAccess;
+					
+					builder.read(src_handle, src_read_state);
+					builder.write(current_pyramid, ResourceState::UnorderedAccess);
+					return current_pyramid;
+				},
+				[=, &rg](RHI* rhi, CommandHandle cmd) {
+					RGHandle current_pyramid = *pyramid_h_ptr;
+					RGHandle src_handle = (i == 0) ? depth_buffer : current_pyramid;
+					
+					uint32_t dst_size = size >> i;
+					rhi->cmd_bind_pipeline(cmd, pipeline);
+					rhi->cmd_bind_compute_texture(cmd, pipeline, 3, rg.get_texture(src_handle), (i == 0) ? 0 : (i - 1), false, (i > 0)); // is_general=true when reading from the pyramid (it's in GENERAL layout)
+					rhi->cmd_bind_compute_texture(cmd, pipeline, 5, rg.get_texture(current_pyramid), i, true);
+					
+					struct Push { 
+						bud::math::vec2 out_size;
+						uint32_t reversed_z;
+						uint32_t padding;
+					} push;
+					push.out_size = bud::math::vec2((float)dst_size, (float)dst_size);
+					push.reversed_z = config.reversed_z ? 1 : 0;
+					rhi->cmd_push_constants(cmd, pipeline, sizeof(push), &push);
+
+					uint32_t gx = (dst_size + 15) / 16;
+					uint32_t gy = (dst_size + 15) / 16;
+					rhi->cmd_dispatch(cmd, gx, gy, 1);
+				}
+			);
 		}
 
-		auto vs_code = bud::io::FileSystem::read_binary("src/shaders/zprepass.vert.spv");
-		auto fs_code = bud::io::FileSystem::read_binary("src/shaders/zprepass.frag.spv");
+		return *pyramid_h_ptr;
+	}
 
-		if (!vs_code || !fs_code) {
-			if (!vs_code)
-				std::println(stderr, "[ZPrepass] Missing shader: src/shaders/zprepass.vert.spv");
+	void HiZDebugPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) return;
+		
+		load_shaders_async(asset_manager, { "src/shaders/fullscreen.vert.spv", "src/shaders/hiz_debug.frag.spv" }, [this, rhi](const auto& shaders) {
+			GraphicsPipelineDesc desc;
+			desc.vs.code = shaders[0];
+			desc.fs.code = shaders[1];
+			desc.depth_test = false;
+			desc.depth_write = false;
+			desc.color_attachment_format = bud::graphics::TextureFormat::BGRA8_SRGB;
+			desc.vertex_layout = VertexLayoutType::NoVertexInput;
+			pipeline = rhi->create_graphics_pipeline(desc);
+			if (pipeline) {
+				bud::print("[HiZDebugPass] Shaders loaded and pipeline created.");
+			}
+		});
+	}
 
-			if (!fs_code)
-				std::println(stderr, "[ZPrepass] Missing shader: src/shaders/zprepass.frag.spv");
+	void HiZDebugPass::add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle hiz_pyramid, uint32_t mip_level) {
+		if (!pipeline) return;
+		rg.add_pass("Hi-Z Debug Pass",
+			[=](RGBuilder& builder) {
+				builder.read(hiz_pyramid, ResourceState::ShaderResource);
+				builder.write(backbuffer, ResourceState::RenderTarget);
+			},
+			[=, &rg](RHI* rhi, CommandHandle cmd) {
+				rhi->cmd_begin_debug_label(cmd, "Hi-Z Debug", 1, 0, 1);
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->update_bindless_image(0, rg.get_texture(hiz_pyramid), ALL_MIPS, false);
+				
+				struct PC { uint32_t mip; } pc = { mip_level };
+				rhi->cmd_push_constants(cmd, pipeline, sizeof(pc), &pc);
+				
+				RenderPassBeginInfo info;
+				info.color_attachments.push_back(rg.get_texture(backbuffer));
+				rhi->cmd_begin_render_pass(cmd, info);
+				rhi->cmd_draw(cmd, 3, 1, 0, 0);
+				rhi->cmd_end_render_pass(cmd);
+				rhi->cmd_end_debug_label(cmd);
+			}
+		);
+	}
 
-			return;
-		}
+	void ZPrepass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) return;
 
-		GraphicsPipelineDesc desc;
-		desc.vs.code = *vs_code;
-		desc.fs.code = *fs_code;
-		desc.depth_test = true;
-		desc.depth_write = false;
-		desc.cull_mode = CullMode::None;
-		desc.color_attachment_format = TextureFormat::Undefined;
-		desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
-		desc.enable_depth_bias = false; // Disable depth bias for Z-prepass pipeline
+		load_shaders_async(asset_manager, { "src/shaders/zprepass.vert.spv", "src/shaders/zprepass.frag.spv" }, [this, rhi, config](const auto& shaders) {
+			GraphicsPipelineDesc desc;
+			desc.vs.code = shaders[0];
+			desc.fs.code = shaders[1];
+			desc.depth_test = true;
+			desc.depth_write = true;
+			desc.cull_mode = CullMode::None;
+			desc.color_attachment_format = bud::graphics::TextureFormat::Undefined;
+			desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
+			desc.enable_depth_bias = false;
+			desc.vertex_layout = VertexLayoutType::PositionUV;
 
-		pipeline = rhi->create_graphics_pipeline(desc);
+			pipeline = rhi->create_graphics_pipeline(desc);
+			if (pipeline) {
+				bud::print("[ZPrepass] Shaders loaded and pipeline created.");
+			}
+		});
 	}
 
 	RGHandle ZPrepass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer,
@@ -84,9 +295,10 @@ namespace bud::graphics {
 		const RenderConfig& config,
 		const std::vector<RenderMesh>& meshes,
 		const std::vector<SortItem>& sort_list,
-		size_t instance_count) {
+		size_t instance_count,
+		RGHandle indirect_draw_buffer) {
 		if (!pipeline) {
-			std::println(stderr, "[ZPrepass] ERROR: Pipeline is null.");
+			bud::eprint("[ZPrepass] ERROR: Pipeline is null.");
 			return {};
 		}
 
@@ -99,7 +311,7 @@ namespace bud::graphics {
 		});
 
 		if (max_scene_count == 0 || sort_list.empty()) {
-			std::println(stderr, "[ZPrepass] ERROR: RenderScene or sort list is empty.");
+			bud::eprint("[ZPrepass] ERROR: RenderScene or sort list is empty.");
 			return {};
 		}
 
@@ -108,14 +320,17 @@ namespace bud::graphics {
 			return {};
 		}
 
-		const size_t draw_count = std::min({ instance_count, sort_list.size(), max_scene_count });
+		// instance_count = exploded submesh draw count; sort_list is sized to match.
+		// max_scene_count guards accessing render_scene arrays, but entity_index in
+		// sort_list items are already validated — do NOT clamp draw_count by it.
+		const size_t draw_count = std::min(instance_count, sort_list.size());
 		uint32_t target_width = backbuffer_tex->width;
 		uint32_t target_height = backbuffer_tex->height;
 
 		TextureDesc depth_desc;
 		depth_desc.width = target_width;
 		depth_desc.height = target_height;
-		depth_desc.format = TextureFormat::D32_FLOAT;
+		depth_desc.format = bud::graphics::TextureFormat::D32_FLOAT;
 
 		auto depth_h = std::make_shared<RGHandle>();
 
@@ -123,12 +338,20 @@ namespace bud::graphics {
 			[=](RGBuilder& builder) {
 				*depth_h = builder.create("MainDepth", depth_desc);
 				builder.write(*depth_h, ResourceState::DepthWrite);
+				if (config.enable_gpu_driven) {
+					builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
+				}
 				return *depth_h;
 			},
 			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) {
-					std::println(stderr, "[ZPrepass] ERROR: Pipeline is null.");
+					bud::eprint("[ZPrepass] ERROR: Pipeline is null.");
 					return;
+				}
+
+				bud::graphics::BufferHandle ind_buf_handle;
+				if (config.enable_gpu_driven) {
+					ind_buf_handle = render_graph.get_buffer(indirect_draw_buffer);
 				}
 
 				RenderPassBeginInfo info;
@@ -159,8 +382,8 @@ namespace bud::graphics {
 					if (!mesh.is_valid()) continue;
 
 					if (mesh_id != last_mesh) {
-						rhi->cmd_bind_vertex_buffer(cmd, mesh.vertex_buffer.internal_handle);
-						rhi->cmd_bind_index_buffer(cmd, mesh.index_buffer.internal_handle);
+						rhi->cmd_bind_vertex_buffer(cmd, mesh.vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mesh.index_buffer);
 						last_mesh = mesh_id;
 					}
 
@@ -176,11 +399,19 @@ namespace bud::graphics {
 						const auto& sub = mesh.submeshes[item.submesh_index];
 						push_vars.material_id = sub.material_id;
 						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
-						rhi->cmd_draw_indexed(cmd, sub.index_count, 1, sub.index_start, 0, 0);
+						if (config.enable_gpu_driven && ind_buf_handle.is_valid()) {
+							rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, i * sizeof(IndirectCommand), 1, sizeof(IndirectCommand)); 
+						} else {
+							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, sub.index_start, 0, 0);
+						}
 					} else {
 						push_vars.material_id = material_id;
 						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
-						rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, 0, 0, 0);
+						if (config.enable_gpu_driven) {
+							rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, i * sizeof(IndirectCommand), 1, sizeof(IndirectCommand));
+						} else {
+							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, 0, 0, 0);
+						}
 					}
 				}
 
@@ -190,12 +421,11 @@ namespace bud::graphics {
 	}
 
 	CSMShadowPass::~CSMShadowPass() {
-		shutdown();
 	}
 
-	void CSMShadowPass::shutdown() {
-		if (stored_rhi) {
-			auto* pool = stored_rhi->get_resource_pool();
+	void CSMShadowPass::shutdown(RHI* rhi) {
+		if (rhi) {
+			auto* pool = rhi->get_resource_pool();
 			if (pool && static_cache_texture) {
 				pool->release_texture(static_cache_texture);
 			}
@@ -207,36 +437,26 @@ namespace bud::graphics {
 		has_last_config = false;
 	}
 
-	void CSMShadowPass::init(RHI* rhi, const RenderConfig& config) {
-        if (!rhi) {
-            std::println(stderr, "[CSMShadowPass] ERROR: RHI is null.");
-            return;
-        }
+	void CSMShadowPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) return;
 
-        stored_rhi = rhi;
-        auto vs_code = bud::io::FileSystem::read_binary("src/shaders/shadow.vert.spv");
-        // Shadow pass theoretically doesn't need frag shader for D32, but we have one
-        auto fs_code = bud::io::FileSystem::read_binary("src/shaders/shadow.frag.spv"); 
+		stored_rhi = rhi;
+		load_shaders_async(asset_manager, { "src/shaders/shadow.vert.spv", "src/shaders/shadow.frag.spv" }, [this, rhi, config](const auto& shaders) {
+			GraphicsPipelineDesc desc;
+			desc.vs.code = shaders[0];
+			desc.fs.code = shaders[1];
+			desc.cull_mode = CullMode::Back;
+			desc.color_attachment_format = TextureFormat::Undefined;
+			desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
+			desc.enable_depth_bias = true;
+			desc.vertex_layout = VertexLayoutType::PositionUV;
 
-        if (!vs_code) throw std::runtime_error("[CSMShadowPass] Failed to load shadow.vert.spv");
-        if (!fs_code) throw std::runtime_error("[CSMShadowPass] Failed to load shadow.frag.spv");
-
-		GraphicsPipelineDesc desc;
-		desc.vs.code = *vs_code;
-		desc.fs.code = *fs_code;
-		desc.cull_mode = CullMode::Back; // Only render backfaces
-		desc.color_attachment_format = TextureFormat::Undefined;
-		desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
-		desc.enable_depth_bias = true;
-
-        
-        pipeline = rhi->create_graphics_pipeline(desc);
-        if (pipeline) {
-            std::println("[CSMShadowPass] Pipeline created successfully: {}", (void*)pipeline);
-        } else {
-            std::println(stderr, "[CSMShadowPass] ERROR: Pipeline creation returned nullptr!");
-        }
-    }
+			pipeline = rhi->create_graphics_pipeline(desc);
+			if (pipeline) {
+				bud::print("[CSMShadowPass] Shaders loaded and pipeline created: {}", (void*)pipeline);
+			}
+		});
+	}
 
 	RGHandle CSMShadowPass::add_to_graph(RenderGraph& render_graph, const SceneView& view, const RenderConfig& config,
 		const RenderScene& render_scene,
@@ -244,14 +464,14 @@ namespace bud::graphics {
 		std::vector<std::vector<uint32_t>> csm_visible_instances)
 	{
 		if (config.shadow_map_size == 0 || config.cascade_count == 0) {
-			std::println(stderr, "[CSMShadowPass] ERROR: Invalid shadow config (size={}, cascades={}).",
+			bud::eprint("[CSMShadowPass] ERROR: Invalid shadow config (size={}, cascades={}).",
 				config.shadow_map_size, config.cascade_count);
 			return {};
 		}
 
 		const uint32_t cascade_count = std::min(config.cascade_count, MAX_CASCADES);
 		if (cascade_count != config.cascade_count) {
-			std::println(stderr, "[CSMShadowPass] WARNING: cascade_count clamped to MAX_CASCADES ({})", MAX_CASCADES);
+			bud::eprint("[CSMShadowPass] WARNING: cascade_count clamped to MAX_CASCADES ({})", MAX_CASCADES);
 		}
 
 		const size_t max_scene_count = std::min({
@@ -263,19 +483,19 @@ namespace bud::graphics {
 		});
 
 		if (max_scene_count == 0) {
-			std::println(stderr, "[CSMShadowPass] ERROR: RenderScene arrays are empty.");
+			bud::eprint("[CSMShadowPass] ERROR: RenderScene arrays are empty.");
 			return {};
 		}
 
 		TextureDesc desc;
 		desc.width = config.shadow_map_size;
 		desc.height = config.shadow_map_size;
-		desc.format = TextureFormat::D32_FLOAT;
+		desc.format = bud::graphics::TextureFormat::D32_FLOAT;
 		desc.type = TextureType::Texture2DArray;
 		desc.array_layers = cascade_count;
 
 		if (!config.cache_shadows && static_cache_texture) {
-			shutdown();
+			shutdown(stored_rhi);
 		}
 
 		bool light_changed = bud::math::length(view.light_dir - last_light_dir) > 0.001f;
@@ -387,22 +607,15 @@ namespace bud::graphics {
 
 								// 3. Draw
 								push_consts.model = model_matrix;
-								rhi->cmd_bind_vertex_buffer(cmd, mesh.vertex_buffer.internal_handle);
-								rhi->cmd_bind_index_buffer(cmd, mesh.index_buffer.internal_handle);
+								rhi->cmd_bind_vertex_buffer(cmd, mesh.vertex_buffer);
+								rhi->cmd_bind_index_buffer(cmd, mesh.index_buffer);
 
-								if (!mesh.submeshes.empty()) {
-									for (const auto& sub : mesh.submeshes) {
-										// Submesh culling
-										auto sub_world_sphere = sub.sphere.transform(model_matrix);
-										if (!bud::math::intersect_sphere_frustum(sub_world_sphere, cascade_view_frustum_dbg)) continue;
-
-										auto sub_world_aabb = sub.aabb.transform(model_matrix);
-										if (!bud::math::intersect_aabb_frustum(sub_world_aabb, cascade_view_frustum_dbg)) continue;
-
-										push_consts.material_id = sub.material_id;
-										rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-										rhi->cmd_draw_indexed(cmd, sub.index_count, 1, sub.index_start, 0, 0);
-									}
+								uint32_t sub_idx = render_scene.submesh_indices[idx];
+								if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
+									const auto& sub = mesh.submeshes[sub_idx];
+									push_consts.material_id = sub.material_id;
+									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+									rhi->cmd_draw_indexed(cmd, sub.index_count, 1, sub.index_start, 0, 0);
 								}
 								else {
 									push_consts.material_id = render_scene.material_indices[idx];
@@ -497,22 +710,15 @@ namespace bud::graphics {
 
 						// Draw
 						push_consts.model = model_matrix;
-						rhi->cmd_bind_vertex_buffer(cmd, mesh.vertex_buffer.internal_handle);
-						rhi->cmd_bind_index_buffer(cmd, mesh.index_buffer.internal_handle);
+						rhi->cmd_bind_vertex_buffer(cmd, mesh.vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mesh.index_buffer);
 
-						if (!mesh.submeshes.empty()) {
-							for (const auto& sub : mesh.submeshes) {
-								// Submesh culling
-								auto sub_world_sphere = sub.sphere.transform(model_matrix);
-								if (!bud::math::intersect_sphere_frustum(sub_world_sphere, cascade_view_frustum_dbg)) continue;
-
-								auto sub_world_aabb = sub.aabb.transform(model_matrix);
-								if (!bud::math::intersect_aabb_frustum(sub_world_aabb, cascade_view_frustum_dbg)) continue;
-
-								push_consts.material_id = sub.material_id;
-								rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-								rhi->cmd_draw_indexed(cmd, sub.index_count, 1, sub.index_start, 0, 0);
-							}
+						uint32_t sub_idx = render_scene.submesh_indices[idx];
+						if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
+							const auto& sub = mesh.submeshes[sub_idx];
+							push_consts.material_id = sub.material_id;
+							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, sub.index_start, 0, 0);
 						}
 						else {
 							push_consts.material_id = render_scene.material_indices[idx];
@@ -526,33 +732,27 @@ namespace bud::graphics {
 		);
 	}
 	
-	void MainPass::init(RHI* rhi, const RenderConfig& config) {
-        if (!rhi) {
-            std::println(stderr, "[MainPass] ERROR: RHI is null.");
-            return;
-        }
+	void MainPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) return;
 
-        auto vs_code = bud::io::FileSystem::read_binary("src/shaders/main.vert.spv");
-        auto fs_code = bud::io::FileSystem::read_binary("src/shaders/main.frag.spv");
+		load_shaders_async(asset_manager, { "src/shaders/main.vert.spv", "src/shaders/main.frag.spv" }, [this, rhi, config](const auto& shaders) {
+			GraphicsPipelineDesc desc;
+			desc.vs.code = shaders[0];
+			desc.fs.code = shaders[1];
+			desc.depth_test = true;
+			desc.depth_write = true;
+			desc.cull_mode = CullMode::None;
+			desc.color_attachment_format = bud::graphics::TextureFormat::BGRA8_SRGB;
+			desc.depth_compare_op = config.reversed_z ? CompareOp::GreaterEqual : CompareOp::LessEqual;
+			desc.enable_depth_bias = false;
+			desc.vertex_layout = VertexLayoutType::Default;
 
-        if (!vs_code || !fs_code) {
-            std::println(stderr, "[MainPass] Failed to load shaders!");
-            return;
-        }
-
-        GraphicsPipelineDesc desc;
-        desc.vs.code = *vs_code;
-        desc.fs.code = *fs_code;
-        desc.depth_test = true;
-        desc.depth_write = true;
-        desc.cull_mode = CullMode::None; // Double Sided
-        desc.color_attachment_format = bud::graphics::TextureFormat::BGRA8_SRGB; 
-		desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
-		desc.enable_depth_bias = false;
-
-        pipeline = rhi->create_graphics_pipeline(desc);
-        //std::println("[MainPass] Pipeline created successfully.");
-    }
+			pipeline = rhi->create_graphics_pipeline(desc);
+			if (pipeline) {
+				bud::print("[MainPass] Shaders loaded and pipeline created.");
+			}
+		});
+	}
 
 	void MainPass::add_to_graph(RenderGraph& render_graph, RGHandle shadow_map, RGHandle backbuffer, RGHandle depth_buffer,
 		const RenderScene& render_scene,
@@ -560,7 +760,8 @@ namespace bud::graphics {
 		const RenderConfig& config,
 		const std::vector<RenderMesh>& meshes,
 		const std::vector<SortItem>& sort_list,
-		size_t instance_count)
+		size_t instance_count,
+		RGHandle indirect_draw_buffer)
 	{
 		const size_t max_scene_count = std::min({
 			render_scene.world_matrices.size(),
@@ -571,7 +772,7 @@ namespace bud::graphics {
 		});
 
 		if (max_scene_count == 0 || sort_list.empty()) {
-			std::println(stderr, "[MainPass] ERROR: RenderScene or sort list is empty.");
+			bud::eprint("[MainPass] ERROR: RenderScene or sort list is empty.");
 			return;
 		}
 
@@ -580,7 +781,10 @@ namespace bud::graphics {
 			return;
 		}
 
-		const size_t draw_count = std::min({ instance_count, sort_list.size(), max_scene_count });
+		// instance_count = exploded submesh draw count; sort_list is sized to match.
+		// max_scene_count guards accessing render_scene arrays, but entity_index in
+		// sort_list items are already validated — do NOT clamp draw_count by it.
+		const size_t draw_count = std::min(instance_count, sort_list.size());
 
 		uint32_t target_width = backbuffer_tex->width;
 		uint32_t target_height = backbuffer_tex->height;
@@ -590,13 +794,21 @@ namespace bud::graphics {
 				builder.write(backbuffer, ResourceState::RenderTarget);
 				builder.read(shadow_map, ResourceState::DepthRead);
 				builder.write(depth_buffer, ResourceState::DepthWrite);
+				if (config.enable_gpu_driven) {
+					builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
+				}
 				return depth_buffer;
 			},
 
 			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) {
-					std::println(stderr, "[MainPass] ERROR: Pipeline is null.");
+					bud::eprint("[MainPass] ERROR: Pipeline is null.");
 					return;
+				}
+
+				bud::graphics::BufferHandle ind_buf_handle;
+				if (config.enable_gpu_driven) {
+					ind_buf_handle = render_graph.get_buffer(indirect_draw_buffer);
 				}
 
 				RenderPassBeginInfo info;
@@ -635,8 +847,8 @@ namespace bud::graphics {
 
 
 					if (mesh_id != last_mesh) {
-						rhi->cmd_bind_vertex_buffer(cmd, mesh.vertex_buffer.internal_handle);
-						rhi->cmd_bind_index_buffer(cmd, mesh.index_buffer.internal_handle);
+						rhi->cmd_bind_vertex_buffer(cmd, mesh.vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mesh.index_buffer);
 						last_mesh = mesh_id;
 					}
 
@@ -652,12 +864,20 @@ namespace bud::graphics {
 						const auto& sub = mesh.submeshes[item.submesh_index];
 						push_vars.material_id = sub.material_id;
 						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
-						rhi->cmd_draw_indexed(cmd, sub.index_count, 1, sub.index_start, 0, 0);
+						if (config.enable_gpu_driven) {
+							rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, i * sizeof(IndirectCommand), 1, sizeof(IndirectCommand));
+						} else {
+							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, sub.index_start, 0, 0);
+						}
 					}
 					else {
 						push_vars.material_id = material_id;
 						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
-						rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, 0, 0, 0);
+						if (config.enable_gpu_driven) {
+							rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, i * sizeof(IndirectCommand), 1, sizeof(IndirectCommand));
+						} else {
+							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, 0, 0, 0);
+						}
 					}
 				}
 
@@ -684,8 +904,10 @@ namespace bud::graphics {
 		}
 	}
 
-	void UIPass::init(RHI* rhi, const RenderConfig& config) {
-		// Build font texture FIRST to avoid nullptr exceptions in NewFrame later
+	void UIPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) return;
+
+		// Build font texture FIRST
 		ImGuiIO& imgui_io = ImGui::GetIO();
 		unsigned char* pixels;
 		int width, height;
@@ -700,33 +922,29 @@ namespace bud::graphics {
 		font_texture = rhi->create_texture(tex_desc, pixels, width * height * 4);
 		rhi->set_debug_name(font_texture, ObjectType::Texture, "ImGui_Font_Atlas");
 
-		// Register bindless slot for font texture (e.g. index 1)
 		font_bindless_index = imgui_font_bindless_slot;
 		rhi->update_bindless_texture(font_bindless_index, font_texture);
 		imgui_io.Fonts->SetTexID((ImTextureID)(intptr_t)font_bindless_index);
 
-		auto vs_code = bud::io::FileSystem::read_binary("src/shaders/debug_ui.vert.spv");
-		auto fs_code = bud::io::FileSystem::read_binary("src/shaders/debug_ui.frag.spv");
+		load_shaders_async(asset_manager, { "src/shaders/debug_ui.vert.spv", "src/shaders/debug_ui.frag.spv" }, [this, rhi](const auto& shaders) {
+			GraphicsPipelineDesc desc;
+			desc.vs.code = shaders[0];
+			desc.fs.code = shaders[1];
+			desc.depth_test = false;
+			desc.depth_write = false;
+			desc.cull_mode = CullMode::None;
+			desc.color_attachment_format = bud::graphics::TextureFormat::BGRA8_SRGB;
+			desc.depth_attachment_format = bud::graphics::TextureFormat::Undefined;
+			desc.depth_compare_op = CompareOp::Always;
+			desc.enable_depth_bias = false;
+			desc.blending_enable = true;
+			desc.vertex_layout = VertexLayoutType::ImGui;
 
-		if (!vs_code || !fs_code) {
-			std::println(stderr, "[UIPass] Failed to load ImGui shaders!");
-			return;
-		}
-
-		GraphicsPipelineDesc desc;
-		desc.vs.code = *vs_code;
-		desc.fs.code = *fs_code;
-		desc.depth_test = false;
-		desc.depth_write = false;
-		desc.cull_mode = CullMode::None;
-		desc.color_attachment_format = bud::graphics::TextureFormat::BGRA8_SRGB;
-		desc.depth_attachment_format = bud::graphics::TextureFormat::Undefined;
-		desc.depth_compare_op = CompareOp::Always;
-		desc.enable_depth_bias = false;
-		desc.is_ui_layout = true;
-		desc.blending_enable = true; // Essential for UI font text
-
-		pipeline = rhi->create_graphics_pipeline(desc);
+			pipeline = rhi->create_graphics_pipeline(desc);
+			if (pipeline) {
+				bud::print("[UIPass] Shaders loaded and pipeline created.");
+			}
+		});
 	}
 
 	void UIPass::update_draw_data(ImDrawData* draw_data) {
@@ -822,8 +1040,8 @@ namespace bud::graphics {
 
 				rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
 
-				rhi->cmd_bind_vertex_buffer(cmd, vertex_buffer.internal_handle);
-				rhi->cmd_bind_index_buffer(cmd, index_buffer.internal_handle);
+				rhi->cmd_bind_vertex_buffer(cmd, vertex_buffer);
+				rhi->cmd_bind_index_buffer(cmd, index_buffer);
 
 				float fb_width = draw_data.display_size.x * draw_data.framebuffer_scale.x;
 				float fb_height = draw_data.display_size.y * draw_data.framebuffer_scale.y;

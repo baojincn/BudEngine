@@ -1,0 +1,149 @@
+#version 460
+
+layout (local_size_x = 256) in;
+
+struct VkDrawIndexedIndirectCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+struct DrawData {
+    uint indexCount;
+    uint firstIndex;
+    uint materialId;
+    uint meshId;
+    vec3 min;
+    uint unused0;
+    vec3 max;
+    uint unused1;
+    uint meshletCount;
+    uint unused2;
+    uint unused3;
+    uint unused4;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer InstanceBuffer {
+    DrawData data[];
+};
+
+layout(std430, set = 0, binding = 1) writeonly buffer IndirectDrawCmds {
+    VkDrawIndexedIndirectCommand cmds[];
+};
+
+layout(std430, set = 0, binding = 2) buffer StatsBuffer {
+	uint totalInstances;
+	uint visibleInstances;
+    uint totalTriangles;
+    uint visibleTriangles;
+    uint totalMeshlets;
+    uint visibleMeshlets;
+} stats;
+
+layout(binding = 3) uniform sampler2D hizPyramid;
+
+layout(binding = 4) uniform UniformBufferObject {
+    mat4 view;
+    mat4 proj;
+    mat4 cascade_view_proj[4];
+    vec4 cascade_split_depths;
+    vec3 cam_pos;
+    vec3 light_dir;
+    vec3 light_color;
+    float light_intensity;
+    float ambient_strength;
+    uint cascade_count;
+    uint reversed_z;
+} ubo;
+
+
+#ifdef VULKAN
+layout(push_constant) uniform PushConstants {
+    uint instanceCount;
+} pc;
+#endif
+
+bool is_visible(vec3 bmin, vec3 bmax) {
+    vec4 corners[8];
+    corners[0] = vec4(bmin.x, bmin.y, bmin.z, 1.0);
+    corners[1] = vec4(bmax.x, bmin.y, bmin.z, 1.0);
+    corners[2] = vec4(bmin.x, bmax.y, bmin.z, 1.0);
+    corners[3] = vec4(bmax.x, bmax.y, bmin.z, 1.0);
+    corners[4] = vec4(bmin.x, bmin.y, bmax.z, 1.0);
+    corners[5] = vec4(bmax.x, bmin.y, bmax.z, 1.0);
+    corners[6] = vec4(bmin.x, bmax.y, bmax.z, 1.0);
+    corners[7] = vec4(bmax.x, bmax.y, bmax.z, 1.0);
+
+    mat4 vp = ubo.proj * ubo.view;
+    
+    float minZ = 1e5;
+    float maxZ = -1e5;
+    vec2 minXY = vec2(1e5);
+    vec2 maxXY = vec2(-1e5);
+
+    for (int i = 0; i < 8; i++) {
+        vec4 clip = vp * corners[i];
+        if (clip.w > 0.0) {
+            vec3 ndc = clip.xyz / clip.w;
+            minXY = min(minXY, ndc.xy);
+            maxXY = max(maxXY, ndc.xy);
+            minZ = min(minZ, ndc.z);
+            maxZ = max(maxZ, ndc.z);
+        } else {
+            // behind camera
+            return true;
+        }
+    }
+
+    // Convert NDC to UV [0, 1]
+    vec2 uvMin = clamp(minXY * 0.5 + 0.5, 0.0, 1.0);
+    vec2 uvMax = clamp(maxXY * 0.5 + 0.5, 0.0, 1.0);
+    vec2 size = (uvMax - uvMin) * textureSize(hizPyramid, 0);
+    
+    float maxDim = max(size.x, size.y);
+    float mip = ceil(log2(maxDim));
+    if (mip < 0.0) mip = 0.0;
+    
+    vec2 mipSize = vec2(textureSize(hizPyramid, int(mip)));
+    ivec2 pMin = ivec2(floor(uvMin * mipSize));
+    ivec2 pMax = ivec2(floor(uvMax * mipSize));
+    
+    // Sample exact 4 grid texels without linear filtering
+    float d0 = texelFetch(hizPyramid, pMin, int(mip)).r;
+    float d1 = texelFetch(hizPyramid, ivec2(pMax.x, pMin.y), int(mip)).r;
+    float d2 = texelFetch(hizPyramid, ivec2(pMin.x, pMax.y), int(mip)).r;
+    float d3 = texelFetch(hizPyramid, pMax, int(mip)).r;
+
+    if (ubo.reversed_z == 1) {
+        float depth = min(min(d0, d1), min(d2, d3));
+        return maxZ >= depth;
+    } else {
+        float depth = max(max(d0, d1), max(d2, d3));
+        return minZ <= depth;
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.instanceCount) return;
+
+	atomicAdd(stats.totalInstances, 1);
+    atomicAdd(stats.totalTriangles, data[idx].indexCount / 3);
+    atomicAdd(stats.totalMeshlets, data[idx].meshletCount);
+
+    bool visible = is_visible(data[idx].min, data[idx].max);
+
+    cmds[idx].indexCount    = data[idx].indexCount;
+    cmds[idx].instanceCount = visible ? 1 : 0;
+    cmds[idx].firstIndex    = data[idx].firstIndex;
+    cmds[idx].vertexOffset  = 0;
+    cmds[idx].firstInstance = idx;
+
+    if (visible) {
+		atomicAdd(stats.visibleInstances, 1);
+        atomicAdd(stats.visibleTriangles, data[idx].indexCount / 3);
+        atomicAdd(stats.visibleMeshlets, data[idx].meshletCount);
+    }
+}

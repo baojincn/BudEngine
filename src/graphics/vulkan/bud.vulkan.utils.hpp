@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vulkan/vulkan.h>
 #include <stdexcept>
@@ -28,7 +28,7 @@ namespace bud::graphics::vulkan {
 		}
 	}
 
-	// --- 1. 格式转换 ---
+	// 1. 格式转换
 	constexpr VkFormat to_vk_format(TextureFormat format) {
 		switch (format) {
 		case TextureFormat::Undefined:         return VK_FORMAT_UNDEFINED; // [FIX] Allow Undefined
@@ -38,11 +38,12 @@ namespace bud::graphics::vulkan {
 		case TextureFormat::R32G32B32_FLOAT:   return VK_FORMAT_R32G32B32_SFLOAT;
 		case TextureFormat::D32_FLOAT:         return VK_FORMAT_D32_SFLOAT;
 		case TextureFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
+		case TextureFormat::R32_FLOAT:         return VK_FORMAT_R32_SFLOAT;
 		default: throw std::runtime_error("Unsupported TextureFormat");
 		}
 	}
 
-	// --- 2. 自动推导 Image Aspect (深度/颜色) ---
+	// 2. 自动推导 Image Aspect (深度/颜色)
 	constexpr VkImageAspectFlags get_aspect_flags(VkFormat format) {
 		switch (format) {
 		case VK_FORMAT_D32_SFLOAT:
@@ -57,7 +58,7 @@ namespace bud::graphics::vulkan {
 		}
 	}
 
-	// --- 3. 自动推导 Usage Flags ---
+	// 3. 自动推导 Usage Flags
 	// 根据用途推断 Vulkan Usage
 	constexpr VkImageUsageFlags get_image_usage(VkFormat format, bool is_storage = false) {
 		VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT |      // 总是可以被采样
@@ -78,7 +79,7 @@ namespace bud::graphics::vulkan {
 		return usage;
 	}
 
-	// --- 4. 状态转换 (Barrier 用) ---
+	// 4. 状态转换 (Barrier 用)
 	// 这个之前写在 RHI 里，现在搬过来统一管理
 	// struct VulkanLayoutTransition moved to types.hpp
 
@@ -105,7 +106,12 @@ namespace bud::graphics::vulkan {
 		case ResourceState::ShaderResource:
 			return { VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 					 VK_ACCESS_SHADER_READ_BIT,
-					 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT };
+					 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT };
+
+		case ResourceState::UnorderedAccess:
+			return { VK_IMAGE_LAYOUT_GENERAL,
+					 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+					 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT };
 
 		case ResourceState::TransferDst:
 			return { VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,

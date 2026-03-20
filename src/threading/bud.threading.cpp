@@ -1,4 +1,4 @@
-﻿/// The Task Scheduler is the core component that powers the engine's Job System.
+/// The Task Scheduler is the core component that powers the engine's Job System.
 
 #include <atomic>
 #include <vector>
@@ -9,6 +9,8 @@
 #include <mutex>
 #include <deque>
 #include <print>
+
+#include "src/core/bud.core.hpp"
 // #define BUD_TRACK_TASK_SOURCE
 #if defined(_DEBUG) && defined(BUD_TRACK_TASK_SOURCE)
 #include <stacktrace>
@@ -141,7 +143,7 @@ Fiber* LockFreeFiberPool::pop() {
 TaskScheduler::TaskScheduler(size_t n)
 	: num_threads(n) {
 
-	std::println("[TaskScheduler] Initializing with {} threads(workers), {} fibers per thread", n, MAX_FIBERS_PER_THREAD);
+	bud::print("[TaskScheduler] Initializing with {} threads(workers), {} fibers per thread", n, MAX_FIBERS_PER_THREAD);
 
 	for (size_t i = 0; i < n * MAX_FIBERS_PER_THREAD; ++i)
 		fiber_pool.push(new Fiber());

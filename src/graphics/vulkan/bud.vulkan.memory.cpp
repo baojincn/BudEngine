@@ -5,15 +5,15 @@
 #include <print>
 #include <stdexcept>
 
+#define VMA_IMPLEMENTATION
 #include "src/graphics/vulkan/bud.vulkan.memory.hpp"
 #include "src/graphics/bud.graphics.types.hpp"
 
 namespace bud::graphics::vulkan {
 
-    // --- LinearPage ---
+    // LinearPage
 
-    bool LinearPage::try_alloc(VkDeviceSize req_size, VkDeviceSize alignment, VkDeviceSize& out_offset) {
-        // 计算对齐
+    bool VmaLinearPage::try_alloc(VkDeviceSize req_size, VkDeviceSize alignment, VkDeviceSize& out_offset) {
         VkDeviceSize aligned_offset = (offset + alignment - 1) & ~(alignment - 1);
         if (aligned_offset + req_size > size) return false;
 
@@ -22,40 +22,64 @@ namespace bud::graphics::vulkan {
         return true;
     }
 
-    void LinearPage::reset() {
-        offset = 0;
-    }
+    void VmaLinearPage::reset() { offset = 0; }
 
-    // --- VulkanMemoryAllocator ---
+    // VulkanMemoryAllocator
 
-    VulkanMemoryAllocator::VulkanMemoryAllocator(VkDevice device, VkPhysicalDevice phy_device, uint32_t frames_in_flight)
-        : device(device), phy_device(phy_device), frames_in_flight(frames_in_flight) {
+    VulkanMemoryAllocator::VulkanMemoryAllocator(VkInstance instance, VkDevice device, VkPhysicalDevice phy_device, uint32_t frames_in_flight)
+        : instance(instance), device(device), phy_device(phy_device), frames_in_flight(frames_in_flight) {
     }
 
     void VulkanMemoryAllocator::init() {
-        vkGetPhysicalDeviceMemoryProperties(phy_device, &mem_props);
+        VmaAllocatorCreateInfo allocatorInfo = {};
+        allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+        allocatorInfo.physicalDevice = phy_device;
+        allocatorInfo.device = device;
+        allocatorInfo.instance = instance;
+        // allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT; // Enable if needed later
 
-        // 1. 初始化 Transient Pool (RenderGraph 显存池)
-        // 预分配 256MB DeviceLocal 显存，专门给 RT 使用
-        create_page(256 * 1024 * 1024, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, transient_page);
-        std::println("[Memory] Transient Heap Initialized: 256 MB");
+        if (vmaCreateAllocator(&allocatorInfo, &vma_allocator) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create VMA Allocator!");
+        }
 
-        // 2. 初始化 Staging Pools (CPU上传池)
-        // 为每一帧创建一个独立的上传堆 (64MB x FramesInFlight)
+        // Initialize staging pages. For VMA, Transient pages can just use VmaAllocator directly,
+        // but we'll keep the staging pages as large mapped Vulkan buffers for fast CPU writes.
         staging_pages.resize(frames_in_flight);
         for (uint32_t i = 0; i < frames_in_flight; ++i) {
-            create_page(64 * 1024 * 1024, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging_pages[i]);
+            VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bufferInfo.size = 64 * 1024 * 1024; // 64 MB
+            bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+            VmaAllocationCreateInfo allocInfo = {};
+            allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+            allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+            VmaAllocationInfo vmaInfo;
+            // Hack: store VMA handles in the LinearPage's raw pointers for now 
+            // since LinearPage was designed for raw memory.
+            VkBuffer buf;
+            VmaAllocation alloc;
+            vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo, &buf, &alloc, &vmaInfo);
+            
+            // We use LinearPage to manage offsets within this giant VMA buffer
+            staging_pages[i].buffer = buf;
+            staging_pages[i].allocation = alloc; // Store VmaAllocation here
+            staging_pages[i].size = bufferInfo.size;
+            staging_pages[i].mapped_ptr = vmaInfo.pMappedData;
         }
-        std::println("[Memory] Staging Heaps Initialized: 64 MB x {}", frames_in_flight);
+        bud::print("[Memory] VMA Staging Heaps Initialized: 64 MB x {}", frames_in_flight);
     }
 
     void VulkanMemoryAllocator::cleanup() {
-        // 释放 Transient
-        if (transient_page.memory) vkFreeMemory(device, transient_page.memory, nullptr);
-
-        // 释放 Staging
         for (auto& page : staging_pages) {
-            if (page.memory) vkFreeMemory(device, page.memory, nullptr);
+            if (page.buffer != VK_NULL_HANDLE && vma_allocator != VK_NULL_HANDLE) {
+                vmaDestroyBuffer(vma_allocator, page.buffer, page.allocation);
+                page.buffer = VK_NULL_HANDLE;
+            }
+        }
+        if (vma_allocator != VK_NULL_HANDLE) {
+            vmaDestroyAllocator(vma_allocator);
+            vma_allocator = VK_NULL_HANDLE;
         }
     }
 
@@ -63,85 +87,20 @@ namespace bud::graphics::vulkan {
         std::lock_guard lock(mutex);
         current_frame_index = frame_index;
 
-        // 重置 Transient (因为是帧临时资源，上一帧肯定用完了，或者有 Barrier 保护)
-        transient_page.reset();
-
-        // 重置当前帧的 Staging Page (因为有 Fence 保护，说明 GPU 已经处理完这一帧之前的指令了)
         if (frame_index < staging_pages.size()) {
             staging_pages[frame_index].reset();
         }
     }
 
-    MemoryBlock VulkanMemoryAllocator::alloc_static(uint64_t size, uint64_t alignment, uint32_t memory_type_bits, MemoryUsage usage) {
-        VkMemoryAllocateInfo alloc_info{};
-        alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        alloc_info.allocationSize = size;
-
-        VkMemoryPropertyFlags props = 0;
-        if (usage == MemoryUsage::GpuOnly) props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-        else props = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-
-        alloc_info.memoryTypeIndex = find_memory_type(memory_type_bits, props);
-
-        VkDeviceMemory mem;
-        if (vkAllocateMemory(device, &alloc_info, nullptr, &mem) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to allocate static memory!");
-        }
-
-        MemoryBlock block;
-        block.internal_handle = mem;
-        block.size = size;
-        block.offset = 0;
-
-        if (usage != MemoryUsage::GpuOnly) {
-            vkMapMemory(device, mem, 0, size, 0, &block.mapped_ptr);
-        }
-
-        return block;
+    bud::graphics::BufferHandle VulkanMemoryAllocator::alloc_frame_transient(uint64_t size, uint64_t alignment) {
+        // Obsolete, transient resources are now created directly via VMA in RHI
+        return {};
     }
 
-    void VulkanMemoryAllocator::free(const MemoryBlock& block) {
-        // 只有 alloc_static 分配的独立内存才需要 free
-        // 判断是否属于我们的 Pool (简单的指针比较)
-        bool is_transient = (block.internal_handle == transient_page.memory);
-        bool is_staging = false;
-        for (const auto& page : staging_pages) {
-            if (block.internal_handle == page.memory) { is_staging = true; break; }
-        }
-
-        if (!is_transient && !is_staging && block.internal_handle) {
-            vkFreeMemory(device, static_cast<VkDeviceMemory>(block.internal_handle), nullptr);
-        }
-    }
-
-    MemoryBlock VulkanMemoryAllocator::alloc_frame_transient(uint64_t size, uint64_t alignment, uint32_t memory_type_bits) {
+    bud::graphics::BufferHandle VulkanMemoryAllocator::alloc_staging(uint64_t size, uint64_t alignment) {
         VkDeviceSize offset = 0;
         bool success = false;
-
-        {
-            std::lock_guard lock(mutex);
-            // 假设 memory_type_bits 兼容 DeviceLocal
-            success = transient_page.try_alloc(size, alignment, offset);
-        }
-
-        if (!success) {
-            // 显存池满了！降级为直接分配 (会有性能警告，但不会崩)
-            // std::println(stderr, "[Memory] Warning: Transient Heap Overflow! Fallback to static alloc.");
-            return alloc_static(size, alignment, memory_type_bits, MemoryUsage::GpuOnly);
-        }
-
-        MemoryBlock block;
-        block.internal_handle = transient_page.memory;
-        block.offset = offset;
-        block.size = size;
-        block.mapped_ptr = nullptr; // GPU Only
-        return block;
-    }
-
-    MemoryBlock VulkanMemoryAllocator::alloc_staging(uint64_t size, uint64_t alignment) {
-        VkDeviceSize offset = 0;
-        bool success = false;
-        LinearPage* current_page = nullptr;
+        VmaLinearPage* current_page = nullptr;
 
         {
             std::lock_guard lock(mutex);
@@ -152,47 +111,22 @@ namespace bud::graphics::vulkan {
         }
 
         if (!success || !current_page) {
-            // 这一帧的上传堆满了，降级为直接分配
-            return alloc_static(size, alignment, 0xFFFFFFFF, MemoryUsage::CpuToGpu);
+            // fallback if staging page is full (rare in our 64MB setup)
+            throw std::runtime_error("Staging page overflowed! No fallback implemented yet.");
         }
 
-        MemoryBlock block;
-        block.internal_handle = current_page->memory;
+        bud::graphics::BufferHandle block;
+        // Allocate a new VulkanBuffer wrapper
+        auto* vk_buf = new VulkanBuffer();
+        vk_buf->buffer = current_page->buffer;
+        vk_buf->allocation = current_page->allocation;
+        vk_buf->owns_allocation = false; // It's a sub-allocation, so it shouldn't destroy the parent buffer
+
+        block.internal_state = vk_buf;
         block.offset = offset;
         block.size = size;
-        // 计算 CPU 写入指针
         block.mapped_ptr = static_cast<uint8_t*>(current_page->mapped_ptr) + offset;
         return block;
-    }
-
-    void VulkanMemoryAllocator::create_page(VkDeviceSize size, VkMemoryPropertyFlags props, LinearPage& out_page) {
-        VkMemoryAllocateInfo alloc_info{};
-        alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        alloc_info.allocationSize = size;
-        // 寻找最合适的 Memory Type (通常选第一个符合要求的)
-        alloc_info.memoryTypeIndex = find_memory_type(0xFFFFFFFF, props);
-
-        if (vkAllocateMemory(device, &alloc_info, nullptr, &out_page.memory) == VK_SUCCESS) {
-            out_page.size = size;
-            out_page.offset = 0;
-
-            // 如果是 Host Visible，立刻 Map 出来备用
-            if (props & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
-                vkMapMemory(device, out_page.memory, 0, size, 0, &out_page.mapped_ptr);
-            }
-        }
-        else {
-            throw std::runtime_error("Failed to allocate memory page!");
-        }
-    }
-
-    uint32_t VulkanMemoryAllocator::find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties) {
-        for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
-            if ((type_filter & (1 << i)) && (mem_props.memoryTypes[i].propertyFlags & properties) == properties) {
-                return i;
-            }
-        }
-        throw std::runtime_error("Failed to find suitable memory type!");
     }
 
 }

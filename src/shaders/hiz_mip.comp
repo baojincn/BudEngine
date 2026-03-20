@@ -1,0 +1,41 @@
+#version 460
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (set = 0, binding = 3) uniform sampler2D in_mip;
+layout (set = 0, binding = 5, r32f) uniform writeonly image2D out_mip;
+
+layout (push_constant) uniform PushConstants {
+    vec2 out_size;
+    uint reversed_z;
+    uint padding;
+} pc;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    if (pos.x >= int(pc.out_size.x) || pos.y >= int(pc.out_size.y)) return;
+
+    // Gather 4 texels from the previous mip level
+    // Since we are creating a HiZ pyramid for occlusion, we need the 
+    // conservative depth (min depth if using standard Z, max depth if using reversed Z).
+    // BudEngine uses standard Z (reversed_z = false in RenderConfig).
+    
+    // For standard Z, we need the MIN depth for occlusion testing? 
+    // Actually, for occlusion, you want to know the *furthest* point in a region to be safe?
+    // No, if you want to know if a box is OCCLUDED, you compare its nearest point 
+    // with the *furthest* point of the depth buffer in that region.
+    // If box_near_z > max_hiz_z, then it's occluded.
+    // So HiZ usually stores the MAX depth.
+    
+    vec2 uv = (vec2(pos) + 0.5) / pc.out_size;
+    
+    vec4 depths = textureGather(in_mip, uv, 0);
+    float res_z;
+    if (pc.reversed_z == 1) {
+        res_z = min(min(depths.x, depths.y), min(depths.z, depths.w));
+    } else {
+        res_z = max(max(depths.x, depths.y), max(depths.z, depths.w));
+    }
+
+    imageStore(out_mip, pos, vec4(res_z, 0.0, 0.0, 0.0));
+}

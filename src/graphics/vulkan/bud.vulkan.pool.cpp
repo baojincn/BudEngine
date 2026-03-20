@@ -101,13 +101,16 @@ namespace bud::graphics::vulkan {
             if (v) vkDestroyImageView(device, v, nullptr);
         }
         tex->layer_views.clear();
+
+        for (auto v : tex->mip_views) {
+            if (v) vkDestroyImageView(device, v, nullptr);
+        }
+        tex->mip_views.clear();
         if (tex->view) vkDestroyImageView(device, tex->view, nullptr);
         
-        if (tex->image) vkDestroyImage(device, tex->image, nullptr);
-
-        // [FIX] Free memory block using allocator
-        if (tex->memory_block.is_valid()) {
-            allocator->free(tex->memory_block);
+        if (tex->image) {
+            // bud::print("[Pool] Destroying VkImage {} ({}x{} fmt={})", (void*)tex->image, tex->width, tex->height, (int)tex->format);
+            vmaDestroyImage(allocator->get_vma_allocator(), tex->image, tex->allocation);
         }
     }
 
@@ -124,7 +127,7 @@ namespace bud::graphics::vulkan {
 
         // 2. 使用 Utils 转换参数
         auto vk_format = to_vk_format(desc.format);
-        auto usage = get_image_usage(vk_format);
+        auto usage = get_image_usage(vk_format, desc.is_storage);
 
         VkImageCreateInfo image_info{};
         image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -139,20 +142,13 @@ namespace bud::graphics::vulkan {
         image_info.samples = VK_SAMPLE_COUNT_1_BIT;
         image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-        // 3. 创建 Image Handle
-        if (vkCreateImage(device, &image_info, nullptr, &tex->image) != VK_SUCCESS) {
+        VmaAllocationCreateInfo alloc_info = {};
+        alloc_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+        if (vmaCreateImage(allocator->get_vma_allocator(), &image_info, &alloc_info, &tex->image, &tex->allocation, nullptr) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create pooled image");
         }
-
-        // 4. [New] Bind Memory
-        VkMemoryRequirements mem_reqs;
-        vkGetImageMemoryRequirements(device, tex->image, &mem_reqs);
-
-        // Use alloc_static for pooled resources because they must survive across frames.
-        auto block = allocator->alloc_static(mem_reqs.size, mem_reqs.alignment, mem_reqs.memoryTypeBits, MemoryUsage::GpuOnly);
-        tex->memory_block = block;
-
-        vkBindImageMemory(device, tex->image, static_cast<VkDeviceMemory>(block.internal_handle), block.offset);
+        // bud::print("[Pool] Created VkImage {} ({}x{} fmt={} layers={})", (void*)tex->image, desc.width, desc.height, (int)desc.format, desc.array_layers);
 
         // 5. Create View
         VkImageViewCreateInfo view_info{};
@@ -166,6 +162,15 @@ namespace bud::graphics::vulkan {
         view_info.subresourceRange.baseArrayLayer = 0;
         view_info.subresourceRange.layerCount = desc.array_layers;
 
+        // [FIX] For R32_SFLOAT (used by HiZ), map R to RGB channels so Nsight shows it as grayscale
+        // rather than bright blinding red.
+        if (vk_format == VK_FORMAT_R32_SFLOAT) {
+            view_info.components.r = VK_COMPONENT_SWIZZLE_R;
+            view_info.components.g = VK_COMPONENT_SWIZZLE_R;
+            view_info.components.b = VK_COMPONENT_SWIZZLE_R;
+            view_info.components.a = VK_COMPONENT_SWIZZLE_ONE;
+        }
+
         if (vkCreateImageView(device, &view_info, nullptr, &tex->view) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create image view");
         }
@@ -178,8 +183,32 @@ namespace bud::graphics::vulkan {
                 layer_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
                 layer_view_info.subresourceRange.baseArrayLayer = i;
                 layer_view_info.subresourceRange.layerCount = 1;
+
+                // [FIX] Layer and Mip views are often used as STORAGE images (e.g. HiZ, CSM).
+                // Vulkan requires IDENTITY swizzle for STORAGE descriptors.
+                layer_view_info.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+
                 if (vkCreateImageView(device, &layer_view_info, nullptr, &tex->layer_views[i]) != VK_SUCCESS) {
                     throw std::runtime_error("Failed to create layer image view");
+                }
+            }
+        }
+
+        // 7. Create Mip Views
+        if (desc.mips > 1) {
+            tex->mip_views.resize(desc.mips);
+            for (uint32_t i = 0; i < desc.mips; ++i) {
+                VkImageViewCreateInfo mip_view_info = view_info;
+                mip_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                mip_view_info.subresourceRange.baseMipLevel = i;
+                mip_view_info.subresourceRange.levelCount = 1;
+
+                // [FIX] Layer and Mip views are often used as STORAGE images (e.g. HiZ).
+                // Vulkan requires IDENTITY swizzle for STORAGE descriptors.
+                mip_view_info.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+
+                if (vkCreateImageView(device, &mip_view_info, nullptr, &tex->mip_views[i]) != VK_SUCCESS) {
+                    throw std::runtime_error("Failed to create mip image view");
                 }
             }
         }

@@ -1,12 +1,12 @@
-﻿#pragma once
+#pragma once
 #include <memory>
 #include <string>
 #include <string_view>
+#include "src/graphics/bud.graphics.types.hpp"
 #include "bud.ml.tensor.hpp"
 
 namespace bud::graphics {
 	class RHI;
-	class CommandHandle;
 }
 
 namespace bud::ml {

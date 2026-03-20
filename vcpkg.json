@@ -23,7 +23,10 @@
     "tinygltf",
     "tinyobjloader",
     "pybind11",
-    "onnxruntime"
+    "onnxruntime",
+    "nlohmann-json",
+    "meshoptimizer",
+    "assimp"
   ],
   "overrides": [
     {

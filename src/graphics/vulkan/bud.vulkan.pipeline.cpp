@@ -1,10 +1,13 @@
-﻿#include <vulkan/vulkan.h>
+#include <vulkan/vulkan.h>
 #include <unordered_map>
 #include <vector>
 #include <stdexcept>
 
 #include "src/graphics/vulkan/bud.vulkan.pipeline.hpp"
 #include "src/graphics/bud.graphics.types.hpp"
+#include "src/io/bud.io.hpp"
+#include <imgui.h>
+#include <cstddef>
 
 namespace bud::graphics::vulkan {
 
@@ -48,22 +51,42 @@ namespace bud::graphics::vulkan {
 
         std::vector<VkVertexInputAttributeDescription> attributeDescriptions;
 
-        if (key.is_ui_layout) {
-            bindingDescription.stride = sizeof(float) * 2 + sizeof(float) * 2 + sizeof(uint32_t); // pos(vec2), uv(vec2), col(uint32)
+        switch (key.vertex_layout) {
+        case VertexLayoutType::Default:
+            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},     // Pos
-                {1, 0, VK_FORMAT_R32G32_SFLOAT, 8},     // UV
-                {2, 0, VK_FORMAT_R8G8B8A8_UNORM, 16}    // Color (ImU32)
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)},
+                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, color)},
+                {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, normal)},
+                {3, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::io::MeshData::Vertex, texture_uv)},
+                {4, 0, VK_FORMAT_R32_SFLOAT,       offsetof(bud::io::MeshData::Vertex, texture_index)}
             };
-        } else {
-            bindingDescription.stride = sizeof(float) * (3+3+3+2+1); // Vertex struct size
+            break;
+        case VertexLayoutType::PositionOnly:
+            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},     // Pos
-                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12},    // Color
-                {2, 0, VK_FORMAT_R32G32B32_SFLOAT, 24},    // Normal
-                {3, 0, VK_FORMAT_R32G32_SFLOAT,    36},    // UV
-                //{4, 0, VK_FORMAT_R32_SFLOAT,       44}     // TexIndex
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)}
             };
+            break;
+        case VertexLayoutType::PositionUV:
+            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
+            attributeDescriptions = {
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)},
+                {3, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::io::MeshData::Vertex, texture_uv)}
+            };
+            break;
+        case VertexLayoutType::NoVertexInput:
+            bindingDescription.stride = 0;
+            attributeDescriptions = {};
+            break;
+        case VertexLayoutType::ImGui:
+            bindingDescription.stride = sizeof(ImDrawVert);
+            attributeDescriptions = {
+                {0, 0, VK_FORMAT_R32G32_SFLOAT,  offsetof(ImDrawVert, pos)},
+                {1, 0, VK_FORMAT_R32G32_SFLOAT,  offsetof(ImDrawVert, uv)},
+                {2, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(ImDrawVert, col)}
+            };
+            break;
         }
 
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};

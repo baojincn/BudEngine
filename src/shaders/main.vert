@@ -4,13 +4,12 @@ layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_color;
 layout(location = 2) in vec3 in_normal; 
 layout(location = 3) in vec2 in_tex_coord; 
-//layout(location = 4) in float in_tex_index;
+layout(location = 4) in float in_tex_index;
 
 layout(location = 0) out vec3 frag_world_pos;
 layout(location = 1) out vec3 frag_normal;
 layout(location = 2) out vec2 frag_tex_coord;
-//layout(location = 3) out flat float frag_tex_index;
-// [CSM] fragPosLightSpace removed, we calculate it in frag shader per cascade
+layout(location = 3) out vec3 frag_color;
 
 layout(binding = 0) uniform UniformBufferObject {
     mat4 view;
@@ -25,12 +24,15 @@ layout(binding = 0) uniform UniformBufferObject {
     float light_intensity;
     float ambient_strength;
 	uint cascade_count;
+    uint debug_cascades;
 	uint reversed_z;
 	uint padding[3];
 } ubo;
 
 layout(push_constant) uniform PushConsts {
     mat4 model;
+    uint material_id;
+    uint padding[3];
 } push_consts;
 
 void main() {
@@ -39,9 +41,9 @@ void main() {
 	// [CSM] No more single lightSpaceMatrix projection here
 
     frag_normal = in_normal;
+    frag_color = in_color;
 
     gl_Position = ubo.proj * ubo.view * world_pos;
 
     frag_tex_coord = in_tex_coord;
-    //frag_tex_index = in_tex_index;
 }

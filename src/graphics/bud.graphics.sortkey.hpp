@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <cstdint>
 #include <algorithm>
 
@@ -9,7 +9,7 @@ namespace bud::graphics {
 	struct DrawKey {
 		uint64_t value = 0;
 
-		// --- 编码器 (Encoder) ---
+		// 编码器 (Encoder)
 
 		// Opaque Key: 
 		// 优先级: Layer > Pipeline > Material > Mesh > Depth

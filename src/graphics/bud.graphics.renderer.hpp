@@ -43,6 +43,7 @@ namespace bud::graphics {
 
 		// Game-thread safe snapshot (CPU-side bounds only)
 		std::vector<bud::math::AABB> get_mesh_bounds_snapshot() const;
+		std::vector<std::vector<bud::math::AABB>> get_submesh_bounds_snapshot() const;
 
 	private:
 		struct UploadQueue {
@@ -60,8 +61,19 @@ namespace bud::graphics {
 
 		std::unique_ptr<CSMShadowPass> csm_pass;
 		std::unique_ptr<ZPrepass> z_prepass;
+		std::unique_ptr<HiZMipPass> hiz_mip_pass;
+		std::unique_ptr<HiZCullingPass> hiz_pass;
+		std::unique_ptr<HiZDebugPass> hiz_debug_pass;
 		std::unique_ptr<MainPass> main_pass;
 		std::unique_ptr<UIPass> ui_pass;
+
+		// GPU-Driven specific (Per-frame)
+		uint32_t current_indirect_capacity = 0;
+		std::vector<bud::graphics::BufferHandle> indirect_instance_buffers;
+		std::vector<bud::graphics::BufferHandle> indirect_draw_buffers;
+		std::vector<bud::graphics::BufferHandle> stats_readback_buffers;
+
+		GPUStats last_gpu_stats{};
 
 		std::vector<RenderMesh> meshes;
 		std::vector<bud::math::AABB> mesh_bounds;

@@ -6,7 +6,7 @@
 
 namespace bud::graphics::vulkan {
 
-    // --- VulkanDescriptorAllocator ---
+    // VulkanDescriptorAllocator
 
     void VulkanDescriptorAllocator::init(VkDevice device) {
         this->device = device;
@@ -97,7 +97,7 @@ namespace bud::graphics::vulkan {
         return pool;
     }
 
-    // --- DescriptorLayoutBuilder ---
+    // DescriptorLayoutBuilder
 
     void DescriptorLayoutBuilder::add_binding(uint32_t binding, VkDescriptorType type, VkShaderStageFlags stageFlags, uint32_t count, VkDescriptorBindingFlags bindingFlags) {
         Binding new_bind{};
@@ -158,7 +158,7 @@ namespace bud::graphics::vulkan {
         return set;
     }
 
-    // --- DescriptorWriter ---
+    // DescriptorWriter
 
     void DescriptorWriter::write_image(int binding, int arrayElement, VkImageView image, VkSampler sampler, VkImageLayout layout, VkDescriptorType type) {
         VkDescriptorImageInfo& info = image_infos.emplace_back(VkDescriptorImageInfo{

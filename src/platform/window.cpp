@@ -1,6 +1,7 @@
-﻿#include <SDL3/SDL.h>
+#include <SDL3/SDL.h>
 #include <stdexcept>
 #include "src/platform/bud.platform.hpp"
+#include "src/core/bud.core.hpp"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -86,7 +87,7 @@ namespace bud::platform {
 			if (!window) {
 				auto err = SDL_GetError();
 				auto msg = std::format("SDL Error: {}", err ? err : "Unknown error");
-				std::println(stderr, "CRITICAL FAILURE: {}", msg);
+				bud::eprint("CRITICAL FAILURE: {}", msg);
 
 				SDL_Quit();
 				throw std::runtime_error("Failed to create SDL window");
@@ -94,7 +95,7 @@ namespace bud::platform {
 
 			SDL_ShowWindow(window);
 			update_window_size();
-			std::print("Created window: {} ({}x{})\n", title, width, height);
+			bud::print("Created window: {} ({}x{})", title, width, height);
 		}
 
 		~WindowWin() override {

@@ -1,6 +1,6 @@
-﻿#pragma once
-
+#pragma once
 #include <vector>
+#include <string>
 
 #include "src/core/bud.math.hpp"
 
@@ -29,13 +29,18 @@ namespace bud::scene {
 		void process_mouse_movement(float x_offset, float y_offset, bool constrain_pitch = true);
 		void process_mouse_scroll(float y_offset);
 		void process_mouse_drag_zoom(float yoffset);
+		
+		inline bud::math::AABB get_collision_aabb(float radius = 0.2f) const {
+			return { position - bud::math::vec3(radius), position + bud::math::vec3(radius) };
+		}
 
 	private:
 		void update_camera_vectors();
 	};
 
 	 struct Entity {
-		uint32_t mesh_index = 0;
+		std::string asset_path = "";
+		uint32_t mesh_index = 0xFFFFFFFF;
 		uint32_t material_index = 0;
 		bud::math::mat4 transform = bud::math::mat4(1.0f);
 		bool is_static = true;

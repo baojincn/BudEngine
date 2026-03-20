@@ -1,4 +1,4 @@
-﻿#include "src/graphics/bud.graphics.scene.hpp"
+#include "src/graphics/bud.graphics.scene.hpp"
 #include <bit>
 
 #include "src/threading/bud.threading.hpp"
@@ -14,6 +14,7 @@ namespace bud::graphics {
 			world_matrices = std::move(other.world_matrices);
 			world_aabbs = std::move(other.world_aabbs);
 			mesh_indices = std::move(other.mesh_indices);
+			submesh_indices = std::move(other.submesh_indices);
 			material_indices = std::move(other.material_indices);
 			flags = std::move(other.flags);
 			lbvh_nodes = std::move(other.lbvh_nodes);
@@ -32,24 +33,7 @@ namespace bud::graphics {
 		return *this;
 	}
 
-	void RenderScene::reset(size_t estimated_capacity) {
-		instance_count.store(0, std::memory_order_relaxed);
-		dropped_instances.store(0, std::memory_order_relaxed);
 
-		const size_t target = std::max(estimated_capacity, world_matrices.size());
-		if (world_matrices.size() < target) {
-			world_matrices.resize(target);
-			world_aabbs.resize(target);
-			mesh_indices.resize(target);
-			material_indices.resize(target);
-			flags.resize(target);
-		}
-	}
-
-	inline size_t RenderScene::size() const {
-		const size_t count = instance_count.load(std::memory_order_relaxed);
-		return std::min(count, world_matrices.size());
-	}
 
 	namespace {
 		uint32_t find_split(const std::vector<RenderScene::LBVHNode>& nodes, uint32_t first, uint32_t last) {
@@ -238,5 +222,38 @@ namespace bud::graphics {
 				}
 			}
 		}
+	}
+
+	bool RenderScene::intersect_scene(const bud::math::AABB& aabb) const {
+		if (bvh_root == ~0u) {
+			size_t count = size();
+			for (size_t i = 0; i < count; ++i) {
+				if (world_aabbs[i].intersects(aabb)) return true;
+			}
+			return false;
+		}
+
+		std::vector<uint32_t> stack;
+		stack.reserve(64);
+		stack.push_back(bvh_root);
+
+		while (!stack.empty()) {
+			uint32_t node_idx = stack.back();
+			stack.pop_back();
+
+			const auto& node = bvh_nodes[node_idx];
+			if (node.aabb.intersects(aabb)) {
+				if (node.is_leaf) {
+					// Need to check actual intersection since BVH AABB might be slightly larger or represent multiple items
+					// But for LBVH, leaf is one instance.
+					if (world_aabbs[node.instance_index].intersects(aabb)) return true;
+				} else {
+					stack.push_back(node.left_child);
+					stack.push_back(node.right_child);
+				}
+			}
+		}
+
+		return false;
 	}
 }

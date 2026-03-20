@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vector>
 #include <string>
@@ -18,11 +18,18 @@
 
 #include "src/threading/bud.threading.hpp"
 
+#include <nlohmann/json_fwd.hpp>
+#include "src/core/bud.math.hpp"
+#include "src/core/bud.asset.types.hpp"
+
 namespace bud::io {
 	struct MeshSubset {
 		uint32_t index_start;
 		uint32_t index_count;
+		uint32_t meshlet_start;
+		uint32_t meshlet_count;
 		uint32_t material_index;
+		bud::math::AABB aabb;
 	};
 
 	struct MeshData {
@@ -40,6 +47,12 @@ namespace bud::io {
 		std::vector<uint32_t> indices;
 		std::vector<std::string> texture_paths;
 		std::vector<MeshSubset> subsets;
+
+		// Meshlet data
+		std::vector<bud::asset::MeshletDescriptor> meshlets;
+		std::vector<bud::asset::MeshletCullData> meshlet_cull_data;
+		std::vector<uint32_t> meshlet_vertices;
+		std::vector<uint32_t> meshlet_triangles;
 	};
 }
 
@@ -66,6 +79,7 @@ namespace bud::io {
 
 
 		static std::optional<std::vector<char>> read_binary(const std::filesystem::path& path);
+		static bool write_binary(const std::filesystem::path& path, const std::vector<char>& data);
 	};
 
 
@@ -108,6 +122,7 @@ namespace bud::io {
 		static std::optional<MeshData> load_obj(const std::filesystem::path& path);
 
 		static std::optional<MeshData> load_gltf(const std::filesystem::path& path);
+		static std::optional<MeshData> load_bud_mesh(const std::filesystem::path& path);
 	private:
 		static MeshData convert_to_mesh_data(const tinygltf::Model& model);
 	};
@@ -123,6 +138,12 @@ namespace bud::io {
 
 
 		void load_file_async(const std::string& path, std::function<void(std::vector<char>)> on_loaded);
+
+		void load_json_async(const std::string& path, std::function<void(nlohmann::json)> on_loaded);
+
+		void save_json_async(const std::string& path, const nlohmann::json& json, std::function<void(bool)> on_finished = nullptr);
+
+		void save_file_async(const std::string& path, std::vector<char> data, std::function<void(bool)> on_finished = nullptr);
 
 
 	private:

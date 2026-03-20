@@ -1,4 +1,4 @@
-﻿#include "src/graphics/bud.graphics.graph.hpp"
+#include "src/graphics/bud.graphics.graph.hpp"
 
 #include <iostream>
 
@@ -40,6 +40,12 @@ namespace bud::graphics {
 		RGResourceNode node;
 		node.name = name;
 		node.physical_texture = texture;
+		if (texture) {
+			node.desc.width = texture->width;
+			node.desc.height = texture->height;
+			node.desc.mips = texture->mips;
+			node.desc.format = texture->format;
+		}
 		node.is_external = (texture != nullptr);
 		node.is_transient = !node.is_external;
 		node.initial_state = current_state;
@@ -48,7 +54,7 @@ namespace bud::graphics {
 		return RGHandle{ static_cast<uint32_t>(resources.size() - 1) };
 	}
 
-	RGHandle RenderGraph::import_buffer(const std::string& name, MemoryBlock buffer, ResourceState current_state) {
+	RGHandle RenderGraph::import_buffer(const std::string& name, bud::graphics::BufferHandle buffer, ResourceState current_state) {
 		if (resources.empty())
 			resources.emplace_back();
 
@@ -71,9 +77,9 @@ namespace bud::graphics {
 		return resources[handle.id].physical_texture;
 	}
 
-	MemoryBlock RenderGraph::get_buffer(RGHandle handle) const {
+	bud::graphics::BufferHandle RenderGraph::get_buffer(RGHandle handle) const {
 		if (handle.id == 0 || handle.id >= resources.size())
-			return MemoryBlock{};
+			return bud::graphics::BufferHandle{};
 
 		return resources[handle.id].physical_buffer;
 	}
@@ -236,9 +242,8 @@ namespace bud::graphics {
 					rhi->set_debug_name(tex, ObjectType::Texture, debug_name);
 					rhi->resource_barrier(cmd, tex, barrier.old_state, barrier.new_state);
 				} else if (buf.is_valid()) {
-					// [TODO] Implement rhi->resource_barrier(cmd, buffer, old_state, new_state)
-					// Currently no-op for buffers, but we can set debug name
 					rhi->set_debug_name(buf, ObjectType::Buffer, debug_name);
+					rhi->resource_barrier(cmd, buf, barrier.old_state, barrier.new_state);
 				}
 			}
 

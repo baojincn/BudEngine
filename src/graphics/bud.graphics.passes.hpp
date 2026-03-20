@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vector>
 #include <mutex>
@@ -18,23 +18,60 @@
 #include "src/graphics/bud.graphics.sortkey.hpp"
 
 namespace bud::graphics {
-	class ZPrepass {
+	class RenderPassBase {
+	public:
+		virtual ~RenderPassBase() = default;
+		virtual void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) = 0;
+		virtual void shutdown(RHI* rhi) {}
+	};
+
+	class RenderPass : public RenderPassBase {
+	protected:
 		void* pipeline = nullptr;
 
+		// Helper for asynchronous multi-shader loading
+		void load_shaders_async(bud::io::AssetManager* asset_manager, 
+							   const std::vector<std::string>& paths, 
+							   std::function<void(std::vector<std::vector<char>>)> on_loaded);
+
 	public:
-		void init(RHI* rhi, const RenderConfig& config);
+		virtual ~RenderPass() = default;
+		bool is_ready() const { return pipeline != nullptr; }
+	};
+
+	class HiZCullingPass : public RenderPass {
+	public:
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle instance_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, RGHandle hiz_pyramid, const SceneView& view, size_t instance_count);
+	};
+
+	class HiZMipPass : public RenderPass {
+	public:
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle depth_buffer, const RenderConfig& config);
+	};
+
+	class HiZDebugPass : public RenderPass {
+	public:
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		void add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle hiz_pyramid, uint32_t mip_level);
+	};
+
+	class ZPrepass : public RenderPass {
+	public:
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer,
 			const RenderScene& render_scene,
 			const SceneView& view,
 			const RenderConfig& config,
 			const std::vector<RenderMesh>& meshes,
 			const std::vector<SortItem>& sort_list,
-			size_t instance_count);
+			size_t instance_count,
+			RGHandle indirect_draw_buffer);
 	};
 
 
-	class CSMShadowPass {
-		void* pipeline = nullptr;
+	class CSMShadowPass : public RenderPass {
 		Texture* static_cache_texture = nullptr;
 		bud::math::vec3 last_light_dir = bud::math::vec3(0.0f);
 		bud::math::mat4 last_view_proj = bud::math::mat4(1.0f);
@@ -46,30 +83,29 @@ namespace bud::graphics {
 
 	public:
 		~CSMShadowPass();
-		void shutdown();
+		void shutdown(RHI* rhi) override;
 
 		struct ShadowData {
 			bud::math::mat4 light_space_matrix;
 			bud::math::vec4 light_dir;
 		};
 
-		void init(RHI* rhi, const RenderConfig& config);
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances);
 	};
 
 	
-	class MainPass {
-		void* pipeline = nullptr;
-
+	class MainPass : public RenderPass {
 	public:
-		void init(RHI* rhi, const RenderConfig& config);
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		void add_to_graph(RenderGraph& rg, RGHandle shadow_map, RGHandle backbuffer, RGHandle depth_buffer,
 			const RenderScene& render_scene,
 			const SceneView& view,
 			const RenderConfig& config,
 			const std::vector<RenderMesh>& meshes,
 			const std::vector<SortItem>& sort_list,
-			size_t instance_count);
+			size_t instance_count,
+			bud::graphics::RGHandle indirect_draw_buffer);
 	};
 
 	struct UIDrawCmdSnapshot {
@@ -109,12 +145,11 @@ namespace bud::graphics {
 		}
 	};
 
-	class UIPass {
-		void* pipeline = nullptr;
+	class UIPass : public RenderPass {
 		Texture* font_texture = nullptr;
 
-		MemoryBlock vertex_buffer;
-		MemoryBlock index_buffer;
+		bud::graphics::BufferHandle vertex_buffer;
+		bud::graphics::BufferHandle index_buffer;
 		uint32_t current_vertex_buffer_size = 0;
 		uint32_t current_index_buffer_size = 0;
 
@@ -124,8 +159,8 @@ namespace bud::graphics {
 
 	public:
 		~UIPass();
-		void shutdown(RHI* rhi);
-		void init(RHI* rhi, const RenderConfig& config);
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		void update_draw_data(ImDrawData* draw_data);
 		void add_to_graph(RenderGraph& rg, RGHandle backbuffer);
 	};

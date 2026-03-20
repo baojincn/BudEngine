@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.30.0)
+cmake_minimum_required(VERSION 3.30.0)
 
 # Setup vcpkg toolchain
 if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
@@ -53,6 +53,9 @@ if(BUD_ENABLE_PROFILING)
 endif()
 find_package(onnxruntime CONFIG REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+find_package(meshoptimizer CONFIG REQUIRED)
+find_package(assimp CONFIG REQUIRED)
 # End, find dependencies
 
 # ---------------------------------------------------------------------------
@@ -97,6 +100,9 @@ list(APPEND SHADER_FILES
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/zprepass.frag"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/debug_ui.vert"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/debug_ui.frag"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hiz_cull.comp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hiz_mip.comp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hiz_debug.frag"
 )
 
 # Find glslc compiler
@@ -162,12 +168,15 @@ target_sources(bud_engine_core
         "src/platform/windows/switch_context_win_x86_64.asm"
 		"src/platform/window.cpp"
 		"src/runtime/bud.engine.cpp"
+		"src/runtime/bud.game.cpp"
+		"src/ui/bud.stats.ui.cpp"
 		"src/graphics/bud.graphics.cpp"
 		"src/graphics/bud.graphics.scene.cpp"
         "src/graphics/bud.graphics.passes.cpp"
-		"src/graphics/bud.graphics.renderer.cpp"
 		"src/graphics/bud.graphics.graph.cpp"
+		"src/graphics/bud.graphics.renderer.cpp"
 		"src/graphics/bud.ml_passes.cpp"
+		"src/graphics/bud.ml_perception.cpp"
         
 		"src/graphics/vulkan/bud.graphics.vulkan.cpp"
 		"src/graphics/vulkan/bud.vulkan.memory.cpp"
@@ -193,6 +202,8 @@ target_sources(bud_engine_core
 		"src/runtime/bud.input.hpp"
 		"src/runtime/bud.scene.hpp"
 
+		"src/ui/bud.stats.ui.hpp"
+
 		"src/graphics/bud.graphics.hpp"
 		"src/graphics/bud.graphics.rhi.hpp"
 		"src/graphics/bud.graphics.scene.hpp"
@@ -211,6 +222,8 @@ target_sources(bud_engine_core
 		"src/graphics/vulkan/bud.vulkan.types.hpp"
 		"src/graphics/vulkan/bud.vulkan.utils.hpp"
 
+		"src/graphics/bud.ml_passes.hpp"
+		"src/graphics/bud.ml_perception.hpp"
 		"src/ml/bud.ml.tensor.hpp"
 		"src/ml/bud.ml.backend.hpp"
 )
@@ -221,6 +234,8 @@ target_link_libraries(bud_engine_core
 		Vulkan::Vulkan
 		imgui::imgui
 		onnxruntime::onnxruntime
+		nlohmann_json::nlohmann_json
+		meshoptimizer::meshoptimizer
 )
 
 target_include_directories(bud_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -238,6 +253,10 @@ if(BUD_BUILD_SAMPLES)
 
 	if(MSVC)
         target_link_options(triangle_sample PRIVATE "/CETCOMPAT:NO")
+        # Non-debug builds: hide console window (SUBSYSTEM:WINDOWS, keep main() via mainCRTStartup)
+        target_link_options(triangle_sample PRIVATE
+            $<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup>
+        )
     endif()
 
     # Directly Copy DLL to the Exe Directory
@@ -251,3 +270,26 @@ if(BUD_BUILD_SAMPLES)
 	endif()
 endif()
 # End, triangle_sample
+
+# Begin, BudAssetTool
+add_executable(BudAssetTool
+    src/tools/BudAssetTool/main.cpp
+    src/tools/BudAssetTool/bud.asset.processor.cpp
+)
+
+target_link_libraries(BudAssetTool
+    PRIVATE
+        bud_engine_core
+        meshoptimizer::meshoptimizer
+        assimp::assimp
+)
+
+target_include_directories(BudAssetTool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Output directory
+set_target_properties(BudAssetTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+if(MSVC)
+    target_link_options(BudAssetTool PRIVATE "/CETCOMPAT:NO")
+endif()
+# End, BudAssetTool

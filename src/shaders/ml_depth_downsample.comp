@@ -1,0 +1,18 @@
+#version 450
+
+layout(set = 0, binding = 0) uniform sampler2D in_depth;
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D out_depth;
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    ivec2 target_size = imageSize(out_depth);
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+
+    if (pos.x >= target_size.x || pos.y >= target_size.y) return;
+
+    vec2 uv = (vec2(pos) + 0.5) / vec2(target_size);
+    float depth = texture(in_depth, uv).r;
+
+    imageStore(out_depth, pos, vec4(depth, 0.0, 0.0, 0.0));
+}

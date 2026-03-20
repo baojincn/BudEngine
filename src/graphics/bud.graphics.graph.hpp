@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vector>
 #include <string>
@@ -26,7 +26,7 @@ namespace bud::graphics {
 	struct RGResourceNode {
 		std::string name;
 		Texture* physical_texture = nullptr;
-		MemoryBlock physical_buffer;
+		bud::graphics::BufferHandle physical_buffer;
 		bool is_buffer = false;
 		TextureDesc desc;
 		bool is_transient = true;
@@ -94,6 +94,7 @@ namespace bud::graphics {
 		friend class RGBuilder;
 	public:
 		RenderGraph(RHI* rhi) : rhi(rhi) {}
+		~RenderGraph() { reset(); }
 
 		void reset() {
 			if (rhi) {
@@ -129,9 +130,17 @@ namespace bud::graphics {
 		}
 
 		RGHandle import_texture(const std::string& name, Texture* texture, ResourceState current_state);
-		RGHandle import_buffer(const std::string& name, MemoryBlock buffer, ResourceState current_state);
+		RGHandle import_buffer(const std::string& name, bud::graphics::BufferHandle buffer, ResourceState current_state);
 		Texture* get_texture(RGHandle handle) const;
-		MemoryBlock get_buffer(RGHandle handle) const;
+		bud::graphics::BufferHandle get_buffer(RGHandle handle) const;
+		
+		const TextureDesc& get_texture_desc(RGHandle handle) const {
+			if (handle.id == 0 || handle.id >= resources.size()) {
+				static TextureDesc empty{};
+				return empty;
+			}
+			return resources[handle.id].desc;
+		}
 
 		void compile();
 		void execute(CommandHandle cmd);

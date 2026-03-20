@@ -1,4 +1,4 @@
-﻿/// The Task Scheduler is the core component that powers the engine's Job System.
+/// The Task Scheduler is the core component that powers the engine's Job System.
 
 #pragma once
 
@@ -173,7 +173,7 @@ namespace bud::threading {
 
 	/// @brief High-performance Task Scheduler based on C++23 Fibers and Work Stealing.
 	///
-	/// -----------------------------------------------------------------------------
+	/// 
 	/// @todo [Safety] Implement Stack Guard Pages.
 	/// Current stack size is fixed (64KB Debug / 32KB Release). Deep recursion or 
 	/// large stack allocations may silently corrupt heap memory (memory stomping).
@@ -200,7 +200,7 @@ namespace bud::threading {
 	/// Fibers are cooperatively scheduled. Calling blocking APIs (e.g., Sleep, 
 	/// fread, synchronous socket wait) will suspend the entire physical Worker Thread,
 	/// starving all other fibers assigned to that thread.
-	/// -----------------------------------------------------------------------------
+	/// 
 
 
 	/// @brief The core Job System that manages fiber-based concurrency.
@@ -208,7 +208,7 @@ namespace bud::threading {
 	/// This scheduler supports three primary patterns of execution (Task Types),
 	/// allowing for both logic-driven and data-driven parallelism.
 	///
-	/// -----------------------------------------------------------------------------
+	/// 
 	/// **1. Fire-and-Forget Tasks (Detached)**
 	/// Independent background tasks that do not require immediate synchronization.
 	/// Suitable for: Logging, file I/O requests, or non-critical background logic.
@@ -218,7 +218,7 @@ namespace bud::threading {
 	/// });
 	/// @endcode
 	///
-	/// -----------------------------------------------------------------------------
+	/// 
 	/// **2. Dependency-Managed Tasks (Fork-Join / DAG)**
 	/// Tasks that define an implicit dependency graph using `Counter`.
 	/// The current thread (Main or Worker) can spawn children and wait for them 
@@ -231,7 +231,7 @@ namespace bud::threading {
 	/// scheduler.wait_for_counter(dependency); // Join (Sync point)
 	/// @endcode
 	///
-	/// -----------------------------------------------------------------------------
+	/// 
 	/// **3. Data Parallelism (Batch Processing)**
 	/// High-throughput processing of large datasets (Arrays, Vectors).
 	/// Large loops are split into chunks and distributed across worker threads.
@@ -242,7 +242,7 @@ namespace bud::threading {
 	///     for (size_t i = start; i < end; ++i) UpdateParticle(i);
 	/// }, &dependency);
 	/// @endcode
-	/// -----------------------------------------------------------------------------
+	/// 
 
 
 	class TaskScheduler {

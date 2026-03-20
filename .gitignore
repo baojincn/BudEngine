@@ -29,6 +29,14 @@ third_party/*/.gitignore
 # Logs
 *.log
 *.tmp
+.agents/
+.claude/
+.cursor/
+.gemini/
+temp/
+tmp/
+
+
 
 # CMake cache
 CMakeCache.txt

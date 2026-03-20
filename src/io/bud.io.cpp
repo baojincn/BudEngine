@@ -1,28 +1,16 @@
-﻿#include <vector>
-#include <string>
-#include <filesystem>
+#include "bud.io.hpp"
+#include "src/core/bud.core.hpp"
+#include "src/core/bud.asset.types.hpp"
 #include <fstream>
-#include <iostream>
-#include <print>
+#include <filesystem>
 #include <optional>
-#include <functional>
+#include <iostream>
+#include <nlohmann/json.hpp>
 
-// 保持第三方库的 include
 #include <tiny_obj_loader.h>
-#include <tiny_gltf.h> 
 #include <stb_image.h>
 
-#define GLM_FORCE_RADIANS
-#define GLM_FORCE_DEPTH_ZERO_TO_ONE
-#define GLM_ENABLE_EXPERIMENTAL // for glm::hash
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtx/hash.hpp>
-
-#include "src/io/bud.io.hpp"
-#include "src/threading/bud.threading.hpp"
-
-using namespace bud::io;
+namespace bud::io {
 
 bool MeshData::Vertex::operator==(const Vertex& other) const {
 	return pos == other.pos &&
@@ -39,29 +27,36 @@ std::optional<std::filesystem::path> FileSystem::resolve_path(const std::filesys
 		};
 
 	if (check_exists(path)) return path;
-	if (check_exists(std::filesystem::path("../") / path)) {
-		auto p = std::filesystem::path("../") / path;
-		std::println("[IO] Resolved path via fallback: {}", p.string());
-		return p;
-	}
-	if (check_exists(std::filesystem::path("../../") / path)) {
-		auto p = std::filesystem::path("../../") / path;
-		std::println("[IO] Resolved path via fallback: {}", p.string());
-		return p;
-	}
-	return std::nullopt;
+
+	// Try parent directories (for running from build/bin)
+	auto p1 = std::filesystem::path("../") / path;
+	if (check_exists(p1)) return p1;
+
+	auto p2 = std::filesystem::path("../../") / path;
+	if (check_exists(p2)) return p2;
+
+	auto p3 = std::filesystem::path("../../../") / path;
+	if (check_exists(p3)) return p3;
+
+	// For saving, we might not want to resolve, or we resolve to current dir
+	return path;
 }
 
 // 通用二进制读取 (用于 Shader (SPV), Buffer 等)
 std::optional<std::vector<char>> FileSystem::read_binary(const std::filesystem::path& path) {
-	auto resolved_path = resolve_path(path);
-	if (!resolved_path) {
-		std::println(stderr, "[IO] Failed to find file: {}", path.string());
-		std::println(stderr, "[IO] CWD: {}", std::filesystem::current_path().string());
-		return std::nullopt;
+	auto resolved_path_opt = resolve_path(path);
+	if (!resolved_path_opt) return std::nullopt;
+	
+	std::filesystem::path resolved_path = *resolved_path_opt;
+	// Extra check if it really exists for reading
+	if (!std::filesystem::exists(resolved_path)) {
+		// Try fallback if resolve_path didn't do it
+		if (std::filesystem::exists(std::filesystem::path("../") / path)) resolved_path = std::filesystem::path("../") / path;
+		else if (std::filesystem::exists(std::filesystem::path("../../") / path)) resolved_path = std::filesystem::path("../../") / path;
+		else return std::nullopt;
 	}
 
-	std::ifstream file(*resolved_path, std::ios::ate | std::ios::binary);
+	std::ifstream file(resolved_path, std::ios::ate | std::ios::binary);
 	if (!file.is_open()) return std::nullopt;
 
 	size_t file_size = (size_t)file.tellg();
@@ -71,6 +66,37 @@ std::optional<std::vector<char>> FileSystem::read_binary(const std::filesystem::
 	return buffer;
 }
 
+bool FileSystem::write_binary(const std::filesystem::path& path, const std::vector<char>& data) {
+	try {
+		// 1. Ensure the parent directory exists
+		auto parent_path = path.parent_path();
+		if (!parent_path.empty() && !std::filesystem::exists(parent_path)) {
+			std::filesystem::create_directories(parent_path);
+		}
+
+		// 2. Write to a temporary file first
+		std::filesystem::path temp_path = path;
+		temp_path.replace_extension(path.extension().string() + ".tmp");
+
+		{
+			std::ofstream file(temp_path, std::ios::binary | std::ios::trunc);
+			if (!file.is_open()) {
+				bud::eprint("[IO] Failed to open temp file for writing: {}", temp_path.string());
+				return false;
+			}
+			file.write(data.data(), data.size());
+			file.flush();
+		}
+
+		// 3. Atomic rename (on most filesystems)
+		std::filesystem::rename(temp_path, path);
+		return true;
+	}
+	catch (const std::exception& e) {
+		bud::eprint("[IO] Exception during atomic write to {}: {}", path.string(), e.what());
+		return false;
+	}
+}
 
 
 Image::Image(Image&& other) noexcept {
@@ -113,10 +139,9 @@ void Image::move_from(Image&& other) {
 std::optional<Image> ImageLoader::load(const std::filesystem::path& path) {
 	Image img;
 
-	// [FIX] Use resolve_path
 	auto resolved_opt = FileSystem::resolve_path(path);
 	if (!resolved_opt) {
-		std::println(stderr, "[IO] Image not found: {}", path.string());
+		bud::eprint("[IO] Image not found: {}", path.string());
 		return std::nullopt;
 	}
 	std::string path_str = resolved_opt->string();
@@ -125,7 +150,7 @@ std::optional<Image> ImageLoader::load(const std::filesystem::path& path) {
 	img.pixels = stbi_load(path_str.c_str(), &img.width, &img.height, &img.channels, STBI_rgb_alpha);
 
 	if (!img.pixels) {
-		std::println(stderr, "[IO] Failed to load image: {}", path_str);
+		bud::eprint("[IO] Failed to load image: {}", path_str);
 		return std::nullopt;
 	}
 
@@ -139,19 +164,26 @@ std::optional<Image> ImageLoader::load(const std::filesystem::path& path) {
 // ==========================================
 
 std::optional<MeshData> ModelLoader::load_obj(const std::filesystem::path& path) {
+	auto resolved_opt = FileSystem::resolve_path(path);
+	if (!resolved_opt) {
+		bud::eprint("[IO] OBJ file not found: {}", path.string());
+		return std::nullopt;
+	}
+	std::filesystem::path resolved_path = *resolved_opt;
+
 	tinyobj::attrib_t attrib;
 	std::vector<tinyobj::shape_t> shapes;
 	std::vector<tinyobj::material_t> materials;
 	std::string warn, err;
 
-	auto base_dir = path.parent_path().string() + "/";
+	auto base_dir = resolved_path.parent_path().string() + "/";
 	bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, 
-	                            path.string().c_str(), base_dir.c_str());
+	                            resolved_path.string().c_str(), base_dir.c_str());
 
 	if (!warn.empty() && warn.find("Both") == std::string::npos)
-		std::println("[TinyOBJ Warn]: {}", warn);
+		bud::print("[TinyOBJ Warn]: {}", warn);
 	if (!err.empty())
-		std::println("[TinyOBJ Error]: {}", err);
+		bud::print("[TinyOBJ Error]: {}", err);
 	if (!ret)
 		return std::nullopt;
 
@@ -159,7 +191,7 @@ std::optional<MeshData> ModelLoader::load_obj(const std::filesystem::path& path)
 
 	const std::string default_texture = "data/textures/default.png";
 
-	std::println("[OBJ Parser] Loading {} materials...", materials.size());
+	bud::print("[OBJ Parser] Loading {} materials...", materials.size());
 	for (size_t mat_idx = 0; mat_idx < materials.size(); mat_idx++) {
 		auto tex_name = materials[mat_idx].diffuse_texname;
 		std::replace(tex_name.begin(), tex_name.end(), '\\', '/');
@@ -169,11 +201,9 @@ std::optional<MeshData> ModelLoader::load_obj(const std::filesystem::path& path)
 				tex_name = base_dir + tex_name;
 			}
 			mesh_data.texture_paths.push_back(tex_name);
-			//std::println("  Material[{}] -> {}", mat_idx, tex_name);
 		}
 		else {
 			mesh_data.texture_paths.push_back(default_texture);
-			std::println("  Material[{}] -> (empty/fallback)", mat_idx);
 		}
 	}
 
@@ -188,10 +218,6 @@ std::optional<MeshData> ModelLoader::load_obj(const std::filesystem::path& path)
 			uint32_t safe_mat_idx = (current_material_id < 0) ? 0 : static_cast<uint32_t>(current_material_id);
 
 			if (safe_mat_idx >= mesh_data.texture_paths.size()) {
-				//std::println(stderr, 
-				//	"[OBJ Parser ERROR] Material {} out of range! "
-				//	"(Max: {})", 
-				//	safe_mat_idx, mesh_data.texture_paths.size());
 				safe_mat_idx = 0;
 			}
 
@@ -215,10 +241,6 @@ std::optional<MeshData> ModelLoader::load_obj(const std::filesystem::path& path)
 			int32_t mat_id = shape.mesh.material_ids[f];
 
 			if (mat_id != current_material_id) {
-				//if (f % 1000 == 0) {  // 每1000个面打印一次，避免过多日志
-				//	std::println("[OBJ Parser] Face {}: Material {} -> {}", 
-				//		f, current_material_id, mat_id);
-				//}
 				flush_subset(mat_id);
 			}
 
@@ -273,18 +295,10 @@ std::optional<MeshData> ModelLoader::load_obj(const std::filesystem::path& path)
 		}
 	}
 
-	// 提交最后一个子网格
 	flush_subset(current_material_id);
 
-	//std::println("\n[OBJ Loader Summary]");
-	//std::println("  File: {}", path.string());
-	//std::println("  Vertices: {}", mesh_data.vertices.size());
-	//std::println("  Indices: {}", mesh_data.indices.size());
-	//std::println("  Materials (textures): {}", mesh_data.texture_paths.size());
-	//std::println("  Subsets: {}", mesh_data.subsets.size());
-	
 	if (mesh_data.subsets.empty() && !mesh_data.indices.empty()) {
-		std::println(stderr, "  ⚠️ WARNING: No subsets found! Creating fallback...");
+		bud::eprint("  ⚠️ WARNING: No subsets found! Creating fallback...");
 		MeshSubset fallback;
 		fallback.index_start = 0;
 		fallback.index_count = (uint32_t)mesh_data.indices.size();
@@ -297,23 +311,29 @@ std::optional<MeshData> ModelLoader::load_obj(const std::filesystem::path& path)
 }
 
 std::optional<MeshData> ModelLoader::load_gltf(const std::filesystem::path& path) {
+	auto resolved_opt = FileSystem::resolve_path(path);
+	if (!resolved_opt) {
+		bud::eprint("[IO] glTF file not found: {}", path.string());
+		return std::nullopt;
+	}
+	auto path_str = resolved_opt->string();
+
 	tinygltf::Model model;
 	tinygltf::TinyGLTF loader;
 	std::string err;
 	std::string warn;
-	auto path_str = path.string();
 	auto ret = false;
 
-	if (path.extension() == ".glb")
+	if (resolved_opt->extension() == ".glb")
 		ret = loader.LoadBinaryFromFile(&model, &err, &warn, path_str);
 	else
 		ret = loader.LoadASCIIFromFile(&model, &err, &warn, path_str);
 
 	if (!warn.empty())
-		std::println("[glTF Warn]: {}", warn);
+		bud::print("[glTF Warn]: {}", warn);
 
 	if (!err.empty())
-		std::println("[glTF Error]: {}", err);
+		bud::print("[glTF Error]: {}", err);
 
 	if (!ret)
 		return std::nullopt;
@@ -390,22 +410,163 @@ MeshData ModelLoader::convert_to_mesh_data(const tinygltf::Model& model) {
 	return meshData;
 }
 
+std::optional<MeshData> ModelLoader::load_bud_mesh(const std::filesystem::path& path) {
+	std::cout << "[IO] load_bud_mesh: " << path.string() << std::endl;
+	auto resolved_opt = FileSystem::resolve_path(path);
+	if (!resolved_opt) {
+		bud::eprint("[IO] .budmesh file not found: {}", path.string());
+		return std::nullopt;
+	}
+
+	auto data_opt = FileSystem::read_binary(*resolved_opt);
+	if (!data_opt) return std::nullopt;
+
+	const char* ptr = data_opt->data();
+	size_t data_size = data_opt->size();
+	const asset::BudMeshHeader* header = reinterpret_cast<const asset::BudMeshHeader*>(ptr);
+
+	if (header->magic != asset::MESH_MAGIC) {
+		bud::eprint("[IO] Invalid .budmesh magic: {}", path.string());
+		return std::nullopt;
+	}
+
+	if (header->version < 2) {
+		bud::eprint("[IO] Version too old: {}, expected at least 2, got {}", path.string(), header->version);
+		return std::nullopt;
+	}
+
+	static_assert(sizeof(asset::BudMeshHeader) == asset::MESH_HEADER_SIZE, "BudMeshHeader size mismatch!");
+	static_assert(offsetof(asset::BudMeshHeader, vertex_offset) == asset::MESH_HEADER_VERTEX_OFFSET, "BudMeshHeader alignment mismatch!");
+	static_assert(offsetof(asset::BudMeshHeader, submesh_count) == asset::MESH_HEADER_SUBMESH_COUNT_OFFSET, "BudMeshHeader submesh_count offset mismatch!");
+
+	bud::print("[IO] sizeof(Header)={}, sizeof(Vertex)={}", sizeof(asset::BudMeshHeader), sizeof(asset::Vertex));
+	bud::print("[IO] .budmesh: {}, size={}, v_count={}, i_count={}, m_count={}, s_count={}", 
+		path.string(), data_size, header->total_vertices, header->total_indices, header->meshlet_count, header->submesh_count);
+
+	auto check_offset = [&](uint64_t offset, size_t section_size, const char* name) {
+		if (offset + section_size > data_size) {
+			bud::eprint("[IO] Offset out of bounds: {} (offset={}, section_size={}, total={})", name, offset, section_size, data_size);
+			return false;
+		}
+		return true;
+	};
+
+	if (!check_offset(header->vertex_offset, header->total_vertices * sizeof(asset::Vertex), "Vertices") ||
+		!check_offset(header->index_offset, header->total_indices * sizeof(uint32_t), "Indices") ||
+		!check_offset(header->meshlet_offset, header->meshlet_count * sizeof(asset::MeshletDescriptor), "Meshlets") ||
+		!check_offset(header->vertex_index_offset, header->meshlet_index_offset - header->vertex_index_offset, "MeshletVertices") ||
+		!check_offset(header->meshlet_index_offset, header->cull_data_offset - header->meshlet_index_offset, "MeshletTriangles") ||
+		!check_offset(header->cull_data_offset, header->meshlet_count * sizeof(asset::MeshletCullData), "CullData") ||
+		(header->version >= 2 && !check_offset(header->submesh_offset, header->submesh_count * sizeof(asset::SubMeshDescriptor), "Submeshes")) ||
+		(header->version >= 3 && !check_offset(header->texture_offset, 0, "Textures"))) { // check_offset 0 just for existence of start
+		return std::nullopt;
+	}
+
+	MeshData mesh;
+
+	// 1. Map Source Vertices
+	const asset::Vertex* src_vertices = reinterpret_cast<const asset::Vertex*>(ptr + header->vertex_offset);
+    
+	// 2. Map Meshlet and Submesh Data
+	bud::print("[IO] Offsets: v={}, i={}, m={}, s={}", header->vertex_offset, header->index_offset, header->meshlet_offset, header->submesh_offset);
+	const asset::MeshletDescriptor* descriptors = reinterpret_cast<const asset::MeshletDescriptor*>(ptr + header->meshlet_offset);
+	const uint32_t* meshlet_vertices = reinterpret_cast<const uint32_t*>(ptr + header->vertex_index_offset);
+	const uint32_t* meshlet_triangles = reinterpret_cast<const uint32_t*>(ptr + header->meshlet_index_offset);
+	const asset::SubMeshDescriptor* submesh_descs = reinterpret_cast<const asset::SubMeshDescriptor*>(ptr + header->submesh_offset);
+
+	// 3. Fast load buffers (Convert back to engine-friendly Vertex structure)
+	mesh.vertices.resize(header->total_vertices);
+	for (uint32_t i = 0; i < header->total_vertices; ++i) {
+		MeshData::Vertex v;
+		v.pos = { src_vertices[i].position[0], src_vertices[i].position[1], src_vertices[i].position[2] };
+		v.normal = { src_vertices[i].normal[0], src_vertices[i].normal[1], src_vertices[i].normal[2] };
+		v.texture_uv = { src_vertices[i].uv[0], src_vertices[i].uv[1] };
+		v.color = { 1.0f, 1.0f, 1.0f };
+		v.texture_index = 0.0f;
+		mesh.vertices[i] = v;
+	}
+
+	const uint32_t* src_indices = reinterpret_cast<const uint32_t*>(ptr + header->index_offset);
+	mesh.indices.assign(src_indices, src_indices + header->total_indices);
+
+	// Map Meshlet and Submesh Data
+	const asset::MeshletDescriptor* meshlet_descs = reinterpret_cast<const asset::MeshletDescriptor*>(ptr + header->meshlet_offset);
+	const uint32_t* mv_ptr = reinterpret_cast<const uint32_t*>(ptr + header->vertex_index_offset);
+	const uint32_t* mt_ptr = reinterpret_cast<const uint32_t*>(ptr + header->meshlet_index_offset);
+	const asset::MeshletCullData* mc_ptr = reinterpret_cast<const asset::MeshletCullData*>(ptr + header->cull_data_offset);
+	const asset::SubMeshDescriptor* sm_ptr = reinterpret_cast<const asset::SubMeshDescriptor*>(ptr + header->submesh_offset);
+
+	mesh.meshlets.assign(meshlet_descs, meshlet_descs + header->meshlet_count);
+	mesh.meshlet_cull_data.assign(mc_ptr, mc_ptr + header->meshlet_count);
+
+    uint32_t mv_count = (uint32_t)((header->meshlet_index_offset - header->vertex_index_offset) / sizeof(uint32_t));
+    uint32_t mt_count = (uint32_t)((header->cull_data_offset - header->meshlet_index_offset) / sizeof(uint32_t));
+	mesh.meshlet_vertices.assign(mv_ptr, mv_ptr + mv_count);
+	mesh.meshlet_triangles.assign(mt_ptr, mt_ptr + mt_count);
+
+	for (uint32_t s = 0; s < header->submesh_count; ++s) {
+		const auto& sub = sm_ptr[s];
+		MeshSubset subset;
+		subset.index_start = sub.index_start;
+		subset.index_count = sub.index_count;
+		subset.meshlet_start = sub.meshlet_start;
+		subset.meshlet_count = sub.meshlet_count;
+		subset.material_index = sub.material_id;
+		subset.aabb = bud::math::AABB(
+			bud::math::vec3(sub.aabb_min[0], sub.aabb_min[1], sub.aabb_min[2]),
+			bud::math::vec3(sub.aabb_max[0], sub.aabb_max[1], sub.aabb_max[2])
+		);
+		mesh.subsets.push_back(subset);
+	}
+
+	bud::print("[IO] Loaded mesh: {} (v={}, i={}, m={}, s={})", path.string(), (uint32_t)mesh.vertices.size(), (uint32_t)mesh.indices.size(), (uint32_t)mesh.meshlets.size(), (uint32_t)mesh.subsets.size());
+
+	// Texture paths
+	if (header->version >= 3 && header->texture_count > 0) {
+		mesh.texture_paths.clear();
+		const char* tex_ptr = ptr + header->texture_offset;
+		for (uint32_t t = 0; t < header->texture_count; ++t) {
+			std::string tex_path(tex_ptr);
+			// Fix backslashes
+			std::replace(tex_path.begin(), tex_path.end(), '\\', '/');
+			
+			// If it's just a filename, we might need a base path?
+			// But for Sponza, we should have exported them correctly in Tool.
+			mesh.texture_paths.push_back(tex_path);
+			tex_ptr += tex_path.length() + 1;
+		}
+	} else {
+		mesh.texture_paths.push_back("data/textures/default.png");
+	}
+
+	return mesh;
+}
+
 
 AssetManager::AssetManager(bud::threading::TaskScheduler* scheduler) : task_scheduler(scheduler) {}
 
 void AssetManager::load_mesh_async(const std::string& path, std::function<void(MeshData)> on_loaded) {
-
 	task_scheduler->spawn("AsyncMeshLoad", [this, path, on_loaded]() {
-		auto mesh_opt = ModelLoader::load_obj(path);
+		std::optional<MeshData> mesh_opt;
+		
+		std::string path_lower = path;
+		std::transform(path_lower.begin(), path_lower.end(), path_lower.begin(), ::tolower);
+
+		if (path_lower.ends_with(".budmesh")) {
+			mesh_opt = ModelLoader::load_bud_mesh(path);
+		} else if (path_lower.ends_with(".gltf") || path_lower.ends_with(".glb")) {
+			mesh_opt = ModelLoader::load_gltf(path);
+		} else {
+			mesh_opt = ModelLoader::load_obj(path);
+		}
 
 		if (mesh_opt) {
-			//std::println("[Asset] Mesh parsed: {} (v:{}, i:{})", path, mesh_opt->vertices.size(), mesh_opt->indices.size());
 			task_scheduler->submit_main_thread_task([on_loaded, mesh = std::move(*mesh_opt)]() mutable {
 				on_loaded(std::move(mesh));
 				});
 		}
 		else {
-			std::println(stderr, "[Asset] Failed to load mesh: {}", path);
+			bud::eprint("[Asset] Failed to load mesh: {}", path);
 		}
 	});
 }
@@ -413,18 +574,15 @@ void AssetManager::load_mesh_async(const std::string& path, std::function<void(M
 
 void AssetManager::load_image_async(const std::string& path, std::function<void(Image)> on_loaded) {
 	task_scheduler->spawn("AsyncImageLoad", [this, path, on_loaded]() {
-		// Fiber Thread 操作：IO + STB 解码
 		auto img_opt = ImageLoader::load(path);
 
 		if (img_opt) {
-			//std::println("[Asset] Image decoded: {} ({}x{})", path, img_opt->width, img_opt->height);
-
 			task_scheduler->submit_main_thread_task([on_loaded, img = std::move(*img_opt)]() mutable {
 				on_loaded(std::move(img));
 				});
 		}
 		else {
-			std::println(stderr, "[Asset] Failed to load image: {}", path);
+			bud::eprint("[Asset] Failed to load image: {}", path);
 		}
 	});
 }
@@ -439,9 +597,46 @@ void AssetManager::load_file_async(const std::string& path, std::function<void(s
 				});
 		}
 		else {
-			std::println(stderr, "[Asset] Failed to read file: {}", path);
+			bud::eprint("[Asset] Failed to read file: {}", path);
 		}
 	});
 }
+
+void AssetManager::load_json_async(const std::string& path, std::function<void(nlohmann::json)> on_loaded) {
+	task_scheduler->spawn("AsyncJSONLoad", [this, path, on_loaded]() {
+		auto data_opt = FileSystem::read_binary(path);
+		if (data_opt) {
+			try {
+				nlohmann::json j = nlohmann::json::parse(data_opt->begin(), data_opt->end());
+				task_scheduler->submit_main_thread_task([on_loaded, json = std::move(j)]() mutable {
+					on_loaded(std::move(json));
+				});
+			} catch (const std::exception& e) {
+				bud::eprint("[Asset] Failed to parse JSON: {} - {}", path, e.what());
+			}
+		} else {
+			bud::eprint("[Asset] Failed to read JSON file: {}", path);
+		}
+	});
+}
+
+void AssetManager::save_json_async(const std::string& path, const nlohmann::json& json, std::function<void(bool)> on_finished) {
+	std::string dump = json.dump(4);
+	std::vector<char> data(dump.begin(), dump.end());
+	save_file_async(path, std::move(data), on_finished);
+}
+
+void AssetManager::save_file_async(const std::string& path, std::vector<char> data, std::function<void(bool)> on_finished) {
+	task_scheduler->spawn("AsyncFileSave", [path, data = std::move(data), on_finished, this]() mutable {
+		bool success = FileSystem::write_binary(path, data);
+		if (on_finished) {
+			task_scheduler->submit_main_thread_task([on_finished, success]() {
+				on_finished(success);
+			});
+		}
+	});
+}
+
+} // namespace bud::io
 
 

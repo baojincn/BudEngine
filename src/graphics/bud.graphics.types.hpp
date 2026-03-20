@@ -4,9 +4,15 @@
 #include <vector>
 #include <string>
 
+#include "src/core/bud.core.hpp"
 #include "src/core/bud.math.hpp"
 
+namespace math = bud::math;
+
+
 namespace bud::graphics {
+	constexpr uint32_t ALL_MIPS = 0xFFFFFFFF;
+
 	// Enum, begin
 	enum class Backend {
 		Vulkan,
@@ -24,6 +30,7 @@ namespace bud::graphics {
 		DepthRead,         // Depth Attachment Read
 		ShaderResource,    // Pixel Shader Read (Texture)
 		UnorderedAccess,   // Compute Shader Write (UAV / Storage Image)
+		IndirectArgument,  // GPU-Driven Draw Indirect Buffer
 		TransferSrc,       // Copy Source
 		TransferDst,       // Copy Dest
 		Present,           // Swapchain Present
@@ -56,6 +63,7 @@ namespace bud::graphics {
 		R32G32B32_FLOAT,
 		D32_FLOAT,
 		D24_UNORM_S8_UINT,
+		R32_FLOAT,
 	};
 
 	enum class TextureType {
@@ -97,6 +105,7 @@ namespace bud::graphics {
 		uint32_t mips = 1;
 		TextureFormat format = TextureFormat::RGBA8_UNORM;
 		TextureType type = TextureType::Texture2D;
+		bool is_storage = false;
 		ResourceState initial_state = ResourceState::Undefined;
 	};
 
@@ -127,7 +136,12 @@ namespace bud::graphics {
 
 		bool enable_soft_shadows = true;
 		bool debug_cascades = false;
-		bool cache_shadows = true;
+		bool cache_shadows = false; // Disabled: feature has rendering bugs, enable when fixed
+
+		bool enable_gpu_driven = true;
+		bool debug_hiz = false;
+		uint32_t debug_hiz_mip = 0;
+		bool enable_cluster_visualization = true;
 	};
 
 	struct SceneView {
@@ -179,19 +193,26 @@ namespace bud::graphics {
 		std::string entry_point = "main";
 	};
 
+	enum class VertexLayoutType {
+		Default,      // Pos(0), Color(1), Normal(2), UV(3)
+		PositionOnly, // Pos(0) only
+		PositionUV,   // Pos(0) and UV(3)
+		NoVertexInput,// For self-generating vertices (Fullscreen)
+		ImGui         // Special ImGui layout (0,1,2)
+	};
+
 	struct GraphicsPipelineDesc {
 		ShaderStage vs;
 		ShaderStage fs;
-		VertexInputLayout vertex_layout;
-		bool is_ui_layout = false;
-		TextureFormat color_attachment_format = TextureFormat::RGBA8_UNORM;
-		TextureFormat depth_attachment_format = TextureFormat::D32_FLOAT;
 		bool depth_test = true;
 		bool depth_write = true;
-		bool enable_depth_bias = false;
-		bool blending_enable = false; // Add blending for UI
-		CullMode cull_mode = CullMode::Back;
 		CompareOp depth_compare_op = CompareOp::Less;
+		CullMode cull_mode = CullMode::Back;
+		TextureFormat color_attachment_format = TextureFormat::BGRA8_SRGB;
+		TextureFormat depth_attachment_format = TextureFormat::D32_FLOAT;
+		bool enable_depth_bias = false;
+		bool blending_enable = false;
+		VertexLayoutType vertex_layout = VertexLayoutType::Default;
 	};
 
 	struct ComputePipelineDesc {
@@ -199,19 +220,20 @@ namespace bud::graphics {
 	};
 	// POD, end
 
-	struct MemoryBlock {
-		void* internal_handle = nullptr;
+	// BufferHandle replaces the old 'MemoryBlock' to avoid API leakage
+	struct BufferHandle {
+		void* internal_state = nullptr; // e.g. VulkanBuffer*
 		uint64_t offset = 0;
 		uint64_t size = 0;
 		void* mapped_ptr = nullptr;
-		bool is_valid() const { return internal_handle != nullptr; }
+		bool is_valid() const { return internal_state != nullptr; }
 	};
 
 	class Texture;
 
 	using CommandHandle = void*;
 
-	using BufferHandle = MemoryBlock;
+	// Aliases for clarity
 	using ImageHandle = Texture*;
 
 	class Texture {
@@ -234,9 +256,19 @@ namespace bud::graphics {
 		float split_depth;
 	};
 
+	struct IndirectCommand {
+		uint32_t index_count;
+		uint32_t instance_count;
+		uint32_t first_index;
+		int32_t  vertex_offset;
+		uint32_t first_instance;
+	};
+
 	struct SubMesh {
 		uint32_t index_start;
 		uint32_t index_count;
+		uint32_t meshlet_start;
+		uint32_t meshlet_count;
 		uint32_t material_id;
 		bool double_sided = false;
 
@@ -245,9 +277,17 @@ namespace bud::graphics {
 	};
 
 	struct RenderMesh {
-		MemoryBlock vertex_buffer;
-		MemoryBlock index_buffer;
+		BufferHandle vertex_buffer;
+		BufferHandle index_buffer;
 		uint32_t index_count = 0;
+
+		// GPU-Driven Meshlet data
+		BufferHandle meshlet_buffer;
+		BufferHandle vertex_index_buffer;
+		BufferHandle meshlet_index_buffer;
+		BufferHandle cull_data_buffer;
+		uint32_t meshlet_count = 0;
+
 		bud::math::AABB aabb;
 		bud::math::BoundingSphere sphere;
 		std::vector<SubMesh> submeshes;
@@ -255,30 +295,82 @@ namespace bud::graphics {
 		bool is_valid() const { return index_count > 0; }
 	};
 
+	struct GPUStats {
+		uint32_t totalInstances = 0;
+		uint32_t visibleInstances = 0;
+		uint32_t totalTriangles = 0;
+		uint32_t visibleTriangles = 0;
+		uint32_t totalMeshlets = 0;
+		uint32_t visibleMeshlets = 0;
+	};
+
+
 	struct RenderStats {
 		// 耗时 (ms)
 		float fps = 0.0f;
 		float frame_time = 0.0f;
 		float cpu_render_time = 0.0f;
-		float gpu_render_time = 0.0f; // 需通过 Vulkan Timestamps 实现，暂时预留
+		float gpu_render_time = 0.0f;
 
 		// 绘制指标
 		uint32_t draw_calls = 0;
-		uint32_t drawn_triangles = 0;
+		uint32_t drawn_triangles = 0; // Total accumulated across ALL render passes (Shadows, etc)
 		uint32_t pipeline_binds = 0;
 
-		// 剔除指标
-		uint32_t total_objects = 0;
-		uint32_t visible_objects = 0;
+		// 剔除指标 (GPU Occlusion Culling)
+		uint32_t gpu_total_objects = 0;
+		uint32_t gpu_visible_objects = 0;
+		uint32_t gpu_total_instances = 0;
+		uint32_t gpu_visible_instances = 0;
+		uint32_t gpu_total_triangles = 0;
+		uint32_t gpu_visible_triangles = 0;
+		uint32_t gpu_total_meshlets = 0;
+		uint32_t gpu_visible_meshlets = 0;
+
+		// 剔除指标 (CPU Frustum Culling)
+		uint32_t cpu_total_objects = 0;
+		uint32_t cpu_visible_objects = 0;
+		uint32_t cpu_total_instances = 0;
+		uint32_t cpu_visible_instances = 0;
+		uint32_t cpu_total_triangles = 0;
+		uint32_t cpu_visible_triangles = 0;
+		uint32_t cpu_total_meshlets = 0;
+		uint32_t cpu_visible_meshlets = 0;
+
+		// ML Occluder Stats
+		uint32_t occluder_count = 0;
+		uint32_t occluder_triangles = 0;
+
 		uint32_t shadow_casters = 0;
+		uint32_t shadow_caster_submeshes = 0;
 
 		void reset() {
 			draw_calls = 0;
 			drawn_triangles = 0;
 			pipeline_binds = 0;
-			total_objects = 0;
-			visible_objects = 0;
+			gpu_total_objects = 0;
+			gpu_visible_objects = 0;
+			gpu_total_instances = 0;
+			gpu_visible_instances = 0;
+			gpu_total_triangles = 0;
+			gpu_visible_triangles = 0;
+			gpu_total_meshlets = 0;
+			gpu_visible_meshlets = 0;
+			cpu_total_objects = 0;
+			cpu_visible_objects = 0;
+			cpu_total_instances = 0;
+			cpu_visible_instances = 0;
+			cpu_total_triangles = 0;
+			cpu_visible_triangles = 0;
+			cpu_total_meshlets = 0;
+			cpu_visible_meshlets = 0;
+			occluder_count = 0;
+			occluder_triangles = 0;
 			shadow_casters = 0;
+			shadow_caster_submeshes = 0;
 		}
+
+
+
 	};
 }

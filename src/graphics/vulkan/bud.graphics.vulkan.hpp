@@ -5,6 +5,7 @@
 #include <optional>
 #include <mutex>
 #include <memory>
+#include <variant>
 #include <unordered_map>
 
 #include "src/io/bud.io.hpp"
@@ -27,6 +28,17 @@
 
 namespace bud::graphics::vulkan {
 
+	struct ImageBinding {
+		bud::graphics::Texture* texture;
+		uint32_t mip_level;
+		bool is_storage;
+		bool is_general = false; // Use VK_IMAGE_LAYOUT_GENERAL when image is a storage image read as sampler
+	};
+
+	struct UBOBinding {};
+
+	using ComputeResource = std::variant<bud::graphics::BufferHandle, ImageBinding, UBOBinding>;
+
 	 using VkInstance = struct VkInstance_T*;
 	 using VkPhysicalDevice = struct VkPhysicalDevice_T*;
 	 using VkDevice = struct VkDevice_T*;
@@ -47,10 +59,10 @@ namespace bud::graphics::vulkan {
 		void resize_swapchain(uint32_t width, uint32_t height) override;
 		bool is_swapchain_out_of_date() const override { return swapchain_out_of_date.load(std::memory_order_acquire); }
 
-		bud::graphics::MemoryBlock create_gpu_buffer(uint64_t size, bud::graphics::ResourceState usage_state) override;
-		bud::graphics::MemoryBlock create_upload_buffer(uint64_t size) override;
-		void copy_buffer_immediate(bud::graphics::MemoryBlock src, bud::graphics::MemoryBlock dst, uint64_t size) override;
-		void destroy_buffer(bud::graphics::MemoryBlock block) override;
+		bud::graphics::BufferHandle create_gpu_buffer(uint64_t size, bud::graphics::ResourceState usage_state) override;
+		bud::graphics::BufferHandle create_upload_buffer(uint64_t size) override;
+		void copy_buffer_immediate(bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size) override;
+		void destroy_buffer(bud::graphics::BufferHandle block) override;
 
 		// 帧控制
 		CommandHandle begin_frame() override;
@@ -60,6 +72,7 @@ namespace bud::graphics::vulkan {
 
 		// 命令录制 
 		void resource_barrier(CommandHandle cmd, bud::graphics::Texture* texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) override;
+		void resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) override;
 		void cmd_bind_pipeline(CommandHandle cmd, void* pipeline) override;
 		void cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) override;
 
@@ -67,10 +80,11 @@ namespace bud::graphics::vulkan {
 		void cmd_begin_render_pass(CommandHandle cmd, const bud::graphics::RenderPassBeginInfo& info) override;
 		void cmd_end_render_pass(CommandHandle cmd) override;
 
-		void cmd_bind_vertex_buffer(CommandHandle cmd, void* buffer) override;
-		void cmd_bind_index_buffer(CommandHandle cmd, void* buffer) override;
+		void cmd_bind_vertex_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer) override;
+		void cmd_bind_index_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer) override;
 		void cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) override;
 		void cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset, uint32_t first_instance) override;
+		void cmd_draw_indexed_indirect(CommandHandle cmd, bud::graphics::BufferHandle buffer, uint64_t offset, uint32_t draw_count, uint32_t stride) override;
 
 		void cmd_set_viewport(CommandHandle cmd, float width, float height) override;
 		void cmd_set_scissor(CommandHandle cmd, int32_t x, int32_t y, uint32_t width, uint32_t height) override;
@@ -78,9 +92,11 @@ namespace bud::graphics::vulkan {
 		void cmd_set_depth_bias(CommandHandle cmd, float constant, float clamp, float slope) override;
 		void update_global_shadow_map(Texture* texture) override;
 		void cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) override;
+		void cmd_blit_image(CommandHandle cmd, Texture* src, Texture* dst) override;
 
 		bud::graphics::Texture* create_texture(const bud::graphics::TextureDesc& desc, const void* initial_data, uint64_t size) override;
 		void update_bindless_texture(uint32_t index, bud::graphics::Texture* texture) override;
+		void update_bindless_image(uint32_t index, bud::graphics::Texture* texture, uint32_t mip_level = 0, bool is_storage = false) override;
 		bud::graphics::Texture* get_fallback_texture() override;
 
 		// 杂项 / 待重构
@@ -93,10 +109,11 @@ namespace bud::graphics::vulkan {
 		void* create_graphics_pipeline(const bud::graphics::GraphicsPipelineDesc& desc) override;
 		void* create_compute_pipeline(const bud::graphics::ComputePipelineDesc& desc) override;
 
-		void cmd_copy_buffer(CommandHandle cmd, bud::graphics::MemoryBlock src, bud::graphics::MemoryBlock dst, uint64_t size) override;
 
 		void cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint32_t set_index) override;
-		void cmd_bind_storage_buffer(CommandHandle cmd, void* pipeline, uint32_t binding, bud::graphics::MemoryBlock buffer) override;
+		void cmd_bind_storage_buffer(CommandHandle cmd, void* pipeline, uint32_t binding, bud::graphics::BufferHandle buffer) override;
+		void cmd_bind_compute_texture(CommandHandle cmd, void* pipeline, uint32_t binding, bud::graphics::Texture* texture, uint32_t mip_level = 0, bool is_storage = false, bool is_general = false) override;
+		void cmd_bind_compute_ubo(CommandHandle cmd, void* pipeline, uint32_t binding) override;
 		void cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group_y, uint32_t group_z) override;
 
 		VulkanMemoryAllocator* get_memory_allocator() { return memory_allocator.get(); }
@@ -107,18 +124,23 @@ namespace bud::graphics::vulkan {
 		void cmd_end_debug_label(CommandHandle cmd) override;
 
 		void set_debug_name(Texture* texture, ObjectType object_type, const std::string& name) override;
-		void set_debug_name(const MemoryBlock& buffer, ObjectType object_type, const std::string& name) override;
+		void set_debug_name(const bud::graphics::BufferHandle& buffer, ObjectType object_type, const std::string& name) override;
 		void set_debug_name(CommandHandle cmd, ObjectType object_type, const std::string& name) override;
 
 		RenderStats get_stats() const override { return current_stats; }
+		RenderStats& get_render_stats() override { return current_stats; }
 		void add_culling_stats(uint32_t total, uint32_t visible, uint32_t casters) override {
-			current_stats.total_objects += total;
-			current_stats.visible_objects += visible;
+			current_stats.gpu_total_objects += total;
+			current_stats.gpu_visible_objects += visible;
 			current_stats.shadow_casters += casters;
 		}
 
+
+		void cmd_copy_buffer(CommandHandle cmd, bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size) override;
+		void cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) override;
+
+
 	private:
-		// --- 初始化辅助 ---
 		void create_instance(VkInstance& vk_instance, bool enable_validation);
 		void create_surface(bud::platform::Window* window);
 		void pick_physical_device();
@@ -182,7 +204,8 @@ namespace bud::graphics::vulkan {
 		std::vector<const char*> device_extensions = {
 			VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 			VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
-			VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME
+			VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+			VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME
 		};
 
 		// Swapchain
@@ -217,17 +240,21 @@ namespace bud::graphics::vulkan {
 		VkSampler shadow_sampler = VK_NULL_HANDLE;
 		VulkanTexture dummy_depth_texture; // Placeholder for shadow map binding
 
-		std::unordered_map<VkBuffer, VkDeviceMemory> buffer_memory_map;
+		std::unordered_map<bud::graphics::Texture*, VulkanTexture> textures;
+		std::vector<std::unique_ptr<bud::graphics::Texture>> texture_objects;
 	
-		std::vector<VkPipelineLayout> created_layouts;
 
 		// Compute Binding state
-		std::unordered_map<uint32_t, bud::graphics::MemoryBlock> current_compute_bindings;
+		std::unordered_map<uint32_t, ComputeResource> current_compute_bindings;
 		void* current_compute_pipeline = nullptr;
 
 		VulkanTexture* fallback_texture_ptr = nullptr;
 		std::atomic<bool> swapchain_out_of_date{false};
 
 		RenderStats current_stats;
+		
+		PFN_vkCmdPushDescriptorSetKHR fpCmdPushDescriptorSetKHR = nullptr;
+
+		std::vector<VkPipelineLayout> created_layouts;
 	};
 }

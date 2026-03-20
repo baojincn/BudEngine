@@ -4,8 +4,7 @@
 layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_normal;
 layout(location = 2) in vec2 frag_tex_coord;
-//layout(location = 3) in flat float frag_tex_index;
-// [CSM] fragPosLightSpace removed, we use worldPos per cascade
+layout(location = 3) in vec3 frag_color;
 
 layout(location = 0) out vec4 out_color;
 
@@ -263,5 +262,5 @@ void main() {
     // Gamma Correction (Linear -> sRGB)
     color = pow(color, vec3(1.0/2.2)); 
 
-    out_color = vec4(color, albedo_sample.a);
+    out_color = vec4(color * frag_color, albedo_sample.a);
 }

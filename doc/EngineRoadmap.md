@@ -16,8 +16,8 @@ This document is the top-level milestone roadmap for BudEngine across rendering,
 |---|---|---|---|
 | M0 | Foundation | Stable `BudEngine` orchestration (`Engine`/`RHI`/`Renderer` boundaries) | Done |
 | M1 | Rendering Stage 1 | CPU macro-culling (LBVH-oriented frustum filtering & screen-area heuristic) | Done |
-| M1.5| Asset & Shader Toolchain| `cgltf` scene parsing, file-watcher hot-reload, and DXC (HLSL->SPIR-V) compiler pipeline | Planned |
-| M2 | Rendering Stage 2 | GPU instance culling (`Z-Prepass` + `Hi-Z` + occlusion compaction) | Planned |
+| M1.5| Asset & Shader Toolchain| `cgltf` scene parsing, file-watcher hot-reload, and DXC (HLSL->SPIR-V) compiler pipeline | In Progress |
+| M2 | Rendering Stage 2 | GPU instance culling (`Z-Prepass` + `Hi-Z` + occlusion compaction) | Done |
 | M3 | Rendering Stage 3 | High-end meshlet/micro-culling path (Task/Mesh or Compute fallback) | Planned |
 | M4 | Rendering Stage 4 | Indirect draw / optional visibility-buffer dispatch path | Planned |
 | M5 | Rendering Stage 5 | Neural rendering path (AI denoise + in-house CNN neural super-resolution) | Planned |
@@ -38,8 +38,8 @@ Rendering is implemented as a scalable multi-profile pipeline:
 ### Rendering Milestones
 
 - **R1 (Done):** CPU macro-culling at instance level.
-- **R1.5:** Unified HLSL shader compilation pipeline & glTF data ingestion.
-- **R2:** GPU instance-level occlusion culling pipeline.
+- **R1.5 (In Progress):** Unified HLSL shader compilation pipeline & glTF data ingestion.
+- **R2 (Done):** GPU instance-level occlusion culling pipeline.
 - **R3:** Meshlet-level fine-grained culling pipeline.
 - **R4:** Low-resolution internal raster + robust motion vector output.
 - **R5:** Neural upscaling/denoise integration before present.
@@ -50,9 +50,13 @@ Rendering is implemented as a scalable multi-profile pipeline:
   - `cgltf` scene load path can import at least one representative `.gltf` sample end-to-end.
   - File watcher detects changed assets and triggers hot-reload without restarting runtime.
   - DXC-based HLSL-to-SPIR-V compilation is integrated in build/runtime workflow with clear error reporting.
+  - **Asset Pipeline Specification**: Definition of `.budmesh` (Binary Meshlets) for Stage 3 and `.budmap` (JSON Scene) format for Stage 1.
+  - **Tooling**: `BudAssetTool` CLI for off-line mesh processing (meshletization via `meshoptimizer`) and texture compression.
+  - **DCC Workflow**: Pybind11-based Blender visualization plugin for Meshlet and LOD verification.
 
 - **R2 (GPU Instance Culling)**
-  - `Z-Prepass + Hi-Z + occlusion compaction` path is functional and can be toggled for A/B comparison.
+  - **Path A (RL-Driven)**: `RL Selection -> Current-frame Z-Prepass -> Hi-Z -> Occlusion` is functional.
+  - **Path B (Heuristic)**: `Traditional Heuristic -> Previous-frame Hi-Z` fallback is implemented as a comparison baseline.
   - GPU culling path produces deterministic visible-instance counts across repeated runs in same camera state.
   - Frame-time or GPU-pass metrics are captured before/after enabling R2 for baseline comparison.
 
@@ -224,3 +228,4 @@ The following items are tracked as long-term research directions. They are not i
 - Keep render submit/present on the render thread.
 - Maintain strict `Engine`/`RHI`/`Renderer` responsibility boundaries.
 - Use milestone completion gates with measurable checklists before promoting to next milestone.
+- **Development Environment:** The engine target environment has been standardized to **Visual Studio 2026 (Pro)** with MSVC 14.50. Use the `Visual Studio 18 2026` generator in `CMakePresets.json` for universal cross-machine build support in VS Code.

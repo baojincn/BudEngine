@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // Force GLM to use Radians and Vulkan Depth Range (0..1)
 // crucial for consistent matrices across compiled units
@@ -118,6 +118,9 @@ namespace bud::math {
 		vec3 min{ std::numeric_limits<float>::max() };
 		vec3 max{ std::numeric_limits<float>::lowest() };
 
+		AABB() = default;
+		AABB(const vec3& _min, const vec3& _max) : min(_min), max(_max) {}
+
 		inline void merge(const vec3& p) {
 			min = glm::min(min, p);
 			max = glm::max(max, p);
@@ -130,6 +133,18 @@ namespace bud::math {
 
 		inline vec3 center() const { return (min + max) * 0.5f; }
 		inline vec3 size() const { return max - min; }
+
+		inline bool intersects(const AABB& other) const {
+			return (min.x <= other.max.x && max.x >= other.min.x) &&
+				   (min.y <= other.max.y && max.y >= other.min.y) &&
+				   (min.z <= other.max.z && max.z >= other.min.z);
+		}
+
+		inline bool contains(const vec3& p) const {
+			return (p.x >= min.x && p.x <= max.x) &&
+				   (p.y >= min.y && p.y <= max.y) &&
+				   (p.z >= min.z && p.z <= max.z);
+		}
 
 		inline AABB transform(const mat4& m) const {
 			vec3 corners[8] = {
@@ -193,9 +208,7 @@ namespace bud::math {
 		return true;
 	}
 
-	// ------------------------------------------------------------------------
 	// Morton Code / Z-Order Curve Utilities for (H)LBVH
-	// ------------------------------------------------------------------------
 
 	// Expands a 10-bit integer into 30 bits
 	// by inserting 2 zeros after each bit.

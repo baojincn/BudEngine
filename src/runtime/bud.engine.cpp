@@ -1,4 +1,4 @@
-﻿#include <string>
+#include <string>
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -11,6 +11,10 @@
 #define ZoneScoped
 #define FrameMark
 #endif
+
+#include "src/io/bud.io.hpp"
+#include "src/core/bud.asset.types.hpp"
+#include "src/ui/bud.stats.ui.hpp"
 
 #include "src/runtime/bud.engine.hpp"
 #include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
@@ -155,11 +159,13 @@ namespace bud::engine {
 	void BudEngine::extract_render_scene_data(bud::graphics::RenderScene& render_scene) {
 		ZoneScoped;
 		auto& logic_entities = scene.entities;
-		size_t total_logic_count = logic_entities.size();
+		auto submesh_bounds_all = renderer->get_submesh_bounds_snapshot();
 
-		constexpr size_t buffering_size = 128; // 预留一些余量，避免频繁越界
+		// Calculate total submesh count for capacity reservation
+		size_t total_submesh_count = logic_entities.size();
 
-		render_scene.reset(total_logic_count + buffering_size);
+		constexpr size_t buffering_size = 256;
+		render_scene.reset(total_submesh_count + buffering_size);
 
 		auto mesh_bounds = renderer->get_mesh_bounds_snapshot();
 
@@ -169,10 +175,12 @@ namespace bud::engine {
 		// 经验值：64 ~ 256 个实体一个 Job。
 		constexpr size_t CHUNK_SIZE = 128;
 
-		task_scheduler->ParallelFor(total_logic_count, CHUNK_SIZE,
+		task_scheduler->ParallelFor(logic_entities.size(), CHUNK_SIZE,
 			[&](size_t start, size_t end_exclusive) {
 				for (size_t i = start; i < end_exclusive; ++i) {
 					const auto& entity = logic_entities[i];
+					if (entity.mesh_index == bud::asset::INVALID_INDEX)
+						continue;
 
 					if (entity.mesh_index >= mesh_bounds.size()) [[unlikely]] {
 						continue;
@@ -182,19 +190,17 @@ namespace bud::engine {
 						continue; 
 
 					const auto& world_matrix = entity.transform;
-
 					const auto& local_aabb = mesh_bounds[entity.mesh_index];
-
 					auto world_aabb = local_aabb.transform(world_matrix);
 
 					render_scene.add_instance(
 						world_matrix,
 						world_aabb,
 						entity.mesh_index,
+						bud::asset::INVALID_INDEX, // Let renderer explode
 						entity.material_index,
 						entity.is_static
 					);
-
 				}
 			},
 			&extract_scene_counter
@@ -270,66 +276,8 @@ namespace bud::engine {
 			auto stats = rhi->get_stats();
 			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
 			ImGui::SetNextWindowBgAlpha(0.35f);
-			bool window_open = ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-			if (window_open) {
-				static float update_timer = 0.0f;
-				static float display_fps = 0.0f;
-				static float display_ms = 0.0f;
-				static constexpr float fps_ema_tau_seconds = 0.8f;
-				static uint32_t display_draw_calls = 0;
-				static uint32_t display_triangles = 0;
-				static uint32_t display_pipeline_binds = 0;
-				static uint32_t display_total_objs = 0;
-				static uint32_t display_visible_objs = 0;
-				static uint32_t display_shadow_casters = 0;
-
-				float current_ms = view_snapshot.delta_time * 1000.0f;
-				float ema_alpha = (view_snapshot.delta_time > 0.0f)
-					? (1.0f - std::exp(-view_snapshot.delta_time / fps_ema_tau_seconds))
-					: 1.0f;
-				if (display_ms <= 0.0f) {
-					display_ms = current_ms;
-				}
-				else {
-					display_ms = ema_alpha * current_ms + (1.0f - ema_alpha) * display_ms;
-				}
-				display_fps = (display_ms > 0.0f) ? (1000.0f / display_ms) : 0.0f;
-
-				update_timer += view_snapshot.delta_time;
-				if (update_timer >= 0.5f) {
-					display_draw_calls = stats.draw_calls;
-					display_triangles = stats.drawn_triangles;
-					display_pipeline_binds = stats.pipeline_binds;
-					display_total_objs = stats.total_objects;
-					display_visible_objs = stats.visible_objects;
-					display_shadow_casters = stats.shadow_casters;
-					update_timer = 0.0f;
-				}
-
-				ImGui::SetWindowFontScale(1.5f);
-
-				ImVec4 color_good(0.4f, 1.0f, 0.4f, 1.0f);
-				ImVec4 color_warn(1.0f, 1.0f, 0.4f, 1.0f);
-				ImVec4 color_bad(1.0f, 0.4f, 0.4f, 1.0f);
-				ImVec4 color_neutral(0.9f, 0.9f, 0.9f, 1.0f);
-
-				ImVec4 fps_color = display_fps >= 60.0f ? color_good : (display_fps >= 30.0f ? color_warn : color_bad);
-				ImVec4 dc_color = display_draw_calls <= 5000 ? color_good : (display_draw_calls <= 10000 ? color_warn : color_bad);
-				ImVec4 tri_color = display_triangles <= 2000000 ? color_good : (display_triangles <= 5000000 ? color_warn : color_bad);
-				ImVec4 pipe_color = display_pipeline_binds <= 100 ? color_good : (display_pipeline_binds <= 500 ? color_warn : color_bad);
-
-				ImGui::TextColored(fps_color, "FPS: %.1f (%.2f ms)", display_fps, display_ms);
-				ImGui::Separator();
-				ImGui::TextColored(color_neutral, "--- Draw Stats ---");
-				ImGui::TextColored(dc_color, "Draw Calls: %u", display_draw_calls);
-				ImGui::TextColored(tri_color, "Triangles: %u", display_triangles);
-				ImGui::TextColored(pipe_color, "Pipeline Binds: %u", display_pipeline_binds);
-
-				ImGui::Separator();
-				ImGui::TextColored(color_neutral, "--- Culling Stats ---");
-				ImGui::TextColored(color_neutral, "Total Objects: %u", display_total_objs);
-				ImGui::TextColored(color_neutral, "Visible Objects: %u", display_visible_objs);
-				ImGui::TextColored(color_neutral, "Shadow Casters: %u", display_shadow_casters);
+			if (ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
+				bud::ui::StatsUI::render(stats, view_snapshot.delta_time);
 			}
 			ImGui::End();
 		}

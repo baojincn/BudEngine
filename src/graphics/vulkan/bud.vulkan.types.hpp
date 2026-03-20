@@ -1,8 +1,9 @@
-﻿#pragma once
+#pragma once
 
 #include <vector>
 #include <optional>
 #include <vulkan/vulkan.h>
+#include <vma/vk_mem_alloc.h>
 
 #include "src/core/bud.math.hpp"
 #include "src/graphics/bud.graphics.types.hpp"
@@ -20,9 +21,9 @@ namespace bud::graphics::vulkan {
 		VkImage image = VK_NULL_HANDLE;
 		VkImageView view = VK_NULL_HANDLE;
 		std::vector<VkImageView> layer_views;
+		std::vector<VkImageView> mip_views;
 		VkSampler sampler = VK_NULL_HANDLE;
-		VkDeviceMemory memory = VK_NULL_HANDLE;
-		bud::graphics::MemoryBlock memory_block; // Store block for allocator->free()
+		VmaAllocation allocation = VK_NULL_HANDLE;
 	};
 
 	struct VulkanLayoutTransition {

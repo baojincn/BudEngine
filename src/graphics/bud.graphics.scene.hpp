@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vector>
 #include <atomic>
@@ -19,6 +19,7 @@ namespace bud::graphics {
 		std::vector<bud::math::AABB> world_aabbs;
 
 		std::vector<uint32_t> mesh_indices;
+		std::vector<uint32_t> submesh_indices;
 		std::vector<uint32_t> material_indices;
 
 		// 标志位 (Bit 0 = IsStatic, Bit 1 = CastShadow ...)
@@ -58,13 +59,23 @@ namespace bud::graphics {
 		RenderScene(const RenderScene&) = delete;
 		RenderScene& operator=(const RenderScene&) = delete;
 
-		void reset(size_t estimated_capacity);
+		void reset(size_t estimated_capacity) {
+			world_matrices.assign(estimated_capacity, bud::math::mat4(1.0f));
+			world_aabbs.assign(estimated_capacity, bud::math::AABB());
+			mesh_indices.assign(estimated_capacity, 0);
+			submesh_indices.assign(estimated_capacity, 0);
+			material_indices.assign(estimated_capacity, 0);
+			flags.assign(estimated_capacity, 0);
+			instance_count.store(0);
+			dropped_instances.store(0);
+		}
 		void build_culling_lbvh();
 		void build_culling_lbvh_parallel(bud::threading::TaskScheduler* task_scheduler);
 
 		void cull_frustum(const bud::math::Frustum& frustum, std::vector<uint32_t>& out_indices) const;
+		bool intersect_scene(const bud::math::AABB& aabb) const;
 
-		inline void add_instance(const bud::math::mat4& transform, const bud::math::AABB& aabb, uint32_t mesh_index, uint32_t material_index, bool is_static) {
+		inline void add_instance(const bud::math::mat4& transform, const bud::math::AABB& aabb, uint32_t mesh_index, uint32_t submesh_index, uint32_t material_index, bool is_static) {
 			size_t idx = instance_count.fetch_add(1, std::memory_order_relaxed);
 
 			if (idx >= world_matrices.size()) [[unlikely]] {
@@ -75,11 +86,15 @@ namespace bud::graphics {
 			world_matrices[idx] = transform;
 			world_aabbs[idx] = aabb;
 			mesh_indices[idx] = mesh_index;
+			submesh_indices[idx] = submesh_index;
 			material_indices[idx] = material_index;
 
 			flags[idx] = is_static ? 1 : 0;
 		}
 
-		inline size_t size() const;
+		inline size_t size() const {
+			const size_t count = instance_count.load(std::memory_order_relaxed);
+			return std::min(count, world_matrices.size());
+		}
 	};
 }

@@ -1,0 +1,45 @@
+﻿{
+    "name": "Sponza Default Scene",
+    "ambient_strength": 0.1,
+    "directional_light": {
+        "color": [1.0, 1.0, 1.0],
+        "direction": [50.0, 500.0, 50.0],
+        "intensity": 3.0
+    },
+    "entities": [
+        {
+            "asset_path": "data/meshlets/sponza.budmesh",
+            "is_active": true,
+            "is_static": true,
+            "material_index": 0,
+            "mesh_index": 0,
+            "transform": [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0
+            ]
+        },
+        {
+            "asset_path": "data/meshlets/Cube.budmesh",
+            "is_active": true,
+            "is_static": false,
+            "material_index": 0,
+            "mesh_index": 0,
+            "transform": [
+                10.0, 0.0, 0.0, 0.0,
+                0.0, 10.0, 0.0, 0.0,
+                0.0, 0.0, 10.0, 0.0,
+                0.0, 50.0, 0.0, 1.0
+            ]
+        }
+    ],
+    "main_camera": {
+        "pitch": 0.0,
+        "position": [0.0, 100.0, 0.0],
+        "yaw": -90.0,
+        "zoom": 45.0,
+        "speed": 50.0,
+        "sensitivity": 0.1
+    }
+}
