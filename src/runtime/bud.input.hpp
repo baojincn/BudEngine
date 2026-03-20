@@ -21,6 +21,7 @@ namespace bud::input {
 		Q,
 		E,
 		F3, // Enable debug overlay
+		F4, // Enable cluster visualization
 	};
 
 	 enum class MouseButton {

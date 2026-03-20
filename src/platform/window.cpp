@@ -26,6 +26,7 @@ namespace bud::platform {
 		case SDLK_D:      return bud::input::Key::D;
 		case SDLK_R:      return bud::input::Key::R;
 		case SDLK_F3:     return bud::input::Key::F3;
+		case SDLK_F4:     return bud::input::Key::F4;
 
 		default:          return bud::input::Key::Unknown;
 		}

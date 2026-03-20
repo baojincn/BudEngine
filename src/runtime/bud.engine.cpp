@@ -141,6 +141,15 @@ namespace bud::engine {
 		}
 		was_f3_down = is_f3_down;
 
+		static bool was_f4_down = false;
+		bool is_f4_down = bud::input::Input::get().is_key_down(bud::input::Key::F4);
+		if (is_f4_down && !was_f4_down) {
+			auto config = renderer->get_config();
+			config.enable_cluster_visualization = !config.enable_cluster_visualization;
+			renderer->set_config(config);
+		}
+		was_f4_down = is_f4_down;
+
 		int width = 0;
 		int height = 0;
 		window->get_size_in_pixels(width, height);

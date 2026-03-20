@@ -1,4 +1,4 @@
-﻿# Engine Roadmap
+# Engine Roadmap
 
 This document is the top-level milestone roadmap for BudEngine across rendering, physics, animation, audio, and runtime integration.
 
@@ -18,8 +18,9 @@ This document is the top-level milestone roadmap for BudEngine across rendering,
 | M1 | Rendering Stage 1 | CPU macro-culling (LBVH-oriented frustum filtering & screen-area heuristic) | Done |
 | M1.5| Asset & Shader Toolchain| `cgltf` scene parsing, file-watcher hot-reload, and DXC (HLSL->SPIR-V) compiler pipeline | In Progress |
 | M2 | Rendering Stage 2 | GPU instance culling (`Z-Prepass` + `Hi-Z` + occlusion compaction) | Done |
+| M2.5| Rendering Stage 2.5 | Multi-Draw Indirect (MDI) / Instance SSBO submission for mainstream devices | Planned |
 | M3 | Rendering Stage 3 | High-end meshlet/micro-culling path (Task/Mesh or Compute fallback) | Planned |
-| M4 | Rendering Stage 4 | Indirect draw / optional visibility-buffer dispatch path | Planned |
+| M4 | Rendering Stage 4 | Visibility-buffer dispatch path | Planned |
 | M5 | Rendering Stage 5 | Neural rendering path (AI denoise + in-house CNN neural super-resolution) | Planned |
 | M6 | Cross-system Vertical Slice | Integrate rendering + physics + animation + audio in one playable sample | Planned |
 | M7 | Runtime and Tools | Blender Live Link bridge (Socket-based), asset dependency tracking, in-engine debug panels | Planned |
@@ -78,8 +79,9 @@ Rendering is implemented as a scalable multi-profile pipeline:
   - Automated SPIR-V reflection to generate C++ Descriptor Set Layouts.
 
 - **Geometry Track**
-  - GPU-driven culling completion (`Hi-Z` occlusion in compute path).
-  - Meshlet and virtualized geometry progression for high-end profile.
+  - Global Geometry Pool (Mega-Buffer) refactoring to supply unified geometry layout.
+  - Multi-Draw Indirect (MDI) submission to eliminate per-instance CPU draw overhead (Hardware fetching via `vertexOffset`).
+  - Buffer Device Address (BDA) / Bindless Geometry foundation for Meshlet and virtualized geometry progression (M3 Compute/Mesh shaders).
   - GPU compute skinning path for animation-heavy scenes.
 
 - **Lighting and Shadows Track**

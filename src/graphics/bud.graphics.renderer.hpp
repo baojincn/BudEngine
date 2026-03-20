@@ -65,6 +65,7 @@ namespace bud::graphics {
 		std::unique_ptr<HiZCullingPass> hiz_pass;
 		std::unique_ptr<HiZDebugPass> hiz_debug_pass;
 		std::unique_ptr<MainPass> main_pass;
+		std::unique_ptr<ClusterVisualizationPass> cluster_viz_pass;
 		std::unique_ptr<UIPass> ui_pass;
 
 		// GPU-Driven specific (Per-frame)

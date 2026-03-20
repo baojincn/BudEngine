@@ -108,6 +108,19 @@ namespace bud::graphics {
 			bud::graphics::RGHandle indirect_draw_buffer);
 	};
 
+	class ClusterVisualizationPass : public RenderPass {
+	public:
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		void add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle depth_buffer,
+			const RenderScene& render_scene,
+			const SceneView& view,
+			const RenderConfig& config,
+			const std::vector<RenderMesh>& meshes,
+			const std::vector<SortItem>& sort_list,
+			size_t instance_count,
+			bud::graphics::RGHandle indirect_draw_buffer);
+	};
+
 	struct UIDrawCmdSnapshot {
 		ImVec4 clip_rect{};
 		uint32_t elem_count = 0;

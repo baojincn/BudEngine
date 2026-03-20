@@ -29,6 +29,7 @@ namespace bud::graphics {
 		hiz_pass = std::make_unique<HiZCullingPass>();
 		hiz_debug_pass = std::make_unique<HiZDebugPass>();
 		main_pass = std::make_unique<MainPass>();
+		cluster_viz_pass = std::make_unique<ClusterVisualizationPass>();
 		ui_pass = std::make_unique<UIPass>();
 
 		csm_pass->init(rhi, render_config, asset_manager);
@@ -37,6 +38,7 @@ namespace bud::graphics {
 		hiz_pass->init(rhi, render_config, asset_manager);
 		hiz_debug_pass->init(rhi, render_config, asset_manager);
 		main_pass->init(rhi, render_config, asset_manager);
+		cluster_viz_pass->init(rhi, render_config, asset_manager);
 		ui_pass->init(rhi, render_config, asset_manager);
 	}
 
@@ -770,7 +772,11 @@ namespace bud::graphics {
 
 					auto shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances));
 					if (shadow_map.is_valid()) {
-						main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw);
+						if (render_config.enable_cluster_visualization) {
+							cluster_viz_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw);
+						} else {
+							main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw);
+						}
 						has_main_pass = true;
 					}
 				}

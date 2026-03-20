@@ -1,4 +1,4 @@
-﻿#include <vector>
+#include <vector>
 #include <iostream>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -1095,6 +1095,107 @@ namespace bud::graphics {
 					global_vtx_offset += static_cast<int>(cmd_list.vertices.size());
 				}
 
+				rhi->cmd_end_render_pass(cmd);
+			}
+		);
+	}
+
+	void ClusterVisualizationPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) return;
+		load_shaders_async(asset_manager, { "src/shaders/cluster_debug.vert.spv", "src/shaders/cluster_debug.frag.spv" }, [this, rhi, config](const auto& shaders) {
+			GraphicsPipelineDesc desc;
+			desc.vs.code = shaders[0];
+			desc.fs.code = shaders[1];
+			desc.depth_test = true;
+			desc.depth_write = true;
+			desc.cull_mode = CullMode::None;
+			desc.color_attachment_format = bud::graphics::TextureFormat::BGRA8_SRGB;
+			desc.depth_compare_op = config.reversed_z ? CompareOp::GreaterEqual : CompareOp::LessEqual;
+			desc.enable_depth_bias = false;
+			desc.vertex_layout = VertexLayoutType::Default;
+
+			pipeline = rhi->create_graphics_pipeline(desc);
+			if (pipeline) {
+				bud::print("[ClusterVisualizationPass] Shaders loaded and pipeline created.");
+			}
+		});
+	}
+
+	void ClusterVisualizationPass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer, RGHandle depth_buffer,
+		const RenderScene& render_scene, const SceneView& view, const RenderConfig& config,
+		const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list,
+		size_t instance_count, bud::graphics::RGHandle indirect_draw_buffer)
+	{
+		const size_t draw_count = std::min(instance_count, sort_list.size());
+		if (draw_count == 0 || !pipeline) return;
+
+		const auto* backbuffer_tex = render_graph.get_texture(backbuffer);
+		if (!backbuffer_tex || backbuffer_tex->width == 0 || backbuffer_tex->height == 0) return;
+
+		uint32_t target_width = backbuffer_tex->width;
+		uint32_t target_height = backbuffer_tex->height;
+
+		render_graph.add_pass("Cluster Visualization Pass",
+			[=](RGBuilder& builder) {
+				builder.write(backbuffer, ResourceState::RenderTarget);
+				builder.write(depth_buffer, ResourceState::DepthWrite);
+				if (config.enable_gpu_driven) {
+					builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
+				}
+				return backbuffer;
+			},
+			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				bud::graphics::BufferHandle ind_buf_handle;
+				if (config.enable_gpu_driven) ind_buf_handle = render_graph.get_buffer(indirect_draw_buffer);
+
+				RenderPassBeginInfo info;
+				info.color_attachments.push_back(render_graph.get_texture(backbuffer));
+				info.depth_attachment = render_graph.get_texture(depth_buffer);
+				info.clear_color = true;
+				info.clear_color_value = { 0.1f, 0.1f, 0.1f, 1.0f };
+				info.clear_depth = false; // depth comes from prepass
+
+				rhi->cmd_begin_render_pass(cmd, info);
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_set_viewport(cmd, (float)target_width, (float)target_height);
+				rhi->cmd_set_scissor(cmd, target_width, target_height);
+				
+				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
+				rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
+
+				uint32_t last_mesh = std::numeric_limits<uint32_t>::max();
+
+				for (size_t i = 0; i < draw_count; ++i) {
+					const auto& item = sort_list[i];
+					uint32_t idx = item.entity_index;
+					uint32_t mesh_id = render_scene.mesh_indices[idx];
+					const auto& model_matrix = render_scene.world_matrices[idx];
+					if (mesh_id >= meshes.size() || !meshes[mesh_id].is_valid()) continue;
+					const auto& mesh = meshes[mesh_id];
+
+					if (mesh_id != last_mesh) {
+						rhi->cmd_bind_vertex_buffer(cmd, mesh.vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mesh.index_buffer);
+						last_mesh = mesh_id;
+					}
+
+					struct PushVars { bud::math::mat4 model; uint32_t material_id; uint32_t padding[3]; } push_vars;
+					push_vars.model = model_matrix;
+					push_vars.material_id = 0;
+
+					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+						const auto& sub = mesh.submeshes[item.submesh_index];
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
+						if (config.enable_gpu_driven && ind_buf_handle.is_valid()) rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, i * sizeof(IndirectCommand), 1, sizeof(IndirectCommand));
+						else rhi->cmd_draw_indexed(cmd, sub.index_count, 1, sub.index_start, 0, 0);
+					} else {
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
+						if (config.enable_gpu_driven && ind_buf_handle.is_valid()) rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, i * sizeof(IndirectCommand), 1, sizeof(IndirectCommand));
+						else rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, 0, 0, 0);
+					}
+				}
 				rhi->cmd_end_render_pass(cmd);
 			}
 		);
