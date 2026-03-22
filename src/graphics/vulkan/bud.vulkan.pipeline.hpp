@@ -1,7 +1,8 @@
-#pragma once
+﻿#pragma once
 
 #include <vulkan/vulkan.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <functional> // for std::hash
 #include <stdexcept>
@@ -64,10 +65,20 @@ namespace bud::graphics::vulkan {
 		VkPipeline get_pipeline(const PipelineKey& key, VkPipelineLayout layout, bool is_depth_only = false);
 		VkPipeline create_compute_pipeline(VkShaderModule compute_shader, VkPipelineLayout layout);
 
+		// Release a pipeline reference; destroy underlying VkPipeline when refcount reaches zero
+		void release_pipeline(VkPipeline pipeline);
+
 	private:
-		VkDevice device;
-		std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> cache;
-		std::vector<VkPipeline> compute_pipelines;
+    VkDevice device;
+    // Store pipeline and a reference count so pipelines can be released when no longer used
+    struct PipelineEntry { VkPipeline pipeline; uint32_t refcount; };
+    std::unordered_map<PipelineKey, PipelineEntry, PipelineKeyHash> cache;
+    // Reverse map for O(1) lookup from VkPipeline -> PipelineKey
+    std::unordered_map<VkPipeline, PipelineKey> pipeline_to_key;
+    // Compute pipelines tracking
+    std::vector<VkPipeline> compute_pipelines;
+    std::unordered_set<VkPipeline> compute_pipeline_set;
+
 
 		VkPipeline create_pipeline_internal(const PipelineKey& key, VkPipelineLayout layout, bool is_depth_only);
 	};

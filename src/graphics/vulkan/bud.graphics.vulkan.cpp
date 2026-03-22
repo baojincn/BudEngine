@@ -128,6 +128,9 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	platform_window = plat_window;
 	max_frames_in_flight = inflight_frame_count;
 
+	// store runtime validation flag
+	enable_validation_layers = enable_validation;
+
 #ifdef BUD_ENABLE_AFTERMATH
 	enable_aftermath_crash_dumps();
 #endif
@@ -173,6 +176,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	layout_builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1000,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	layout_builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+	layout_builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 
 	global_set_layout = layout_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
 
@@ -231,7 +235,8 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	{
 		std::vector<VkDescriptorPoolSize> pool_sizes = {
 			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, (uint32_t)frames.size() },
-			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (uint32_t)frames.size() * 1001 } // 1000 bindless + 1 shadow
+			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (uint32_t)frames.size() * 1001 }, // 1000 bindless + 1 shadow
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)frames.size() }
 		};
 
 		VkDescriptorPoolCreateInfo pool_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -549,6 +554,98 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	VkShaderModule vertModule = create_shader_module(device, desc.vs.code);
 	VkShaderModule fragModule = create_shader_module(device, desc.fs.code);
 
+#if defined(BUD_HAVE_SPIRV_REFLECT)
+    // SPIR-V reflection validation: strict compare reflected descriptor sets against registered layouts
+    auto map_spv_type_to_vk = [](SpvReflectDescriptorType t) -> VkDescriptorType {
+        switch (t) {
+        case SPV_REFLECT_DESCRIPTOR_TYPE_SAMPLER: return VK_DESCRIPTOR_TYPE_SAMPLER;
+        case SPV_REFLECT_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        case SPV_REFLECT_DESCRIPTOR_TYPE_SAMPLED_IMAGE: return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        case SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_IMAGE: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        case SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: return VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+        case SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER: return VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+        case SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        case SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        case SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+        case SPV_REFLECT_DESCRIPTOR_TYPE_INPUT_ATTACHMENT: return VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+        default: return VK_DESCRIPTOR_TYPE_MAX_ENUM;
+        }
+    };
+
+    auto validate_spv_strict = [&](const std::vector<char>& code, const char* stage_name) {
+        SpvReflectShaderModule module;
+        SpvReflectResult res = spvReflectCreateShaderModule(code.size(), code.data(), &module);
+        if (res != SPV_REFLECT_RESULT_SUCCESS) {
+            bud::eprint("SPIRV-Reflect: failed to create module for {}", stage_name);
+            return;
+        }
+
+        uint32_t set_count = 0;
+        res = spvReflectEnumerateDescriptorSets(&module, &set_count, nullptr);
+        if (res == SPV_REFLECT_RESULT_SUCCESS && set_count > 0) {
+            std::vector<SpvReflectDescriptorSet*> sets(set_count);
+            res = spvReflectEnumerateDescriptorSets(&module, &set_count, sets.data());
+            if (res == SPV_REFLECT_RESULT_SUCCESS) {
+                for (uint32_t si = 0; si < set_count; ++si) {
+                    SpvReflectDescriptorSet* set = sets[si];
+                    // If pipeline uses setLayouts, check only those sets
+                    if (si >= setLayouts.size()) {
+                        bud::eprint("Shader {} declares descriptor set {} but pipeline only provides {} sets", stage_name, si, setLayouts.size());
+                        continue;
+                    }
+                    VkDescriptorSetLayout layout = setLayouts[si];
+                    const auto* layout_info = get_descriptor_set_layout_info(layout);
+                    if (!layout_info) {
+                        bud::eprint("No layout metadata for VkDescriptorSetLayout {} (set {})", (uintptr_t)layout, si);
+                        continue;
+                    }
+
+                    for (uint32_t bi = 0; bi < set->binding_count; ++bi) {
+                        const SpvReflectDescriptorBinding* binding = set->bindings[bi];
+                        // Find binding in layout_info
+                        bool found = false;
+                        for (const auto& lb : layout_info->bindings) {
+                            if (lb.binding == binding->binding) {
+                                found = true;
+                                VkDescriptorType vk_expected = map_spv_type_to_vk(binding->descriptor_type);
+                                if (vk_expected == VK_DESCRIPTOR_TYPE_MAX_ENUM) {
+                                    bud::eprint("Shader {} set {} binding {} has unknown SPIR-V descriptor type {}", stage_name, si, binding->binding, (int)binding->descriptor_type);
+                                } else if (vk_expected != lb.type) {
+                                    bud::eprint("Type mismatch: shader {} set {} binding {} type {} vs layout type {}", stage_name, si, binding->binding, (int)vk_expected, (int)lb.type);
+                                }
+                                // Check count
+                                if (binding->array.dims_count > 0) {
+                                    uint32_t arr_count = binding->array.dims[0];
+                                    if (arr_count != lb.count && lb.count != VK_DESCRIPTOR_TYPE_MAX_ENUM) {
+                                        // Allow layout with large array (e.g., bindless) to be >= reflected count
+                                        if (lb.count < arr_count) {
+                                            bud::eprint("Count mismatch: shader {} set {} binding {} array count {} vs layout count {}", stage_name, si, binding->binding, arr_count, lb.count);
+                                        }
+                                    }
+                                }
+                                // Note: SPIRV-Reflect's SpvReflectDescriptorBinding does not expose stage mask directly;
+                                // stage validation is skipped here.
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            bud::eprint("Shader {} set {} binding {} not present in pipeline layout", stage_name, si, binding->binding);
+                        }
+                    }
+                }
+            }
+        }
+
+        spvReflectDestroyShaderModule(&module);
+    };
+
+    if (enable_validation_layers) {
+        validate_spv_strict(desc.vs.code, "vertex");
+        validate_spv_strict(desc.fs.code, "fragment");
+    }
+#endif
+
 	PipelineKey key{};
 	key.vert_shader = vertModule;
 	key.frag_shader = fragModule;
@@ -590,6 +687,17 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	created_layouts.push_back(pipelineLayout);
 
 	return pipeObj;
+}
+
+void VulkanRHI::destroy_pipeline(void* pipeline) {
+	if (!pipeline) return;
+	auto* pipeObj = static_cast<VulkanPipelineObject*>(pipeline);
+    // Release pipeline from cache; pipeline will be destroyed when no longer referenced
+    if (pipeline_cache) {
+        pipeline_cache->release_pipeline(pipeObj->pipeline);
+    }
+    // Destroy wrapper (layout will be cleaned up in VulkanRHI::cleanup via created_layouts)
+    delete pipeObj;
 }
 
 void* VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& desc) {
@@ -1192,6 +1300,7 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 	features12.runtimeDescriptorArray = VK_TRUE;
 	features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
 	features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+	features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
 	features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
 
 	VkPhysicalDeviceVulkan11Features features11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
@@ -1201,6 +1310,7 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 	VkPhysicalDeviceFeatures2 device_features2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
 	device_features2.pNext = &features11;
 	device_features2.features.samplerAnisotropy = VK_TRUE;
+	device_features2.features.multiDrawIndirect = VK_TRUE;
 
 #ifdef BUD_ENABLE_AFTERMATH
 	// Enable NV_device_diagnostic_checkpoints extension to be able to
@@ -1642,6 +1752,31 @@ void VulkanRHI::copy_buffer_immediate(bud::graphics::BufferHandle src, bud::grap
 	this->end_single_time_commands(cmd);
 }
 
+void VulkanRHI::copy_buffer_immediate_offset(bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) {
+	if (!src.is_valid() || !dst.is_valid()) {
+		bud::eprint("[Vulkan][copy_buffer_immediate_offset] invalid handle: src_valid={}, dst_valid={}, size={}", src.is_valid(), dst.is_valid(), size);
+		return;
+	}
+
+	auto* vk_src = static_cast<bud::graphics::vulkan::VulkanBuffer*>(src.internal_state);
+	auto* vk_dst = static_cast<bud::graphics::vulkan::VulkanBuffer*>(dst.internal_state);
+	if (!vk_src || !vk_dst || !vk_src->buffer || !vk_dst->buffer) {
+		bud::eprint("[Vulkan][copy_buffer_immediate_offset] null VkBuffer handles");
+		return;
+	}
+
+	VkCommandBuffer cmd = this->begin_single_time_commands();
+
+	VkBufferCopy copy_region{};
+	copy_region.srcOffset = src_offset;
+	copy_region.dstOffset = dst_offset;
+	copy_region.size = size;
+
+	vkCmdCopyBuffer(cmd, vk_src->buffer, vk_dst->buffer, 1, &copy_region);
+
+	this->end_single_time_commands(cmd);
+}
+
 void VulkanRHI::cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) {
 	VulkanTexture* vk_src = static_cast<VulkanTexture*>(src);
 	VulkanTexture* vk_dst = static_cast<VulkanTexture*>(dst);
@@ -1936,6 +2071,8 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	ubo.ambient_strength = scene_view.ambient_strength;
 	ubo.debug_cascades = render_config.debug_cascades ? 1 : 0;
 	ubo.reversed_z = render_config.reversed_z ? 1 : 0;
+	ubo.shadow_bias_constant = render_config.shadow_bias_constant;
+	ubo.shadow_bias_slope = render_config.shadow_bias_slope;
 
 	if (frames[current_frame].uniform_mapped) {
 		std::memcpy(frames[current_frame].uniform_mapped, &ubo, sizeof(UniformBufferObject));
@@ -1949,6 +2086,17 @@ void VulkanRHI::update_global_shadow_map(bud::graphics::Texture* texture) {
 	for (int i = 0; i < max_frames_in_flight; i++) {
 		DescriptorWriter writer;
 		writer.write_image(2, 0, vk_tex->view, shadow_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+		writer.update_set(device, frames[i].global_descriptor_set);
+	}
+}
+
+void VulkanRHI::update_global_instance_data(bud::graphics::BufferHandle buffer) {
+	if (!buffer.is_valid()) return;
+	auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
+
+	for (int i = 0; i < max_frames_in_flight; i++) {
+		DescriptorWriter writer;
+		writer.write_buffer(3, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 		writer.update_set(device, frames[i].global_descriptor_set);
 	}
 }

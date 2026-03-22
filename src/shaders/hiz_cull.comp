@@ -13,10 +13,10 @@ struct VkDrawIndexedIndirectCommand {
 struct DrawData {
     uint indexCount;
     uint firstIndex;
+    int  vertexOffset;
     uint materialId;
-    uint meshId;
     vec3 min;
-    uint unused0;
+    uint meshId;
     vec3 max;
     uint unused1;
     uint meshletCount;
@@ -138,7 +138,7 @@ void main() {
     cmds[idx].indexCount    = data[idx].indexCount;
     cmds[idx].instanceCount = visible ? 1 : 0;
     cmds[idx].firstIndex    = data[idx].firstIndex;
-    cmds[idx].vertexOffset  = 0;
+    cmds[idx].vertexOffset  = data[idx].vertexOffset;
     cmds[idx].firstInstance = idx;
 
     if (visible) {

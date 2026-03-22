@@ -1,4 +1,4 @@
-#include "bud.asset.processor.hpp"
+﻿#include "bud.asset.processor.hpp"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -9,7 +9,61 @@
 #include <assimp/postprocess.h>
 
 #include <meshoptimizer.h>
-#include "src/core/bud.core.hpp"
+#include <optional>
+
+#include "../bud_tool_support/bud_tool_support.hpp"
+#if defined(__has_include)
+# if __has_include(<spirv_reflect.h>)
+#  ifndef SPIRV_REFLECT_USE_SYSTEM_SPIRV_H
+#   define SPIRV_REFLECT_USE_SYSTEM_SPIRV_H 1
+#  endif
+#  include <spirv_reflect.h>
+#  define BUD_HAVE_SPIRV_REFLECT 1
+# endif
+#endif
+#include <filesystem>
+#include <cstdlib>
+#include <nlohmann/json.hpp>
+#include <thread>
+#include <future>
+#include <atomic>
+#include <mutex>
+// note: avoid depending on bud::io; use local helpers above
+
+#if defined(BUD_HAVE_SPIRV_REFLECT)
+static bool compile_shader_with_glslc(const std::filesystem::path& src, const std::filesystem::path& out_spv);
+static bool reflect_and_validate_spv(const std::filesystem::path& spv_path);
+#include <sstream>
+
+static bool compile_shader_with_glslc(const std::filesystem::path& src, const std::filesystem::path& out_spv) {
+    // Use process runner to capture output instead of manual redirection
+    std::ostringstream cmd;
+    cmd << "glslc " << '"' << src.string() << '"' << " -o " << '"' << out_spv.string() << '"';
+    auto res = bud::tool_support::run_process_capture(cmd.str());
+    if (!res.stderr_str.empty()) {
+        // write compiler log next to spv
+        std::filesystem::path log_path = out_spv;
+        log_path += ".log";
+        bud::tool_support::write_text_file_atomic(log_path, res.stderr_str);
+    }
+    return res.exit_code == 0;
+}
+
+static bool reflect_and_validate_spv(const std::filesystem::path& spv_path) {
+    // Minimal reflection validation: attempt to create and destroy a module
+    std::ifstream in(spv_path, std::ios::binary | std::ios::ate);
+    if (!in.is_open()) return false;
+    auto size = in.tellg();
+    in.seekg(0, std::ios::beg);
+    std::vector<char> data(size);
+    in.read(data.data(), size);
+    SpvReflectShaderModule module;
+    SpvReflectResult res = spvReflectCreateShaderModule(data.size(), data.data(), &module);
+    if (res != SPV_REFLECT_RESULT_SUCCESS) return false;
+    spvReflectDestroyShaderModule(&module);
+    return true;
+}
+#endif
 
 namespace bud::tool {
 
@@ -280,9 +334,236 @@ namespace bud::tool {
             out.write(path.c_str(), path.length() + 1);
         }
 
-        bud::print("[BudAssetTool] Successfully exported {} submeshes, {} meshlets, and {} textures to {}", 
-            header.submesh_count, header.meshlet_count, header.texture_count, output_path);
+        std::cout << "[BudAssetTool] Successfully exported " << header.submesh_count << " submeshes, " << header.meshlet_count << " meshlets, and " << header.texture_count << " textures to " << output_path << std::endl;
         return true;
     }
 
 } // namespace bud::tool
+
+#include <string>
+
+#if !defined(BUD_HAVE_SPIRV_REFLECT)
+bool bud::tool::AssetProcessor::validate_shaders_in_directory(const std::string& shader_dir, const std::string& report_path, unsigned int /*max_workers*/) {
+    (void)shader_dir; (void)report_path;
+    std::cerr << "[BudAssetTool] SPIRV-Reflect not available in this build. Install spirv-reflect via vcpkg to enable validation." << std::endl;
+    return false;
+}
+#else
+bool bud::tool::AssetProcessor::validate_shaders_in_directory(const std::string& shader_dir, const std::string& report_path, unsigned int max_workers) {
+    namespace fs = std::filesystem;
+    fs::path dir(shader_dir);
+    // Ensure tmp dir exists under repo for temporary compiler outputs
+    fs::path tmp_dir = std::filesystem::current_path() / "tmp";
+    std::error_code tmp_ec;
+    fs::create_directories(tmp_dir, tmp_ec);
+    if (!fs::exists(dir) || !fs::is_directory(dir)) {
+        std::cerr << "[BudAssetTool] Shader directory does not exist: " << shader_dir << std::endl;
+        return false;
+    }
+
+    std::vector<std::string> exts = { ".vert", ".frag", ".comp", ".geom", ".tesc", ".tese" };
+    nlohmann::json report_json;
+    report_json["shaders"] = nlohmann::json::array();
+
+    // Collect shader files
+    std::vector<fs::path> shader_files;
+    for (auto& p : fs::recursive_directory_iterator(dir)) {
+        if (!p.is_regular_file()) continue;
+        fs::path path = p.path();
+        std::string ext = path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (std::find(exts.begin(), exts.end(), ext) == exts.end()) continue;
+        shader_files.push_back(path);
+    }
+
+    std::atomic<bool> all_ok{true};
+    // Determine worker count: prefer explicit parameter, then env var, then hardware concurrency
+    unsigned int workers = max_workers;
+    if (workers == 0) {
+        // check env var BUD_SHADER_WORKERS or BUD_ASSET_TOOL_WORKERS
+        const char* env = std::getenv("BUD_SHADER_WORKERS");
+        if (!env) env = std::getenv("BUD_ASSET_TOOL_WORKERS");
+        if (env) {
+            try { workers = std::stoul(env); }
+            catch (...) { workers = 0; }
+        }
+    }
+    if (workers == 0) {
+        unsigned int hw = std::thread::hardware_concurrency();
+        workers = hw == 0 ? 1u : hw;
+    }
+    unsigned int max_workers_final = workers;
+    std::cout << "[BudAssetTool] Using " << max_workers_final << " parallel workers for shader validation." << std::endl;
+
+    // Launch tasks in parallel using a simple batch/future approach
+    std::vector<std::future<nlohmann::json>> futures;
+    futures.reserve(shader_files.size());
+
+    for (const auto& path : shader_files) {
+        futures.push_back(std::async(std::launch::async, [path, tmp_dir]() -> nlohmann::json {
+            nlohmann::json entry;
+            entry["path"] = path.string();
+            entry["compiled"] = false;
+            entry["warnings"] = nlohmann::json::array();
+            entry["errors"] = nlohmann::json::array();
+            entry["bindings"] = nlohmann::json::array();
+            entry["inputs"] = nlohmann::json::array();
+            entry["outputs"] = nlohmann::json::array();
+            entry["push_constants"] = nlohmann::json::array();
+
+            try {
+                std::cout << "[BudAssetTool] Validating shader: " << path << std::endl;
+                fs::path out_spv = tmp_dir / (path.filename().string() + std::string(".spv"));
+                bool compiled = compile_shader_with_glslc(path, out_spv);
+                entry["compiled"] = compiled;
+
+                fs::path log_path = tmp_dir / (path.filename().string() + std::string(".spv.log"));
+                if (auto log_data = bud::tool_support::read_binary_file(log_path)) {
+                    std::string compiler_output(log_data->begin(), log_data->end());
+                    entry["compiler_output"] = compiler_output;
+                }
+
+                if (!compiled) {
+                    std::string msg = std::string("Failed to compile shader with glslc: ") + path.string();
+                    std::cerr << "[BudAssetTool] " << msg << std::endl;
+                    entry["errors"].push_back(msg);
+                    // cleanup
+                    std::error_code ec; fs::remove(out_spv, ec); fs::remove(log_path, ec);
+                    return entry;
+                }
+
+                auto spv_data_opt = bud::tool_support::read_binary_file(out_spv);
+                if (!spv_data_opt) {
+                    std::string msg = std::string("Failed to read compiled SPV: ") + out_spv.string();
+                    std::cerr << "[BudAssetTool] " << msg << std::endl;
+                    entry["errors"].push_back(msg);
+                    return entry;
+                }
+                std::vector<char> data = *spv_data_opt;
+
+                SpvReflectShaderModule module;
+                SpvReflectResult res = spvReflectCreateShaderModule(data.size(), data.data(), &module);
+                if (res != SPV_REFLECT_RESULT_SUCCESS) {
+                    std::string msg = std::string("SPIRV-Reflect: failed to create module for ") + path.string();
+                    std::cerr << "[BudAssetTool] " << msg << std::endl;
+                    entry["errors"].push_back(msg);
+                    return entry;
+                }
+
+                entry["stage"] = module.shader_stage;
+
+                uint32_t set_count = 0;
+                res = spvReflectEnumerateDescriptorSets(&module, &set_count, nullptr);
+                if (res == SPV_REFLECT_RESULT_SUCCESS && set_count > 0) {
+                    std::vector<SpvReflectDescriptorSet*> sets(set_count);
+                    res = spvReflectEnumerateDescriptorSets(&module, &set_count, sets.data());
+                    if (res == SPV_REFLECT_RESULT_SUCCESS) {
+                        for (uint32_t si = 0; si < set_count; ++si) {
+                            SpvReflectDescriptorSet* set = sets[si];
+                            nlohmann::json set_json;
+                            set_json["set"] = set->set;
+                            set_json["bindings"] = nlohmann::json::array();
+                            for (uint32_t bi = 0; bi < set->binding_count; ++bi) {
+                                const SpvReflectDescriptorBinding* binding = set->bindings[bi];
+                                nlohmann::json b;
+                                b["set"] = set->set;
+                                b["binding"] = binding->binding;
+                                b["descriptor_type"] = binding->descriptor_type;
+                                b["array_dims"] = binding->array.dims_count > 0 ? binding->array.dims[0] : 0;
+                                b["name"] = binding->name ? binding->name : "";
+                                set_json["bindings"].push_back(b);
+                            }
+                            entry["bindings"].push_back(set_json);
+                        }
+                    }
+                }
+
+                uint32_t input_count = 0;
+                if (spvReflectEnumerateInputVariables(&module, &input_count, nullptr) == SPV_REFLECT_RESULT_SUCCESS && input_count > 0) {
+                    std::vector<SpvReflectInterfaceVariable*> inputs(input_count);
+                    if (spvReflectEnumerateInputVariables(&module, &input_count, inputs.data()) == SPV_REFLECT_RESULT_SUCCESS) {
+                        for (uint32_t ii = 0; ii < input_count; ++ii) {
+                            SpvReflectInterfaceVariable* v = inputs[ii];
+                            nlohmann::json iv;
+                            iv["location"] = v->location;
+                            iv["name"] = v->name ? v->name : "";
+                            iv["built_in"] = v->built_in;
+                            iv["format"] = v->format;
+                            entry["inputs"].push_back(iv);
+                        }
+                    }
+                }
+
+                uint32_t output_count = 0;
+                if (spvReflectEnumerateOutputVariables(&module, &output_count, nullptr) == SPV_REFLECT_RESULT_SUCCESS && output_count > 0) {
+                    std::vector<SpvReflectInterfaceVariable*> outputs(output_count);
+                    if (spvReflectEnumerateOutputVariables(&module, &output_count, outputs.data()) == SPV_REFLECT_RESULT_SUCCESS) {
+                        for (uint32_t oi = 0; oi < output_count; ++oi) {
+                            SpvReflectInterfaceVariable* v = outputs[oi];
+                            nlohmann::json ov;
+                            ov["location"] = v->location;
+                            ov["name"] = v->name ? v->name : "";
+                            ov["built_in"] = v->built_in;
+                            ov["format"] = v->format;
+                            entry["outputs"].push_back(ov);
+                        }
+                    }
+                }
+
+                uint32_t pcb_count = 0;
+                if (spvReflectEnumeratePushConstantBlocks(&module, &pcb_count, nullptr) == SPV_REFLECT_RESULT_SUCCESS && pcb_count > 0) {
+                    std::vector<SpvReflectBlockVariable*> pcbs(pcb_count);
+                    if (spvReflectEnumeratePushConstantBlocks(&module, &pcb_count, pcbs.data()) == SPV_REFLECT_RESULT_SUCCESS) {
+                        for (uint32_t pi = 0; pi < pcb_count; ++pi) {
+                            SpvReflectBlockVariable* b = pcbs[pi];
+                            nlohmann::json pjson;
+                            pjson["size"] = b->size;
+                            pjson["name"] = b->name ? b->name : "";
+                            entry["push_constants"].push_back(pjson);
+                        }
+                    }
+                }
+
+                spvReflectDestroyShaderModule(&module);
+                // remove temp spv
+                std::error_code ec; fs::remove(out_spv, ec);
+            }
+            catch (const std::exception& e) {
+                entry["errors"].push_back(std::string("Exception: ") + e.what());
+            }
+            return entry;
+        }));
+        // If too many outstanding futures, wait for some
+        while (futures.size() > max_workers) {
+            auto f = std::move(futures.front());
+            futures.erase(futures.begin());
+            nlohmann::json e = f.get();
+            if (e.contains("compiled") && !e["compiled"].get<bool>()) all_ok.store(false);
+            report_json["shaders"].push_back(e);
+        }
+    }
+
+    // Collect remaining futures
+    for (auto& fut : futures) {
+        nlohmann::json e = fut.get();
+        if (e.contains("compiled") && !e["compiled"].get<bool>()) all_ok.store(false);
+        report_json["shaders"].push_back(e);
+    }
+
+    if (!report_path.empty()) {
+        std::ofstream out(report_path);
+        if (out.is_open()) {
+            out << report_json.dump(2);
+            out.close();
+        } else {
+            std::cerr << "[BudAssetTool] Failed to write report to " << report_path << std::endl;
+        }
+    }
+
+    return all_ok.load();
+}
+#endif
+
+
+// end of file
+

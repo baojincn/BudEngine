@@ -55,6 +55,7 @@ namespace bud::graphics::vulkan {
 		void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count) override;
 		void cleanup() override;
 		void wait_idle() override;
+		uint32_t get_inflight_frame_count() const override { return max_frames_in_flight; }
 
 		void resize_swapchain(uint32_t width, uint32_t height) override;
 		bool is_swapchain_out_of_date() const override { return swapchain_out_of_date.load(std::memory_order_acquire); }
@@ -62,6 +63,7 @@ namespace bud::graphics::vulkan {
 		bud::graphics::BufferHandle create_gpu_buffer(uint64_t size, bud::graphics::ResourceState usage_state) override;
 		bud::graphics::BufferHandle create_upload_buffer(uint64_t size) override;
 		void copy_buffer_immediate(bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size) override;
+		void copy_buffer_immediate_offset(bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) override;
 		void destroy_buffer(bud::graphics::BufferHandle block) override;
 
 		// 帧控制
@@ -91,6 +93,7 @@ namespace bud::graphics::vulkan {
 		void cmd_set_scissor(CommandHandle cmd, uint32_t width, uint32_t height) override;
 		void cmd_set_depth_bias(CommandHandle cmd, float constant, float clamp, float slope) override;
 		void update_global_shadow_map(Texture* texture) override;
+		void update_global_instance_data(bud::graphics::BufferHandle buffer) override;
 		void cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) override;
 		void cmd_blit_image(CommandHandle cmd, Texture* src, Texture* dst) override;
 
@@ -108,6 +111,7 @@ namespace bud::graphics::vulkan {
 
 		void* create_graphics_pipeline(const bud::graphics::GraphicsPipelineDesc& desc) override;
 		void* create_compute_pipeline(const bud::graphics::ComputePipelineDesc& desc) override;
+		void destroy_pipeline(void* pipeline) override;
 
 
 		void cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint32_t set_index) override;

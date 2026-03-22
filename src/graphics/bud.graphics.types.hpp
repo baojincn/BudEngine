@@ -141,7 +141,7 @@ namespace bud::graphics {
 		bool enable_gpu_driven = true;
 		bool debug_hiz = false;
 		uint32_t debug_hiz_mip = 0;
-		bool enable_cluster_visualization = true;
+		bool enable_cluster_visualization = false;
 	};
 
 	struct SceneView {
@@ -197,6 +197,7 @@ namespace bud::graphics {
 		Default,      // Pos(0), Color(1), Normal(2), UV(3)
 		PositionOnly, // Pos(0) only
 		PositionUV,   // Pos(0) and UV(3)
+		PositionNormal, // Pos(0) and Normal(2)
 		NoVertexInput,// For self-generating vertices (Fullscreen)
 		ImGui         // Special ImGui layout (0,1,2)
 	};
@@ -277,8 +278,9 @@ namespace bud::graphics {
 	};
 
 	struct RenderMesh {
-		BufferHandle vertex_buffer;
-		BufferHandle index_buffer;
+		// Offsets into the global Geometry Pool Mega-Buffers
+		uint32_t first_index = 0;
+		int32_t  vertex_offset = 0;
 		uint32_t index_count = 0;
 
 		// GPU-Driven Meshlet data

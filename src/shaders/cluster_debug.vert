@@ -1,7 +1,7 @@
 #version 450
 
 layout(location = 0) in vec3 in_position;
-layout(location = 1) in vec3 in_normal;
+layout(location = 2) in vec3 in_normal;
 
 layout(location = 0) out vec3 frag_world_pos;
 layout(location = 1) out vec3 frag_normal;
@@ -26,19 +26,23 @@ layout(binding = 0) uniform UniformBufferObject {
 	uint padding[3];
 } ubo;
 
-layout(push_constant) uniform PushConsts {
+struct InstanceData {
     mat4 model;
     uint material_id;
     uint padding[3];
-} push_consts;
+};
+
+layout(std430, binding = 3) readonly buffer InstanceBuffer {
+    InstanceData data[];
+} instance_buffer;
 
 void main() {
-    vec4 world_pos = push_consts.model * vec4(in_position, 1.0);
+    InstanceData instance = instance_buffer.data[gl_InstanceIndex];
+    vec4 world_pos = instance.model * vec4(in_position, 1.0);
     frag_world_pos = world_pos.xyz;
-    frag_normal = mat3(transpose(inverse(push_consts.model))) * in_normal;
-    
+    frag_normal = in_normal;
     // Create stable instance seed based on world position
-    instance_seed = floatBitsToUint(push_consts.model[3].x) ^ floatBitsToUint(push_consts.model[3].y) ^ floatBitsToUint(push_consts.model[3].z);
+    instance_seed = floatBitsToUint(instance.model[3].x) ^ floatBitsToUint(instance.model[3].y) ^ floatBitsToUint(instance.model[3].z);
     cluster_seed = uint(gl_VertexIndex) / 64u; // Stable seed for cluster coloration
 
     gl_Position = ubo.proj * ubo.view * world_pos;

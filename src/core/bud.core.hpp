@@ -1,10 +1,11 @@
-#pragma once
+﻿#pragma once
 
 #include <cstddef>
 #include <concepts>
 #include <type_traits>
 #include <iostream>
 #include <string>
+#include <cstdint>
 #include <vector>
 #include <memory>
 #include <array>
@@ -26,31 +27,17 @@ namespace bud::core {
     inline constexpr bool is_numeric_v = numeric<T>;
 }
 
-// 
-// bud::print / bud::eprint  --  debug-only logging wrappers
-//   Debug builds  : forwards to std::println (stdout / stderr)
-//   Release/Profile: empty no-op, fully eliminated by the optimizer
-// Usage:
-//   bud::print("Hello {}", value);
-//   bud::eprint("Error: {}", msg);
-// 
+// Logging implementation moved to a dedicated header/source pair.
 #ifndef NDEBUG
-    #include <print>
-    namespace bud {
-        template<typename... Args>
-        inline void print(std::format_string<Args...> fmt, Args&&... args) {
-            std::println(fmt, std::forward<Args>(args)...);
-        }
-        template<typename... Args>
-        inline void eprint(std::format_string<Args...> fmt, Args&&... args) {
-            std::println(stderr, fmt, std::forward<Args>(args)...);
-        }
-    }
+#include "bud.logger.hpp"
 #else
-    namespace bud {
-        template<typename... Args>
-        constexpr void print([[maybe_unused]] Args&&...) noexcept {}
-        template<typename... Args>
-        constexpr void eprint([[maybe_unused]] Args&&...) noexcept {}
-    }
+namespace bud {
+    template<typename... Args>
+    constexpr void print([[maybe_unused]] Args&&...) noexcept {}
+    template<typename... Args>
+    constexpr void eprint([[maybe_unused]] Args&&...) noexcept {}
+    inline void set_log_backend_mask([[maybe_unused]] uint32_t) noexcept {}
+    inline uint32_t get_log_backend_mask() noexcept { return 0; }
+    inline void set_log_file([[maybe_unused]] const std::string&) noexcept {}
+}
 #endif

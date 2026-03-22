@@ -51,6 +51,20 @@ namespace bud::graphics {
 			std::vector<std::function<void()>> commands;
 		};
 
+		// Global Geometry Pool (Mega-Buffer) that all meshes are packed into
+		struct GeometryPool {
+			static constexpr uint64_t kVertexPoolSize = 256ull * 1024 * 1024; // 256 MB
+			static constexpr uint64_t kIndexPoolSize  = 128ull * 1024 * 1024; // 128 MB
+
+			bud::graphics::BufferHandle vertex_buffer;
+			bud::graphics::BufferHandle index_buffer;
+
+			std::atomic<uint32_t> next_vertex{ 0 }; // in vertices
+			std::atomic<uint32_t> next_index{ 0 };  // in indices
+
+			bool initialized = false;
+		};
+
 		void update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb);
 
 		RHI* rhi;
@@ -76,6 +90,8 @@ namespace bud::graphics {
 
 		GPUStats last_gpu_stats{};
 
+		GeometryPool geometry_pool;
+
 		std::vector<RenderMesh> meshes;
 		std::vector<bud::math::AABB> mesh_bounds;
 		mutable std::mutex mesh_bounds_mutex;
@@ -84,6 +100,15 @@ namespace bud::graphics {
 
 		std::atomic<uint32_t> next_bindless_slot{ 1 };
 		std::atomic<uint32_t> next_mesh_id{ 0 };
+
+		struct InstanceData {
+			bud::math::mat4 model;
+			uint32_t material_id;
+			uint32_t padding[3];
+		};
+
+		std::vector<bud::graphics::BufferHandle> instance_data_ssbos;
+		uint32_t instance_data_capacity = 0;
 
 		std::shared_ptr<UploadQueue> upload_queue;
 	};

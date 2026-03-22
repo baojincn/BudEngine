@@ -10,6 +10,7 @@ layout(location = 0) out vec3 frag_world_pos;
 layout(location = 1) out vec3 frag_normal;
 layout(location = 2) out vec2 frag_tex_coord;
 layout(location = 3) out vec3 frag_color;
+layout(location = 4) flat out uint frag_material_id;
 
 layout(binding = 0) uniform UniformBufferObject {
     mat4 view;
@@ -29,19 +30,24 @@ layout(binding = 0) uniform UniformBufferObject {
 	uint padding[3];
 } ubo;
 
-layout(push_constant) uniform PushConsts {
+struct InstanceData {
     mat4 model;
     uint material_id;
     uint padding[3];
-} push_consts;
+};
+
+layout(std430, binding = 3) readonly buffer InstanceBuffer {
+    InstanceData data[];
+} instance_buffer;
 
 void main() {
-    vec4 world_pos = push_consts.model * vec4(in_position, 1.0);
+    InstanceData instance = instance_buffer.data[gl_InstanceIndex];
+    vec4 world_pos = instance.model * vec4(in_position, 1.0);
     frag_world_pos = world_pos.xyz;
-	// [CSM] No more single lightSpaceMatrix projection here
 
     frag_normal = in_normal;
     frag_color = in_color;
+    frag_material_id = instance.material_id;
 
     gl_Position = ubo.proj * ubo.view * world_pos;
 

@@ -36,14 +36,17 @@ namespace bud::graphics {
 		virtual void end_frame(CommandHandle cmd) = 0;
 		virtual void wait_idle() = 0;
 		virtual void cleanup() = 0;
+		virtual uint32_t get_inflight_frame_count() const = 0;
 
 		// 资源管理
 		virtual BufferHandle create_gpu_buffer(uint64_t size, ResourceState usage_state) = 0;
 		virtual BufferHandle create_upload_buffer(uint64_t size) = 0;
 		virtual void copy_buffer_immediate(BufferHandle src, BufferHandle dst, uint64_t size) = 0;
+		virtual void copy_buffer_immediate_offset(BufferHandle src, BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) = 0;
 		virtual void destroy_buffer(BufferHandle block) = 0;
 		virtual void* create_graphics_pipeline(const GraphicsPipelineDesc& desc) = 0;
 		virtual void* create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
+		virtual void destroy_pipeline(void* pipeline) = 0;
 
 
 		// 现有接口
@@ -78,6 +81,7 @@ namespace bud::graphics {
 		virtual void update_bindless_image(uint32_t index, Texture* texture, uint32_t mip_level = 0, bool is_storage = false) = 0;
 		virtual Texture* get_fallback_texture() = 0;
 		virtual void update_global_shadow_map(Texture* texture) = 0;
+		virtual void update_global_instance_data(bud::graphics::BufferHandle buffer) = 0;
 		virtual void cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) = 0; // Shadow Caching
 		virtual void cmd_blit_image(CommandHandle cmd, Texture* src, Texture* dst) = 0;
 		virtual void cmd_set_scissor(CommandHandle cmd, uint32_t width, uint32_t height) = 0;

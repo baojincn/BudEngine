@@ -40,32 +40,37 @@ namespace bud::graphics {
 		main_pass->init(rhi, render_config, asset_manager);
 		cluster_viz_pass->init(rhi, render_config, asset_manager);
 		ui_pass->init(rhi, render_config, asset_manager);
+
+		uint32_t max_frames = rhi->get_inflight_frame_count();
+		indirect_instance_buffers.resize(max_frames);
+		indirect_draw_buffers.resize(max_frames);
+		stats_readback_buffers.resize(max_frames);
+		instance_data_ssbos.resize(max_frames);
 	}
 
 	Renderer::~Renderer() {
 		flush_upload_queue();
 		upload_queue.reset();
 
-		if (csm_pass) {
-			csm_pass->shutdown(rhi);
-		}
-
-		if (ui_pass) {
-			ui_pass->shutdown(rhi);
-		}
-
-		if (hiz_pass) {
-			hiz_pass->shutdown(rhi);
-		}
+		if (csm_pass) csm_pass->shutdown(rhi);
+		if (z_prepass) z_prepass->shutdown(rhi);
+		if (hiz_mip_pass) hiz_mip_pass->shutdown(rhi);
+		if (hiz_pass) hiz_pass->shutdown(rhi);
+		if (hiz_debug_pass) hiz_debug_pass->shutdown(rhi);
+		if (main_pass) main_pass->shutdown(rhi);
+		if (cluster_viz_pass) cluster_viz_pass->shutdown(rhi);
+		if (ui_pass) ui_pass->shutdown(rhi);
 
 		for (auto& mesh : meshes) {
-			if (mesh.vertex_buffer.is_valid()) rhi->destroy_buffer(mesh.vertex_buffer);
-			if (mesh.index_buffer.is_valid()) rhi->destroy_buffer(mesh.index_buffer);
+			// vertex_buffer and index_buffer are now pool offsets, no individual destroy needed
 			if (mesh.meshlet_buffer.is_valid()) rhi->destroy_buffer(mesh.meshlet_buffer);
 			if (mesh.vertex_index_buffer.is_valid()) rhi->destroy_buffer(mesh.vertex_index_buffer);
 			if (mesh.meshlet_index_buffer.is_valid()) rhi->destroy_buffer(mesh.meshlet_index_buffer);
 			if (mesh.cull_data_buffer.is_valid()) rhi->destroy_buffer(mesh.cull_data_buffer);
 		}
+
+		if (geometry_pool.vertex_buffer.is_valid()) rhi->destroy_buffer(geometry_pool.vertex_buffer);
+		if (geometry_pool.index_buffer.is_valid())  rhi->destroy_buffer(geometry_pool.index_buffer);
 		
 		for (auto& buf : indirect_instance_buffers) {
 			if (buf.is_valid()) rhi->destroy_buffer(buf);
@@ -81,8 +86,12 @@ namespace bud::graphics {
 		for (auto& buf : stats_readback_buffers) {
 			if (buf.is_valid()) rhi->destroy_buffer(buf);
 		}
-
 		stats_readback_buffers.clear();
+
+		for (auto& buf : instance_data_ssbos) {
+			if (buf.is_valid()) rhi->destroy_buffer(buf);
+		}
+		instance_data_ssbos.clear();
 	}
 
 	std::vector<bud::math::AABB> Renderer::get_mesh_bounds_snapshot() const {
@@ -202,32 +211,45 @@ namespace bud::graphics {
 				new_mesh.sphere.radius = bud::math::distance(cpu_aabb.max, new_mesh.sphere.center);
 				new_mesh.index_count = (uint32_t)mesh_data_copy->indices.size();
 
-				uint64_t v_size = mesh_data_copy->vertices.size() * sizeof(bud::io::MeshData::Vertex);
-				uint64_t i_size = mesh_data_copy->indices.size() * sizeof(uint32_t);
+				const uint32_t vertex_count = (uint32_t)mesh_data_copy->vertices.size();
+				const uint32_t index_count  = (uint32_t)mesh_data_copy->indices.size();
+				const uint64_t v_size = vertex_count * sizeof(bud::io::MeshData::Vertex);
+				const uint64_t i_size = index_count  * sizeof(uint32_t);
 
-				new_mesh.vertex_buffer = rhi->create_gpu_buffer(v_size, ResourceState::VertexBuffer);
-				new_mesh.index_buffer = rhi->create_gpu_buffer(i_size, ResourceState::IndexBuffer);
-				bud::print("[Renderer::upload_mesh] mesh={} vbuf_valid={} ibuf_valid={} vbuf_state={} ibuf_state={}",
-					assigned_mesh_id,
-					new_mesh.vertex_buffer.is_valid(),
-					new_mesh.index_buffer.is_valid(),
-					(void*)new_mesh.vertex_buffer.internal_state,
-					(void*)new_mesh.index_buffer.internal_state);
+				// Initialize Geometry Pool Mega-Buffers on first use
+				if (!geometry_pool.initialized) {
+					geometry_pool.vertex_buffer = rhi->create_gpu_buffer(GeometryPool::kVertexPoolSize, ResourceState::VertexBuffer);
+					geometry_pool.index_buffer  = rhi->create_gpu_buffer(GeometryPool::kIndexPoolSize,  ResourceState::IndexBuffer);
+					rhi->set_debug_name(geometry_pool.vertex_buffer, ObjectType::Buffer, "GeometryPool_Vertices");
+					rhi->set_debug_name(geometry_pool.index_buffer,  ObjectType::Buffer, "GeometryPool_Indices");
+					geometry_pool.initialized = true;
+					bud::print("[GeometryPool] Initialized: vertex={}MB index={}MB",
+						GeometryPool::kVertexPoolSize / (1024 * 1024),
+						GeometryPool::kIndexPoolSize  / (1024 * 1024));
+				}
 
+				// Atomically reserve contiguous region inside the pool
+				const uint32_t vertex_base = geometry_pool.next_vertex.fetch_add(vertex_count, std::memory_order_relaxed);
+				const uint32_t index_base  = geometry_pool.next_index .fetch_add(index_count,  std::memory_order_relaxed);
+
+				const uint64_t vertex_pool_byte_offset = (uint64_t)vertex_base * sizeof(bud::io::MeshData::Vertex);
+				const uint64_t index_pool_byte_offset  = (uint64_t)index_base  * sizeof(uint32_t);
+
+				new_mesh.first_index   = index_base;
+				new_mesh.vertex_offset = (int32_t)vertex_base;
+
+				bud::print("[GeometryPool] mesh={} vertex_offset={} first_index={} v_size={}B i_size={}B",
+					assigned_mesh_id, vertex_base, index_base, v_size, i_size);
+
+				// Stage upload: CPU -> staging -> GPU pool
 				auto v_stage = rhi->create_upload_buffer(v_size);
 				auto i_stage = rhi->create_upload_buffer(i_size);
 
 				std::memcpy(v_stage.mapped_ptr, mesh_data_copy->vertices.data(), v_size);
-				std::memcpy(i_stage.mapped_ptr, mesh_data_copy->indices.data(), i_size);
-				bud::print("[Renderer::upload_mesh] mesh={} before copy v_stage_valid={} i_stage_valid={} vbuf_valid={} ibuf_valid={}",
-					assigned_mesh_id,
-					v_stage.is_valid(),
-					i_stage.is_valid(),
-					new_mesh.vertex_buffer.is_valid(),
-					new_mesh.index_buffer.is_valid());
+				std::memcpy(i_stage.mapped_ptr, mesh_data_copy->indices.data(),  i_size);
 
-				rhi->copy_buffer_immediate(v_stage, new_mesh.vertex_buffer, v_size);
-				rhi->copy_buffer_immediate(i_stage, new_mesh.index_buffer, i_size);
+				rhi->copy_buffer_immediate_offset(v_stage, geometry_pool.vertex_buffer, v_size, 0, vertex_pool_byte_offset);
+				rhi->copy_buffer_immediate_offset(i_stage, geometry_pool.index_buffer,  i_size, 0, index_pool_byte_offset);
 
 				rhi->destroy_buffer(v_stage);
 				rhi->destroy_buffer(i_stage);
@@ -408,11 +430,10 @@ namespace bud::graphics {
 			const bud::math::Frustum& main_camera_frustum = view_frustums[0];
 
 			const auto& visible_instances = culled_results[0];
-			size_t visible_count_initial = visible_instances.size();
-			visible_instance_count = visible_count_initial;
+			visible_instance_count = visible_instances.size();
 			total_draw_count = 0;
-			std::vector<uint32_t> draw_offsets(visible_count_initial + 1);
-			for (size_t k = 0; k < visible_count_initial; ++k) {
+			std::vector<uint32_t> draw_offsets(visible_instance_count + 1);
+			for (size_t k = 0; k < visible_instance_count; ++k) {
 				uint32_t i = visible_instances[k];
 				uint32_t mesh_id = render_scene.mesh_indices[i];
 				const auto& mesh = meshes[mesh_id];
@@ -425,7 +446,7 @@ namespace bud::graphics {
 					total_draw_count += 1;
 				}
 			}
-			draw_offsets[visible_count_initial] = (uint32_t)total_draw_count;
+			draw_offsets[visible_instance_count] = (uint32_t)total_draw_count;
 
 			if (sort_list.size() < total_draw_count)
 				sort_list.resize(total_draw_count);
@@ -441,7 +462,7 @@ namespace bud::graphics {
 			bud::threading::Counter key_gen_signal;
 			constexpr size_t KEY_GEN_CHUNK_SIZE = 256;
 
-			task_scheduler->ParallelFor(visible_count_initial, KEY_GEN_CHUNK_SIZE,
+			task_scheduler->ParallelFor(visible_instance_count, KEY_GEN_CHUNK_SIZE,
 				[&](size_t start_exclusive, size_t end_exclusive) {
 					for (size_t k = start_exclusive; k < end_exclusive; ++k) {
 						uint32_t i = visible_instances[k];
@@ -510,11 +531,9 @@ namespace bud::graphics {
 				[](const SortItem& a, const SortItem& b) { return a.key < b.key; }
 			);
 
-			auto it = std::lower_bound(sort_list.begin(), sort_list.begin() + total_draw_count, UINT64_MAX,
-				[](const SortItem& item, uint64_t val) { return item.key < val; }
-			);
-
-			visible_count = std::distance(sort_list.begin(), it);
+			auto end_it = std::remove_if(sort_list.begin(), sort_list.begin() + total_draw_count, [](const SortItem& a) { return a.key == UINT64_MAX; });
+			sort_list.erase(end_it, sort_list.end()); // REMOVES INVALID ITEMS!
+			visible_count = sort_list.size();
 		}
 
 		auto cmd = rhi->begin_frame();
@@ -532,14 +551,15 @@ namespace bud::graphics {
 		RGHandle rg_draw;
 		RGHandle rg_inst;
 		RGHandle rg_stats;
+		RGHandle rg_instance_data;
 
 		struct DrawData {
 			uint32_t indexCount;
 			uint32_t firstIndex;
+			int32_t vertexOffset;
 			uint32_t materialId;
-			uint32_t meshId;
 			bud::math::vec3 min;
-			uint32_t padding0;
+			uint32_t meshId;
 			bud::math::vec3 max;
 			uint32_t padding1;
 			uint32_t meshletCount;
@@ -547,44 +567,78 @@ namespace bud::graphics {
 		};
 
 		if (instance_count > 0) {
-			if (render_config.enable_gpu_driven) {
-				if (indirect_instance_buffers.size() <= current_idx) {
-					indirect_instance_buffers.resize(current_idx + 1);
-					indirect_draw_buffers.resize(current_idx + 1);
-					stats_readback_buffers.resize(current_idx + 1);
-				}
+			if (instance_data_ssbos.size() <= current_idx) {
+				instance_data_ssbos.resize(current_idx + 1);
+				indirect_instance_buffers.resize(current_idx + 1);
+				indirect_draw_buffers.resize(current_idx + 1);
+				stats_readback_buffers.resize(current_idx + 1);
+			}
 
-				if (total_draw_count > current_indirect_capacity) {
-					rhi->wait_idle();
-					for (auto& buf : indirect_instance_buffers)
-						if (buf.is_valid())
-							rhi->destroy_buffer(buf);
+			if (total_draw_count > current_indirect_capacity) {
+				rhi->wait_idle();
+				for (auto& buf : indirect_instance_buffers)
+					if (buf.is_valid())
+						rhi->destroy_buffer(buf);
+				for (auto& buf : indirect_draw_buffers)
+					if (buf.is_valid())
+						rhi->destroy_buffer(buf);
+				for (auto& buf : stats_readback_buffers)
+					if (buf.is_valid())
+						rhi->destroy_buffer(buf);
+				for (auto& buf : instance_data_ssbos)
+					if (buf.is_valid())
+						rhi->destroy_buffer(buf);
 
-					for (auto& buf : indirect_draw_buffers)
-						if (buf.is_valid())
-							rhi->destroy_buffer(buf);
+				constexpr uint32_t kCapacityHeadroom = 1024;
+				current_indirect_capacity = std::max(current_indirect_capacity * 2, static_cast<uint32_t>(total_draw_count) + kCapacityHeadroom);
 
-					for (auto& buf : stats_readback_buffers)
-						if (buf.is_valid())
-							rhi->destroy_buffer(buf);
-
-					// Growth strategy: double current capacity, but at least (needed + headroom).
-					constexpr uint32_t kCapacityHeadroom = 1024;
-					current_indirect_capacity = std::max(current_indirect_capacity * 2, static_cast<uint32_t>(total_draw_count) + kCapacityHeadroom);
-
+				for (size_t i = 0; i < instance_data_ssbos.size(); ++i) {
+					instance_data_ssbos[i] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(InstanceData), ResourceState::ShaderResource);
+					rhi->set_debug_name(instance_data_ssbos[i], ObjectType::Buffer, "GlobalInstanceData_Frame" + std::to_string(i));
 					
-					for (size_t i = 0; i < indirect_instance_buffers.size(); ++i) {
+					if (render_config.enable_gpu_driven) {
 						indirect_instance_buffers[i] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(DrawData), ResourceState::UnorderedAccess);
-						indirect_draw_buffers[i] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(IndirectCommand), ResourceState::IndirectArgument); 
-						
-						stats_readback_buffers[i] = rhi->create_gpu_buffer(1024, ResourceState::UnorderedAccess); // Extra space for alignment/future stats
+						indirect_draw_buffers[i] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(IndirectCommand), ResourceState::IndirectArgument);
+						stats_readback_buffers[i] = rhi->create_gpu_buffer(1024, ResourceState::UnorderedAccess);
 						
 						rhi->set_debug_name(indirect_instance_buffers[i], ObjectType::Buffer, "IndirectInstanceData_Frame" + std::to_string(i));
 						rhi->set_debug_name(indirect_draw_buffers[i], ObjectType::Buffer, "IndirectDrawCommands_Frame" + std::to_string(i));
 						rhi->set_debug_name(stats_readback_buffers[i], ObjectType::Buffer, "GPUStatsReadback_Frame" + std::to_string(i));
 					}
 				}
-					if (visible_count > 0) {
+			}
+
+			// Ensure current frame buffer is valid even if capacity didn't change (e.g. first frame if capacity > total_draw_count)
+			if (!instance_data_ssbos[current_idx].is_valid()) {
+				if (current_indirect_capacity == 0) current_indirect_capacity = std::max<uint32_t>(static_cast<uint32_t>(total_draw_count) + 1024u, 1024u);
+				instance_data_ssbos[current_idx] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(InstanceData), ResourceState::ShaderResource);
+				rhi->set_debug_name(instance_data_ssbos[current_idx], ObjectType::Buffer, "GlobalInstanceData_Frame" + std::to_string(current_idx));
+			}
+
+			// Common Instance Data Upload
+			if (visible_count > 0) {
+				auto instance_staging = rhi->create_upload_buffer(visible_count * sizeof(InstanceData));
+				InstanceData* inst_mapped = static_cast<InstanceData*>(instance_staging.mapped_ptr);
+				for (size_t i = 0; i < visible_count; ++i) {
+					const auto& item = sort_list[i];
+					uint32_t entity_idx = item.entity_index;
+					const auto& mesh = meshes[render_scene.mesh_indices[entity_idx]];
+
+					inst_mapped[i].model = render_scene.world_matrices[entity_idx];
+					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+						inst_mapped[i].material_id = mesh.submeshes[item.submesh_index].material_id;
+					}
+					else {
+						inst_mapped[i].material_id = render_scene.material_indices[entity_idx];
+					}
+				}
+				rhi->copy_buffer_immediate(instance_staging, instance_data_ssbos[current_idx], visible_count * sizeof(InstanceData));
+				rhi->destroy_buffer(instance_staging);
+				rg_instance_data = render_graph.import_buffer("GlobalInstanceData", instance_data_ssbos[current_idx], ResourceState::ShaderResource);
+			}
+
+			if (render_config.enable_gpu_driven) {
+				if (visible_count > 0) {
 					auto& current_inst_buf = indirect_instance_buffers[current_idx];
 					auto& current_draw_buf = indirect_draw_buffers[current_idx];
 					auto& current_stats_buf = stats_readback_buffers[current_idx];
@@ -606,9 +660,9 @@ namespace bud::graphics {
 						rhi->set_debug_name(current_stats_buf, ObjectType::Buffer, "GPUStatsReadback_Frame" + std::to_string(current_idx));
 					}
 
-						auto staging = rhi->create_upload_buffer(visible_count * sizeof(DrawData));
+					auto staging = rhi->create_upload_buffer(visible_count * sizeof(DrawData));
 					DrawData* mapped = static_cast<DrawData*>(staging.mapped_ptr);
-						for (size_t i = 0; i < visible_count; ++i) {
+					for (size_t i = 0; i < visible_count; ++i) {
 						const auto& item = sort_list[i];
 						uint32_t entity_idx = item.entity_index;
 						uint32_t mesh_id = render_scene.mesh_indices[entity_idx];
@@ -617,7 +671,8 @@ namespace bud::graphics {
 						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
 							const auto& sub = mesh.submeshes[item.submesh_index];
 							mapped[i].indexCount = sub.index_count;
-							mapped[i].firstIndex = sub.index_start;
+							mapped[i].firstIndex = mesh.first_index + sub.index_start;
+							mapped[i].vertexOffset = mesh.vertex_offset;
 							mapped[i].materialId = sub.material_id;
 							mapped[i].meshId = mesh_id;
 							
@@ -627,7 +682,8 @@ namespace bud::graphics {
 							mapped[i].meshletCount = sub.meshlet_count;
 						} else {
 							mapped[i].indexCount = mesh.index_count;
-							mapped[i].firstIndex = 0;
+							mapped[i].firstIndex = mesh.first_index;
+							mapped[i].vertexOffset = mesh.vertex_offset;
 							mapped[i].materialId = render_scene.material_indices[entity_idx];
 							mapped[i].meshId = mesh_id;
 
@@ -637,12 +693,12 @@ namespace bud::graphics {
 							mapped[i].meshletCount = mesh.meshlet_count;
 						}
 					}
-						rhi->copy_buffer_immediate(staging, current_inst_buf, visible_count * sizeof(DrawData));
+					rhi->copy_buffer_immediate(staging, current_inst_buf, visible_count * sizeof(DrawData));
 					rhi->destroy_buffer(staging);
 
 					rg_inst = render_graph.import_buffer("IndirectInstanceData", current_inst_buf, ResourceState::UnorderedAccess);
 					rg_draw = render_graph.import_buffer("IndirectDrawCommands", current_draw_buf, ResourceState::IndirectArgument);
-					rg_stats = render_graph.import_buffer("GPUStatsReadback", stats_readback_buffers[current_idx], ResourceState::UnorderedAccess);
+					rg_stats = render_graph.import_buffer("GPUStatsReadback", current_stats_buf, ResourceState::UnorderedAccess);
 				}
 
 				// Read back previous frame stats (delayed latency) from this exact buffer which is guaranteed finished
@@ -684,7 +740,7 @@ namespace bud::graphics {
 
 			uint32_t cpu_total_tris = 0;
 			uint32_t cpu_visible_tris = 0;
-			for (size_t i = 0; i < total_draw_count; ++i) {
+			for (size_t i = 0; i < visible_count; ++i) {
 				const auto& item = sort_list[i];
 				if (item.entity_index == UINT32_MAX && item.key == UINT64_MAX) continue;
 				uint32_t mesh_id = render_scene.mesh_indices[item.entity_index];
@@ -752,10 +808,13 @@ namespace bud::graphics {
 			rhi->get_render_stats().shadow_caster_submeshes = total_shadow_caster_submeshes;
 
 			bool has_main_pass = false;
+			if (rg_instance_data.is_valid()) {
+				rhi->update_global_instance_data(instance_data_ssbos[current_idx]);
+			}
 			if (visible_count > 0) {
 				// Z-Prepass ALWAYS uses CPU frustum-culling (visible_count) regardless of GPU-driven settings,
 				// as it must generate the depth buffer for Hi-Z culling itself.
-				auto depth_prepass = z_prepass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, RGHandle{});
+				auto depth_prepass = z_prepass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
 				
 				if (depth_prepass.is_valid()) {
 					if (render_config.enable_gpu_driven) {
@@ -770,12 +829,12 @@ namespace bud::graphics {
 					std::vector<std::vector<uint32_t>> csm_visible_instances(cascade_count);
 					for (uint32_t i = 0; i < cascade_count; ++i) csm_visible_instances[i] = std::move(culled_results[i + 1]);
 
-					auto shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances));
+					auto shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), geometry_pool.vertex_buffer, geometry_pool.index_buffer);
 					if (shadow_map.is_valid()) {
 						if (render_config.enable_cluster_visualization) {
-							cluster_viz_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw);
+							cluster_viz_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
 						} else {
-							main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw);
+							main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
 						}
 						has_main_pass = true;
 					}
@@ -816,6 +875,7 @@ namespace bud::graphics {
 		render_graph.execute(cmd);
 		rhi->resource_barrier(cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::Present);
 		rhi->end_frame(cmd);
+		render_graph.reset();
 	}
 
 

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.30.0)
+﻿cmake_minimum_required(VERSION 3.30.0)
 
 # Setup vcpkg toolchain
 if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
@@ -48,6 +48,7 @@ option(BUD_BUILD_SAMPLES "Build samples" ON)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
 find_package(imgui CONFIG REQUIRED)
+find_package(spirv-reflect CONFIG QUIET)
 if(BUD_ENABLE_PROFILING)
 	find_package(Tracy CONFIG REQUIRED)
 endif()
@@ -158,6 +159,14 @@ if(BUD_ENABLE_AFTERMATH)
 	endif()
 endif()
 
+if(spirv-reflect_FOUND)
+    message(STATUS "Found SPIRV-Reflect")
+    # Propagate spirv-reflect to dependents so tools linking against the core can use it
+    target_link_libraries(bud_engine_core PUBLIC spirv-reflect::spirv-reflect)
+else()
+    message(STATUS "SPIRV-Reflect not found; shader reflection validation disabled")
+endif()
+
 if(MSVC)
 	target_link_options(bud_engine_core PRIVATE "/CETCOMPAT:NO")
 endif()
@@ -178,6 +187,8 @@ target_sources(bud_engine_core
 		"src/graphics/bud.ml_passes.cpp"
 		"src/graphics/bud.ml_perception.cpp"
         
+		"src/core/bud.logger.cpp"
+
 		"src/graphics/vulkan/bud.graphics.vulkan.cpp"
 		"src/graphics/vulkan/bud.vulkan.memory.cpp"
 		"src/graphics/vulkan/bud.vulkan.descriptors.cpp"
@@ -194,6 +205,7 @@ target_sources(bud_engine_core
     PUBLIC
 		"src/core/bud.core.hpp"
 		"src/core/bud.math.hpp"
+		"src/core/bud.logger.hpp"
 		"src/io/bud.io.hpp"
 		"src/dod/bud.dod.hpp"
 		"src/runtime/bud.engine.hpp"
@@ -238,14 +250,14 @@ target_link_libraries(bud_engine_core
 		meshoptimizer::meshoptimizer
 )
 
-target_include_directories(bud_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(bud_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # End, define engine core library
 
 # Begin, triangle_sample
 if(BUD_BUILD_SAMPLES)
     add_executable(triangle_sample samples/triangle/main.cpp)
     target_link_libraries(triangle_sample PRIVATE bud_engine_core)
-    target_include_directories(triangle_sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_include_directories(triangle_sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
     
     # Output directory
     set_target_properties(triangle_sample PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -271,25 +283,37 @@ if(BUD_BUILD_SAMPLES)
 endif()
 # End, triangle_sample
 
-# Begin, BudAssetTool
-add_executable(BudAssetTool
-    src/tools/BudAssetTool/main.cpp
-    src/tools/BudAssetTool/bud.asset.processor.cpp
+# Begin, tools
+add_subdirectory(src/tools/bud_tool_support)
+add_subdirectory(src/tools/BudAssetTool)
+add_subdirectory(src/tools/shader_layout_codegen)
+
+# Generate shader layouts header at build time using the codegen tool.
+# Input: tmp/shader_report.json
+# Output: include/generated/shader_layouts.h
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/include/generated/shader_layouts.h
+    # Ensure tmp and include/generated exist
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_SOURCE_DIR}/tmp
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_SOURCE_DIR}/include/generated
+    # Run BudAssetTool to produce tmp/shader_report.json
+    COMMAND $<TARGET_FILE:BudAssetTool> --validate-shaders ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders --report ${CMAKE_CURRENT_SOURCE_DIR}/tmp/shader_report.json
+    # Run codegen to generate the header from the report
+    COMMAND $<TARGET_FILE:ShaderLayoutCodegen> --input ${CMAKE_CURRENT_SOURCE_DIR}/tmp/shader_report.json --output ${CMAKE_CURRENT_SOURCE_DIR}/include/generated/shader_layouts.h
+    DEPENDS ShaderLayoutCodegen BudAssetTool
+    COMMENT "Generating include/generated/shader_layouts.h from shader reflection (BudAssetTool + ShaderLayoutCodegen)"
+    VERBATIM
 )
 
-target_link_libraries(BudAssetTool
-    PRIVATE
-        bud_engine_core
-        meshoptimizer::meshoptimizer
-        assimp::assimp
+add_custom_target(GenerateShaderLayouts DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/include/generated/shader_layouts.h)
+
+# Separate target: only generate the shader reflection JSON report (tmp/shader_report.json)
+add_custom_target(GenerateShaderReport
+    COMMAND $<TARGET_FILE:BudAssetTool> --validate-shaders ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders --report ${CMAKE_CURRENT_SOURCE_DIR}/tmp/shader_report.json
+    DEPENDS BudAssetTool
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Generating tmp/shader_report.json using BudAssetTool"
+    VERBATIM
 )
 
-target_include_directories(BudAssetTool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Output directory
-set_target_properties(BudAssetTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-
-if(MSVC)
-    target_link_options(BudAssetTool PRIVATE "/CETCOMPAT:NO")
-endif()
-# End, BudAssetTool
+# End, tools

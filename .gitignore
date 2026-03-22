@@ -55,3 +55,6 @@ ipch/
 *.spv
 *.pdb
 *.ilk
+
+# Generated headers
+include/generated/shader_layouts.h

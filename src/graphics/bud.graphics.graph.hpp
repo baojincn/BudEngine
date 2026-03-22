@@ -105,6 +105,7 @@ namespace bud::graphics {
 							pool->release_texture(node.physical_texture);
 							node.physical_texture = nullptr;
 						}
+						node.physical_buffer = {};
 					}
 				}
 			}

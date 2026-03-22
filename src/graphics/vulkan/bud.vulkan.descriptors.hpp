@@ -46,6 +46,23 @@ namespace bud::graphics::vulkan {
 		VkDescriptorSetLayout build(VkDevice device, VkShaderStageFlags shader_stages, void* pNext = nullptr, VkDescriptorSetLayoutCreateFlags flags = 0);
 	};
 
+    struct DescriptorBindingInfo {
+        uint32_t binding;
+        VkDescriptorType type;
+        uint32_t count;
+        VkShaderStageFlags stage_flags;
+        VkDescriptorBindingFlags binding_flags;
+    };
+
+    struct DescriptorSetLayoutInfo {
+        std::vector<DescriptorBindingInfo> bindings;
+        VkDescriptorSetLayoutCreateFlags flags = 0;
+    };
+
+    // Register and query layout metadata for validation/reflection
+    void register_descriptor_set_layout(VkDescriptorSetLayout layout, const DescriptorSetLayoutInfo& info);
+    const DescriptorSetLayoutInfo* get_descriptor_set_layout_info(VkDescriptorSetLayout layout);
+
 	 class DescriptorWriter {
 	public:
 		std::deque<VkDescriptorImageInfo> image_infos;

@@ -1,4 +1,4 @@
-#include <vulkan/vulkan.h>
+﻿#include <vulkan/vulkan.h>
 #include <unordered_map>
 #include <vector>
 #include <stdexcept>
@@ -16,22 +16,32 @@ namespace bud::graphics::vulkan {
     }
 
     void VulkanPipelineCache::cleanup() {
-        for (auto& [key, pipe] : cache) {
-            vkDestroyPipeline(device, pipe, nullptr);
+        for (auto& [key, entry] : cache) {
+            if (device && entry.pipeline) vkDestroyPipeline(device, entry.pipeline, nullptr);
         }
         cache.clear();
+        pipeline_to_key.clear();
 
         for (auto pipe : compute_pipelines) {
             vkDestroyPipeline(device, pipe, nullptr);
         }
         compute_pipelines.clear();
+        compute_pipeline_set.clear();
     }
 
     VkPipeline VulkanPipelineCache::get_pipeline(const PipelineKey& key, VkPipelineLayout layout, bool is_depth_only) {
-        if (cache.contains(key)) return cache[key];
+        auto it = cache.find(key);
+        if (it != cache.end()) {
+            // Increment refcount and return existing pipeline
+            it->second.refcount++;
+            return it->second.pipeline;
+        }
 
         VkPipeline new_pipe = create_pipeline_internal(key, layout, is_depth_only);
-        cache[key] = new_pipe;
+        PipelineEntry entry{ new_pipe, 1 };
+        cache[key] = entry;
+        // Record reverse mapping for O(1) lookup on release
+        pipeline_to_key[new_pipe] = key;
         return new_pipe;
     }
 
@@ -75,6 +85,13 @@ namespace bud::graphics::vulkan {
                 {3, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::io::MeshData::Vertex, texture_uv)}
             };
             break;
+        case VertexLayoutType::PositionNormal:
+            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
+            attributeDescriptions = {
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)},
+                {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, normal)}
+            };
+            break;
         case VertexLayoutType::NoVertexInput:
             bindingDescription.stride = 0;
             attributeDescriptions = {};
@@ -88,6 +105,7 @@ namespace bud::graphics::vulkan {
             };
             break;
         }
+
 
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -233,6 +251,49 @@ namespace bud::graphics::vulkan {
         }
 
         compute_pipelines.push_back(computePipeline);
+        compute_pipeline_set.insert(computePipeline);
         return computePipeline;
+    }
+
+    void VulkanPipelineCache::release_pipeline(VkPipeline pipeline) {
+        if (pipeline == VK_NULL_HANDLE) return;
+        // O(1) lookup using reverse map
+        auto rit = pipeline_to_key.find(pipeline);
+        if (rit != pipeline_to_key.end()) {
+            const PipelineKey& key = rit->second;
+            auto cit = cache.find(key);
+            if (cit != cache.end()) {
+                if (cit->second.refcount > 1) {
+                    cit->second.refcount--;
+                    bud::print("[VulkanPipelineCache] release_pipeline: decremented refcount for pipeline {} to {}", (void*)pipeline, cit->second.refcount);
+                } else {
+                    if (device && cit->second.pipeline) {
+                        bud::print("[VulkanPipelineCache] release_pipeline: destroying pipeline {}", (void*)pipeline);
+                        vkDestroyPipeline(device, cit->second.pipeline, nullptr);
+                    }
+                    cache.erase(cit);
+                    pipeline_to_key.erase(rit);
+                }
+            } else {
+                // Shouldn't happen: reverse map points to missing cache entry
+                pipeline_to_key.erase(rit);
+                bud::eprint("[VulkanPipelineCache] release_pipeline: reverse map had key but cache missing for pipeline {}", (void*)pipeline);
+            }
+            return;
+        }
+
+        // If not found in reverse map, check compute pipeline set
+        auto pit = compute_pipeline_set.find(pipeline);
+        if (pit != compute_pipeline_set.end()) {
+            if (device && pipeline) vkDestroyPipeline(device, pipeline, nullptr);
+            compute_pipeline_set.erase(pit);
+            // Also remove from vector
+            auto vit = std::find(compute_pipelines.begin(), compute_pipelines.end(), pipeline);
+            if (vit != compute_pipelines.end()) compute_pipelines.erase(vit);
+            bud::print("[VulkanPipelineCache] release_pipeline: destroyed compute pipeline {}", (void*)pipeline);
+            return;
+        }
+
+        bud::eprint("[VulkanPipelineCache] release_pipeline: pipeline {} not found in cache or compute set", (void*)pipeline);
     }
 }

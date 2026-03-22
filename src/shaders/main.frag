@@ -5,15 +5,9 @@ layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_normal;
 layout(location = 2) in vec2 frag_tex_coord;
 layout(location = 3) in vec3 frag_color;
+layout(location = 4) flat in uint frag_material_id;
 
 layout(location = 0) out vec4 out_color;
-
-
-layout(push_constant) uniform PushConsts {
-    mat4 model;
-    uint material_id;
-	uint padding[3];
-} push;
 
 layout(binding = 0) uniform UniformBufferObject {
     mat4 view;
@@ -30,7 +24,9 @@ layout(binding = 0) uniform UniformBufferObject {
 	uint cascade_count;
 	uint debug_cascades;
 	uint reversed_z;
-	uint padding[3];
+	float shadow_bias_constant;
+	float shadow_bias_slope;
+	uint padding[1];
 } ubo;
 
 layout(binding = 1) uniform sampler2D tex_samplers[];
@@ -110,7 +106,12 @@ float SampleCascade(int layer, vec3 world_pos, vec3 N, vec3 L) {
     if(proj_coords.z > 1.0 || proj_coords.z < 0.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 || proj_coords.y < 0.0 || proj_coords.y > 1.0)
         return 1.0;
 
-    float bias = 0.0; 
+    // Dynamic Bias based on slope and constant
+    // shadow_bias_constant is usually ~0.005, shadow_bias_slope is ~1.25
+    float bias = max(ubo.shadow_bias_slope * 0.001 * (1.0 - dot(N, L)), ubo.shadow_bias_constant);
+    
+    // Scale bias by cascade level (far cascades have less precision)
+    bias *= (1.0 + float(layer));
 
     // PCF
     float shadow_sum = 0.0;
@@ -177,7 +178,7 @@ float ShadowCalculation(vec3 world_pos, vec3 N, vec3 L) {
 
 void main() {
     //int tex_id = int(frag_tex_index + 0.5);
-	uint tex_id = push.material_id;
+	uint tex_id = frag_material_id;
     vec4 albedo_sample;
     
     // Handle unbound texture index 0 or missing textures

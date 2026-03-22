@@ -37,6 +37,7 @@ namespace bud::graphics {
 	public:
 		virtual ~RenderPass() = default;
 		bool is_ready() const { return pipeline != nullptr; }
+		void shutdown(RHI* rhi) override;
 	};
 
 	class HiZCullingPass : public RenderPass {
@@ -67,7 +68,8 @@ namespace bud::graphics {
 			const std::vector<RenderMesh>& meshes,
 			const std::vector<SortItem>& sort_list,
 			size_t instance_count,
-			RGHandle indirect_draw_buffer);
+			bud::graphics::BufferHandle mega_vertex_buffer,
+			bud::graphics::BufferHandle mega_index_buffer);
 	};
 
 
@@ -91,7 +93,7 @@ namespace bud::graphics {
 		};
 
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances);
+		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances, bud::graphics::BufferHandle mega_vertex_buffer, bud::graphics::BufferHandle mega_index_buffer);
 	};
 
 	
@@ -105,7 +107,10 @@ namespace bud::graphics {
 			const std::vector<RenderMesh>& meshes,
 			const std::vector<SortItem>& sort_list,
 			size_t instance_count,
-			bud::graphics::RGHandle indirect_draw_buffer);
+			bud::graphics::RGHandle indirect_draw_buffer,
+			bud::graphics::RGHandle instance_data,
+			bud::graphics::BufferHandle mega_vertex_buffer,
+			bud::graphics::BufferHandle mega_index_buffer);
 	};
 
 	class ClusterVisualizationPass : public RenderPass {
@@ -118,7 +123,10 @@ namespace bud::graphics {
 			const std::vector<RenderMesh>& meshes,
 			const std::vector<SortItem>& sort_list,
 			size_t instance_count,
-			bud::graphics::RGHandle indirect_draw_buffer);
+			bud::graphics::RGHandle indirect_draw_buffer,
+			bud::graphics::RGHandle instance_data,
+			bud::graphics::BufferHandle mega_vertex_buffer,
+			bud::graphics::BufferHandle mega_index_buffer);
 	};
 
 	struct UIDrawCmdSnapshot {

@@ -1,8 +1,14 @@
-#include <vulkan/vulkan.h>
+﻿#include <vulkan/vulkan.h>
 #include <vector>
 #include <algorithm>
 
 #include "src/graphics/vulkan/bud.vulkan.descriptors.hpp"
+#include <unordered_map>
+
+namespace {
+    using namespace bud::graphics::vulkan;
+    static std::unordered_map<VkDescriptorSetLayout, DescriptorSetLayoutInfo> g_layout_registry;
+}
 
 namespace bud::graphics::vulkan {
 
@@ -155,8 +161,33 @@ namespace bud::graphics::vulkan {
         VkDescriptorSetLayout set;
         vkCreateDescriptorSetLayout(device, &info, nullptr, &set);
 
-        return set;
+    // Register metadata
+    DescriptorSetLayoutInfo info_meta;
+    info_meta.flags = info.flags;
+    info_meta.bindings.reserve(vk_bindings.size());
+    for (size_t i = 0; i < vk_bindings.size(); ++i) {
+        DescriptorBindingInfo b{};
+        b.binding = vk_bindings[i].binding;
+        b.count = vk_bindings[i].descriptorCount;
+        b.type = vk_bindings[i].descriptorType;
+        b.stage_flags = vk_bindings[i].stageFlags;
+        b.binding_flags = binding_flags[i];
+        info_meta.bindings.push_back(b);
     }
+    g_layout_registry[set] = std::move(info_meta);
+
+    return set;
+    }
+
+void bud::graphics::vulkan::register_descriptor_set_layout(VkDescriptorSetLayout layout, const DescriptorSetLayoutInfo& info) {
+    g_layout_registry[layout] = info;
+}
+
+const bud::graphics::vulkan::DescriptorSetLayoutInfo* bud::graphics::vulkan::get_descriptor_set_layout_info(VkDescriptorSetLayout layout) {
+    auto it = g_layout_registry.find(layout);
+    if (it == g_layout_registry.end()) return nullptr;
+    return &it->second;
+}
 
     // DescriptorWriter
 
