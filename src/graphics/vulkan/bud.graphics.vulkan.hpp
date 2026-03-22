@@ -157,7 +157,7 @@ namespace bud::graphics::vulkan {
 		VkCommandBuffer begin_single_time_commands();
 		void end_single_time_commands(VkCommandBuffer command_buffer);
 		void transition_image_layout_immediate(VkImage image, VkFormat format, VkImageLayout old_layout, VkImageLayout new_layout);
-		void copy_buffer_to_image(VkImage image, VkBuffer buffer, uint32_t width, uint32_t height);
+		void copy_buffer_to_image(VkImage image, VkBuffer buffer, uint64_t buffer_offset, uint32_t width, uint32_t height);
 		void generate_mipmaps(VkImage image, VkFormat format, int32_t texWidth, int32_t texHeight, uint32_t mipLevels); 
 		
 		QueueFamilyIndices find_queue_families(VkPhysicalDevice device);

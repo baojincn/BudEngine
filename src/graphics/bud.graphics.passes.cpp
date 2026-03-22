@@ -1,4 +1,4 @@
-#include <vector>
+﻿#include <vector>
 #include <iostream>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -556,8 +556,12 @@ namespace bud::graphics {
 							rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
 
 							// Bind global Mega-Buffer once per cascade
-							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+							// NOTE: For diagnostics we support an alternative binding scheme where we bind
+							// the vertex buffer with a byte-offset per-mesh and issue draw calls with
+							// vertexOffset=0. This helps detect whether vertexOffset is being
+							// interpreted in vertices vs bytes by the driver/pipeline.
 							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+							static constexpr bool kUseBindVertexByteOffset = true; // A/B test toggle
 
 							struct PushConsts {
 								bud::math::mat4 light_view_proj;
@@ -607,7 +611,16 @@ namespace bud::graphics {
 								else {
 									push_consts.material_id = render_scene.material_indices[idx];
 									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-									rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, 0);
+									if (kUseBindVertexByteOffset) {
+										auto vb = mega_vertex_buffer;
+										vb.offset = static_cast<uint64_t>(mesh.vertex_offset) * sizeof(bud::io::MeshData::Vertex);
+										rhi->cmd_bind_vertex_buffer(cmd, vb);
+										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, 0, 0);
+									}
+									else {
+										rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, 0);
+									}
 								}
 							}
 							rhi->cmd_end_render_pass(cmd);
@@ -1020,23 +1033,23 @@ namespace bud::graphics {
 				rhi->cmd_bind_vertex_buffer(cmd, vertex_buffer);
 				rhi->cmd_bind_index_buffer(cmd, index_buffer);
 
-				float fb_width = draw_data.display_size.x * draw_data.framebuffer_scale.x;
-				float fb_height = draw_data.display_size.y * draw_data.framebuffer_scale.y;
+                float fb_width = draw_data.display_size.x * draw_data.framebuffer_scale.x;
+                float fb_height = draw_data.display_size.y * draw_data.framebuffer_scale.y;
 
-				rhi->cmd_set_viewport(cmd, fb_width, fb_height);
+                rhi->cmd_set_viewport(cmd, fb_width, fb_height);
 
-				struct PushConst {
-					bud::math::vec2 scale;
-					bud::math::vec2 translate;
-					uint32_t texture_id;
-					uint32_t padding[3];
-				} push_const;
+                struct PushConst {
+                    bud::math::vec2 scale;
+                    bud::math::vec2 translate;
+                    uint32_t texture_id;
+                    uint32_t padding[3];
+                } push_const;
 
-				push_const.scale[0] = 2.0f / draw_data.display_size.x;
-				push_const.scale[1] = 2.0f / draw_data.display_size.y;
-				push_const.translate[0] = -1.0f - draw_data.display_pos.x * push_const.scale[0];
-				push_const.translate[1] = -1.0f - draw_data.display_pos.y * push_const.scale[1];
-				push_const.texture_id = font_bindless_index;
+                push_const.scale[0] = 2.0f / draw_data.display_size.x;
+                push_const.scale[1] = 2.0f / draw_data.display_size.y;
+                push_const.translate[0] = -1.0f - draw_data.display_pos.x * push_const.scale[0];
+                push_const.translate[1] = -1.0f - draw_data.display_pos.y * push_const.scale[1];
+                push_const.texture_id = font_bindless_index;
 
 				rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConst), &push_const);
 

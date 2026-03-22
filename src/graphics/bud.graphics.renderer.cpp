@@ -1,4 +1,4 @@
-#include <memory>
+﻿#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -118,8 +118,8 @@ namespace bud::graphics {
 		if (mesh_data.vertices.empty())
 			return MeshAssetHandle::invalid();
 
-		bud::print("\n[Renderer::upload_mesh] Processing mesh with {} subsets",
-			mesh_data.subsets.size());
+		//bud::print("\n[Renderer::upload_mesh] Processing mesh with {} subsets",
+		//	mesh_data.subsets.size());
 
 		std::vector<uint32_t> texture_slot_map;
 		texture_slot_map.reserve(mesh_data.texture_paths.size());
@@ -136,8 +136,8 @@ namespace bud::graphics {
 		auto rhi_ptr = rhi;
 
 		if (!mesh_data.texture_paths.empty()) {
-			bud::print("[upload_mesh] Allocating {} texture slots...",
-				mesh_data.texture_paths.size());
+			//bud::print("[upload_mesh] Allocating {} texture slots...",
+			//	mesh_data.texture_paths.size());
 
 			for (size_t i = 0; i < mesh_data.texture_paths.size(); ++i) {
 				uint32_t current_slot = next_bindless_slot.fetch_add(1, std::memory_order_relaxed);
@@ -238,12 +238,12 @@ namespace bud::graphics {
 				new_mesh.first_index   = index_base;
 				new_mesh.vertex_offset = (int32_t)vertex_base;
 
-				bud::print("[GeometryPool] mesh={} vertex_offset={} first_index={} v_size={}B i_size={}B",
-					assigned_mesh_id, vertex_base, index_base, v_size, i_size);
+				//bud::print("[GeometryPool] mesh={} vertex_offset={} first_index={} v_size={}B i_size={}B",
+				//	assigned_mesh_id, vertex_base, index_base, v_size, i_size);
 
 				// Stage upload: CPU -> staging -> GPU pool
-				auto v_stage = rhi->create_upload_buffer(v_size);
-				auto i_stage = rhi->create_upload_buffer(i_size);
+                auto v_stage = rhi->get_allocator()->alloc_staging(v_size);
+                auto i_stage = rhi->get_allocator()->alloc_staging(i_size);
 
 				std::memcpy(v_stage.mapped_ptr, mesh_data_copy->vertices.data(), v_size);
 				std::memcpy(i_stage.mapped_ptr, mesh_data_copy->indices.data(),  i_size);
@@ -267,25 +267,34 @@ namespace bud::graphics {
 					new_mesh.meshlet_index_buffer = rhi->create_gpu_buffer(mt_size, ResourceState::ShaderResource);
 					new_mesh.cull_data_buffer = rhi->create_gpu_buffer(mc_size, ResourceState::ShaderResource);
 
-					auto m_stage = rhi->create_upload_buffer(m_size);
-					auto mv_stage = rhi->create_upload_buffer(mv_size);
-					auto mt_stage = rhi->create_upload_buffer(mt_size);
-					auto mc_stage = rhi->create_upload_buffer(mc_size);
+                    auto m_stage = rhi->get_allocator()->alloc_staging(m_size);
+                    auto mv_stage = rhi->get_allocator()->alloc_staging(mv_size);
+                    auto mt_stage = rhi->get_allocator()->alloc_staging(mt_size);
+                    auto mc_stage = rhi->get_allocator()->alloc_staging(mc_size);
 
-					std::memcpy(m_stage.mapped_ptr, mesh_data_copy->meshlets.data(), m_size);
-					std::memcpy(mv_stage.mapped_ptr, mesh_data_copy->meshlet_vertices.data(), mv_size);
-					std::memcpy(mt_stage.mapped_ptr, mesh_data_copy->meshlet_triangles.data(), mt_size);
-					std::memcpy(mc_stage.mapped_ptr, mesh_data_copy->meshlet_cull_data.data(), mc_size);
+                    if (!m_stage.is_valid() || !m_stage.mapped_ptr || !mv_stage.is_valid() || !mv_stage.mapped_ptr ||
+                        !mt_stage.is_valid() || !mt_stage.mapped_ptr || !mc_stage.is_valid() || !mc_stage.mapped_ptr) {
+                        bud::eprint("[upload_mesh] ERROR: alloc_staging failed for meshlet data of mesh {}", assigned_mesh_id);
+                        if (m_stage.is_valid()) rhi->destroy_buffer(m_stage);
+                        if (mv_stage.is_valid()) rhi->destroy_buffer(mv_stage);
+                        if (mt_stage.is_valid()) rhi->destroy_buffer(mt_stage);
+                        if (mc_stage.is_valid()) rhi->destroy_buffer(mc_stage);
+                    } else {
+                        std::memcpy(m_stage.mapped_ptr, mesh_data_copy->meshlets.data(), m_size);
+                        std::memcpy(mv_stage.mapped_ptr, mesh_data_copy->meshlet_vertices.data(), mv_size);
+                        std::memcpy(mt_stage.mapped_ptr, mesh_data_copy->meshlet_triangles.data(), mt_size);
+                        std::memcpy(mc_stage.mapped_ptr, mesh_data_copy->meshlet_cull_data.data(), mc_size);
 
-					rhi->copy_buffer_immediate(m_stage, new_mesh.meshlet_buffer, m_size);
-					rhi->copy_buffer_immediate(mv_stage, new_mesh.vertex_index_buffer, mv_size);
-					rhi->copy_buffer_immediate(mt_stage, new_mesh.meshlet_index_buffer, mt_size);
-					rhi->copy_buffer_immediate(mc_stage, new_mesh.cull_data_buffer, mc_size);
+                        rhi->copy_buffer_immediate(m_stage, new_mesh.meshlet_buffer, m_size);
+                        rhi->copy_buffer_immediate(mv_stage, new_mesh.vertex_index_buffer, mv_size);
+                        rhi->copy_buffer_immediate(mt_stage, new_mesh.meshlet_index_buffer, mt_size);
+                        rhi->copy_buffer_immediate(mc_stage, new_mesh.cull_data_buffer, mc_size);
 
-					rhi->destroy_buffer(m_stage);
-					rhi->destroy_buffer(mv_stage);
-					rhi->destroy_buffer(mt_stage);
-					rhi->destroy_buffer(mc_stage);
+                        rhi->destroy_buffer(m_stage);
+                        rhi->destroy_buffer(mv_stage);
+                        rhi->destroy_buffer(mt_stage);
+                        rhi->destroy_buffer(mc_stage);
+                    }
 				}
 
 				if (!mesh_data_copy->subsets.empty()) {
@@ -617,7 +626,7 @@ namespace bud::graphics {
 
 			// Common Instance Data Upload
 			if (visible_count > 0) {
-				auto instance_staging = rhi->create_upload_buffer(visible_count * sizeof(InstanceData));
+                auto instance_staging = rhi->get_allocator()->alloc_staging(visible_count * sizeof(InstanceData));
 				InstanceData* inst_mapped = static_cast<InstanceData*>(instance_staging.mapped_ptr);
 				for (size_t i = 0; i < visible_count; ++i) {
 					const auto& item = sort_list[i];
@@ -660,7 +669,7 @@ namespace bud::graphics {
 						rhi->set_debug_name(current_stats_buf, ObjectType::Buffer, "GPUStatsReadback_Frame" + std::to_string(current_idx));
 					}
 
-					auto staging = rhi->create_upload_buffer(visible_count * sizeof(DrawData));
+                    auto staging = rhi->get_allocator()->alloc_staging(visible_count * sizeof(DrawData));
 					DrawData* mapped = static_cast<DrawData*>(staging.mapped_ptr);
 					for (size_t i = 0; i < visible_count; ++i) {
 						const auto& item = sort_list[i];

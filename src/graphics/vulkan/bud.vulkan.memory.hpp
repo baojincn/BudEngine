@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -63,6 +63,10 @@ namespace bud::graphics::vulkan {
 
 		VmaAllocator get_vma_allocator() const { return vma_allocator; }
 
+		// Deferred free support: buffers/textures marked for freeing when given frame is reached
+		void defer_free(const bud::graphics::BufferHandle& handle, uint32_t frame_index) override;
+		void defer_free(bud::graphics::Texture* texture, uint32_t frame_index) override;
+
 	private:
 		VkInstance instance;
 		VkDevice device;
@@ -73,5 +77,7 @@ namespace bud::graphics::vulkan {
 		std::mutex mutex;
 
 		std::vector<VmaLinearPage> staging_pages; // CPU-to-GPU (Uniforms), Per Frame
+		std::vector<std::vector<bud::graphics::BufferHandle>> deferred_free_buffers;
+		std::vector<std::vector<bud::graphics::Texture*>> deferred_free_textures;
 	};
 }

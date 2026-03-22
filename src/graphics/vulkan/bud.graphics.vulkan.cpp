@@ -320,7 +320,6 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	}
 
 	// 创建 Fallback 纹理 (Index 0)
-	bud::print("[Vulkan] Creating Fallback Texture...");
 	{
 		TextureDesc desc{};
 		desc.width = 1;
@@ -430,19 +429,20 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
 
 	buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
+	// Always set the correct usage flags for vertex and index buffers
 	if (usage_state == bud::graphics::ResourceState::VertexBuffer) {
 		buffer_info.usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
 	}
-	else if (usage_state == bud::graphics::ResourceState::IndexBuffer) {
+	if (usage_state == bud::graphics::ResourceState::IndexBuffer) {
 		buffer_info.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 	}
-	else if (usage_state == bud::graphics::ResourceState::IndirectArgument) {
+	if (usage_state == bud::graphics::ResourceState::IndirectArgument) {
 		buffer_info.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT; 
 	}
-	else if (usage_state == bud::graphics::ResourceState::UnorderedAccess) {
+	if (usage_state == bud::graphics::ResourceState::UnorderedAccess) {
 		buffer_info.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 	}
-	else if (usage_state == bud::graphics::ResourceState::ShaderResource) {
+	if (usage_state == bud::graphics::ResourceState::ShaderResource) {
 		buffer_info.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 	}
 
@@ -455,42 +455,41 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
 		alloc_info.requiredFlags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 	}
 
-	bud::print("[Vulkan][create_gpu_buffer] request size={}, usage_state={}, vk_usage={}, vma_flags={}",
-		size, static_cast<uint32_t>(usage_state), (uint32_t)buffer_info.usage, (uint32_t)alloc_info.flags);
+    auto* vk_buf = new bud::graphics::vulkan::VulkanBuffer();
+    auto vma_allocator = get_memory_allocator()->get_vma_allocator();
 
-	auto* vk_buf = new bud::graphics::vulkan::VulkanBuffer();
-	auto vma_allocator = get_memory_allocator()->get_vma_allocator();
-
-	VmaAllocationInfo alloc_result_info;
-	VkResult create_result = vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info);
-	if (create_result != VK_SUCCESS) {
-		delete vk_buf;
-		return {};
-	}
-	
-	vk_buf->mapped_ptr = alloc_result_info.pMappedData;
-	vk_buf->size = size;
-	vk_buf->owns_allocation = true;
-	bud::graphics::BufferHandle handle;
-	handle.internal_state = vk_buf;
-	handle.size = size;
-	handle.mapped_ptr = vk_buf->mapped_ptr;
-    bud::print("[Debug] create_gpu_buffer size={} vk_buf={} mapped_ptr={}", size, (void*)vk_buf, handle.mapped_ptr);
-	return handle;
+    VmaAllocationInfo alloc_result_info;
+    VkResult create_result = vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info);
+    if (create_result != VK_SUCCESS) {
+        delete vk_buf;
+        return {};
+    }
+    vk_buf->mapped_ptr = alloc_result_info.pMappedData;
+    vk_buf->size = size;
+    vk_buf->owns_allocation = true;
+    bud::graphics::BufferHandle handle;
+    handle.internal_state = vk_buf;
+    handle.size = size;
+    handle.mapped_ptr = vk_buf->mapped_ptr;
+    return handle;
 }
 
 void VulkanRHI::destroy_buffer(bud::graphics::BufferHandle block) {
-	if (!block.is_valid()) return;
-	auto* vk_buf = static_cast<bud::graphics::vulkan::VulkanBuffer*>(block.internal_state);
-	if (!vk_buf) return;
-
-	if (vk_buf->owns_allocation) {
-		auto vma_allocator = get_memory_allocator()->get_vma_allocator();
-		if (vma_allocator && vk_buf->buffer) {
-			vmaDestroyBuffer(vma_allocator, vk_buf->buffer, vk_buf->allocation);
-		}
-	}
-	delete vk_buf;
+    if (!block.is_valid()) return;
+    // Defer actual destruction until the frame that is safe (avoids freeing resources still in flight)
+    if (memory_allocator) {
+        memory_allocator->defer_free(block, current_frame);
+    } else {
+        // Fallback: immediate destroy if no allocator
+        auto* vk_buf = static_cast<bud::graphics::vulkan::VulkanBuffer*>(block.internal_state);
+        if (vk_buf) {
+            auto vma_allocator = get_memory_allocator() ? get_memory_allocator()->get_vma_allocator() : VK_NULL_HANDLE;
+            if (vk_buf->owns_allocation && vma_allocator && vk_buf->buffer) {
+                vmaDestroyBuffer(vma_allocator, vk_buf->buffer, vk_buf->allocation);
+            }
+            delete vk_buf;
+        }
+    }
 }
 
 // Helper to create shader module
@@ -1060,14 +1059,26 @@ void VulkanRHI::cmd_bind_pipeline(CommandHandle cmd, void* pipeline) {
 }
 
 void VulkanRHI::cmd_bind_vertex_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer) {
-	auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
-	VkDeviceSize offsets[] = { 0 };
-	vkCmdBindVertexBuffers(static_cast<VkCommandBuffer>(cmd), 0, 1, &vk_buf->buffer, offsets);
+    if (!buffer.is_valid()) return;
+    auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
+    if (!vk_buf || !vk_buf->buffer) return;
+    VkDeviceSize offsets[] = { static_cast<VkDeviceSize>(buffer.offset) };
+
+    // Diagnostic: log vertex bind info
+    //bud::print("[Vulkan][bind_vertex] VkBuffer={} byteOffset={} mapped_ptr={}", (void*)vk_buf->buffer, (uint64_t)buffer.offset, vk_buf->mapped_ptr);
+
+    vkCmdBindVertexBuffers(static_cast<VkCommandBuffer>(cmd), 0, 1, &vk_buf->buffer, offsets);
 }
 
 void VulkanRHI::cmd_bind_index_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer) {
-	auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
-	vkCmdBindIndexBuffer(static_cast<VkCommandBuffer>(cmd), vk_buf->buffer, 0, VK_INDEX_TYPE_UINT32);
+    if (!buffer.is_valid()) return;
+    auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
+    if (!vk_buf || !vk_buf->buffer) return;
+
+    // Diagnostic: log index bind info
+    //bud::print("[Vulkan][bind_index] VkBuffer={} byteOffset={} mapped_ptr={}", (void*)vk_buf->buffer, (uint64_t)buffer.offset, vk_buf->mapped_ptr);
+
+    vkCmdBindIndexBuffer(static_cast<VkCommandBuffer>(cmd), vk_buf->buffer, static_cast<VkDeviceSize>(buffer.offset), VK_INDEX_TYPE_UINT32);
 }
 
 void VulkanRHI::cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) {
@@ -1077,9 +1088,13 @@ void VulkanRHI::cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t inst
 }
 
 void VulkanRHI::cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset, uint32_t first_instance) {
-	vkCmdDrawIndexed(static_cast<VkCommandBuffer>(cmd), index_count, instance_count, first_index, vertex_offset, first_instance);
-	current_stats.draw_calls++;
-	current_stats.drawn_triangles += (index_count / 3) * instance_count;
+    // Diagnostic: log draw parameters to verify index/vertex offsets and counts
+    //bud::print("[Vulkan][draw_indexed] indexCount={} instanceCount={} firstIndex={} vertexOffset={} firstInstance={}",
+      //  (uint64_t)index_count, (uint64_t)instance_count, (uint64_t)first_index, (int64_t)vertex_offset, (uint64_t)first_instance);
+
+    vkCmdDrawIndexed(static_cast<VkCommandBuffer>(cmd), index_count, instance_count, first_index, vertex_offset, first_instance);
+    current_stats.draw_calls++;
+    current_stats.drawn_triangles += (index_count / 3) * instance_count;
 }
 
 void VulkanRHI::cmd_draw_indexed_indirect(CommandHandle cmd, bud::graphics::BufferHandle buffer, uint64_t offset, uint32_t draw_count, uint32_t stride) {
@@ -1420,7 +1435,8 @@ void VulkanRHI::create_image_views() {
 		swapchain_textures_wrappers[i].height = swapchain_extent.height;
 		swapchain_textures_wrappers[i].mips = 1;
 		swapchain_textures_wrappers[i].array_layers = 1;
-		swapchain_textures_wrappers[i].format = TextureFormat::BGRA8_UNORM;
+        // Use SRGB variant if swapchain was created with an SRGB surface format
+        swapchain_textures_wrappers[i].format = (swapchain_image_format == VK_FORMAT_B8G8R8A8_SRGB) ? TextureFormat::BGRA8_SRGB : TextureFormat::BGRA8_UNORM;
 		swapchain_textures_wrappers[i].allocation = VK_NULL_HANDLE; // Swapchain image memory is managed by driver
 	}
 }
@@ -1659,11 +1675,12 @@ void VulkanRHI::transition_image_layout_immediate(VkImage image, VkFormat format
     this->end_single_time_commands(commandBuffer);
 }
 
-void VulkanRHI::copy_buffer_to_image(VkImage image, VkBuffer buffer, uint32_t width, uint32_t height) {
-	VkCommandBuffer commandBuffer = this->begin_single_time_commands();
+void VulkanRHI::copy_buffer_to_image(VkImage image, VkBuffer buffer, uint64_t buffer_offset, uint32_t width, uint32_t height) {
+    VkCommandBuffer commandBuffer = this->begin_single_time_commands();
 
-	VkBufferImageCopy region{};
-	region.bufferOffset = 0;
+    VkBufferImageCopy region{};
+    // Use provided buffer_offset to support sub-allocated staging buffers
+    region.bufferOffset = static_cast<VkDeviceSize>(buffer_offset);
 	region.bufferRowLength = 0;
 	region.bufferImageHeight = 0;
 	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -1687,8 +1704,9 @@ void VulkanRHI::copy_buffer_immediate(bud::graphics::BufferHandle src, bud::grap
 	}
 
 	VkBufferCopy copy_region{};
-	copy_region.srcOffset = 0;
-	copy_region.dstOffset = 0;
+    // Respect BufferHandle offsets (sub-allocations in staging pages)
+    copy_region.srcOffset = static_cast<VkDeviceSize>(src.offset);
+    copy_region.dstOffset = static_cast<VkDeviceSize>(dst.offset);
 	copy_region.size = size;
 
 	auto* vk_src = static_cast<bud::graphics::vulkan::VulkanBuffer*>(src.internal_state);
@@ -1706,6 +1724,10 @@ void VulkanRHI::copy_buffer_immediate(bud::graphics::BufferHandle src, bud::grap
 	}
 
 	vkCmdCopyBuffer(cmd, vk_src->buffer, vk_dst->buffer, 1, &copy_region);
+
+    // Diagnostic: log successful copy details
+    //bud::print("[Vulkan][copy_buffer_immediate] src_buf={} dst_buf={} srcOffset={} dstOffset={} size={}",
+    //    (void*)vk_src->buffer, (void*)vk_dst->buffer, (uint64_t)copy_region.srcOffset, (uint64_t)copy_region.dstOffset, (uint64_t)copy_region.size);
 
 	this->end_single_time_commands(cmd);
 }
@@ -1726,11 +1748,16 @@ void VulkanRHI::copy_buffer_immediate_offset(bud::graphics::BufferHandle src, bu
 	VkCommandBuffer cmd = this->begin_single_time_commands();
 
 	VkBufferCopy copy_region{};
-	copy_region.srcOffset = src_offset;
-	copy_region.dstOffset = dst_offset;
+    // Combine provided offsets with BufferHandle offsets (for sub-allocations)
+    copy_region.srcOffset = static_cast<VkDeviceSize>(src.offset + src_offset);
+    copy_region.dstOffset = static_cast<VkDeviceSize>(dst.offset + dst_offset);
 	copy_region.size = size;
 
 	vkCmdCopyBuffer(cmd, vk_src->buffer, vk_dst->buffer, 1, &copy_region);
+
+    // Diagnostic: log copy details for staging/suballoc verification
+    //bud::print("[Vulkan][copy_buffer_immediate_offset] src_buf={} dst_buf={} srcOffset={} dstOffset={} size={}",
+    //    (void*)vk_src->buffer, (void*)vk_dst->buffer, (uint64_t)copy_region.srcOffset, (uint64_t)copy_region.dstOffset, (uint64_t)copy_region.size);
 
 	this->end_single_time_commands(cmd);
 }
@@ -1781,17 +1808,17 @@ void VulkanRHI::cmd_blit_image(CommandHandle cmd, Texture* src, Texture* dst) {
 	VkImageBlit blit{};
 	blit.srcOffsets[0] = { 0, 0, 0 };
 	blit.srcOffsets[1] = { (int32_t)src->width, (int32_t)src->height, 1 };
-	blit.srcSubresource.aspectMask = (src->format == TextureFormat::D32_FLOAT || src->format == TextureFormat::D24_UNORM_S8_UINT) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+	blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	blit.srcSubresource.mipLevel = 0;
 	blit.srcSubresource.baseArrayLayer = 0;
-	blit.srcSubresource.layerCount = src->array_layers;
+	blit.srcSubresource.layerCount = 1;
 
 	blit.dstOffsets[0] = { 0, 0, 0 };
 	blit.dstOffsets[1] = { (int32_t)dst->width, (int32_t)dst->height, 1 };
-	blit.dstSubresource.aspectMask = (dst->format == TextureFormat::D32_FLOAT || dst->format == TextureFormat::D24_UNORM_S8_UINT) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+	blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	blit.dstSubresource.mipLevel = 0;
 	blit.dstSubresource.baseArrayLayer = 0;
-	blit.dstSubresource.layerCount = dst->array_layers;
+	blit.dstSubresource.layerCount = 1;
 
 	vkCmdBlitImage(static_cast<VkCommandBuffer>(cmd),
 		vk_src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -1806,7 +1833,7 @@ void VulkanRHI::cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandl
 		bud::eprint("[Vulkan][cmd_copy_to_buffer] invalid handle: dst_valid=false, offset={}, size={}", offset, size);
 		return;
 	}
-	auto* vk_dst = static_cast<bud::graphics::vulkan::VulkanBuffer*>(dst.internal_state);
+	auto* vk_dst = static_cast<VulkanBuffer*>(dst.internal_state);
 	if (!vk_dst || !vk_dst->buffer) {
 		bud::eprint("[Vulkan][cmd_copy_to_buffer] null destination buffer: vk_dst={}, dst_buf={}, offset={}, size={}", (void*)vk_dst, vk_dst ? (void*)vk_dst->buffer : nullptr, offset, size);
 		return;
@@ -1815,32 +1842,37 @@ void VulkanRHI::cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandl
 }
 
 bud::graphics::BufferHandle VulkanRHI::create_upload_buffer(uint64_t size) {
-	VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-	buffer_info.size = size;
-	buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT; // Allow using upload buffer directly for dynamic UI
-	buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    // Prefer allocating staging memory from the unified allocator (ring staging). Falls back inside allocator if needed.
+    if (memory_allocator) {
+        return memory_allocator->alloc_staging(size, 256);
+    }
 
-	VmaAllocationCreateInfo alloc_info = {};
-	alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
-	alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    // Fallback to previous behavior if allocator is not available
+    VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    buffer_info.size = size;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-	auto* vk_buf = new bud::graphics::vulkan::VulkanBuffer();
-	auto vma_allocator = get_memory_allocator()->get_vma_allocator();
+    VmaAllocationCreateInfo alloc_info = {};
+    alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+    alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
-	VkResult create_result = vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &vk_buf->alloc_info);
-	if (create_result != VK_SUCCESS) {
-		delete vk_buf;
-		throw std::runtime_error("Failed to create Upload buffer via VMA!");
-	}
+    auto* vk_buf = new bud::graphics::vulkan::VulkanBuffer();
+    auto vma_allocator = get_memory_allocator()->get_vma_allocator();
 
-	bud::graphics::BufferHandle handle;
-	vk_buf->owns_allocation = true;
-	handle.internal_state = vk_buf;
-	handle.offset = 0;
-	handle.size = size;
-	handle.mapped_ptr = vk_buf->alloc_info.pMappedData;
-    //bud::print("[Debug] create_upload_buffer size={} vk_buf={} mapped_ptr={}", size, (void*)vk_buf, handle.mapped_ptr);
-	return handle;
+    VkResult create_result = vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &vk_buf->alloc_info);
+    if (create_result != VK_SUCCESS) {
+        delete vk_buf;
+        throw std::runtime_error("Failed to create Upload buffer via VMA!");
+    }
+
+    bud::graphics::BufferHandle handle;
+    vk_buf->owns_allocation = true;
+    handle.internal_state = vk_buf;
+    handle.offset = 0;
+    handle.size = size;
+    handle.mapped_ptr = vk_buf->alloc_info.pMappedData;
+    return handle;
 }
 
 void VulkanRHI::generate_mipmaps(VkImage image, VkFormat format, int32_t texWidth, int32_t texHeight, uint32_t mipLevels) {
@@ -1970,7 +2002,8 @@ bud::graphics::Texture* VulkanRHI::create_texture(const bud::graphics::TextureDe
 
 		auto* vk_buf = static_cast<VulkanBuffer*>(staging.internal_state);
 
-		this->copy_buffer_to_image(tex->image, vk_buf->buffer, desc.width, desc.height);
+	// Respect staging buffer sub-allocation offset when copying to image
+	this->copy_buffer_to_image(tex->image, vk_buf->buffer, staging.offset, desc.width, desc.height);
 
 		if (desc.mips > 1) {
 			//bud::print("[Texture] Generating {} mip levels for {}x{} texture", desc.mips, desc.width, desc.height);
@@ -2179,6 +2212,8 @@ void VulkanRHI::set_debug_name(CommandHandle cmd, ObjectType object_type, const 
 	auto vk_cmd = static_cast<VkCommandBuffer>(cmd);
 	set_object_debug_name(reinterpret_cast<uint64_t>(vk_cmd), object_type, name);
 }
+
+
 
 
 

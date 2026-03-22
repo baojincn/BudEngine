@@ -44,18 +44,18 @@ namespace bud::graphics::vulkan {
         // Initialize staging pages. For VMA, Transient pages can just use VmaAllocator directly,
         // but we'll keep the staging pages as large mapped Vulkan buffers for fast CPU writes.
         staging_pages.resize(frames_in_flight);
+        deferred_free_buffers.resize(frames_in_flight);
+        deferred_free_textures.resize(frames_in_flight);
         for (uint32_t i = 0; i < frames_in_flight; ++i) {
             VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             bufferInfo.size = 64 * 1024 * 1024; // 64 MB
-            bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT; // Allow binding as vertex/index buffer
 
             VmaAllocationCreateInfo allocInfo = {};
             allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
             allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
             VmaAllocationInfo vmaInfo;
-            // Hack: store VMA handles in the LinearPage's raw pointers for now 
-            // since LinearPage was designed for raw memory.
             VkBuffer buf;
             VmaAllocation alloc;
             VkResult r = vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo, &buf, &alloc, &vmaInfo);
@@ -77,9 +77,8 @@ namespace bud::graphics::vulkan {
                 throw std::runtime_error("Failed to create VMA staging buffer for frame " + std::to_string(i));
             }
 
-            // We use LinearPage to manage offsets within this giant VMA buffer
             staging_pages[i].buffer = buf;
-            staging_pages[i].allocation = alloc; // Store VmaAllocation here
+            staging_pages[i].allocation = alloc;
             staging_pages[i].size = bufferInfo.size;
             staging_pages[i].mapped_ptr = vmaInfo.pMappedData;
         }
@@ -87,6 +86,10 @@ namespace bud::graphics::vulkan {
     }
 
     void VulkanMemoryAllocator::cleanup() {
+        // Flush all deferred frees before destroying allocator
+        for (uint32_t i = 0; i < frames_in_flight; ++i) {
+            on_frame_begin(i);
+        }
         // Destroy staging pages first (they depend on the VMA allocator)
         if (vma_allocator) {
             for (auto& page : staging_pages) {
@@ -108,7 +111,29 @@ namespace bud::graphics::vulkan {
 
     void VulkanMemoryAllocator::on_frame_begin(uint32_t frame_index) {
         std::lock_guard lock(mutex);
+        // bud::print("[VulkanMemoryAllocator::on_frame_begin] frame_index={}", frame_index); // [LOG REDUCED]
         current_frame_index = frame_index;
+
+        // Free deferred buffers/textures scheduled for this frame (safe point: RHI waits on fence before calling on_frame_begin)
+        if (frame_index < deferred_free_buffers.size()) {
+            for (auto& handle : deferred_free_buffers[frame_index]) {
+                if (!handle.is_valid()) continue;
+                auto* vk_buf = static_cast<VulkanBuffer*>(handle.internal_state);
+                if (!vk_buf) continue;
+                if (vk_buf->owns_allocation) {
+                    if (vma_allocator && vk_buf->buffer != VK_NULL_HANDLE) {
+                        vmaDestroyBuffer(vma_allocator, vk_buf->buffer, vk_buf->allocation);
+                    }
+                }
+                delete vk_buf;
+            }
+            deferred_free_buffers[frame_index].clear();
+        }
+
+        // Textures deferred: allocator doesn't own higher-level texture lifecycle; clear list for now
+        if (frame_index < deferred_free_textures.size()) {
+            deferred_free_textures[frame_index].clear();
+        }
 
         if (frame_index < staging_pages.size()) {
             staging_pages[frame_index].reset();
@@ -118,6 +143,22 @@ namespace bud::graphics::vulkan {
     bud::graphics::BufferHandle VulkanMemoryAllocator::alloc_frame_transient(uint64_t size, uint64_t alignment) {
         // Obsolete, transient resources are now created directly via VMA in RHI
         return {};
+    }
+
+    void VulkanMemoryAllocator::defer_free(const bud::graphics::BufferHandle& handle, uint32_t frame_index) {
+        if (!handle.is_valid()) return;
+        std::lock_guard lock(mutex);
+        if (deferred_free_buffers.empty()) return;
+        uint32_t idx = frame_index % deferred_free_buffers.size();
+        deferred_free_buffers[idx].push_back(handle);
+    }
+
+    void VulkanMemoryAllocator::defer_free(bud::graphics::Texture* texture, uint32_t frame_index) {
+        if (!texture) return;
+        std::lock_guard lock(mutex);
+        if (deferred_free_textures.empty()) return;
+        uint32_t idx = frame_index % deferred_free_textures.size();
+        deferred_free_textures[idx].push_back(texture);
     }
 
     bud::graphics::BufferHandle VulkanMemoryAllocator::alloc_staging(uint64_t size, uint64_t alignment) {
@@ -146,6 +187,7 @@ namespace bud::graphics::vulkan {
             block.offset = offset;
             block.size = size;
             block.mapped_ptr = static_cast<uint8_t*>(current_page->mapped_ptr) + offset;
+            // bud::print("[VulkanMemoryAllocator][alloc_staging] Suballoc VkBuffer={} size={} usage=STAGING_PAGE", (void*)vk_buf->buffer, size); // [LOG REDUCED]
             return block;
         }
 
@@ -153,7 +195,8 @@ namespace bud::graphics::vulkan {
         // This avoids throwing in runtime when the ring buffer is exhausted.
         VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         buffer_info.size = size;
-        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        // Always allow binding as vertex and index buffer for UI/upload buffers
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
         buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
         VmaAllocationCreateInfo alloc_info = {};
@@ -178,6 +221,7 @@ namespace bud::graphics::vulkan {
         block.offset = 0;
         block.size = size;
         block.mapped_ptr = vk_buf->mapped_ptr;
+        // bud::print("[VulkanMemoryAllocator][alloc_staging] VkBuffer={} size={} usage=TRANSFER_SRC|VERTEX|INDEX", (void*)vk_buf->buffer, size); // [LOG REDUCED]
         return block;
     }
 
@@ -223,6 +267,8 @@ namespace bud::graphics::vulkan {
         vk_buf->size = size;
         vk_buf->owns_allocation = true;
 
+        bud::print("[VulkanMemoryAllocator][alloc_gpu] VkBuffer={} size={} usage={} (ResourceState={})", (void*)vk_buf->buffer, size, (uint32_t)buffer_info.usage, (int)usage);
+
         bud::graphics::BufferHandle handle;
         handle.internal_state = vk_buf;
         handle.size = size;
@@ -251,6 +297,8 @@ namespace bud::graphics::vulkan {
         vk_buf->mapped_ptr = alloc_result_info.pMappedData;
         vk_buf->size = size;
         vk_buf->owns_allocation = true;
+
+        bud::print("[VulkanMemoryAllocator][alloc_persistent] VkBuffer={} size={} usage={} (ResourceState={})", (void*)vk_buf->buffer, size, (uint32_t)buffer_info.usage, (int)usage);
 
         bud::graphics::BufferHandle handle;
         handle.internal_state = vk_buf;
