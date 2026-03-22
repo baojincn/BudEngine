@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstdint>
 #include <vector>
@@ -74,9 +74,10 @@ namespace bud::graphics {
 	};
 
 	enum class MemoryUsage {
-		GpuOnly,    // Device Local
-		CpuToGpu,   // Host Visible (Upload)
-		GpuToCpu,   // Host Visible (Readback)
+		GpuOnly,          // Device Local (MegaBuffers, Textures)
+		StagingRing,      // Host Visible + Coherent (Dynamic per-frame UI/Uniforms)
+		PersistentMapped, // Host Visible + Coherent + Persistently Mapped (MDI Data)
+		Readback          // Gpu to Cpu
 	};
 
 	enum class CullMode {

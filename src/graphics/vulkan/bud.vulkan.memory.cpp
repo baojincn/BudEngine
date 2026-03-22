@@ -1,4 +1,4 @@
-#include <vulkan/vulkan.h>
+﻿#include <vulkan/vulkan.h>
 #include <vector>
 #include <mutex>
 #include <algorithm>
@@ -32,12 +32,11 @@ namespace bud::graphics::vulkan {
 
     void VulkanMemoryAllocator::init() {
         VmaAllocatorCreateInfo allocatorInfo = {};
-        allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+        allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_1;
         allocatorInfo.physicalDevice = phy_device;
         allocatorInfo.device = device;
         allocatorInfo.instance = instance;
-        // allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT; // Enable if needed later
-
+        // allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
         if (vmaCreateAllocator(&allocatorInfo, &vma_allocator) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create VMA Allocator!");
         }
@@ -59,8 +58,25 @@ namespace bud::graphics::vulkan {
             // since LinearPage was designed for raw memory.
             VkBuffer buf;
             VmaAllocation alloc;
-            vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo, &buf, &alloc, &vmaInfo);
-            
+            VkResult r = vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo, &buf, &alloc, &vmaInfo);
+            if (r != VK_SUCCESS) {
+                // Cleanup any previously created pages and destroy allocator
+                for (uint32_t j = 0; j < i; ++j) {
+                    if (staging_pages[j].buffer != VK_NULL_HANDLE && staging_pages[j].allocation != VK_NULL_HANDLE && vma_allocator) {
+                        vmaDestroyBuffer(vma_allocator, staging_pages[j].buffer, staging_pages[j].allocation);
+                        staging_pages[j].buffer = VK_NULL_HANDLE;
+                        staging_pages[j].allocation = VK_NULL_HANDLE;
+                        staging_pages[j].mapped_ptr = nullptr;
+                        staging_pages[j].size = 0;
+                    }
+                }
+                if (vma_allocator) {
+                    vmaDestroyAllocator(vma_allocator);
+                    vma_allocator = nullptr;
+                }
+                throw std::runtime_error("Failed to create VMA staging buffer for frame " + std::to_string(i));
+            }
+
             // We use LinearPage to manage offsets within this giant VMA buffer
             staging_pages[i].buffer = buf;
             staging_pages[i].allocation = alloc; // Store VmaAllocation here
@@ -71,15 +87,22 @@ namespace bud::graphics::vulkan {
     }
 
     void VulkanMemoryAllocator::cleanup() {
-        for (auto& page : staging_pages) {
-            if (page.buffer != VK_NULL_HANDLE && vma_allocator != VK_NULL_HANDLE) {
-                vmaDestroyBuffer(vma_allocator, page.buffer, page.allocation);
-                page.buffer = VK_NULL_HANDLE;
+        // Destroy staging pages first (they depend on the VMA allocator)
+        if (vma_allocator) {
+            for (auto& page : staging_pages) {
+                if (page.buffer != VK_NULL_HANDLE && page.allocation != VK_NULL_HANDLE) {
+                    vmaDestroyBuffer(vma_allocator, page.buffer, page.allocation);
+                    page.buffer = VK_NULL_HANDLE;
+                    page.allocation = VK_NULL_HANDLE;
+                    page.mapped_ptr = nullptr;
+                    page.size = 0;
+                }
             }
         }
-        if (vma_allocator != VK_NULL_HANDLE) {
+
+        if (vma_allocator) {
             vmaDestroyAllocator(vma_allocator);
-            vma_allocator = VK_NULL_HANDLE;
+            vma_allocator = nullptr;
         }
     }
 
@@ -110,23 +133,133 @@ namespace bud::graphics::vulkan {
             }
         }
 
-        if (!success || !current_page) {
-            // fallback if staging page is full (rare in our 64MB setup)
-            throw std::runtime_error("Staging page overflowed! No fallback implemented yet.");
+        bud::graphics::BufferHandle block;
+
+        if (success && current_page) {
+            // Sub-allocation from a per-frame staging page
+            auto* vk_buf = new VulkanBuffer();
+            vk_buf->buffer = current_page->buffer;
+            vk_buf->allocation = current_page->allocation;
+            vk_buf->owns_allocation = false; // It's a sub-allocation, so it shouldn't destroy the parent buffer
+
+            block.internal_state = vk_buf;
+            block.offset = offset;
+            block.size = size;
+            block.mapped_ptr = static_cast<uint8_t*>(current_page->mapped_ptr) + offset;
+            return block;
         }
 
-        bud::graphics::BufferHandle block;
-        // Allocate a new VulkanBuffer wrapper
+        // Fallback: allocate a dedicated temporary mapped buffer for this staging request
+        // This avoids throwing in runtime when the ring buffer is exhausted.
+        VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        buffer_info.size = size;
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        VmaAllocationCreateInfo alloc_info = {};
+        alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+        alloc_info.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+
         auto* vk_buf = new VulkanBuffer();
-        vk_buf->buffer = current_page->buffer;
-        vk_buf->allocation = current_page->allocation;
-        vk_buf->owns_allocation = false; // It's a sub-allocation, so it shouldn't destroy the parent buffer
+        VmaAllocationInfo alloc_result_info;
+        VkResult r = vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info);
+        if (r != VK_SUCCESS) {
+            delete vk_buf;
+            // As a last resort, return empty handle to let caller handle gracefully
+            bud::eprint("[VulkanMemoryAllocator] alloc_staging fallback vmaCreateBuffer failed: {}", (int)r);
+            return {};
+        }
+
+        vk_buf->mapped_ptr = alloc_result_info.pMappedData;
+        vk_buf->size = size;
+        vk_buf->owns_allocation = true;
 
         block.internal_state = vk_buf;
-        block.offset = offset;
+        block.offset = 0;
         block.size = size;
-        block.mapped_ptr = static_cast<uint8_t*>(current_page->mapped_ptr) + offset;
+        block.mapped_ptr = vk_buf->mapped_ptr;
         return block;
     }
 
+    static VkBufferUsageFlags get_vk_buffer_usage(bud::graphics::ResourceState usage_state) {
+        VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT; // Default to allow uploads
+        if (usage_state == bud::graphics::ResourceState::VertexBuffer) {
+            usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        } else if (usage_state == bud::graphics::ResourceState::IndexBuffer) {
+            usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+        } else if (usage_state == bud::graphics::ResourceState::IndirectArgument) {
+            usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        } else if (usage_state == bud::graphics::ResourceState::UnorderedAccess) {
+            usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        } else if (usage_state == bud::graphics::ResourceState::ShaderResource) {
+            usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        }
+        return usage;
+    }
+
+    bud::graphics::BufferHandle VulkanMemoryAllocator::alloc_gpu(uint64_t size, bud::graphics::ResourceState usage) {
+        VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        buffer_info.size = size;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        buffer_info.usage = get_vk_buffer_usage(usage);
+
+        VmaAllocationCreateInfo alloc_info = {};
+        alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE; // Strictly Device Local
+
+        // For UAV/TransferSrc buffers (like stats counter), ensure host access so we can map it for readback.
+        if (usage == bud::graphics::ResourceState::UnorderedAccess || (buffer_info.usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+            alloc_info.flags |= VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+            alloc_info.requiredFlags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        }
+
+        auto* vk_buf = new VulkanBuffer();
+        VmaAllocationInfo alloc_result_info;
+        if (vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info) != VK_SUCCESS) {
+            delete vk_buf;
+            return {};
+        }
+
+        vk_buf->mapped_ptr = alloc_result_info.pMappedData;
+        vk_buf->size = size;
+        vk_buf->owns_allocation = true;
+
+        bud::graphics::BufferHandle handle;
+        handle.internal_state = vk_buf;
+        handle.size = size;
+        handle.mapped_ptr = vk_buf->mapped_ptr;
+        return handle;
+    }
+
+    bud::graphics::BufferHandle VulkanMemoryAllocator::alloc_persistent(uint64_t size, bud::graphics::ResourceState usage) {
+        VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        buffer_info.size = size;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        buffer_info.usage = get_vk_buffer_usage(usage);
+        buffer_info.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT; // usually CPU writes to this, then it might be transferred or used directly
+
+        VmaAllocationCreateInfo alloc_info = {};
+        alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+        alloc_info.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+        
+        auto* vk_buf = new VulkanBuffer();
+        VmaAllocationInfo alloc_result_info;
+        if (vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info) != VK_SUCCESS) {
+            delete vk_buf;
+            return {};
+        }
+
+        vk_buf->mapped_ptr = alloc_result_info.pMappedData;
+        vk_buf->size = size;
+        vk_buf->owns_allocation = true;
+
+        bud::graphics::BufferHandle handle;
+        handle.internal_state = vk_buf;
+        handle.size = size;
+        handle.mapped_ptr = vk_buf->mapped_ptr;
+        return handle;
+    }
+
+    bud::graphics::Texture* VulkanMemoryAllocator::create_texture(const bud::graphics::TextureDesc& desc) {
+        return nullptr; // Stub for Phase 1
+    }
 }

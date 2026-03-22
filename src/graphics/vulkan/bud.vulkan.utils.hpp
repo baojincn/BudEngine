@@ -118,6 +118,26 @@ namespace bud::graphics::vulkan {
 					 VK_ACCESS_TRANSFER_WRITE_BIT,
 					 VK_PIPELINE_STAGE_TRANSFER_BIT };
 
+		case ResourceState::TransferSrc:
+			return { VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					 VK_ACCESS_TRANSFER_READ_BIT,
+					 VK_PIPELINE_STAGE_TRANSFER_BIT };
+
+		case ResourceState::IndirectArgument:
+			return { VK_IMAGE_LAYOUT_GENERAL,
+					 VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+					 VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT };
+
+		case ResourceState::VertexBuffer:
+			return { VK_IMAGE_LAYOUT_GENERAL,
+					 VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
+					 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT };
+
+		case ResourceState::IndexBuffer:
+			return { VK_IMAGE_LAYOUT_GENERAL,
+					 VK_ACCESS_INDEX_READ_BIT,
+					 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT };
+
 		case ResourceState::Present:
 			return { VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
 					 0,

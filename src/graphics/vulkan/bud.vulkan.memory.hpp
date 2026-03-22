@@ -46,11 +46,20 @@ namespace bud::graphics::vulkan {
 		void cleanup() override;
 		void on_frame_begin(uint32_t frame_index) override;
 
+		// 1. GPU 专用资源
+		bud::graphics::BufferHandle alloc_gpu(uint64_t size, bud::graphics::ResourceState usage) override;
+
 		// 2. 帧临时分配 (线性)
 		bud::graphics::BufferHandle alloc_frame_transient(uint64_t size, uint64_t alignment) override;
 
 		// 3. 上传堆分配 (多帧线性)
-		bud::graphics::BufferHandle alloc_staging(uint64_t size, uint64_t alignment) override;
+		bud::graphics::BufferHandle alloc_staging(uint64_t size, uint64_t alignment = 256) override;
+
+		// 4. 持久映射分配
+		bud::graphics::BufferHandle alloc_persistent(uint64_t size, bud::graphics::ResourceState usage) override;
+
+		// 5. 纹理分配
+		bud::graphics::Texture* create_texture(const bud::graphics::TextureDesc& desc) override;
 
 		VmaAllocator get_vma_allocator() const { return vma_allocator; }
 

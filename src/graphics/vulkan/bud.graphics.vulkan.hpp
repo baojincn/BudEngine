@@ -231,6 +231,8 @@ namespace bud::graphics::vulkan {
 		bud::threading::TaskScheduler* task_scheduler = nullptr;
 
 		// 资源管理
+		bud::graphics::Allocator* get_allocator() override { return memory_allocator.get(); }
+
 		std::unique_ptr<VulkanMemoryAllocator> memory_allocator;
 		std::unique_ptr<VulkanResourcePool>    resource_pool;
 		std::unique_ptr<VulkanPipelineCache>   pipeline_cache;

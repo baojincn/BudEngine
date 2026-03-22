@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <chrono>
+#include <format>
 
 #include <vulkan/vulkan.h>
 #include <SDL3/SDL.h>
@@ -493,10 +494,12 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
 	
 	vk_buf->mapped_ptr = alloc_result_info.pMappedData;
 	vk_buf->size = size;
+	vk_buf->owns_allocation = true;
 	bud::graphics::BufferHandle handle;
 	handle.internal_state = vk_buf;
 	handle.size = size;
 	handle.mapped_ptr = vk_buf->mapped_ptr;
+    bud::print("[Debug] create_gpu_buffer size={} vk_buf={} mapped_ptr={}", size, (void*)vk_buf, handle.mapped_ptr);
 	return handle;
 }
 
@@ -1233,9 +1236,12 @@ void VulkanRHI::create_instance(VkInstance& vk_instance, bool enable_validation)
 	VkInstanceCreateInfo create_info{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
 	create_info.pApplicationInfo = &app_info;
 
-	uint32_t count = 0;
-	auto extensions = SDL_Vulkan_GetInstanceExtensions(&count);
-	std::vector<const char*> exts(extensions, extensions + count);
+    uint32_t count = 0;
+    const char* const* extensions = SDL_Vulkan_GetInstanceExtensions(&count);
+    std::vector<const char*> exts;
+    if (extensions && count > 0) {
+        exts.assign(extensions, extensions + count);
+    }
 	if (enable_validation) exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 	exts.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 
@@ -1778,26 +1784,42 @@ void VulkanRHI::copy_buffer_immediate_offset(bud::graphics::BufferHandle src, bu
 }
 
 void VulkanRHI::cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) {
-	VulkanTexture* vk_src = static_cast<VulkanTexture*>(src);
-	VulkanTexture* vk_dst = static_cast<VulkanTexture*>(dst);
+    if (!src || !dst) {
+        bud::eprint("[Vulkan][cmd_copy_image] null texture pointer(s)");
+        return;
+    }
+    VulkanTexture* vk_src = static_cast<VulkanTexture*>(src);
+    VulkanTexture* vk_dst = static_cast<VulkanTexture*>(dst);
+    if (!vk_src || !vk_src->image || !vk_dst || !vk_dst->image) {
+        bud::eprint("[Vulkan][cmd_copy_image] invalid VulkanTexture or VkImage");
+        return;
+    }
 
-	VkImageCopy region{};
-	region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	region.srcSubresource.baseArrayLayer = 0;
-	region.srcSubresource.layerCount = src->array_layers;
-	region.srcSubresource.mipLevel = 0;
-	region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	region.dstSubresource.baseArrayLayer = 0;
-	region.dstSubresource.layerCount = dst->array_layers;
-	region.dstSubresource.mipLevel = 0;
-	region.extent.width = src->width;
-	region.extent.height = src->height;
-	region.extent.depth = 1;
+    VkImageCopy region{};
+    // choose aspect masks based on texture formats (color vs depth/stencil)
+    bool src_is_depth = (src->format == TextureFormat::D32_FLOAT || src->format == TextureFormat::D24_UNORM_S8_UINT);
+    bool dst_is_depth = (dst->format == TextureFormat::D32_FLOAT || dst->format == TextureFormat::D24_UNORM_S8_UINT);
+    VkImageAspectFlags srcAspect = src_is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    VkImageAspectFlags dstAspect = dst_is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    if (src_is_depth && src->format == TextureFormat::D24_UNORM_S8_UINT) srcAspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (dst_is_depth && dst->format == TextureFormat::D24_UNORM_S8_UINT) dstAspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
 
-	vkCmdCopyImage(static_cast<VkCommandBuffer>(cmd),
-		vk_src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		vk_dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		1, &region);
+    region.srcSubresource.aspectMask = srcAspect;
+    region.srcSubresource.baseArrayLayer = 0;
+    region.srcSubresource.layerCount = src->array_layers;
+    region.srcSubresource.mipLevel = 0;
+    region.dstSubresource.aspectMask = dstAspect;
+    region.dstSubresource.baseArrayLayer = 0;
+    region.dstSubresource.layerCount = dst->array_layers;
+    region.dstSubresource.mipLevel = 0;
+    region.extent.width = src->width;
+    region.extent.height = src->height;
+    region.extent.depth = 1;
+
+    vkCmdCopyImage(static_cast<VkCommandBuffer>(cmd),
+        vk_src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        vk_dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1, &region);
 }
 
 void VulkanRHI::cmd_blit_image(CommandHandle cmd, Texture* src, Texture* dst) {
@@ -1860,11 +1882,12 @@ bud::graphics::BufferHandle VulkanRHI::create_upload_buffer(uint64_t size) {
 	}
 
 	bud::graphics::BufferHandle handle;
+	vk_buf->owns_allocation = true;
 	handle.internal_state = vk_buf;
 	handle.offset = 0;
 	handle.size = size;
 	handle.mapped_ptr = vk_buf->alloc_info.pMappedData;
-
+    //bud::print("[Debug] create_upload_buffer size={} vk_buf={} mapped_ptr={}", size, (void*)vk_buf, handle.mapped_ptr);
 	return handle;
 }
 
@@ -2115,7 +2138,7 @@ VkVertexInputBindingDescription Vertex::get_binding_description() {
 }
 
 std::vector<VkVertexInputAttributeDescription> Vertex::get_attribute_descriptions() {
-	std::vector<VkVertexInputAttributeDescription> attributeDescriptions(5);
+std::vector<VkVertexInputAttributeDescription> attributeDescriptions(4);
 
 	// Position (Location 0) -> Offset 0
 	attributeDescriptions[0].binding = 0;

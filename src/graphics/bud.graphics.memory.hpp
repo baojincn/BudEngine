@@ -17,17 +17,25 @@ namespace bud::graphics {
 		// 帧开始/结束回调 (用于翻转 RingBuffer，重置 Linear Allocator)
 		virtual void on_frame_begin(uint32_t frame_index) = 0;
 
-		// 静态资源将由具体的 RHI 后端直接通过 VMA/D3DAliasing 创建，不再通过 Allocator 的跨 API 抽象暴露
-
+		// 1. GPU 专用资源 (Device Local)
+		// 用途：Mega-Buffer, 静态 Mesh数据
+		virtual BufferHandle alloc_gpu(uint64_t size, ResourceState usage) = 0;
 
 		// 2. 帧临时资源 (Transient)
-		// 策略：线性分配 (Linear Bump Pointer)，速度极快，无碎片，无需 Free
-		// 用途：RenderGraph 的 RenderTarget, 临时 Buffer
+		// 策略：线性分配
 		virtual BufferHandle alloc_frame_transient(uint64_t size, uint64_t alignment) = 0;
 
-		// 3. 数据上传 (Staging)
-		// 策略：环形缓冲 (Ring Buffer) 或 每帧线性分配
-		// 用途：UniformBuffer, 动态顶点
-		virtual BufferHandle alloc_staging(uint64_t size, uint64_t alignment) = 0;
+		// 3. 数据上传 (Staging Ring)
+		// 策略：环形缓冲 (Ring Buffer)，每帧重置
+		// 用途：UniformBuffer, UI动态顶点
+		virtual BufferHandle alloc_staging(uint64_t size, uint64_t alignment = 256) = 0;
+
+		// 4. 持久映射资源 (Persistent Mapped)
+		// 策略：分配后一直保持 Mapped 状态，跨帧复用 (需自行管理内部偏移)
+		// 用途：MDI Instance Data, Indirect Commands
+		virtual BufferHandle alloc_persistent(uint64_t size, ResourceState usage) = 0;
+
+		// 5. 纹理分配
+		virtual Texture* create_texture(const TextureDesc& desc) = 0;
 	};
 }

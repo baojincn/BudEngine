@@ -23,6 +23,7 @@ namespace bud::graphics {
 	};
 
 	class ResourcePool;
+	class Allocator;
 
 	class RHI {
 	public:
@@ -38,7 +39,10 @@ namespace bud::graphics {
 		virtual void cleanup() = 0;
 		virtual uint32_t get_inflight_frame_count() const = 0;
 
-		// 资源管理
+		// 统一内存分配器接口
+		virtual bud::graphics::Allocator* get_allocator() = 0;
+
+		// 资源管理 (逐步废弃)
 		virtual BufferHandle create_gpu_buffer(uint64_t size, ResourceState usage_state) = 0;
 		virtual BufferHandle create_upload_buffer(uint64_t size) = 0;
 		virtual void copy_buffer_immediate(BufferHandle src, BufferHandle dst, uint64_t size) = 0;
