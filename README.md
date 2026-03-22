@@ -48,10 +48,13 @@ A full fiber-based task driven lightweight 3D Game Engine.
 * **Memory Management**: 
     * **Virtual Texture Streaming**: Sparse binding support for massive textures.
 
+Meshlet Visualization
+![](samples/screenshots/meshlet_debug_0.png)
+
 CSM Shadow
 ![](samples/screenshots/csm_shadow_debug.png)
 
-Performance tracing tool's test 
+Performance tracing 
 ![](samples/screenshots/tracing0.png)
 
 
