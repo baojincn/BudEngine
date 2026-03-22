@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -45,8 +45,7 @@ namespace bud::graphics::vulkan {
 	 using VkQueue = struct VkQueue_T*;
 	 using VkSurfaceKHR = struct VkSurfaceKHR_T*;
 
-	// 工具函数声明
-	VulkanLayoutTransition get_vk_transition(bud::graphics::ResourceState state);
+    // 工具函数声明 - 旧的 transition helper 已迁移到 synchronization2 helpers (sync2::get_transition2)
 
 	 class VulkanRHI : public bud::graphics::RHI {
 	public:

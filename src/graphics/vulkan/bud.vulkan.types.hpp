@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vector>
 #include <optional>
@@ -26,11 +26,7 @@ namespace bud::graphics::vulkan {
 		VmaAllocation allocation = VK_NULL_HANDLE;
 	};
 
-	struct VulkanLayoutTransition {
-		VkImageLayout layout;
-		VkAccessFlags access;
-		VkPipelineStageFlags stage;
-	};
+
 
 	// Strict alignment for UBO
 	struct UniformBufferObject {

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vulkan/vulkan.h>
 #include <stdexcept>
@@ -79,72 +79,6 @@ namespace bud::graphics::vulkan {
 		return usage;
 	}
 
-	// 4. 状态转换 (Barrier 用)
-	// 这个之前写在 RHI 里，现在搬过来统一管理
-	// struct VulkanLayoutTransition moved to types.hpp
-
-	constexpr VulkanLayoutTransition to_vk_transition(ResourceState state) {
-		switch (state) {
-		case ResourceState::Undefined:
-			return { VK_IMAGE_LAYOUT_UNDEFINED, 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT };
-
-		case ResourceState::RenderTarget:
-			return { VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-					 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-					 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-
-		case ResourceState::DepthWrite:
-			return { VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-					 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-					 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT };
-
-		case ResourceState::DepthRead:
-			return { VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-					 VK_ACCESS_SHADER_READ_BIT,
-					 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT };
-
-		case ResourceState::ShaderResource:
-			return { VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					 VK_ACCESS_SHADER_READ_BIT,
-					 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT };
-
-		case ResourceState::UnorderedAccess:
-			return { VK_IMAGE_LAYOUT_GENERAL,
-					 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-					 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT };
-
-		case ResourceState::TransferDst:
-			return { VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					 VK_ACCESS_TRANSFER_WRITE_BIT,
-					 VK_PIPELINE_STAGE_TRANSFER_BIT };
-
-		case ResourceState::TransferSrc:
-			return { VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-					 VK_ACCESS_TRANSFER_READ_BIT,
-					 VK_PIPELINE_STAGE_TRANSFER_BIT };
-
-		case ResourceState::IndirectArgument:
-			return { VK_IMAGE_LAYOUT_GENERAL,
-					 VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
-					 VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT };
-
-		case ResourceState::VertexBuffer:
-			return { VK_IMAGE_LAYOUT_GENERAL,
-					 VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
-					 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT };
-
-		case ResourceState::IndexBuffer:
-			return { VK_IMAGE_LAYOUT_GENERAL,
-					 VK_ACCESS_INDEX_READ_BIT,
-					 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT };
-
-		case ResourceState::Present:
-			return { VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-					 0,
-					 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT };
-
-		default:
-			throw std::runtime_error("Unknown ResourceState transition");
-		}
-	}
+    // 4. 状态转换 (Barrier 用)
+    // 迁移至 synchronization2 helpers：使用 sync2::get_transition2 / sync2::cmd_image_barrier2
 }
