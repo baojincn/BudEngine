@@ -27,6 +27,7 @@
 #include "src/graphics/bud.graphics.types.hpp"
 #include "src/graphics/vulkan/bud.vulkan.types.hpp"
 #include "src/graphics/vulkan/bud.vulkan.utils.hpp"
+#include "src/graphics/vulkan/bud.vulkan.sync2.hpp"
 
 #ifdef BUD_ENABLE_AFTERMATH
 #include <GFSDK_Aftermath.h>
@@ -1168,39 +1169,30 @@ void VulkanRHI::cmd_bind_compute_ubo(CommandHandle cmd, void* pipeline, uint32_t
 }
 
 void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::Texture* texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) {
-	auto vk_tex = static_cast<VulkanTexture*>(texture);
-	auto src = get_vk_transition(old_state);
-	auto dst = get_vk_transition(new_state);
+    if (!texture) return;
+    auto vk_tex = static_cast<VulkanTexture*>(texture);
+    auto src = sync2::get_transition2(old_state);
+    auto dst = sync2::get_transition2(new_state);
 
-	VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-	barrier.oldLayout = src.layout;
-	barrier.newLayout = dst.layout;
-	barrier.srcAccessMask = src.access;
-	barrier.dstAccessMask = dst.access;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.image = vk_tex->image;
-	bool is_depth = (texture->format == TextureFormat::D32_FLOAT ||
-		texture->format == TextureFormat::D24_UNORM_S8_UINT);
+    bool is_depth = (texture->format == TextureFormat::D32_FLOAT || texture->format == TextureFormat::D24_UNORM_S8_UINT);
+    VkImageLayout newLayout = dst.layout;
+    VkImageLayout oldLayout = src.layout;
+    // Depth textures must use DEPTH_STENCIL_READ_ONLY_OPTIMAL instead of SHADER_READ_ONLY_OPTIMAL
+    if (is_depth && new_state == ResourceState::ShaderResource) {
+        newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    }
+    if (is_depth && old_state == ResourceState::ShaderResource) {
+        oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    }
 
-	// Depth textures must use DEPTH_STENCIL_READ_ONLY_OPTIMAL instead of SHADER_READ_ONLY_OPTIMAL
-	if (is_depth && new_state == ResourceState::ShaderResource) {
-		barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	}
-	// Likewise, depth textures transitioning FROM ShaderResource
-	if (is_depth && old_state == ResourceState::ShaderResource) {
-		barrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	}
+    VkImageAspectFlags aspect = is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    if (is_depth && texture->format == TextureFormat::D24_UNORM_S8_UINT) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
 
-	barrier.subresourceRange.aspectMask = is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
-	if (is_depth && texture->format == TextureFormat::D24_UNORM_S8_UINT) barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
-
-	barrier.subresourceRange.baseMipLevel = 0;
-	barrier.subresourceRange.levelCount = texture->mips > 0 ? texture->mips : 1;
-	barrier.subresourceRange.baseArrayLayer = 0;
-	barrier.subresourceRange.layerCount = texture->array_layers > 0 ? texture->array_layers : 1;
-
-	vkCmdPipelineBarrier(static_cast<VkCommandBuffer>(cmd), src.stage, dst.stage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    sync2::cmd_image_barrier2(static_cast<VkCommandBuffer>(cmd), vk_tex->image, aspect,
+                              0, (texture->mips > 0 ? texture->mips : 1), 0, (texture->array_layers > 0 ? texture->array_layers : 1),
+                              oldLayout, newLayout,
+                              src.stage, src.access,
+                              dst.stage, dst.access);
 }
 
 Texture* VulkanRHI::get_current_swapchain_texture() {
@@ -1665,46 +1657,31 @@ VKAPI_ATTR VkBool32 VKAPI_CALL VulkanRHI::debug_callback(VkDebugUtilsMessageSeve
 	return VK_FALSE;
 }
 void VulkanRHI::transition_image_layout_immediate(VkImage image, VkFormat format, VkImageLayout old_layout, VkImageLayout new_layout) {
-	VkCommandBuffer commandBuffer = this->begin_single_time_commands();
+    VkCommandBuffer commandBuffer = this->begin_single_time_commands();
 
-	VkImageMemoryBarrier barrier{};
-	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	barrier.oldLayout = old_layout;
-	barrier.newLayout = new_layout;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.image = image;
-	barrier.subresourceRange.aspectMask = get_aspect_flags(format);
-	barrier.subresourceRange.baseMipLevel = 0;
-	barrier.subresourceRange.levelCount = 1;
-	barrier.subresourceRange.baseArrayLayer = 0;
-	barrier.subresourceRange.layerCount = 1;
+    VkImageAspectFlags aspect = get_aspect_flags(format);
 
-	VkPipelineStageFlags sourceStage;
-	VkPipelineStageFlags destinationStage;
+    VkPipelineStageFlags2 srcStage = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    VkPipelineStageFlags2 dstStage = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    VkAccessFlags2 srcAccess = 0;
+    VkAccessFlags2 dstAccess = 0;
 
-	if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED && new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-		barrier.srcAccessMask = 0;
-		barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-		sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-		destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-	}
-	else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-		barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-		sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-		destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-	}
-	else {
-		barrier.srcAccessMask = 0;
-		barrier.dstAccessMask = 0;
-		sourceStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-		destinationStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-	}
+    if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED && new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        srcStage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        dstStage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        srcAccess = 0;
+        dstAccess = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    }
+    else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        srcStage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        dstStage = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        srcAccess = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        dstAccess = VK_ACCESS_2_SHADER_READ_BIT;
+    }
 
-	vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    sync2::cmd_image_barrier2(commandBuffer, image, aspect, 0, 1, 0, 1, old_layout, new_layout, srcStage, srcAccess, dstStage, dstAccess);
 
-	this->end_single_time_commands(commandBuffer);
+    this->end_single_time_commands(commandBuffer);
 }
 
 void VulkanRHI::copy_buffer_to_image(VkImage image, VkBuffer buffer, uint32_t width, uint32_t height) {
@@ -1924,11 +1901,11 @@ void VulkanRHI::generate_mipmaps(VkImage image, VkFormat format, int32_t texWidt
 		barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 		barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
-		vkCmdPipelineBarrier(commandBuffer,
-			VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-			0, nullptr,
-			0, nullptr,
-			1, &barrier);
+		sync2::cmd_image_barrier2(commandBuffer, image, VK_IMAGE_ASPECT_COLOR_BIT,
+			(i - 1), 1, 0, 1,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+			VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
 
 		// 1.5 Transition Level i to TRANSFER_DST_OPTIMAL (from UNDEFINED)
 		// We can reuse the barrier struct but be careful
@@ -1939,11 +1916,12 @@ void VulkanRHI::generate_mipmaps(VkImage image, VkFormat format, int32_t texWidt
 		dstBarrier.srcAccessMask = 0;
 		dstBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
-		vkCmdPipelineBarrier(commandBuffer,
-			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-			0, nullptr,
-			0, nullptr,
-			1, &dstBarrier);
+
+		sync2::cmd_image_barrier2(commandBuffer, image, VK_IMAGE_ASPECT_COLOR_BIT,
+			i, 1, 0, 1,
+			VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+			VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
 		// 2. Blit
 		VkImageBlit blit{};
@@ -1974,11 +1952,11 @@ void VulkanRHI::generate_mipmaps(VkImage image, VkFormat format, int32_t texWidt
 		barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
-		vkCmdPipelineBarrier(commandBuffer,
-			VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-			0, nullptr,
-			0, nullptr,
-			1, &barrier);
+		sync2::cmd_image_barrier2(commandBuffer, image, VK_IMAGE_ASPECT_COLOR_BIT,
+			(i - 1), 1, 0, 1,
+			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+			VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
 
 		if (mipWidth > 1) mipWidth /= 2;
 		if (mipHeight > 1) mipHeight /= 2;
@@ -1991,11 +1969,11 @@ void VulkanRHI::generate_mipmaps(VkImage image, VkFormat format, int32_t texWidt
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
-	vkCmdPipelineBarrier(commandBuffer,
-		VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-		0, nullptr,
-		0, nullptr,
-		1, &barrier);
+    sync2::cmd_image_barrier2(commandBuffer, image, VK_IMAGE_ASPECT_COLOR_BIT,
+                              (mipLevels - 1), 1, 0, 1,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
 
 	end_single_time_commands(commandBuffer);
 }

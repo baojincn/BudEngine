@@ -191,6 +191,7 @@ target_sources(bud_engine_core
 
 		"src/graphics/vulkan/bud.graphics.vulkan.cpp"
 		"src/graphics/vulkan/bud.vulkan.memory.cpp"
+		"src/graphics/vulkan/bud.vulkan.sync2.cpp"
 		"src/graphics/vulkan/bud.vulkan.descriptors.cpp"
 		"src/graphics/vulkan/bud.vulkan.pipeline.cpp"
 		"src/graphics/vulkan/bud.vulkan.pool.cpp"
