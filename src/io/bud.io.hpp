@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vector>
 #include <string>
@@ -80,6 +80,11 @@ namespace bud::io {
 
 		static std::optional<std::vector<char>> read_binary(const std::filesystem::path& path);
 		static bool write_binary(const std::filesystem::path& path, const std::vector<char>& data);
+        // Append text to a file asynchronously when possible. If 'counter' is provided
+        // it will be incremented for the scheduled task and decremented when the task
+        // completes (compatible with TaskScheduler::spawn signal_counter semantics).
+        // If 'scheduler' is provided, the append task will be scheduled on it.
+        static void append_text_async(const std::filesystem::path& path, std::string text, bud::threading::Counter* counter = nullptr, bud::threading::TaskScheduler* scheduler = nullptr);
 	};
 
 

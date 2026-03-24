@@ -59,11 +59,10 @@ layout(binding = 4) uniform UniformBufferObject {
 } ubo;
 
 
-#ifdef VULKAN
 layout(push_constant) uniform PushConstants {
     uint instanceCount;
 } pc;
-#endif
+
 
 bool is_visible(vec3 bmin, vec3 bmax) {
     vec4 corners[8];

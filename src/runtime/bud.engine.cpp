@@ -1,4 +1,4 @@
-#include <string>
+﻿#include <string>
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -15,6 +15,7 @@
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.asset.types.hpp"
 #include "src/ui/bud.stats.ui.hpp"
+#include "src/core/bud.logger.hpp"
 
 #include "src/runtime/bud.engine.hpp"
 #include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
@@ -30,6 +31,10 @@ namespace bud::engine {
 		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height);
 		task_scheduler = std::make_unique<bud::threading::TaskScheduler>();
 
+		// Create engine-owned logger and inject TaskScheduler for async log writes.
+		logger = std::make_unique<bud::Logger>(task_scheduler.get());
+
+
 		int initial_width = 0;
 		int initial_height = 0;
 		window->get_size(initial_width, initial_height);
@@ -38,15 +43,28 @@ namespace bud::engine {
 
 		asset_manager = std::make_unique<bud::io::AssetManager>(task_scheduler.get());
 
+		// TaskScheduler already injected via logger constructor above.
+
 		rhi = bud::graphics::create_rhi(engine_config.backend);
 
 		auto enable_validation = engine_config.enable_validation;
+#if not defined(BUD_BUILD_DEBUG)
+		enable_validation = false;
+#endif
 		rhi->init(window.get(), task_scheduler.get(), enable_validation, engine_config.inflight_frame_count);
 
 		IMGUI_CHECKVERSION();
 		ImGui::CreateContext();
 		ImGuiIO& imgui_io = ImGui::GetIO();
-		imgui_io.IniFilename = "src/ui/config/imgui.ini";
+		
+		auto resolved_imgui_path = bud::io::FileSystem::resolve_path("src/ui/config/imgui.ini");
+		if (resolved_imgui_path) {
+			imgui_ini_path = resolved_imgui_path->string();
+			imgui_io.IniFilename = imgui_ini_path.c_str();
+		} else {
+			imgui_io.IniFilename = nullptr; // Don't save if path is invalid
+		}
+
 		imgui_io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 		ImGui::StyleColorsDark();
 		ImGui_ImplSDL3_InitForOther(window->get_sdl_window());
@@ -57,7 +75,6 @@ namespace bud::engine {
 	}
 
 	BudEngine::~BudEngine() {
-		task_scheduler->stop();
 		asset_manager.reset();
 		renderer.reset();
 

@@ -20,6 +20,32 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 enable_language(ASM_MASM)
 
+
+
+# 全局强制：把所有配置的运行时/库输出统一到 ${CMAKE_BINARY_DIR}/bin
+# Single-config (Makefile/Ninja) output
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin" CACHE PATH "Single-config runtime output directory" FORCE)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin" CACHE PATH "Single-config library output directory" FORCE)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib" CACHE PATH "Single-config archive output directory" FORCE)
+
+# Per-config outputs for multi-config generators (Visual Studio)
+# Put each configuration into its own subfolder under bin/ or lib/
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_BINARY_DIR}/bin/debug" CACHE PATH "Multi-config runtime output (Debug)" FORCE)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_BINARY_DIR}/bin/release" CACHE PATH "Multi-config runtime output (Release)" FORCE)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/bin/relWithDebInfo" CACHE PATH "Multi-config runtime output (RelWithDebInfo)" FORCE)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL     "${CMAKE_BINARY_DIR}/bin/minSizeRel" CACHE PATH "Multi-config runtime output (MinSizeRel)" FORCE)
+
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_BINARY_DIR}/bin/debug" CACHE PATH "Multi-config library output (Debug)" FORCE)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_BINARY_DIR}/bin/release" CACHE PATH "Multi-config library output (Release)" FORCE)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/bin/relWithDebInfo" CACHE PATH "Multi-config library output (RelWithDebInfo)" FORCE)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL     "${CMAKE_BINARY_DIR}/bin/minSizeRel" CACHE PATH "Multi-config library output (MinSizeRel)" FORCE)
+
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_BINARY_DIR}/lib/debug" CACHE PATH "Multi-config archive output (Debug)" FORCE)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_BINARY_DIR}/lib/release" CACHE PATH "Multi-config archive output (Release)" FORCE)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/lib/relWithDebInfo" CACHE PATH "Multi-config archive output (RelWithDebInfo)" FORCE)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_MINSIZEREL     "${CMAKE_BINARY_DIR}/lib/minSizeRel" CACHE PATH "Multi-config archive output (MinSizeRel)" FORCE)
+
+
 # Profiler support
 if(NOT DEFINED BUD_ENABLE_PROFILING)
 	option(BUD_ENABLE_PROFILING "Enable Tracy Profiler" OFF)
@@ -48,15 +74,15 @@ option(BUD_BUILD_SAMPLES "Build samples" ON)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
 find_package(imgui CONFIG REQUIRED)
-find_package(spirv-reflect CONFIG QUIET)
-if(BUD_ENABLE_PROFILING)
-	find_package(Tracy CONFIG REQUIRED)
-endif()
+
+find_package(Tracy CONFIG REQUIRED)
+
 find_package(onnxruntime CONFIG REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
+find_package(unofficial-spirv-reflect CONFIG REQUIRED)
 # End, find dependencies
 
 # ---------------------------------------------------------------------------
@@ -147,8 +173,13 @@ if(TARGET CompileShaders)
 endif()
 
 if (BUD_ENABLE_PROFILING)
-	target_compile_definitions(bud_engine_core PUBLIC TRACY_ENABLE)
-	target_link_libraries(bud_engine_core PUBLIC Tracy::TracyClient)
+	# 使用生成器表达式：只有在编译 RelWithDebInfo (Profile) 时，才开启 TRACY_ENABLE 宏并链接库
+	target_compile_definitions(bud_engine_core PUBLIC 
+		$<$<CONFIG:RelWithDebInfo>:TRACY_ENABLE>
+	)
+	target_link_libraries(bud_engine_core PUBLIC 
+		$<$<CONFIG:RelWithDebInfo>:Tracy::TracyClient>
+	)
 endif()
 
 if(BUD_ENABLE_AFTERMATH)
@@ -159,10 +190,9 @@ if(BUD_ENABLE_AFTERMATH)
 	endif()
 endif()
 
-if(spirv-reflect_FOUND)
+if(unofficial-spirv-reflect_FOUND)
     message(STATUS "Found SPIRV-Reflect")
-    # Propagate spirv-reflect to dependents so tools linking against the core can use it
-    target_link_libraries(bud_engine_core PUBLIC spirv-reflect::spirv-reflect)
+    target_link_libraries(bud_engine_core PUBLIC unofficial::spirv-reflect)
 else()
     message(STATUS "SPIRV-Reflect not found; shader reflection validation disabled")
 endif()
@@ -261,8 +291,15 @@ if(BUD_BUILD_SAMPLES)
     target_include_directories(triangle_sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
     
     # Output directory
-    set_target_properties(triangle_sample PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-	set_target_properties(triangle_sample PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    # Use the global per-config runtime output directories defined above
+    # (remove explicit single-config override to avoid output path confusion
+    # for multi-config generators / Visual Studio)
+	set_target_properties(triangle_sample PROPERTIES
+        VS_DEBUGGER_WORKING_DIRECTORY_DEBUG       "$<TARGET_FILE_DIR:triangle_sample>"
+        VS_DEBUGGER_WORKING_DIRECTORY_RELEASE     "$<TARGET_FILE_DIR:triangle_sample>"
+        VS_DEBUGGER_WORKING_DIRECTORY_RELWITHDEBINFO "$<TARGET_FILE_DIR:triangle_sample>"
+        VS_DEBUGGER_WORKING_DIRECTORY_MINSIZEREL  "$<TARGET_FILE_DIR:triangle_sample>"
+	)
 
 	if(MSVC)
         target_link_options(triangle_sample PRIVATE "/CETCOMPAT:NO")
@@ -281,6 +318,39 @@ if(BUD_BUILD_SAMPLES)
 			COMMENT "Copying Aftermath DLL into output binary directory"
 		)
 	endif()
+
+    # Ensure runtime resources are available next to the executable so launching
+    # the binary from the filesystem works the same as from Visual Studio.
+    #add_custom_command(TARGET triangle_sample POST_BUILD
+    #    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    #        "${CMAKE_CURRENT_SOURCE_DIR}/data"
+    #        "$<TARGET_FILE_DIR:triangle_sample>/data"
+    #    COMMENT "Copying data/ to output directory"
+    #)
+
+    # Preserve original source tree layout for shaders so runtime loader
+    # that expects "src/shaders/..." continues to work when launching exe
+    # from the binary folder.
+    #add_custom_command(TARGET triangle_sample POST_BUILD
+    #    COMMAND ${CMAKE_COMMAND} -E make_directory
+    #        "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
+    #    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    #        "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
+    #        "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
+    #    COMMENT "Copying src/shaders to output directory preserving path"
+    #)
+
+    # Copy ImGui runtime config so UI layout persists when launching exe directly
+    # Preserve ImGui config path under src/ui/config so code that loads
+    # "src/ui/config/imgui.ini" works when run from bin.
+    #add_custom_command(TARGET triangle_sample POST_BUILD
+    #    COMMAND ${CMAKE_COMMAND} -E make_directory
+    #        "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config"
+    #    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    #        "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/config/imgui.ini"
+    #        "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config/imgui.ini"
+    #    COMMENT "Copying src/ui/config/imgui.ini to output directory preserving path"
+    #)
 endif()
 # End, triangle_sample
 

@@ -58,3 +58,4 @@ ipch/
 
 # Generated headers
 include/generated/shader_layouts.h
+/bin/Debug

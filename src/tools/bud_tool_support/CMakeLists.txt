@@ -22,4 +22,6 @@ add_executable(bud_tool_support_example
 )
 target_link_libraries(bud_tool_support_example PRIVATE bud_tool_support)
 target_include_directories(bud_tool_support_example PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-set_target_properties(bud_tool_support_example PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# Do not set a hardcoded RUNTIME_OUTPUT_DIRECTORY here; use the top-level
+# per-config output directories so multi-config generators (Visual Studio)
+# place binaries into configuration-specific folders (e.g. bin/debug).

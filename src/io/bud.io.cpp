@@ -1,4 +1,4 @@
-#include "bud.io.hpp"
+﻿#include "bud.io.hpp"
 #include "src/core/bud.core.hpp"
 #include "src/core/bud.asset.types.hpp"
 #include <fstream>
@@ -10,6 +10,14 @@
 #include <tiny_obj_loader.h>
 #include <stb_image.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace bud::io {
 
 bool MeshData::Vertex::operator==(const Vertex& other) const {
@@ -20,44 +28,135 @@ bool MeshData::Vertex::operator==(const Vertex& other) const {
 		texture_index == other.texture_index;
 }
 
+void FileSystem::append_text_async(const std::filesystem::path& path, std::string text, bud::threading::Counter* counter, bud::threading::TaskScheduler* scheduler) {
+    // Ensure parent directory exists (best-effort)
+    try {
+        auto parent = path.parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent);
+    } catch (...) {}
+
+    // If an explicit scheduler is provided, use it. Otherwise fall back to the
+    // thread-local scheduler if available. If neither, perform synchronous write.
+    bud::threading::TaskScheduler* use_scheduler = scheduler ? scheduler : bud::threading::t_scheduler;
+
+    if (use_scheduler) {
+        try {
+            use_scheduler->spawn("IO.Append", [p = path.string(), text = std::move(text)]() mutable {
+                std::ofstream f(p, std::ios::app);
+                if (f) {
+                    f << text << '\n';
+                    f.flush();
+                }
+            }, counter);
+            return;
+        } catch (...) {
+            // Fall through to synchronous fallback
+        }
+    }
+
+    // Fallback: synchronous append
+    try {
+        std::ofstream f(path, std::ios::app);
+        if (f) {
+            f << text << '\n';
+            f.flush();
+        }
+    } catch (...) {}
+}
+
 std::optional<std::filesystem::path> FileSystem::resolve_path(const std::filesystem::path& path) {
 	auto check_exists = [](const std::filesystem::path& p) {
 		std::error_code ec;
 		return std::filesystem::exists(p, ec) && !std::filesystem::is_directory(p, ec);
 		};
+    if (check_exists(path)) return path;
 
-	if (check_exists(path)) return path;
+    // Record tried candidates for diagnostic logging
+    std::vector<std::filesystem::path> tried_candidates;
 
-	// Try parent directories (for running from build/bin)
-	auto p1 = std::filesystem::path("../") / path;
-	if (check_exists(p1)) return p1;
+    // Helper: get executable directory (cross-platform)
+    auto get_executable_dir = []() -> std::filesystem::path {
+        std::error_code ec;
+#if defined(_WIN32)
+        wchar_t buf[MAX_PATH];
+        DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+        if (len == 0) return {};
+        return std::filesystem::path(std::wstring(buf, buf + len)).parent_path();
+#elif defined(__APPLE__)
+        uint32_t size = 0;
+        _NSGetExecutablePath(nullptr, &size);
+        if (size == 0) return {};
+        std::string buf(size, '\0');
+        if (_NSGetExecutablePath(buf.data(), &size) != 0) return {};
+        return std::filesystem::weakly_canonical(std::filesystem::path(buf), ec).parent_path();
+#else
+        std::string buf(4096, '\0');
+        ssize_t len = readlink("/proc/self/exe", buf.data(), buf.size());
+        if (len <= 0) return {};
+        buf.resize(static_cast<size_t>(len));
+        return std::filesystem::path(buf).parent_path();
+#endif
+    };
 
-	auto p2 = std::filesystem::path("../../") / path;
-	if (check_exists(p2)) return p2;
+    auto exe_dir = get_executable_dir();
 
-	auto p3 = std::filesystem::path("../../../") / path;
-	if (check_exists(p3)) return p3;
+    // Try exe-relative first (most robust for copied runtimes)
+    if (!exe_dir.empty()) {
+        auto candidate = exe_dir / path;
+        tried_candidates.push_back(candidate);
+        if (check_exists(candidate)) return candidate;
 
-	// For saving, we might not want to resolve, or we resolve to current dir
-	return path;
+        // Also try one level up (common when exe is under bin/ and resources at repo root)
+        auto candidate_up = exe_dir.parent_path() / path;
+        tried_candidates.push_back(candidate_up);
+        if (check_exists(candidate_up)) return candidate_up;
+    }
+
+    // Try current working directory
+    auto cwd_candidate = std::filesystem::current_path() / path;
+    tried_candidates.push_back(cwd_candidate);
+    if (check_exists(cwd_candidate)) return cwd_candidate;
+
+    // Fallback: try a few parent dirs relative to cwd (keeps previous behavior)
+    auto p1 = std::filesystem::path("../") / path;
+    tried_candidates.push_back(p1);
+    if (check_exists(p1)) return p1;
+
+    auto p2 = std::filesystem::path("../../") / path;
+    tried_candidates.push_back(p2);
+    if (check_exists(p2)) return p2;
+
+    auto p3 = std::filesystem::path("../../../") / path;
+    tried_candidates.push_back(p3);
+    if (check_exists(p3)) return p3;
+
+    // Diagnostic: print all tried candidates to help debugging
+    if (!tried_candidates.empty()) {
+        bud::eprint("[IO] Failed to resolve '{}'. Tried the following paths:", path.string());
+        for (const auto& c : tried_candidates) {
+            bud::eprint("  - {}", c.string());
+        }
+    } else {
+        bud::eprint("[IO] Failed to resolve '{}' and no candidate paths were generated.", path.string());
+    }
+
+    // For saving, preserve previous behavior: return original path (may be used as target)
+    return path;
 }
 
 // 通用二进制读取 (用于 Shader (SPV), Buffer 等)
 std::optional<std::vector<char>> FileSystem::read_binary(const std::filesystem::path& path) {
-	auto resolved_path_opt = resolve_path(path);
-	if (!resolved_path_opt) return std::nullopt;
-	
-	std::filesystem::path resolved_path = *resolved_path_opt;
-	// Extra check if it really exists for reading
-	if (!std::filesystem::exists(resolved_path)) {
-		// Try fallback if resolve_path didn't do it
-		if (std::filesystem::exists(std::filesystem::path("../") / path)) resolved_path = std::filesystem::path("../") / path;
-		else if (std::filesystem::exists(std::filesystem::path("../../") / path)) resolved_path = std::filesystem::path("../../") / path;
-		else return std::nullopt;
-	}
+    auto resolved_path_opt = resolve_path(path);
+    if (!resolved_path_opt) return std::nullopt;
 
-	std::ifstream file(resolved_path, std::ios::ate | std::ios::binary);
-	if (!file.is_open()) return std::nullopt;
+    std::filesystem::path resolved_path = *resolved_path_opt;
+
+    // Open the resolved file directly. resolve_path guarantees existence when returning a value.
+    std::ifstream file(resolved_path, std::ios::ate | std::ios::binary);
+    if (!file.is_open()) {
+        bud::eprint("[IO] Failed to open file after resolution: {}", resolved_path.string());
+        return std::nullopt;
+    }
 
 	size_t file_size = (size_t)file.tellg();
 	std::vector<char> buffer(file_size);

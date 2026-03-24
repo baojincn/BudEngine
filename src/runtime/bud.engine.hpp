@@ -73,6 +73,7 @@ namespace bud::engine {
 		int last_height = 0;
 
 		std::unique_ptr<bud::threading::TaskScheduler> task_scheduler;
+		std::unique_ptr<bud::Logger> logger;
 		std::unique_ptr<bud::graphics::RHI> rhi;
 		std::unique_ptr<bud::io::AssetManager> asset_manager;
 		std::unique_ptr<bud::graphics::Renderer> renderer;
@@ -87,5 +88,6 @@ namespace bud::engine {
 		float near_plane{ 1.0f };
 
 		bool show_debug_stats = true;
+		std::string imgui_ini_path;
 	};
 }

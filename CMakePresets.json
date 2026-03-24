@@ -1,62 +1,32 @@
-{
+﻿{
 	"version": 3,
 	"configurePresets": [
 		{
-			"name": "default",
-			"displayName": "default",
-			"binaryDir": "${sourceDir}/build",
-			"hidden": true,
+			"name": "vs-multi",
+			"displayName": "Visual Studio Multi-Config",
 			"generator": "Visual Studio 18 2026",
 			"architecture": "x64",
-			"environment": {
-				"VULKAN_SDK": "C:/VulkanSDK/1.4.335.0"
-			},
+			"binaryDir": "${sourceDir}/build",
 			"cacheVariables": {
 				"CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake"
-			}
-		},
-		{
-			"name": "debug",
-			"displayName": "Debug Config",
-			"inherits": "default",
-			"cacheVariables": {
-				"CMAKE_BUILD_TYPE": "Debug",
-				"BUD_ENABLE_PROFILING": "OFF"
-			}
-		},
-		{
-			"name": "relwithdebinfo",
-			"displayName": "Profile Config (RelWithDebInfo)",
-			"description": "Optimized build with debug symbols for Tracy profiling",
-			"inherits": "default",
-			"cacheVariables": {
-				"CMAKE_BUILD_TYPE": "RelWithDebInfo",
-				"BUD_ENABLE_PROFILING": "ON"
-			}
-		},
-		{
-			"name": "release",
-			"displayName": "Release Config",
-			"description": "Pure release build for end-users",
-			"inherits": "default",
-			"cacheVariables": {
-				"CMAKE_BUILD_TYPE": "Release",
-				"BUD_ENABLE_PROFILING": "OFF"
 			}
 		}
 	],
 	"buildPresets": [
 		{
 			"name": "Debug x64",
-			"configurePreset": "debug"
+			"configurePreset": "vs-multi",
+			"configuration": "Debug"
 		},
 		{
 			"name": "Profile x64",
-			"configurePreset": "relwithdebinfo"
+			"configurePreset": "vs-multi",
+			"configuration": "RelWithDebInfo"
 		},
 		{
 			"name": "Release x64",
-			"configurePreset": "release"
+			"configurePreset": "vs-multi",
+			"configuration": "Release"
 		}
 	]
 }

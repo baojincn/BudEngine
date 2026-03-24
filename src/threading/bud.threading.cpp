@@ -1,4 +1,4 @@
-/// The Task Scheduler is the core component that powers the engine's Job System.
+﻿/// The Task Scheduler is the core component that powers the engine's Job System.
 
 #include <atomic>
 #include <vector>
@@ -162,19 +162,44 @@ TaskScheduler::TaskScheduler(size_t n)
 }
 
 TaskScheduler::~TaskScheduler() {
-	stop();
-	for (auto w : workers) {
-		for (auto f : w->pinned_queue)
-			delete f;
-		w->pinned_queue.clear();
-		delete w;
-	}
-	workers.clear();
+    stop();
 
-	Fiber* f = nullptr;
-	while ((f = fiber_pool.pop()) != nullptr) {
-		delete f;
-	}
+    // Ensure background threads have exited before we delete any shared data
+    // Join any std::jthread owned by workers first. This prevents worker
+    // threads from accessing the pinned_queue or the fiber_pool while we
+    // are destroying them (use-after-free).
+    for (size_t i = 0; i < workers.size(); ++i) {
+        if (workers[i]) {
+            auto &jt = workers[i]->thread;
+            if (jt.joinable()) {
+                // Request stop first to signal worker loop to exit.
+                // Avoid joining the calling thread (would throw) by
+                // comparing thread ids; if it's the same thread, only
+                // request stop and skip join.
+                if (jt.get_id() != std::this_thread::get_id()) {
+                    jt.request_stop();
+                    jt.join();
+                } else {
+                    jt.request_stop();
+                }
+            }
+        }
+    }
+
+    // Now it is safe to destroy pinned queues and worker objects
+    for (auto w : workers) {
+        for (auto f : w->pinned_queue)
+            delete f;
+        w->pinned_queue.clear();
+        delete w;
+    }
+    workers.clear();
+
+    // Finally, delete any remaining fibers in the pool
+    Fiber* f = nullptr;
+    while ((f = fiber_pool.pop()) != nullptr) {
+        delete f;
+    }
 }
 
 void TaskScheduler::stop() {

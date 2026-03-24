@@ -12,4 +12,6 @@ target_link_libraries(ShaderLayoutCodegen PRIVATE bud_tool_support)
 
 target_include_directories(ShaderLayoutCodegen PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/include)
 
-set_target_properties(ShaderLayoutCodegen PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# Rely on the top-level per-config runtime output directories so the
+# codegen tool ends up in the configuration-specific output folder when
+# building with multi-config generators.

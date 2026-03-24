@@ -34,6 +34,7 @@ public:
         // 2. Load Scene Data-Driven
         if (!config.scene_file.empty()) {
             asset_manager->load_json_async(config.scene_file, [this, engine, renderer, asset_manager](const nlohmann::json& j) {
+            try {
                 auto& scene = engine->get_scene();
                 scene = j.get<bud::scene::Scene>();
 
@@ -57,8 +58,13 @@ public:
                         bud::print("[TriangleApp] Entity has no asset path, skipping mesh load.");
                     }
                 }
+                } catch(const std::exception& e) {
+                    bud::eprint("[TriangleApp] CRITICAL EXCEPTION during JSON parsing: {}", e.what());
+                    std::terminate();
+                }
             });
         }
+        bud::print("[TriangleApp] init finished");
     }
 
     void on_update(float delta_time) override {

@@ -7,7 +7,7 @@ set "VC_VARS=%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
 set "CMAKE_EXE=%VS_PATH%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
 set "CL_EXE=%VS_PATH%\VC\Tools\MSVC\14.50.35717\bin\Hostx64\x64\cl.exe"
 
-set "VULKAN_SDK=C:\VulkanSDK\1.4.335.0"
+set "VULKAN_SDK=D:\VulkanSDK\1.4.335.0"
 set "PATH=%VULKAN_SDK%\Bin;%PATH%"
 
 :: 1. Force environment initialization
@@ -21,7 +21,7 @@ call "%VC_VARS%"
 
 :: 2. Ensure CMake uses the explicit compiler
 echo [Build Script] Configuring CMake (Preset: debug)...
-"%CMAKE_EXE%" --preset debug ^
+"%CMAKE_EXE%" --preset vs-multi ^
   "-DCMAKE_C_COMPILER=%CL_EXE%" ^
   "-DCMAKE_CXX_COMPILER=%CL_EXE%"
 
