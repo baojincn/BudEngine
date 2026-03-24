@@ -153,6 +153,9 @@ namespace bud::ui {
 		ImGui::TextColored(color_neutral, "Shadow Casters: %u", display_shadow_casters);
 		ImGui::TextColored(color_neutral, "Shadow Casters (Submeshes): %u", display_shadow_caster_submeshes);
 
+		// Ensure a tiny bottom padding so auto-resize windows don't clip the last lines
+		// (avoids occasional off-by-one height issues on some platforms/fonts)
+		ImGui::Spacing();
 
 	}
 
