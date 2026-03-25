@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vector>
 #include <string>
@@ -19,7 +19,11 @@ namespace bud::graphics {
 
 	struct RGHandle {
 		uint32_t id = 0;
-		bool is_valid() const { return id != 0; }
+		bool is_valid() const {
+			if (id != 0)
+				return true;
+			return false;
+		}
 		auto operator<=>(const RGHandle&) const = default;
 	};
 

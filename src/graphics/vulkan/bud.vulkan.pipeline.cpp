@@ -6,6 +6,7 @@
 #include "src/graphics/vulkan/bud.vulkan.pipeline.hpp"
 #include "src/graphics/bud.graphics.types.hpp"
 #include "src/io/bud.io.hpp"
+#include "src/core/bud.logger.hpp"
 #include <imgui.h>
 #include <cstddef>
 
@@ -229,10 +230,24 @@ namespace bud::graphics::vulkan {
         pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
         pipelineInfo.basePipelineIndex = -1;
 
-        VkPipeline graphicsPipeline;
-        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+        VkPipeline graphicsPipeline = VK_NULL_HANDLE;
+        // Diagnostic: record that we are about to create a graphics pipeline
+        {
+            std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines: vert_module={} frag_module={} color_fmt={} depth_fmt={}\n",
+                (void*)shaderStages[0].module, (void*)shaderStages[1].module, (int)colorFormat, (int)depthFormat);
+            bud::print("{}", msg);
+        }
+
+        VkResult r = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline);
+        if (r != VK_SUCCESS) {
+            std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines failed: {}\n", (int)r);
+            bud::eprint("{}", msg);
             throw std::runtime_error("failed to create graphics pipeline!");
         }
+
+		std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines OK: pipeline={}\n", (void*)graphicsPipeline);
+		bud::print("{}", msg);
+
         return graphicsPipeline;
     }
 
@@ -256,7 +271,15 @@ namespace bud::graphics::vulkan {
     }
 
     void VulkanPipelineCache::release_pipeline(VkPipeline pipeline) {
-        if (pipeline == VK_NULL_HANDLE) return;
+        if (pipeline == VK_NULL_HANDLE) {
+            std::string err = std::format("VulkanPipelineCache::release_pipeline called with VK_NULL_HANDLE");
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return;
+#endif
+        }
         // O(1) lookup using reverse map
         auto rit = pipeline_to_key.find(pipeline);
         if (rit != pipeline_to_key.end()) {

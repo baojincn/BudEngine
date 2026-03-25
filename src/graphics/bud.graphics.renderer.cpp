@@ -115,8 +115,15 @@ namespace bud::graphics {
 	}
 
 	MeshAssetHandle Renderer::upload_mesh(const bud::io::MeshData& mesh_data) {
-		if (mesh_data.vertices.empty())
+		if (mesh_data.vertices.empty()) {
+			std::string err = "Renderer::upload_mesh called with empty vertex list";
+			bud::eprint("{}", err);
+#if defined(_DEBUG)
+			throw std::runtime_error(err);
+#else
 			return MeshAssetHandle::invalid();
+#endif
+		}
 
 		//bud::print("\n[Renderer::upload_mesh] Processing mesh with {} subsets",
 		//	mesh_data.subsets.size());
@@ -164,8 +171,15 @@ namespace bud::graphics {
 						auto img_ptr = std::make_shared<bud::io::Image>(std::move(img));
 
 						auto queue_locked = queue_weak.lock();
-						if (!queue_locked)
-							return;
+                        if (!queue_locked) {
+                            std::string err = "Renderer::upload_mesh upload queue was destroyed before callback";
+                            bud::eprint("{}", err);
+#if defined(_DEBUG)
+                            throw std::runtime_error(err);
+#else
+                            return;
+#endif
+                        }
 
 						std::lock_guard lock(queue_locked->mutex);
 						queue_locked->commands.push_back([rhi_ptr, current_slot, tex_path, img_ptr]() {
@@ -348,16 +362,26 @@ namespace bud::graphics {
 
 	void Renderer::flush_upload_queue() {
 		auto queue = upload_queue;
-		if (!queue)
+		auto queue_ptr = queue;
+		if (!queue_ptr) {
+			std::string err = "Renderer::flush_upload_queue called but upload_queue is null";
+			bud::eprint("{}", err);
+#if defined(_DEBUG)
+			throw std::runtime_error(err);
+#else
 			return;
+#endif
+		}
 
 		std::vector<std::function<void()>> commands_to_run;
 		{
-			std::lock_guard lock(queue->mutex);
-			if (queue->commands.empty())
-				return;
+		std::lock_guard lock(queue_ptr->mutex);
+		if (queue_ptr->commands.empty()) {
+			// No pending upload commands — not an error. Just return silently.
+			return;
+		}
 
-			commands_to_run.swap(queue->commands);
+		commands_to_run.swap(queue_ptr->commands);
 		}
 
 		for (const auto& rhi_cmd : commands_to_run) {

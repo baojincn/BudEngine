@@ -18,6 +18,13 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Ensure project source directories are available to all targets and
+# to any IDE-driven quick-compile / hot-reload pipelines that may not
+# respect per-target include propagation. This makes includes like
+# "src/io/emergency_logger.hpp" resolvable regardless of generator
+# behavior.
+include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 enable_language(ASM_MASM)
 
 
@@ -206,6 +213,7 @@ target_sources(bud_engine_core
     PRIVATE
         "src/platform/windows/switch_context_win_x86_64.asm"
 		"src/platform/window.cpp"
+		"src/platform/crash_handler_win.cpp"
 		"src/runtime/bud.engine.cpp"
 		"src/runtime/bud.game.cpp"
 		"src/ui/bud.stats.ui.cpp"
@@ -216,8 +224,9 @@ target_sources(bud_engine_core
 		"src/graphics/bud.graphics.renderer.cpp"
 		"src/graphics/bud.ml_passes.cpp"
 		"src/graphics/bud.ml_perception.cpp"
-        
+
 		"src/core/bud.logger.cpp"
+
 
 		"src/graphics/vulkan/bud.graphics.vulkan.cpp"
 		"src/graphics/vulkan/bud.vulkan.memory.cpp"
@@ -281,6 +290,11 @@ target_link_libraries(bud_engine_core
 		meshoptimizer::meshoptimizer
 )
 
+if (WIN32)
+    # Link DbgHelp for MiniDumpWriteDump
+    target_link_libraries(bud_engine_core PRIVATE Dbghelp)
+endif()
+
 target_include_directories(bud_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # End, define engine core library
 
@@ -294,12 +308,12 @@ if(BUD_BUILD_SAMPLES)
     # Use the global per-config runtime output directories defined above
     # (remove explicit single-config override to avoid output path confusion
     # for multi-config generators / Visual Studio)
-	set_target_properties(triangle_sample PROPERTIES
-        VS_DEBUGGER_WORKING_DIRECTORY_DEBUG       "$<TARGET_FILE_DIR:triangle_sample>"
-        VS_DEBUGGER_WORKING_DIRECTORY_RELEASE     "$<TARGET_FILE_DIR:triangle_sample>"
-        VS_DEBUGGER_WORKING_DIRECTORY_RELWITHDEBINFO "$<TARGET_FILE_DIR:triangle_sample>"
-        VS_DEBUGGER_WORKING_DIRECTORY_MINSIZEREL  "$<TARGET_FILE_DIR:triangle_sample>"
-	)
+	#set_target_properties(triangle_sample PROPERTIES
+    #    VS_DEBUGGER_WORKING_DIRECTORY_DEBUG       "$<TARGET_FILE_DIR:triangle_sample>"
+    #    VS_DEBUGGER_WORKING_DIRECTORY_RELEASE     "$<TARGET_FILE_DIR:triangle_sample>"
+    #    VS_DEBUGGER_WORKING_DIRECTORY_RELWITHDEBINFO "$<TARGET_FILE_DIR:triangle_sample>"
+    #    VS_DEBUGGER_WORKING_DIRECTORY_MINSIZEREL  "$<TARGET_FILE_DIR:triangle_sample>"
+	#)
 
 	if(MSVC)
         target_link_options(triangle_sample PRIVATE "/CETCOMPAT:NO")
@@ -321,36 +335,36 @@ if(BUD_BUILD_SAMPLES)
 
     # Ensure runtime resources are available next to the executable so launching
     # the binary from the filesystem works the same as from Visual Studio.
-    #add_custom_command(TARGET triangle_sample POST_BUILD
-    #    COMMAND ${CMAKE_COMMAND} -E copy_directory
-    #        "${CMAKE_CURRENT_SOURCE_DIR}/data"
-    #        "$<TARGET_FILE_DIR:triangle_sample>/data"
-    #    COMMENT "Copying data/ to output directory"
-    #)
+    add_custom_command(TARGET triangle_sample POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/data"
+            "$<TARGET_FILE_DIR:triangle_sample>/data"
+        COMMENT "Copying data/ to output directory"
+    )
 
     # Preserve original source tree layout for shaders so runtime loader
     # that expects "src/shaders/..." continues to work when launching exe
     # from the binary folder.
-    #add_custom_command(TARGET triangle_sample POST_BUILD
-    #    COMMAND ${CMAKE_COMMAND} -E make_directory
-    #        "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
-    #    COMMAND ${CMAKE_COMMAND} -E copy_directory
-    #        "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
-    #        "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
-    #    COMMENT "Copying src/shaders to output directory preserving path"
-    #)
+    add_custom_command(TARGET triangle_sample POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
+            "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
+        COMMENT "Copying src/shaders to output directory preserving path"
+    )
 
     # Copy ImGui runtime config so UI layout persists when launching exe directly
     # Preserve ImGui config path under src/ui/config so code that loads
     # "src/ui/config/imgui.ini" works when run from bin.
-    #add_custom_command(TARGET triangle_sample POST_BUILD
-    #    COMMAND ${CMAKE_COMMAND} -E make_directory
-    #        "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config"
-    #    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    #        "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/config/imgui.ini"
-    #        "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config/imgui.ini"
-    #    COMMENT "Copying src/ui/config/imgui.ini to output directory preserving path"
-    #)
+    add_custom_command(TARGET triangle_sample POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/config/imgui.ini"
+            "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config/imgui.ini"
+        COMMENT "Copying src/ui/config/imgui.ini to output directory preserving path"
+    )
 endif()
 # End, triangle_sample
 

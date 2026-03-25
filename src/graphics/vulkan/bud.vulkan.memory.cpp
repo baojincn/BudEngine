@@ -15,7 +15,8 @@ namespace bud::graphics::vulkan {
 
     bool VmaLinearPage::try_alloc(VkDeviceSize req_size, VkDeviceSize alignment, VkDeviceSize& out_offset) {
         VkDeviceSize aligned_offset = (offset + alignment - 1) & ~(alignment - 1);
-        if (aligned_offset + req_size > size) return false;
+        if (aligned_offset + req_size > size)
+            return false;
 
         out_offset = aligned_offset;
         offset = aligned_offset + req_size;
@@ -146,17 +147,21 @@ namespace bud::graphics::vulkan {
     }
 
     void VulkanMemoryAllocator::defer_free(const bud::graphics::BufferHandle& handle, uint32_t frame_index) {
-        if (!handle.is_valid()) return;
+        if (!handle.is_valid())
+            return;
         std::lock_guard lock(mutex);
-        if (deferred_free_buffers.empty()) return;
+        if (deferred_free_buffers.empty())
+            return;
         uint32_t idx = frame_index % deferred_free_buffers.size();
         deferred_free_buffers[idx].push_back(handle);
     }
 
     void VulkanMemoryAllocator::defer_free(bud::graphics::Texture* texture, uint32_t frame_index) {
-        if (!texture) return;
+        if (!texture)
+            return;
         std::lock_guard lock(mutex);
-        if (deferred_free_textures.empty()) return;
+        if (deferred_free_textures.empty())
+            return;
         uint32_t idx = frame_index % deferred_free_textures.size();
         deferred_free_textures[idx].push_back(texture);
     }
@@ -209,8 +214,13 @@ namespace bud::graphics::vulkan {
         if (r != VK_SUCCESS) {
             delete vk_buf;
             // As a last resort, return empty handle to let caller handle gracefully
-            bud::eprint("[VulkanMemoryAllocator] alloc_staging fallback vmaCreateBuffer failed: {}", (int)r);
+            std::string err = std::format("alloc_staging fallback vmaCreateBuffer failed: {}", (int)r);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
             return {};
+#endif
         }
 
         vk_buf->mapped_ptr = alloc_result_info.pMappedData;

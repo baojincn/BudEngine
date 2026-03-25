@@ -1,10 +1,18 @@
-#include "src/graphics/bud.ml_passes.hpp"
+﻿#include "src/graphics/bud.ml_passes.hpp"
 #include "src/io/bud.io.hpp"
 #include <iostream>
 
 namespace bud::graphics {
     void OccluderSelectionPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
-        if (!rhi || !asset_manager) return;
+        if (!rhi || !asset_manager) {
+            std::string err = std::format("OccluderSelectionPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return;
+#endif
+        }
         
         load_shaders_async(asset_manager, { "src/shaders/ml_identity.comp.spv" }, [this, rhi](const auto& shaders) {
             ComputePipelineDesc desc{};
@@ -17,7 +25,15 @@ namespace bud::graphics {
     }
 
     void OccluderSelectionPass::add_to_graph(RenderGraph& rg, RGHandle input_buffer, RGHandle output_buffer, uint32_t count) {
-        if (!pipeline) return;
+        if (!pipeline) {
+            std::string err = "OccluderSelectionPass::add_to_graph called with null pipeline";
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return;
+#endif
+        }
 
         rg.add_pass("Occluder Selection Pass",
             [&](RGBuilder& builder) {

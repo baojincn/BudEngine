@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vector>
 #include <mutex>
@@ -35,8 +35,12 @@ namespace bud::graphics {
 							   std::function<void(std::vector<std::vector<char>>)> on_loaded);
 
 	public:
-		virtual ~RenderPass() = default;
-		bool is_ready() const { return pipeline != nullptr; }
+        virtual ~RenderPass() = default;
+        bool is_ready() const {
+            if (pipeline != nullptr)
+                return true;
+            return false;
+        }
 		void shutdown(RHI* rhi) override;
 	};
 
@@ -149,7 +153,11 @@ namespace bud::graphics {
 		ImVec2 framebuffer_scale{ 1.0f, 1.0f };
 		std::vector<UIDrawListSnapshot> lists;
 
-		bool has_data() const { return !lists.empty(); }
+        bool has_data() const {
+            if (!lists.empty())
+                return true;
+            return false;
+        }
 
 		uint32_t total_vtx_count() const {
 			uint32_t total = 0;

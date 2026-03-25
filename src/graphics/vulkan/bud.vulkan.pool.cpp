@@ -1,4 +1,4 @@
-#include <vulkan/vulkan.h>
+﻿#include <vulkan/vulkan.h>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -66,7 +66,15 @@ namespace bud::graphics::vulkan {
     }
 
     void VulkanResourcePool::release_texture(Texture* texture) {
-        if (!texture) return;
+        if (!texture) {
+            std::string err = std::format("VulkanResourcePool::release_texture called with null texture");
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return;
+#endif
+        }
 
         auto vk_tex = static_cast<VulkanTexture*>(texture);
 
@@ -96,7 +104,8 @@ namespace bud::graphics::vulkan {
     }
 
     void VulkanResourcePool::destroy_vulkan_objects(VulkanTexture* tex) {
-        if (!tex) return;
+        if (!tex)
+            return;
         for (auto v : tex->layer_views) {
             if (v) vkDestroyImageView(device, v, nullptr);
         }

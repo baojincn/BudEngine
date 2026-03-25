@@ -1,4 +1,4 @@
-#include "src/graphics/bud.graphics.scene.hpp"
+﻿#include "src/graphics/bud.graphics.scene.hpp"
 #include <bit>
 
 #include "src/threading/bud.threading.hpp"
@@ -227,10 +227,12 @@ namespace bud::graphics {
 	bool RenderScene::intersect_scene(const bud::math::AABB& aabb) const {
 		if (bvh_root == ~0u) {
 			size_t count = size();
-			for (size_t i = 0; i < count; ++i) {
-				if (world_aabbs[i].intersects(aabb)) return true;
-			}
-			return false;
+            for (size_t i = 0; i < count; ++i) {
+                if (world_aabbs[i].intersects(aabb)) {
+                    return true;
+                }
+            }
+            return false;
 		}
 
 		std::vector<uint32_t> stack;
@@ -243,14 +245,16 @@ namespace bud::graphics {
 
 			const auto& node = bvh_nodes[node_idx];
 			if (node.aabb.intersects(aabb)) {
-				if (node.is_leaf) {
-					// Need to check actual intersection since BVH AABB might be slightly larger or represent multiple items
-					// But for LBVH, leaf is one instance.
-					if (world_aabbs[node.instance_index].intersects(aabb)) return true;
-				} else {
-					stack.push_back(node.left_child);
-					stack.push_back(node.right_child);
-				}
+                    if (node.is_leaf) {
+                        // Need to check actual intersection since BVH AABB might be slightly larger or represent multiple items
+                        // But for LBVH, leaf is one instance.
+                        if (world_aabbs[node.instance_index].intersects(aabb)) {
+                            return true;
+                        }
+                    } else {
+                        stack.push_back(node.left_child);
+                        stack.push_back(node.right_child);
+                    }
 			}
 		}
 

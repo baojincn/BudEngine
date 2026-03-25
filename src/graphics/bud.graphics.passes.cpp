@@ -74,8 +74,16 @@ namespace bud::graphics {
 		}
 	}
 
-	void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
-		if (!rhi || !asset_manager) return;
+    void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+        if (!rhi || !asset_manager) {
+            std::string err = std::format("HiZCullingPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return;
+#endif
+        }
 
 		load_shaders_async(asset_manager, { "src/shaders/hiz_cull.comp.spv" }, [this, rhi](const auto& shaders) {
 			ComputePipelineDesc desc;
@@ -87,8 +95,16 @@ namespace bud::graphics {
 		});
 	}
 
-	RGHandle HiZCullingPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, RGHandle hiz_pyramid, const SceneView& view, size_t instance_count) {
-		if (!pipeline) return {};
+    RGHandle HiZCullingPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, RGHandle hiz_pyramid, const SceneView& view, size_t instance_count) {
+        if (!pipeline) {
+            std::string err = "HiZCullingPass::add_to_graph called with null pipeline";
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return {};
+#endif
+        }
 
 		return render_graph.add_pass("Hi-Z Culling Pass",
 			[=](RGBuilder& builder) {
@@ -107,14 +123,20 @@ namespace bud::graphics {
 				auto stat_buf = render_graph.get_buffer(stats_buffer);
 				auto depth_tex = render_graph.get_texture(hiz_pyramid);
 
-				if (!inst_buf.is_valid() || !ind_buf.is_valid() || !stat_buf.is_valid() || !depth_tex) {
+                if (!inst_buf.is_valid() || !ind_buf.is_valid() || !stat_buf.is_valid() || !depth_tex) {
 					static bool printed = false;
 					if(!printed) {
 						bud::print("[HiZCullingPass] Warning: Missing resources! inst={} ind={} stat={} depth={}", 
 							inst_buf.is_valid(), ind_buf.is_valid(), stat_buf.is_valid(), (bool)depth_tex);
 						printed = true;
 					}
-					return;
+                    std::string err = std::format("HiZCullingPass missing resources: inst={} ind={} stat={} depth={}", inst_buf.is_valid(), ind_buf.is_valid(), stat_buf.is_valid(), (bool)depth_tex);
+                    bud::eprint("{}", err);
+#if defined(_DEBUG)
+                    throw std::runtime_error(err);
+#else
+                    return;
+#endif
 				}
 
 				// Clear stats buffer (all counters = 0)
@@ -147,8 +169,16 @@ namespace bud::graphics {
 		);
 	}
 
-	void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
-		if (!rhi || !asset_manager) return;
+    void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+        if (!rhi || !asset_manager) {
+            std::string err = std::format("HiZMipPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return;
+#endif
+        }
 
 		load_shaders_async(asset_manager, { "src/shaders/hiz_mip.comp.spv" }, [this, rhi](const auto& shaders) {
 			ComputePipelineDesc desc;
@@ -224,8 +254,16 @@ namespace bud::graphics {
 		return *pyramid_h_ptr;
 	}
 
-	void HiZDebugPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
-		if (!rhi || !asset_manager) return;
+    void HiZDebugPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+        if (!rhi || !asset_manager) {
+            std::string err = std::format("HiZDebugPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return;
+#endif
+        }
 		
 		load_shaders_async(asset_manager, { "src/shaders/fullscreen.vert.spv", "src/shaders/hiz_debug.frag.spv" }, [this, rhi](const auto& shaders) {
 			GraphicsPipelineDesc desc;
@@ -267,8 +305,16 @@ namespace bud::graphics {
 		);
 	}
 
-	void ZPrepass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
-		if (!rhi || !asset_manager) return;
+    void ZPrepass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+        if (!rhi || !asset_manager) {
+            std::string err = std::format("ZPrepass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return;
+#endif
+        }
 
 		load_shaders_async(asset_manager, { "src/shaders/zprepass.vert.spv", "src/shaders/zprepass.frag.spv" }, [this, rhi, config](const auto& shaders) {
 			GraphicsPipelineDesc desc;
@@ -298,10 +344,15 @@ namespace bud::graphics {
 		size_t instance_count,
 		bud::graphics::BufferHandle mega_vertex_buffer,
 		bud::graphics::BufferHandle mega_index_buffer) {
-		if (!pipeline) {
-			bud::eprint("[ZPrepass] ERROR: Pipeline is null.");
-			return {};
-		}
+        if (!pipeline) {
+            std::string err = "ZPrepass::add_to_graph pipeline is null";
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return {};
+#endif
+        }
 
 		const size_t max_scene_count = std::min({
 			render_scene.world_matrices.size(),
@@ -311,15 +362,26 @@ namespace bud::graphics {
 			render_scene.flags.size()
 		});
 
-		if (max_scene_count == 0 || sort_list.empty()) {
-			bud::eprint("[ZPrepass] ERROR: RenderScene or sort list is empty.");
-			return {};
-		}
+        if (max_scene_count == 0 || sort_list.empty()) {
+            std::string err = "ZPrepass::add_to_graph empty scene or sort list";
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return {};
+#endif
+        }
 
 		const auto* backbuffer_tex = render_graph.get_texture(backbuffer);
-		if (!backbuffer_tex || backbuffer_tex->width == 0 || backbuffer_tex->height == 0) {
-			return {};
-		}
+        if (!backbuffer_tex || backbuffer_tex->width == 0 || backbuffer_tex->height == 0) {
+            std::string err = std::format("ZPrepass::add_to_graph invalid backbuffer: tex={} w={} h={}", (void*)backbuffer_tex, backbuffer_tex ? backbuffer_tex->width : 0, backbuffer_tex ? backbuffer_tex->height : 0);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return {};
+#endif
+        }
 
 		// instance_count = exploded submesh draw count; sort_list is sized to match.
 		// max_scene_count guards accessing render_scene arrays, but entity_index in

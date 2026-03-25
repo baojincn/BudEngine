@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <memory>
 #include <vector>
@@ -21,8 +21,14 @@ namespace bud::graphics {
 		uint32_t mesh_id;
 		uint32_t material_id;
 
-		static MeshAssetHandle invalid() { return { invalid_id, invalid_id }; }
-		bool is_valid() const { return mesh_id != invalid_id; }
+        static MeshAssetHandle invalid() {
+            return { invalid_id, invalid_id };
+        }
+        bool is_valid() const {
+            if (mesh_id != invalid_id)
+                return true;
+            return false;
+        }
 	};
 
 	class Renderer {

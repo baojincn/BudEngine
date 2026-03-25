@@ -1,4 +1,4 @@
-#include "src/graphics/bud.graphics.graph.hpp"
+﻿#include "src/graphics/bud.graphics.graph.hpp"
 
 #include <iostream>
 
@@ -71,15 +71,29 @@ namespace bud::graphics {
 	}
 
 	Texture* RenderGraph::get_texture(RGHandle handle) const {
-		if (handle.id == 0 || handle.id >= resources.size())
+		if (handle.id == 0 || handle.id >= resources.size()) {
+			std::string err = std::format("RenderGraph::get_texture invalid handle: id={} size={}", handle.id, resources.size());
+			bud::eprint("{}", err);
+#if defined(_DEBUG)
+			throw std::runtime_error(err);
+#else
 			return nullptr;
+#endif
+		}
 
 		return resources[handle.id].physical_texture;
 	}
 
 	bud::graphics::BufferHandle RenderGraph::get_buffer(RGHandle handle) const {
-		if (handle.id == 0 || handle.id >= resources.size())
+		if (handle.id == 0 || handle.id >= resources.size()) {
+			std::string err = std::format("RenderGraph::get_buffer invalid handle: id={} size={}", handle.id, resources.size());
+			bud::eprint("{}", err);
+#if defined(_DEBUG)
+			throw std::runtime_error(err);
+#else
 			return bud::graphics::BufferHandle{};
+#endif
+		}
 
 		return resources[handle.id].physical_buffer;
 	}

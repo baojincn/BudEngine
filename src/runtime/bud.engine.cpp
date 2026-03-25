@@ -16,6 +16,7 @@
 #include "src/core/bud.asset.types.hpp"
 #include "src/ui/bud.stats.ui.hpp"
 #include "src/core/bud.logger.hpp"
+#include "src/platform/crash_handler.hpp"
 
 #include "src/runtime/bud.engine.hpp"
 #include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
@@ -29,6 +30,9 @@ namespace bud::engine {
 	BudEngine::BudEngine(const bud::graphics::EngineConfig config) : engine_config(config) {
 
 		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height);
+		// Install platform crash handler as early as possible so crashes during
+		// initialization produce minidumps for post-mortem analysis.
+		bud::platform::install_crash_handler();
 		task_scheduler = std::make_unique<bud::threading::TaskScheduler>();
 
 		// Create engine-owned logger and inject TaskScheduler for async log writes.

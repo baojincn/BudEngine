@@ -23,6 +23,7 @@
 
 #include "src/core/bud.math.hpp"
 #include "src/platform/bud.platform.hpp"
+#include "src/core/bud.logger.hpp"
 #include "src/threading/bud.threading.hpp"
 #include "src/graphics/bud.graphics.types.hpp"
 #include "src/graphics/vulkan/bud.vulkan.types.hpp"
@@ -475,7 +476,15 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
 }
 
 void VulkanRHI::destroy_buffer(bud::graphics::BufferHandle block) {
-    if (!block.is_valid()) return;
+    if (!block.is_valid()) {
+        std::string err = std::format("destroy_buffer called with invalid handle: valid=false");
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
     // Defer actual destruction until the frame that is safe (avoids freeing resources still in flight)
     if (memory_allocator) {
         memory_allocator->defer_free(block, current_frame);
@@ -492,18 +501,23 @@ void VulkanRHI::destroy_buffer(bud::graphics::BufferHandle block) {
     }
 }
 
-// Helper to create shader module
+// Helper to create shader module with emergency diagnostics
 VkShaderModule create_shader_module(VkDevice device, const std::vector<char>& code) {
-	VkShaderModuleCreateInfo createInfo{};
-	createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-	createInfo.codeSize = code.size();
-	createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+    VkShaderModuleCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    createInfo.codeSize = code.size();
+    createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
 
-	VkShaderModule shaderModule;
-	if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-		throw std::runtime_error("failed to create shader module!");
-	}
-	return shaderModule;
+
+    VkShaderModule shaderModule = VK_NULL_HANDLE;
+    VkResult r = vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule);
+    if (r != VK_SUCCESS) {
+        // Throw with context so callers can decide how to log/handle it.
+        std::string err = std::format("vkCreateShaderModule failed: code={} worker={}", (int)r, bud::threading::current_worker_index());
+        throw std::runtime_error(err);
+    }
+
+    return shaderModule;
 }
 
 void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
@@ -978,25 +992,47 @@ void VulkanRHI::cmd_end_render_pass(CommandHandle cmd) {
 }
 
 void VulkanRHI::cmd_copy_buffer(CommandHandle cmd, bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size) {
-	if (!src.is_valid() || !dst.is_valid()) {
-		bud::eprint("[Vulkan][cmd_copy_buffer] invalid handle: src_valid={}, dst_valid={}, size={}", src.is_valid(), dst.is_valid(), size);
-		return;
-	}
+    if (!src.is_valid() || !dst.is_valid())
+    {
+        std::string err = std::format("cmd_copy_buffer invalid handle: src_valid={} dst_valid={} size={}", src.is_valid(), dst.is_valid(), size);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
 
-	auto* vk_src = static_cast<bud::graphics::vulkan::VulkanBuffer*>(src.internal_state);
-	auto* vk_dst = static_cast<bud::graphics::vulkan::VulkanBuffer*>(dst.internal_state);
-	if (!vk_src || !vk_dst) {
-		bud::eprint("[Vulkan][cmd_copy_buffer] null internal_state: vk_src={}, vk_dst={}, size={}", (void*)vk_src, (void*)vk_dst, size);
-		return;
-	}
-	if (!vk_src->buffer || !vk_dst->buffer) {
-		bud::eprint("[Vulkan][cmd_copy_buffer] null VkBuffer: src_buf={}, dst_buf={}, src_size={}, dst_size={}, src_offset={}, dst_offset={}",
-			(void*)vk_src->buffer, (void*)vk_dst->buffer, src.size, dst.size, src.offset, dst.offset);
-		return;
-	}
-	VkBufferCopy copy_region{};
-	copy_region.size = size;
-	vkCmdCopyBuffer(static_cast<VkCommandBuffer>(cmd), vk_src->buffer, vk_dst->buffer, 1, &copy_region);
+    auto* vk_src = static_cast<bud::graphics::vulkan::VulkanBuffer*>(src.internal_state);
+    auto* vk_dst = static_cast<bud::graphics::vulkan::VulkanBuffer*>(dst.internal_state);
+    if (!vk_src || !vk_dst)
+    {
+        std::string err = std::format("cmd_copy_buffer null internal_state: vk_src={} vk_dst={} size={}", (void*)vk_src, (void*)vk_dst, size);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
+
+    if (!vk_src->buffer || !vk_dst->buffer)
+    {
+        std::string err = std::format("cmd_copy_buffer null VkBuffer: src_buf={} dst_buf={} src_size={} dst_size={} src_offset={} dst_offset={}",
+                                      (void*)vk_src->buffer, (void*)vk_dst->buffer, src.size, dst.size, src.offset, dst.offset);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
+
+    VkBufferCopy copy_region{};
+    copy_region.srcOffset = static_cast<VkDeviceSize>(src.offset);
+    copy_region.dstOffset = static_cast<VkDeviceSize>(dst.offset);
+    copy_region.size = size;
+    vkCmdCopyBuffer(static_cast<VkCommandBuffer>(cmd), vk_src->buffer, vk_dst->buffer, 1, &copy_region);
 }
 
 void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) {
@@ -1059,9 +1095,25 @@ void VulkanRHI::cmd_bind_pipeline(CommandHandle cmd, void* pipeline) {
 }
 
 void VulkanRHI::cmd_bind_vertex_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer) {
-    if (!buffer.is_valid()) return;
+    if (!buffer.is_valid()) {
+        std::string err = std::format("cmd_bind_vertex_buffer invalid BufferHandle: valid={} offset={} size={}", buffer.is_valid(), buffer.offset, buffer.size);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
     auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
-    if (!vk_buf || !vk_buf->buffer) return;
+    if (!vk_buf || !vk_buf->buffer) {
+        std::string err = std::format("cmd_bind_vertex_buffer null internal VulkanBuffer or VkBuffer: vk_buf={} vk_buffer={}", (void*)vk_buf, vk_buf ? (void*)vk_buf->buffer : nullptr);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
     VkDeviceSize offsets[] = { static_cast<VkDeviceSize>(buffer.offset) };
 
     // Diagnostic: log vertex bind info
@@ -1071,9 +1123,25 @@ void VulkanRHI::cmd_bind_vertex_buffer(CommandHandle cmd, bud::graphics::BufferH
 }
 
 void VulkanRHI::cmd_bind_index_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer) {
-    if (!buffer.is_valid()) return;
+    if (!buffer.is_valid()) {
+        std::string err = std::format("cmd_bind_index_buffer invalid BufferHandle: valid={} offset={} size={}", buffer.is_valid(), buffer.offset, buffer.size);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
     auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
-    if (!vk_buf || !vk_buf->buffer) return;
+    if (!vk_buf || !vk_buf->buffer) {
+        std::string err = std::format("cmd_bind_index_buffer null internal VulkanBuffer or VkBuffer: vk_buf={} vk_buffer={}", (void*)vk_buf, vk_buf ? (void*)vk_buf->buffer : nullptr);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
 
     // Diagnostic: log index bind info
     //bud::print("[Vulkan][bind_index] VkBuffer={} byteOffset={} mapped_ptr={}", (void*)vk_buf->buffer, (uint64_t)buffer.offset, vk_buf->mapped_ptr);
@@ -1098,8 +1166,16 @@ void VulkanRHI::cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32
 }
 
 void VulkanRHI::cmd_draw_indexed_indirect(CommandHandle cmd, bud::graphics::BufferHandle buffer, uint64_t offset, uint32_t draw_count, uint32_t stride) {
-	if (!buffer.is_valid()) return;
-	auto* vk_buf = static_cast<bud::graphics::vulkan::VulkanBuffer*>(buffer.internal_state);
+    if (!buffer.is_valid()) {
+        std::string err = std::format("cmd_draw_indexed_indirect invalid handle: valid={} offset={} size={}", buffer.is_valid(), offset, buffer.size);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
+    auto* vk_buf = static_cast<bud::graphics::vulkan::VulkanBuffer*>(buffer.internal_state);
 	vkCmdDrawIndexedIndirect(static_cast<VkCommandBuffer>(cmd), vk_buf->buffer, offset, draw_count, stride);
 	current_stats.draw_calls += draw_count; 
 }
@@ -1670,7 +1746,11 @@ void VulkanRHI::transition_image_layout_immediate(VkImage image, VkFormat format
         dstAccess = VK_ACCESS_2_SHADER_READ_BIT;
     }
 
-    sync2::cmd_image_barrier2(commandBuffer, image, aspect, 0, 1, 0, 1, old_layout, new_layout, srcStage, srcAccess, dstStage, dstAccess);
+    sync2::cmd_image_barrier2(commandBuffer, image, aspect,
+                              0, 1, 0, 1,
+                              old_layout, new_layout,
+                              srcStage, srcAccess,
+                              dstStage, dstAccess);
 
     this->end_single_time_commands(commandBuffer);
 }
@@ -1697,11 +1777,16 @@ void VulkanRHI::copy_buffer_to_image(VkImage image, VkBuffer buffer, uint64_t bu
 
 void VulkanRHI::copy_buffer_immediate(bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size) {
 	VkCommandBuffer cmd = this->begin_single_time_commands();
-	if (!src.is_valid() || !dst.is_valid()) {
-		bud::eprint("[Vulkan][copy_buffer_immediate] invalid handle: src_valid={}, dst_valid={}, size={}", src.is_valid(), dst.is_valid(), size);
-		this->end_single_time_commands(cmd);
-		return;
-	}
+    if (!src.is_valid() || !dst.is_valid()) {
+        std::string err = std::format("copy_buffer_immediate invalid handle: src_valid={} dst_valid={} size={}", src.is_valid(), dst.is_valid(), size);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        this->end_single_time_commands(cmd);
+        return;
+#endif
+    }
 
 	VkBufferCopy copy_region{};
     // Respect BufferHandle offsets (sub-allocations in staging pages)
@@ -1712,38 +1797,60 @@ void VulkanRHI::copy_buffer_immediate(bud::graphics::BufferHandle src, bud::grap
 	auto* vk_src = static_cast<bud::graphics::vulkan::VulkanBuffer*>(src.internal_state);
 	auto* vk_dst = static_cast<bud::graphics::vulkan::VulkanBuffer*>(dst.internal_state);
 	if (!vk_src || !vk_dst) {
-		bud::eprint("[Vulkan][copy_buffer_immediate] null internal_state: vk_src={}, vk_dst={}, size={}", (void*)vk_src, (void*)vk_dst, size);
+		std::string err = std::format("copy_buffer_immediate null internal_state: vk_src={} vk_dst={} size={}", (void*)vk_src, (void*)vk_dst, size);
+		bud::eprint("{}", err);
+#if defined(_DEBUG)
+		this->end_single_time_commands(cmd);
+		throw std::runtime_error(err);
+#else
 		this->end_single_time_commands(cmd);
 		return;
+#endif
 	}
 	if (!vk_src->buffer || !vk_dst->buffer) {
-		bud::eprint("[Vulkan][copy_buffer_immediate] null VkBuffer: src_buf={}, dst_buf={}, src_size={}, dst_size={}, src_offset={}, dst_offset={}",
-			(void*)vk_src->buffer, (void*)vk_dst->buffer, src.size, dst.size, src.offset, dst.offset);
+		std::string err = std::format("copy_buffer_immediate null VkBuffer: src_buf={} dst_buf={} src_size={} dst_size={} src_offset={} dst_offset={}",
+							(void*)vk_src->buffer, (void*)vk_dst->buffer, src.size, dst.size, src.offset, dst.offset);
+		bud::eprint("{}", err);
+#if defined(_DEBUG)
+		this->end_single_time_commands(cmd);
+		throw std::runtime_error(err);
+#else
 		this->end_single_time_commands(cmd);
 		return;
+#endif
 	}
 
 	vkCmdCopyBuffer(cmd, vk_src->buffer, vk_dst->buffer, 1, &copy_region);
 
-    // Diagnostic: log successful copy details
-    //bud::print("[Vulkan][copy_buffer_immediate] src_buf={} dst_buf={} srcOffset={} dstOffset={} size={}",
-    //    (void*)vk_src->buffer, (void*)vk_dst->buffer, (uint64_t)copy_region.srcOffset, (uint64_t)copy_region.dstOffset, (uint64_t)copy_region.size);
+	// Diagnostic: log successful copy details
+	//bud::print("[Vulkan][copy_buffer_immediate] src_buf={} dst_buf={} srcOffset={} dstOffset={} size=",
+	//    (void*)vk_src->buffer, (void*)vk_dst->buffer, (uint64_t)copy_region.srcOffset, (uint64_t)copy_region.dstOffset, (uint64_t)copy_region.size);
 
 	this->end_single_time_commands(cmd);
 }
 
 void VulkanRHI::copy_buffer_immediate_offset(bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) {
-	if (!src.is_valid() || !dst.is_valid()) {
-		bud::eprint("[Vulkan][copy_buffer_immediate_offset] invalid handle: src_valid={}, dst_valid={}, size={}", src.is_valid(), dst.is_valid(), size);
-		return;
-	}
+    if (!src.is_valid() || !dst.is_valid()) {
+        std::string err = std::format("copy_buffer_immediate_offset invalid handle: src_valid={} dst_valid={} size={}", src.is_valid(), dst.is_valid(), size);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
 
-	auto* vk_src = static_cast<bud::graphics::vulkan::VulkanBuffer*>(src.internal_state);
-	auto* vk_dst = static_cast<bud::graphics::vulkan::VulkanBuffer*>(dst.internal_state);
-	if (!vk_src || !vk_dst || !vk_src->buffer || !vk_dst->buffer) {
-		bud::eprint("[Vulkan][copy_buffer_immediate_offset] null VkBuffer handles");
-		return;
-	}
+    auto* vk_src = static_cast<bud::graphics::vulkan::VulkanBuffer*>(src.internal_state);
+    auto* vk_dst = static_cast<bud::graphics::vulkan::VulkanBuffer*>(dst.internal_state);
+    if (!vk_src || !vk_dst || !vk_src->buffer || !vk_dst->buffer) {
+        std::string err = std::format("copy_buffer_immediate_offset null VkBuffer handles: vk_src={} vk_dst={}", (void*)vk_src, (void*)vk_dst);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
 
 	VkCommandBuffer cmd = this->begin_single_time_commands();
 
@@ -1764,14 +1871,24 @@ void VulkanRHI::copy_buffer_immediate_offset(bud::graphics::BufferHandle src, bu
 
 void VulkanRHI::cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) {
     if (!src || !dst) {
-        bud::eprint("[Vulkan][cmd_copy_image] null texture pointer(s)");
+        std::string err = std::format("cmd_copy_image null texture pointer(s): src={} dst={}", (void*)src, (void*)dst);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
         return;
+#endif
     }
     VulkanTexture* vk_src = static_cast<VulkanTexture*>(src);
     VulkanTexture* vk_dst = static_cast<VulkanTexture*>(dst);
     if (!vk_src || !vk_src->image || !vk_dst || !vk_dst->image) {
-        bud::eprint("[Vulkan][cmd_copy_image] invalid VulkanTexture or VkImage");
+        std::string err = std::format("cmd_copy_image invalid VulkanTexture or VkImage: vk_src={} vk_dst={}", (void*)vk_src, (void*)vk_dst);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
         return;
+#endif
     }
 
     VkImageCopy region{};
@@ -1796,9 +1913,9 @@ void VulkanRHI::cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) {
     region.extent.depth = 1;
 
     vkCmdCopyImage(static_cast<VkCommandBuffer>(cmd),
-        vk_src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        vk_dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        1, &region);
+		vk_src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		vk_dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		1, &region);
 }
 
 void VulkanRHI::cmd_blit_image(CommandHandle cmd, Texture* src, Texture* dst) {
@@ -1829,15 +1946,25 @@ void VulkanRHI::cmd_blit_image(CommandHandle cmd, Texture* src, Texture* dst) {
 
 void VulkanRHI::cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) {
 	// Not used for GPU-to-GPU copy, this seems to be for CPU-to-GPU copy via cmd buffer (vkCmdUpdateBuffer)
-	if (!dst.is_valid()) {
-		bud::eprint("[Vulkan][cmd_copy_to_buffer] invalid handle: dst_valid=false, offset={}, size={}", offset, size);
-		return;
-	}
-	auto* vk_dst = static_cast<VulkanBuffer*>(dst.internal_state);
-	if (!vk_dst || !vk_dst->buffer) {
-		bud::eprint("[Vulkan][cmd_copy_to_buffer] null destination buffer: vk_dst={}, dst_buf={}, offset={}, size={}", (void*)vk_dst, vk_dst ? (void*)vk_dst->buffer : nullptr, offset, size);
-		return;
-	}
+    if (!dst.is_valid()) {
+        std::string err = std::format("cmd_copy_to_buffer invalid handle: dst_valid=false, offset={}, size={}", offset, size);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
+    auto* vk_dst = static_cast<VulkanBuffer*>(dst.internal_state);
+    if (!vk_dst || !vk_dst->buffer) {
+        std::string err = std::format("cmd_copy_to_buffer null destination buffer: vk_dst={} dst_buf={} offset={} size={}", (void*)vk_dst, vk_dst ? (void*)vk_dst->buffer : nullptr, offset, size);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
 	vkCmdUpdateBuffer(static_cast<VkCommandBuffer>(cmd), vk_dst->buffer, offset, size, data);
 }
 

@@ -218,9 +218,21 @@ void log_error(const std::string& msg) {
 }
 
 std::optional<std::string> get_env_var(const std::string& name) {
+#if defined(_WIN32)
+    // Use _dupenv_s on Windows to avoid deprecation warnings for getenv
+    char* buffer = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&buffer, &len, name.c_str()) == 0 && buffer) {
+        std::string val(buffer);
+        free(buffer);
+        return val;
+    }
+    return std::nullopt;
+#else
     const char* v = std::getenv(name.c_str());
     if (!v) return std::nullopt;
     return std::string(v);
+#endif
 }
 
 } // namespace bud::tool_support

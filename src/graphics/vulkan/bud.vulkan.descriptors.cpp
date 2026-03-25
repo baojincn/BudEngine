@@ -185,7 +185,8 @@ void bud::graphics::vulkan::register_descriptor_set_layout(VkDescriptorSetLayout
 
 const bud::graphics::vulkan::DescriptorSetLayoutInfo* bud::graphics::vulkan::get_descriptor_set_layout_info(VkDescriptorSetLayout layout) {
     auto it = g_layout_registry.find(layout);
-    if (it == g_layout_registry.end()) return nullptr;
+    if (it == g_layout_registry.end())
+        return nullptr;
     return &it->second;
 }
 
