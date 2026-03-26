@@ -270,7 +270,13 @@ namespace bud::graphics::vulkan {
         VmaAllocationInfo alloc_result_info;
         if (vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info) != VK_SUCCESS) {
             delete vk_buf;
+            std::string err = std::format("VulkanMemoryAllocator::alloc_gpu vmaCreateBuffer failed (size={} usage={})", size, (int)buffer_info.usage);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
             return {};
+#endif
         }
 
         vk_buf->mapped_ptr = alloc_result_info.pMappedData;
@@ -301,7 +307,13 @@ namespace bud::graphics::vulkan {
         VmaAllocationInfo alloc_result_info;
         if (vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info) != VK_SUCCESS) {
             delete vk_buf;
+            std::string err = std::format("VulkanMemoryAllocator::alloc_persistent vmaCreateBuffer failed (size={} usage={})", size, (int)buffer_info.usage);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
             return {};
+#endif
         }
 
         vk_buf->mapped_ptr = alloc_result_info.pMappedData;

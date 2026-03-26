@@ -155,7 +155,13 @@ namespace bud::graphics::vulkan {
         alloc_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
         if (vmaCreateImage(allocator->get_vma_allocator(), &image_info, &alloc_info, &tex->image, &tex->allocation, nullptr) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create pooled image");
+            std::string err = std::format("VulkanResourcePool::create_texture_smart failed to create image: {}x{} fmt={} layers={}", desc.width, desc.height, (int)desc.format, desc.array_layers);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return nullptr;
+#endif
         }
         // bud::print("[Pool] Created VkImage {} ({}x{} fmt={} layers={})", (void*)tex->image, desc.width, desc.height, (int)desc.format, desc.array_layers);
 
@@ -181,7 +187,15 @@ namespace bud::graphics::vulkan {
         }
 
         if (vkCreateImageView(device, &view_info, nullptr, &tex->view) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create image view");
+            std::string err = std::format("VulkanResourcePool::create_texture_smart failed to create base image view for image {}", (void*)tex->image);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            // Clean up image allocation
+            if (tex->image) vmaDestroyImage(allocator->get_vma_allocator(), tex->image, tex->allocation);
+            return nullptr;
+#endif
         }
 
         // 6. [CSM] Create Layer Views (for rendering to individual layers)
@@ -198,7 +212,15 @@ namespace bud::graphics::vulkan {
                 layer_view_info.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
 
                 if (vkCreateImageView(device, &layer_view_info, nullptr, &tex->layer_views[i]) != VK_SUCCESS) {
-                    throw std::runtime_error("Failed to create layer image view");
+                    std::string err = std::format("VulkanResourcePool::create_texture_smart failed to create layer view {} for image {}", i, (void*)tex->image);
+                    bud::eprint("{}", err);
+#if defined(_DEBUG)
+                    throw std::runtime_error(err);
+#else
+                    // cleanup
+                    destroy_vulkan_objects(tex.get());
+                    return nullptr;
+#endif
                 }
             }
         }
@@ -217,7 +239,14 @@ namespace bud::graphics::vulkan {
                 mip_view_info.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
 
                 if (vkCreateImageView(device, &mip_view_info, nullptr, &tex->mip_views[i]) != VK_SUCCESS) {
-                    throw std::runtime_error("Failed to create mip image view");
+                    std::string err = std::format("VulkanResourcePool::create_texture_smart failed to create mip view {} for image {}", i, (void*)tex->image);
+                    bud::eprint("{}", err);
+#if defined(_DEBUG)
+                    throw std::runtime_error(err);
+#else
+                    destroy_vulkan_objects(tex.get());
+                    return nullptr;
+#endif
                 }
             }
         }

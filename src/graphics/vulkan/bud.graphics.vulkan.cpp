@@ -463,7 +463,13 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
     VkResult create_result = vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info);
     if (create_result != VK_SUCCESS) {
         delete vk_buf;
+        std::string err = std::format("VulkanRHI::create_gpu_buffer vmaCreateBuffer failed: size={} usage={} result={}", size, (int)buffer_info.usage, (int)create_result);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
         return {};
+#endif
     }
     vk_buf->mapped_ptr = alloc_result_info.pMappedData;
     vk_buf->size = size;
@@ -865,10 +871,18 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	submit_info.signalSemaphoreCount = 1;
 	submit_info.pSignalSemaphores = signal_semaphores;
 
-	VkResult submit_result = vkQueueSubmit(graphics_queue, 1, &submit_info, frames[current_frame].in_flight_fence);
-	if (submit_result != VK_SUCCESS) {
-		throw std::runtime_error(std::format("failed to submit draw command buffer! Error: {}", (int)submit_result));
-	}
+    VkResult submit_result = vkQueueSubmit(graphics_queue, 1, &submit_info, frames[current_frame].in_flight_fence);
+    if (submit_result != VK_SUCCESS) {
+        std::string err = std::format("VulkanRHI::end_frame vkQueueSubmit failed: {}", (int)submit_result);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        // In Release, skip presenting this frame but keep running
+        this->end_single_time_commands(VK_NULL_HANDLE); // no-op safe call
+        return;
+#endif
+    }
 
 	VkPresentInfoKHR present_info{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
 	present_info.waitSemaphoreCount = 1;
@@ -878,12 +892,19 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	present_info.pSwapchains = swap_chains;
 	present_info.pImageIndices = &current_image_index;
 
-	VkResult present_result = vkQueuePresentKHR(present_queue, &present_info);
-	if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
-		swapchain_out_of_date.store(true, std::memory_order_release);
-	} else if (present_result != VK_SUCCESS) {
-		throw std::runtime_error("failed to present swap chain image!");
-	}
+    VkResult present_result = vkQueuePresentKHR(present_queue, &present_info);
+    if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
+        swapchain_out_of_date.store(true, std::memory_order_release);
+    } else if (present_result != VK_SUCCESS) {
+        std::string err = std::format("VulkanRHI::end_frame vkQueuePresentKHR failed: {}", (int)present_result);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        swapchain_out_of_date.store(true, std::memory_order_release);
+        return;
+#endif
+    }
 
 	current_frame = (current_frame + 1) % max_frames_in_flight;
 }
@@ -1570,36 +1591,77 @@ VkCommandBuffer VulkanRHI::begin_single_time_commands() {
 	alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 	alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 	// 使用第0帧的命令池（这在多线程渲染时可能不安全，但在初始化阶段是安全的）	
-	alloc_info.commandPool = frames[0].main_command_pool;
+    if (!device) {
+        bud::eprint("VulkanRHI::begin_single_time_commands called but device is null");
+        return VK_NULL_HANDLE;
+    }
+    if (graphics_queue == VK_NULL_HANDLE) {
+        bud::eprint("VulkanRHI::begin_single_time_commands called but graphics_queue is null");
+        return VK_NULL_HANDLE;
+    }
+    if (frames.empty() || frames[0].main_command_pool == VK_NULL_HANDLE) {
+        bud::eprint("VulkanRHI::begin_single_time_commands: invalid command pool");
+        return VK_NULL_HANDLE;
+    }
+    alloc_info.commandPool = frames[0].main_command_pool;
 	alloc_info.commandBufferCount = 1;
 
 	VkCommandBuffer command_buffer;
-	vkAllocateCommandBuffers(device, &alloc_info, &command_buffer);
+    VkResult r = vkAllocateCommandBuffers(device, &alloc_info, &command_buffer);
+    if (r != VK_SUCCESS) {
+        bud::eprint("VulkanRHI::begin_single_time_commands vkAllocateCommandBuffers failed: {}", (int)r);
+        return VK_NULL_HANDLE;
+    }
 
-	VkCommandBufferBeginInfo begin_info{};
-	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VkCommandBufferBeginInfo begin_info{};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-	vkBeginCommandBuffer(command_buffer, &begin_info);
+    if (vkBeginCommandBuffer(command_buffer, &begin_info) != VK_SUCCESS) {
+        bud::eprint("VulkanRHI::begin_single_time_commands vkBeginCommandBuffer failed");
+        // Free the allocated command buffer to avoid leaks
+        vkFreeCommandBuffers(device, frames[0].main_command_pool, 1, &command_buffer);
+        return VK_NULL_HANDLE;
+    }
 
-	return command_buffer;
+    return command_buffer;
 }
 
 void VulkanRHI::end_single_time_commands(VkCommandBuffer command_buffer) {
-	vkEndCommandBuffer(command_buffer);
+    if (command_buffer == VK_NULL_HANDLE) {
+        bud::eprint("VulkanRHI::end_single_time_commands called with VK_NULL_HANDLE");
+        return;
+    }
 
-	VkSubmitInfo submit_info{};
-	submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submit_info.commandBufferCount = 1;
-	submit_info.pCommandBuffers = &command_buffer;
+    if (!device || graphics_queue == VK_NULL_HANDLE) {
+        bud::eprint("VulkanRHI::end_single_time_commands missing device or graphics_queue");
+        return;
+    }
 
-	// 提交并等待队列空闲（同步阻塞）
-	if (vkQueueSubmit(graphics_queue, 1, &submit_info, VK_NULL_HANDLE) != VK_SUCCESS) {
-		bud::eprint("[Vulkan] Failed to submit single time command!");
-	}
-	vkQueueWaitIdle(graphics_queue);
+    if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS) {
+        bud::eprint("VulkanRHI::end_single_time_commands vkEndCommandBuffer failed");
+        return;
+    }
 
-	vkFreeCommandBuffers(device, frames[0].main_command_pool, 1, &command_buffer);
+    VkSubmitInfo submit_info{};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &command_buffer;
+
+    // 提交并等待队列空闲（同步阻塞）
+    VkResult r = vkQueueSubmit(graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    if (r != VK_SUCCESS) {
+        bud::eprint("[Vulkan] Failed to submit single time command! result={}", (int)r);
+    } else {
+        vkQueueWaitIdle(graphics_queue);
+    }
+
+    if (!frames.empty() && frames[0].main_command_pool != VK_NULL_HANDLE) {
+        vkFreeCommandBuffers(device, frames[0].main_command_pool, 1, &command_buffer);
+    } else {
+        // Best effort free: if pool is not available, skip to avoid crash
+        bud::eprint("VulkanRHI::end_single_time_commands cannot free command buffer: invalid command pool");
+    }
 }
 
 

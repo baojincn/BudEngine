@@ -115,13 +115,23 @@ namespace bud::graphics {
 				builder.write(stats_buffer, ResourceState::UnorderedAccess);
 				return RGHandle{}; 
 			},
-			[=, &render_graph, this](RHI* rhi, CommandHandle cmd) {
-				if (!pipeline) return;
+		[=, &render_graph, this](RHI* rhi, CommandHandle cmd) {
+			if (!pipeline) return;
 
-				auto inst_buf = render_graph.get_buffer(instance_buffer);
-				auto ind_buf = render_graph.get_buffer(indirect_draw_buffer);
-				auto stat_buf = render_graph.get_buffer(stats_buffer);
-				auto depth_tex = render_graph.get_texture(hiz_pyramid);
+			// Defensive: resource lookups may throw in Debug if handles are invalid.
+			bud::graphics::BufferHandle inst_buf{};
+			bud::graphics::BufferHandle ind_buf{};
+			bud::graphics::BufferHandle stat_buf{};
+			Texture* depth_tex = nullptr;
+			try {
+				inst_buf = render_graph.get_buffer(instance_buffer);
+				ind_buf = render_graph.get_buffer(indirect_draw_buffer);
+				stat_buf = render_graph.get_buffer(stats_buffer);
+				depth_tex = render_graph.get_texture(hiz_pyramid);
+			} catch (const std::exception& e) {
+				bud::eprint("[HiZCullingPass] Resource lookup failed: {}", e.what());
+				return;
+			}
 
                 if (!inst_buf.is_valid() || !ind_buf.is_valid() || !stat_buf.is_valid() || !depth_tex) {
 					static bool printed = false;
@@ -193,8 +203,8 @@ namespace bud::graphics {
 	RGHandle HiZMipPass::add_to_graph(RenderGraph& rg, RGHandle depth_buffer, const RenderConfig& config) {
 		if (!pipeline) return {};
 		
-		auto depth_desc = rg.get_texture_desc(depth_buffer);
-		if (depth_desc.width == 0 || depth_desc.height == 0) return {};
+			auto depth_desc = rg.get_texture_desc(depth_buffer);
+			if (depth_desc.width == 0 || depth_desc.height == 0) return {};
 
 		// Create a POT pyramid texture for easy mip generation
 		uint32_t pot_w = 1 << (uint32_t)std::ceil(std::log2((float)depth_desc.width));
@@ -226,14 +236,24 @@ namespace bud::graphics {
 					builder.write(current_pyramid, ResourceState::UnorderedAccess);
 					return current_pyramid;
 				},
-				[=, &rg](RHI* rhi, CommandHandle cmd) {
-					RGHandle current_pyramid = *pyramid_h_ptr;
-					RGHandle src_handle = (i == 0) ? depth_buffer : current_pyramid;
-					
-					uint32_t dst_size = size >> i;
-					rhi->cmd_bind_pipeline(cmd, pipeline);
-					rhi->cmd_bind_compute_texture(cmd, pipeline, 3, rg.get_texture(src_handle), (i == 0) ? 0 : (i - 1), false, (i > 0)); // is_general=true when reading from the pyramid (it's in GENERAL layout)
-					rhi->cmd_bind_compute_texture(cmd, pipeline, 5, rg.get_texture(current_pyramid), i, true);
+		[=, &rg](RHI* rhi, CommandHandle cmd) {
+			RGHandle current_pyramid = *pyramid_h_ptr;
+			RGHandle src_handle = (i == 0) ? depth_buffer : current_pyramid;
+			
+			uint32_t dst_size = size >> i;
+			rhi->cmd_bind_pipeline(cmd, pipeline);
+			// Defensive: fetch textures with try/catch
+			Texture* src_tex = nullptr;
+			Texture* dst_tex = nullptr;
+			try {
+				src_tex = rg.get_texture(src_handle);
+				dst_tex = rg.get_texture(current_pyramid);
+			} catch (const std::exception& e) {
+				bud::eprint("[HiZMipPass] Resource lookup failed: {}", e.what());
+				return;
+			}
+			rhi->cmd_bind_compute_texture(cmd, pipeline, 3, src_tex, (i == 0) ? 0 : (i - 1), false, (i > 0)); // is_general=true when reading from the pyramid (it's in GENERAL layout)
+			rhi->cmd_bind_compute_texture(cmd, pipeline, 5, dst_tex, i, true);
 					
 					struct Push { 
 						bud::math::vec2 out_size;
@@ -372,16 +392,25 @@ namespace bud::graphics {
 #endif
         }
 
-		const auto* backbuffer_tex = render_graph.get_texture(backbuffer);
-        if (!backbuffer_tex || backbuffer_tex->width == 0 || backbuffer_tex->height == 0) {
-            std::string err = std::format("ZPrepass::add_to_graph invalid backbuffer: tex={} w={} h={}", (void*)backbuffer_tex, backbuffer_tex ? backbuffer_tex->width : 0, backbuffer_tex ? backbuffer_tex->height : 0);
-            bud::eprint("{}", err);
+		Texture* backbuffer_tex = nullptr;
+		try {
+			backbuffer_tex = render_graph.get_texture(backbuffer);
+		} catch (const std::exception& e) {
+			bud::eprint("ZPrepass::add_to_graph: failed to get backbuffer texture: {}", e.what());
 #if defined(_DEBUG)
-            throw std::runtime_error(err);
+			throw;
 #else
-            return {};
+			return {};
 #endif
-        }
+		}
+		if (!backbuffer_tex || backbuffer_tex->width == 0 || backbuffer_tex->height == 0) {
+			bud::eprint("ZPrepass::add_to_graph invalid backbuffer: tex={} w={} h={}", (void*)backbuffer_tex, backbuffer_tex ? backbuffer_tex->width : 0, backbuffer_tex ? backbuffer_tex->height : 0);
+#if defined(_DEBUG)
+			throw std::runtime_error("ZPrepass::add_to_graph invalid backbuffer");
+#else
+			return {};
+#endif
+		}
 
 		// instance_count = exploded submesh draw count; sort_list is sized to match.
 		// max_scene_count guards accessing render_scene arrays, but entity_index in
@@ -482,8 +511,16 @@ namespace bud::graphics {
 		has_last_config = false;
 	}
 
-	void CSMShadowPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
-		if (!rhi || !asset_manager) return;
+    void CSMShadowPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+        if (!rhi || !asset_manager) {
+            std::string err = std::format("CSMShadowPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return;
+#endif
+        }
 
 		stored_rhi = rhi;
 		load_shaders_async(asset_manager, { "src/shaders/shadow.vert.spv", "src/shaders/shadow.frag.spv" }, [this, rhi, config](const auto& shaders) {
@@ -585,31 +622,38 @@ namespace bud::graphics {
 		RGHandle static_cache_h;
 		bool valid_cache = config.cache_shadows && static_cache_texture;
 
-		if (valid_cache) {
-			static_cache_h = render_graph.import_texture("StaticShadowCache", static_cache_texture, ResourceState::Undefined);
+                if (valid_cache) {
+                    static_cache_h = render_graph.import_texture("StaticShadowCache", static_cache_texture, ResourceState::Undefined);
 
-			if (need_update) {
-				render_graph.add_pass("CSM Static Update",
-					[&](RGBuilder& builder) {
-						builder.write(static_cache_h, ResourceState::DepthWrite);
-						return static_cache_h;
-					},
-					[=, csm_vis = csm_visible_instances, &render_graph, &render_scene, &meshes, &view](RHI* rhi, CommandHandle cmd) {
-						if (!pipeline) return;
+                    if (need_update) {
+                        render_graph.add_pass("CSM Static Update",
+                            [&](RGBuilder& builder) {
+                                builder.write(static_cache_h, ResourceState::DepthWrite);
+                                return static_cache_h;
+                            },
+                            [=, csm_vis = csm_visible_instances, &render_graph, &render_scene, &meshes, &view](RHI* rhi, CommandHandle cmd) {
+                                if (!pipeline) return;
 
-						for (uint32_t i = 0; i < cascade_count; ++i) {
-							auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
-							bud::math::Frustum cascade_view_frustum_dbg;
-							cascade_view_frustum_dbg.update(cascade_light_view_proj);
+                                for (uint32_t i = 0; i < cascade_count; ++i) {
+                                    auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
+                                    bud::math::Frustum cascade_view_frustum_dbg;
+                                    cascade_view_frustum_dbg.update(cascade_light_view_proj);
 
-							RenderPassBeginInfo info;
-							info.depth_attachment = render_graph.get_texture(static_cache_h);
-							info.clear_depth = true;
-							info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
-							info.base_array_layer = i;
-							info.layer_count = 1;
+                                    RenderPassBeginInfo info;
+                                    Texture* static_tex = nullptr;
+                                    try {
+                                        static_tex = render_graph.get_texture(static_cache_h);
+                                    } catch (const std::exception& e) {
+                                        bud::eprint("[CSMShadowPass] failed to get static cache texture: {}", e.what());
+                                        return;
+                                    }
+                                    info.depth_attachment = static_tex;
+                                    info.clear_depth = true;
+                                    info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
+                                    info.base_array_layer = i;
+                                    info.layer_count = 1;
 
-							rhi->cmd_begin_render_pass(cmd, info);
+                                    rhi->cmd_begin_render_pass(cmd, info);
 							rhi->cmd_bind_pipeline(cmd, pipeline);
 							rhi->cmd_set_viewport(cmd, (float)config.shadow_map_size, (float)config.shadow_map_size);
 							rhi->cmd_set_scissor(cmd, config.shadow_map_size, config.shadow_map_size);
@@ -709,15 +753,23 @@ namespace bud::graphics {
 				auto active_map = render_graph.get_texture(*shadow_map_h);
 				bool did_copy = false;
 
-				if (valid_cache && cache_initialized) {
-					auto static_map = render_graph.get_texture(static_cache_h);
-					rhi->resource_barrier(cmd, static_map, ResourceState::DepthRead, ResourceState::TransferSrc);
-					rhi->resource_barrier(cmd, active_map, ResourceState::DepthWrite, ResourceState::TransferDst);
-					rhi->cmd_copy_image(cmd, static_map, active_map);
-					rhi->resource_barrier(cmd, active_map, ResourceState::TransferDst, ResourceState::DepthWrite);
-					rhi->resource_barrier(cmd, static_map, ResourceState::TransferSrc, ResourceState::DepthRead);
-					did_copy = true;
-				}
+                if (valid_cache && cache_initialized) {
+                    Texture* static_map = nullptr;
+                    try {
+                        static_map = render_graph.get_texture(static_cache_h);
+                    } catch (const std::exception& e) {
+                        bud::eprint("[CSMShadowPass] failed to get static cache texture for copy: {}", e.what());
+                        static_map = nullptr;
+                    }
+                    if (static_map) {
+                        rhi->resource_barrier(cmd, static_map, ResourceState::DepthRead, ResourceState::TransferSrc);
+                        rhi->resource_barrier(cmd, active_map, ResourceState::DepthWrite, ResourceState::TransferDst);
+                        rhi->cmd_copy_image(cmd, static_map, active_map);
+                        rhi->resource_barrier(cmd, active_map, ResourceState::TransferDst, ResourceState::DepthWrite);
+                        rhi->resource_barrier(cmd, static_map, ResourceState::TransferSrc, ResourceState::DepthRead);
+                        did_copy = true;
+                    }
+                }
 
 				for (uint32_t i = 0; i < config.cascade_count; ++i) {
 					auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];

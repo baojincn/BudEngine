@@ -231,14 +231,29 @@ namespace bud::graphics {
 	
 		// 4. Resource Allocation (Phase 2)
 		auto* pool = rhi->get_resource_pool();
-		if (pool) {
-			for (auto& node : resources) {
-				// Allocate only if transient and not already allocated (redundant check)
-				if (node.is_transient && !node.physical_texture && node.name != "") {
-					node.physical_texture = pool->acquire_texture(node.desc);
+	if (pool) {
+		for (auto& node : resources) {
+			// Allocate only if transient and not already allocated (redundant check)
+			if (node.is_transient && !node.physical_texture && node.name != "") {
+				auto* tex = pool->acquire_texture(node.desc);
+				if (!tex) {
+					std::string err = std::format("RenderGraph::compile: resource pool failed to allocate texture '{}'", node.name);
+					bud::eprint("{}", err);
+#if defined(_DEBUG)
+					throw std::runtime_error(err);
+#else
+					// Leave physical_texture as nullptr; callers should handle missing textures gracefully
+					node.physical_texture = nullptr;
+#endif
+				} else {
+					node.physical_texture = tex;
 				}
 			}
 		}
+	} else {
+		// No resource pool available; log for diagnostics
+		bud::eprint("RenderGraph::compile: no resource pool available; transient resources will not be allocated");
+	}
 	}
 
 	void RenderGraph::execute(CommandHandle cmd) {

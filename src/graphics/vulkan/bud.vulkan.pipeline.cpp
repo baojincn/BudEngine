@@ -242,7 +242,11 @@ namespace bud::graphics::vulkan {
         if (r != VK_SUCCESS) {
             std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines failed: {}\n", (int)r);
             bud::eprint("{}", msg);
+#if defined(_DEBUG)
             throw std::runtime_error("failed to create graphics pipeline!");
+#else
+            return VK_NULL_HANDLE;
+#endif
         }
 
 		std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines OK: pipeline={}\n", (void*)graphicsPipeline);
@@ -261,8 +265,15 @@ namespace bud::graphics::vulkan {
         pipelineInfo.layout = layout;
 
         VkPipeline computePipeline;
-        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline) != VK_SUCCESS) {
+        VkResult r2 = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline);
+        if (r2 != VK_SUCCESS) {
+            std::string msg = std::format("[Vulkan][Worker] vkCreateComputePipelines failed: {}\n", (int)r2);
+            bud::eprint("{}", msg);
+#if defined(_DEBUG)
             throw std::runtime_error("failed to create compute pipeline!");
+#else
+            return VK_NULL_HANDLE;
+#endif
         }
 
         compute_pipelines.push_back(computePipeline);

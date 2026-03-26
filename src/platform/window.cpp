@@ -1,4 +1,4 @@
-#include <SDL3/SDL.h>
+﻿#include <SDL3/SDL.h>
 #include <stdexcept>
 #include "src/platform/bud.platform.hpp"
 #include "src/core/bud.core.hpp"
@@ -220,10 +220,17 @@ namespace bud::platform {
 				return;
 			}
 
-			if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &out_surface)) {
-				out_surface = nullptr;
-				throw std::runtime_error("Failed to create Vulkan surface");
-			}
+            if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &out_surface)) {
+                out_surface = nullptr;
+                auto err = SDL_GetError();
+                bud::eprint("Window::create_surface: SDL_Vulkan_CreateSurface failed: {}", err ? err : "Unknown");
+#if defined(_DEBUG)
+                throw std::runtime_error("Failed to create Vulkan surface");
+#else
+                // In Release, fail gracefully and let the caller handle the missing surface
+                return;
+#endif
+            }
 		}
 
 	private:

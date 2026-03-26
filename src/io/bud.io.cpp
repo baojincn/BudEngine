@@ -259,7 +259,8 @@ namespace bud::io {
 		img.pixels = stbi_load(path_str.c_str(), &img.width, &img.height, &img.channels, STBI_rgb_alpha);
 
 		if (!img.pixels) {
-			bud::eprint("[IO] Failed to load image: {}", path_str);
+            const char* reason = stbi_failure_reason();
+            bud::eprint("[IO] Failed to load image: {} (stb reason: {})", path_str, reason ? reason : "unknown");
 			return std::nullopt;
 		}
 
