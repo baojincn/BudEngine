@@ -64,6 +64,9 @@ namespace bud {
 
         ~Logger();
 
+        // Stop accepting new log entries and attempt to drain pending writes.
+        void stop();
+
         std::atomic<uint32_t> backend_mask{0};
         std::ofstream file_stream;
         std::mutex file_mutex;
@@ -80,6 +83,8 @@ namespace bud {
         std::mutex log_queue_mutex;
         std::condition_variable log_queue_cv;
         std::atomic<bool> log_thread_running{ false };
+        // When false, new log entries are dropped and background writer will stop
+        std::atomic<bool> accept_logs{ true };
         // Internal worker thread used when no TaskScheduler is injected.
         std::thread worker_thread;
         // Index of the worker thread this logger binds to (if any)
@@ -182,6 +187,7 @@ namespace bud {
     inline void set_log_backend_mask(uint32_t mask) { if (auto g = get_global_logger()) g->set_backend_mask(mask); }
     inline uint32_t get_log_backend_mask() { return get_global_logger() ? get_global_logger()->get_backend_mask() : 0; }
     inline void set_log_file(const std::string& path) { if (auto g = get_global_logger()) g->set_log_file(path); }
+    inline void stop_global_logger() { if (auto g = get_global_logger()) g->stop(); }
 }
 
 // Thread-local sequence id used by print/eprint to route ordered logs.

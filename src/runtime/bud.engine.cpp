@@ -87,6 +87,9 @@ namespace bud::engine {
 
 		rhi->cleanup();
 		rhi.reset();
+
+		// Stop global logger (best-effort flush and shutdown of logging subsystem)
+		bud::stop_global_logger();
 	}
 
 	void BudEngine::run(GameLogic perform_game_logic) {

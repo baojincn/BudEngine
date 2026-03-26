@@ -67,8 +67,21 @@ namespace bud::io {
 			return std::filesystem::exists(p, ec) && !std::filesystem::is_directory(p, ec);
 			};
 
+        // Helper to normalize returned paths to an absolute/weakly canonical form
+        auto normalize = [](const std::filesystem::path& p) {
+            std::error_code ec;
+            try {
+                auto r = std::filesystem::weakly_canonical(p, ec);
+                if (!ec) return r;
+            } catch (...) {}
+            // Fallback to absolute which does not require file to exist
+            std::error_code ec2;
+            auto a = std::filesystem::absolute(p, ec2);
+            return a;
+        };
+
 		if (check_exists(path))
-			return path;
+			return normalize(path);
 
 		// Record tried candidates for diagnostic logging
 		std::vector<std::filesystem::path> tried_candidates;
@@ -104,20 +117,20 @@ namespace bud::io {
 			auto candidate = exe_dir / path;
 			tried_candidates.push_back(candidate);
 			if (check_exists(candidate))
-				return candidate;
+				return normalize(candidate);
 
 			// Also try one level up (common when exe is under bin/ and resources at repo root)
 			auto candidate_up = exe_dir.parent_path() / path;
 			tried_candidates.push_back(candidate_up);
 			if (check_exists(candidate_up))
-				return candidate_up;
+				return normalize(candidate_up);
 		}
 
 		// Try current working directory
 		auto cwd_candidate = std::filesystem::current_path() / path;
 		tried_candidates.push_back(cwd_candidate);
 		if (check_exists(cwd_candidate))
-			return cwd_candidate;
+			return normalize(cwd_candidate);
 
 		//auto p0 = std::filesystem::path("./") / path;
 		//tried_candidates.push_back(p0);
@@ -135,15 +148,17 @@ namespace bud::io {
 		//tried_candidates.push_back(p3);
 		//if (check_exists(p3)) return p3;
 
-		// Diagnostic: print all tried candidates to help debugging
+        // Diagnostic: print all tried candidates to help debugging
+        // Show the input path as an absolute/normalized form for clarity
+        auto input_display = normalize(path);
         if (!tried_candidates.empty()) {
-            bud::eprint("[IO] Failed to resolve '{}'. Tried the following paths:", path.string());
+            bud::eprint("[IO] Failed to resolve {}. Tried the following paths:", input_display.string());
             for (const auto& c : tried_candidates) {
-                bud::eprint("  - {}", c.string());
+                bud::eprint("[IO]   - {}", c.string());
             }
         }
         else {
-            bud::eprint("[IO] Failed to resolve '{}' and no candidate paths were generated.", path.string());
+            bud::eprint("[IO] Failed to resolve {} and no candidate paths were generated.", input_display.string());
         }
 
         // Return nullopt to indicate resolution failure to callers.
@@ -175,9 +190,21 @@ namespace bud::io {
 		}
 
 		size_t file_size = (size_t)file.tellg();
+
+		// Treat zero-sized files as an error for resource loading: log and return nullopt
+		if (file_size == 0) {
+			bud::eprint("[IO] File is empty: {}", resolved_path.string());
+			return std::nullopt;
+		}
+
 		std::vector<char> buffer(file_size);
 		file.seekg(0);
 		file.read(buffer.data(), file_size);
+		if (!file) {
+			bud::eprint("[IO] Failed to read file contents: {}", resolved_path.string());
+			return std::nullopt;
+		}
+
 		return buffer;
 	}
 
@@ -250,7 +277,8 @@ namespace bud::io {
 
 		auto resolved_opt = FileSystem::resolve_path(path);
 		if (!resolved_opt) {
-			bud::eprint("[IO] Image not found: {}", path.string());
+			// resolve_path already printed tried candidates; include a short note here
+			bud::eprint("[IO] Image not found: {} (could not resolve)", path.string());
 			return std::nullopt;
 		}
 		std::string path_str = resolved_opt->string();
@@ -290,10 +318,10 @@ namespace bud::io {
 		bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err,
 			resolved_path.string().c_str(), base_dir.c_str());
 
-		if (!warn.empty() && warn.find("Both") == std::string::npos)
-			bud::print("[TinyOBJ Warn]: {}", warn);
-		if (!err.empty())
-			bud::print("[TinyOBJ Error]: {}", err);
+        if (!warn.empty() && warn.find("Both") == std::string::npos)
+            bud::print("[IO] [TinyOBJ Warn]: {}", warn);
+        if (!err.empty())
+            bud::print("[IO] [TinyOBJ Error]: {}", err);
 		if (!ret)
 		{
 			bud::eprint("[IO] TinyOBJ failed to load OBJ: {}", resolved_path.string());
@@ -304,7 +332,7 @@ namespace bud::io {
 
 		const std::string default_texture = "data/textures/default.png";
 
-		bud::print("[OBJ Parser] Loading {} materials...", materials.size());
+        bud::print("[IO] [OBJ Parser] Loading {} materials...", materials.size());
 		for (size_t mat_idx = 0; mat_idx < materials.size(); mat_idx++) {
 			auto tex_name = materials[mat_idx].diffuse_texname;
 			std::replace(tex_name.begin(), tex_name.end(), '\\', '/');
@@ -410,8 +438,8 @@ namespace bud::io {
 
 		flush_subset(current_material_id);
 
-		if (mesh_data.subsets.empty() && !mesh_data.indices.empty()) {
-			bud::eprint("  WARNING: No subsets found! Creating fallback...");
+        if (mesh_data.subsets.empty() && !mesh_data.indices.empty()) {
+            bud::eprint("[IO] WARNING: No subsets found! Creating fallback...");
 			MeshSubset fallback;
 			fallback.index_start = 0;
 			fallback.index_count = (uint32_t)mesh_data.indices.size();
@@ -442,11 +470,11 @@ namespace bud::io {
 		else
 			ret = loader.LoadASCIIFromFile(&model, &err, &warn, path_str);
 
-		if (!warn.empty())
-			bud::print("[glTF Warn]: {}", warn);
+        if (!warn.empty())
+            bud::print("[IO] [glTF Warn]: {}", warn);
 
-		if (!err.empty())
-			bud::print("[glTF Error]: {}", err);
+        if (!err.empty())
+            bud::print("[IO] [glTF Error]: {}", err);
 
 		if (!ret)
 		{
@@ -461,9 +489,9 @@ namespace bud::io {
 	MeshData ModelLoader::convert_to_mesh_data(const tinygltf::Model& model) {
 		MeshData meshData;
 
-		if (model.meshes.empty()) {
-			std::string err = "ModelLoader::convert_to_mesh_data called with empty glTF model.meshes";
-			bud::eprint("{}", err);
+        if (model.meshes.empty()) {
+            std::string err = "ModelLoader::convert_to_mesh_data called with empty glTF model.meshes";
+            bud::eprint("[IO] {}", err);
 #if defined(_DEBUG)
 			throw std::runtime_error(err);
 #else
@@ -473,9 +501,9 @@ namespace bud::io {
 
 		const auto& gltfMesh = model.meshes[0];
 
-		if (gltfMesh.primitives.empty()) {
-			std::string err = "ModelLoader::convert_to_mesh_data gltf mesh has no primitives";
-			bud::eprint("{}", err);
+        if (gltfMesh.primitives.empty()) {
+            std::string err = "ModelLoader::convert_to_mesh_data gltf mesh has no primitives";
+            bud::eprint("[IO] {}", err);
 #if defined(_DEBUG)
 			throw std::runtime_error(err);
 #else
@@ -541,17 +569,22 @@ namespace bud::io {
 	}
 
 	std::optional<MeshData> ModelLoader::load_bud_mesh(const std::filesystem::path& path) {
-		// Use unified logging helpers so output gets the global prefix/backend handling.
-		bud::print("[IO] load_bud_mesh: {}", path.string());
-		auto resolved_opt = FileSystem::resolve_path(path);
-		if (!resolved_opt) {
-			bud::eprint("[IO] .budmesh file not found: {}", path.string());
-			return std::nullopt;
-		}
+        // Resolve path first so all diagnostics use the fully resolved path
+        auto resolved_opt = FileSystem::resolve_path(path);
+        std::string display_path = path.string();
+        if (!resolved_opt) {
+            bud::eprint("[IO] .budmesh file not found: {}", path.string());
+            return std::nullopt;
+        } else {
+            display_path = resolved_opt->string();
+        }
+
+        // Use unified logging helpers so output gets the global prefix/backend handling.
+        bud::print("[IO] load_bud_mesh: {}", display_path);
 
         auto data_opt = FileSystem::read_binary(*resolved_opt);
         if (!data_opt) {
-            bud::eprint("[IO] Failed to read .budmesh binary data: {}", resolved_opt->string());
+            bud::eprint("[IO] Failed to read .budmesh binary data: {}", display_path);
 #if defined(_DEBUG)
             throw std::runtime_error("Failed to read .budmesh binary data");
 #else
@@ -564,12 +597,12 @@ namespace bud::io {
 		const asset::BudMeshHeader* header = reinterpret_cast<const asset::BudMeshHeader*>(ptr);
 
 		if (header->magic != asset::MESH_MAGIC) {
-			bud::eprint("[IO] Invalid .budmesh magic: {}", path.string());
+			bud::eprint("[IO] Invalid .budmesh magic: {}", display_path);
 			return std::nullopt;
 		}
 
 		if (header->version < 2) {
-			bud::eprint("[IO] Version too old: {}, expected at least 2, got {}", path.string(), header->version);
+			bud::eprint("[IO] Version too old: {}, expected at least 2, got {}", display_path, header->version);
 			return std::nullopt;
 		}
 
@@ -578,8 +611,8 @@ namespace bud::io {
 		static_assert(offsetof(asset::BudMeshHeader, submesh_count) == asset::MESH_HEADER_SUBMESH_COUNT_OFFSET, "BudMeshHeader submesh_count offset mismatch!");
 
 		bud::print("[IO] sizeof(Header)={}, sizeof(Vertex)={}", sizeof(asset::BudMeshHeader), sizeof(asset::Vertex));
-		bud::print("[IO] .budmesh: {}, size={}, v_count={}, i_count={}, m_count={}, s_count={}",
-			path.string(), data_size, header->total_vertices, header->total_indices, header->meshlet_count, header->submesh_count);
+		bud::print("[IO] .budmesh: {}, size={}, v_count={}, i_count={}, m_count={}, s_count=",
+			display_path, data_size, header->total_vertices, header->total_indices, header->meshlet_count, header->submesh_count);
 
 		auto check_offset = [&](uint64_t offset, size_t section_size, const char* name) {
 			if (offset + section_size > data_size) {
@@ -597,6 +630,7 @@ namespace bud::io {
 			!check_offset(header->cull_data_offset, header->meshlet_count * sizeof(asset::MeshletCullData), "CullData") ||
 			(header->version >= 2 && !check_offset(header->submesh_offset, header->submesh_count * sizeof(asset::SubMeshDescriptor), "Submeshes")) ||
 			(header->version >= 3 && !check_offset(header->texture_offset, 0, "Textures"))) { // check_offset 0 just for existence of start
+			bud::eprint("[IO] .budmesh validation failed for: {}", display_path);
 			return std::nullopt;
 		}
 
@@ -657,7 +691,7 @@ namespace bud::io {
 			mesh.subsets.push_back(subset);
 		}
 
-		bud::print("[IO] Loaded mesh: {} (v={}, i={}, m={}, s={})", path.string(), (uint32_t)mesh.vertices.size(), (uint32_t)mesh.indices.size(), (uint32_t)mesh.meshlets.size(), (uint32_t)mesh.subsets.size());
+        bud::print("[IO] Loaded mesh: {} (v={}, i={}, m={}, s={})", display_path, (uint32_t)mesh.vertices.size(), (uint32_t)mesh.indices.size(), (uint32_t)mesh.meshlets.size(), (uint32_t)mesh.subsets.size());
 
 		// Texture paths
 		if (header->version >= 3 && header->texture_count > 0) {
@@ -673,7 +707,8 @@ namespace bud::io {
 				mesh.texture_paths.push_back(tex_path);
 				tex_ptr += tex_path.length() + 1;
 			}
-	} else {
+		}
+		else {
 			mesh.texture_paths.push_back("data/textures/default.png");
 		}
 
@@ -702,12 +737,25 @@ namespace bud::io {
 
 
 			if (mesh_opt) {
-				task_scheduler->submit_main_thread_task([on_loaded, mesh = std::move(*mesh_opt)]() mutable {
-					on_loaded(std::move(mesh));
-					});
+			// Log resolved path for successful loads so callers can see absolute path
+			auto resolved = FileSystem::resolve_path(path);
+			if (resolved) {
+				bud::print("[IO] Loaded mesh (resolved): {}", resolved->string());
+			} else {
+				bud::print("[IO] Loaded mesh: {}", path);
+			}
+
+			task_scheduler->submit_main_thread_task([on_loaded, mesh = std::move(*mesh_opt)]() mutable {
+				on_loaded(std::move(mesh));
+				});
 			}
 			else {
-            bud::eprint("[Asset] Failed to load mesh: {}", path);
+            auto resolved = FileSystem::resolve_path(path);
+            if (resolved) {
+                bud::eprint("[Asset] Failed to load mesh: {} (resolved: {})", path, resolved->string());
+            } else {
+                bud::eprint("[Asset] Failed to load mesh: {} (could not resolve)", path);
+            }
 			}
 			});
 	}
@@ -718,12 +766,25 @@ namespace bud::io {
 			auto img_opt = ImageLoader::load(path);
 
 			if (img_opt) {
-				task_scheduler->submit_main_thread_task([on_loaded, img = std::move(*img_opt)]() mutable {
-					on_loaded(std::move(img));
-					});
+			// Log resolved path for successful image loads
+			auto resolved = FileSystem::resolve_path(path);
+			if (resolved) {
+				bud::print("[IO] Loaded image (resolved): {}", resolved->string());
+			} else {
+				bud::print("[IO] Loaded image: {}", path);
+			}
+
+			task_scheduler->submit_main_thread_task([on_loaded, img = std::move(*img_opt)]() mutable {
+				on_loaded(std::move(img));
+				});
 			}
 			else {
-            bud::eprint("[Asset] Failed to load image: {}", path);
+            auto resolved = FileSystem::resolve_path(path);
+            if (resolved) {
+                bud::eprint("[Asset] Failed to load image: {} (resolved: {})", path, resolved->string());
+            } else {
+                bud::eprint("[Asset] Failed to load image: {} (could not resolve)", path);
+            }
 			}
 			});
 	}
@@ -733,12 +794,32 @@ namespace bud::io {
 		task_scheduler->spawn("AsyncFileLoad", [this, path, on_loaded]() {
 			auto data_opt = FileSystem::read_binary(path);
 			if (data_opt) {
-				task_scheduler->submit_main_thread_task([on_loaded, data = std::move(*data_opt)]() mutable {
-					on_loaded(std::move(data));
-					});
+			// Log resolved path for successful file reads
+			auto resolved = FileSystem::resolve_path(path);
+			if (resolved) {
+				bud::print("[IO] Loaded file (resolved): {}", resolved->string());
+			} else {
+				bud::print("[IO] Loaded file: {}", path);
+			}
+
+			task_scheduler->submit_main_thread_task([on_loaded, data = std::move(*data_opt)]() mutable {
+				on_loaded(std::move(data));
+				});
 			}
 			else {
-            bud::eprint("[Asset] Failed to read file: {}", path);
+            // Attempt to resolve and report the absolute/resolved path for better diagnostics
+            auto resolved = FileSystem::resolve_path(path);
+            if (resolved) {
+                bud::eprint("[Asset] Failed to read file: {} (resolved: {})", path, resolved->string());
+            } else {
+                bud::eprint("[Asset] Failed to read file: {} (could not resolve)", path);
+            }
+
+            // Ensure caller always receives a completion callback to avoid callers waiting indefinitely
+            // (e.g., shader loader expects all file callbacks to be invoked).
+            task_scheduler->submit_main_thread_task([on_loaded]() {
+                on_loaded(std::vector<char>{});
+            });
 			}
 			});
 	}
@@ -749,14 +830,27 @@ namespace bud::io {
 			if (data_opt) {
 				try {
 					nlohmann::json j = nlohmann::json::parse(data_opt->begin(), data_opt->end());
-					task_scheduler->submit_main_thread_task([on_loaded, json = std::move(j)]() mutable {
-						on_loaded(std::move(json));
-						});
+				// Log resolved path for successful JSON loads
+				auto resolved = FileSystem::resolve_path(path);
+				if (resolved) {
+					bud::print("[IO] Loaded JSON (resolved): {}", resolved->string());
+				} else {
+					bud::print("[IO] Loaded JSON: {}", path);
+				}
+
+				task_scheduler->submit_main_thread_task([on_loaded, json = std::move(j)]() mutable {
+					on_loaded(std::move(json));
+					});
 			} catch (const std::exception& e) {
                 bud::eprint("[Asset] Failed to parse JSON: {} - {}", path, e.what());
 			}
 		} else {
-            bud::eprint("[Asset] Failed to read JSON file: {}", path);
+            auto resolved = FileSystem::resolve_path(path);
+            if (resolved) {
+                bud::eprint("[Asset] Failed to read JSON file: {} (resolved: {})", path, resolved->string());
+            } else {
+                bud::eprint("[Asset] Failed to read JSON file: {} (could not resolve)", path);
+            }
 			}
 			});
 	}

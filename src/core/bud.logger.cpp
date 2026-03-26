@@ -150,30 +150,32 @@ namespace bud {
 #endif
 			};
 
-		auto exe_dir = get_exe_dir();
-		if (!exe_dir.empty()) {
-			// Create a timestamped log filename: bud_YYYYMMDD_HHMMSS.log
-			auto make_timestamp = []() -> std::string {
-				using namespace std::chrono;
-				auto now = system_clock::now();
-				std::time_t t = system_clock::to_time_t(now);
-				std::tm tm_info{};
+        auto exe_dir = get_exe_dir();
+        if (!exe_dir.empty()) {
+            // Create a timestamped log filename: bud_YYYYMMDD_HHMMSS.log
+            auto make_timestamp = []() -> std::string {
+                using namespace std::chrono;
+                auto now = system_clock::now();
+                std::time_t t = system_clock::to_time_t(now);
+                std::tm tm_info{};
 #ifdef _WIN32
-				localtime_s(&tm_info, &t);
+                localtime_s(&tm_info, &t);
 #else
-				localtime_r(&t, &tm_info);
+                localtime_r(&t, &tm_info);
 #endif
-				std::ostringstream ss;
-				ss << std::put_time(&tm_info, "%Y%m%d_%H%M%S");
-				return ss.str();
-				};
+                std::ostringstream ss;
+                ss << std::put_time(&tm_info, "%Y%m%d_%H%M%S");
+                return ss.str();
+            };
 
-			auto ts = make_timestamp();
-			auto log_path = exe_dir / ("bud_" + ts + ".log");
-			// Store path and open file
-			log_file_path = log_path.string();
-			set_log_file(log_file_path);
-		}
+            auto ts = make_timestamp();
+            auto log_path = exe_dir / ("bud_" + ts + ".log");
+            // Store path but DO NOT enable file backend by default. We only want
+            // console and debug output active unless the user explicitly enables file logging.
+            log_file_path = log_path.string();
+            // Note: do not call set_log_file(log_file_path) here to avoid enabling file backend
+            // automatically on startup.
+        }
 		// Publish this logger as the global non-owning instance so helpers (print/eprint)
 		// can use it without forcing a singleton ownership model.
 		set_global_logger(this);
@@ -352,6 +354,11 @@ namespace bud {
 	}
 
 	void Logger::enqueue_log(const std::string& msg, bool is_error) {
+		// If logger has been stopped, drop new messages
+		if (!accept_logs.load(std::memory_order_acquire)) {
+			return;
+		}
+
 		// Always enqueue the message for asynchronous processing by the
 		// background worker (either scheduler-bound or internal thread).
 		{
@@ -371,6 +378,30 @@ namespace bud {
 		enqueue_log(std::string("[ERROR] ") + msg, true);
 	}
 
+	void Logger::stop() {
+		// Prevent further enqueues
+		accept_logs.store(false, std::memory_order_release);
+
+		// Disable backends to avoid further output
+		backend_mask.store(0, std::memory_order_relaxed);
+
+		// Attempt to flush pending asynchronous writes (bounded)
+		try {
+			flush();
+		} catch (...) {}
+
+		// Signal background worker(s) to stop
+		log_thread_running.store(false);
+		log_queue_cv.notify_all();
+
+		// If we own an internal worker thread, join it here.
+		if (worker_thread.joinable()) {
+			worker_thread.join();
+		}
+	}
+
+    // (stop_global_logger is declared inline in header)
+
 	void Logger::flush() {
 		// If an engine-injected scheduler exists and the current thread's
 		// scheduler matches it, use wait_for_counter which integrates with
@@ -380,9 +411,19 @@ namespace bud {
 			return;
 		}
 
-		while (pending_writes.load(std::memory_order_acquire) > 0) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		}
+    // Wait up to a short timeout to allow background logger to drain.
+    // This prevents indefinite blocking during shutdown while still
+    // giving async writers a chance to emit recent logs. The user
+    // requested a 500ms wait window.
+    auto start = std::chrono::steady_clock::now();
+    const auto timeout = std::chrono::milliseconds(500);
+    while (pending_writes.load(std::memory_order_acquire) > 0) {
+        if (std::chrono::steady_clock::now() - start > timeout) {
+            // Timed out; stop waiting and return (best-effort flush)
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 	}
 
 } // namespace bud
