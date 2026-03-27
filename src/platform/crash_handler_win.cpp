@@ -42,7 +42,7 @@ static void write_minidump(EXCEPTION_POINTERS* exinfo) {
             DWORD createErr = GetLastError();
             std::string err = "Failed to create dump file: " + dump_path.string() +
                 " (GetLastError=" + std::to_string(createErr) + ")\n";
-            bud::get_or_create_global_logger()->log(err);
+            bud::get_global_logger()->log(err);
             return;
         }
 
@@ -60,10 +60,10 @@ static void write_minidump(EXCEPTION_POINTERS* exinfo) {
 
         if (ok) {
             std::string msg = "Crash dump written to " + dump_path.string() + "\n";
-            bud::get_or_create_global_logger()->log(msg);
+            bud::get_global_logger()->log(msg);
         } else {
             std::string msg = "MiniDumpWriteDump failed (GetLastError=" + std::to_string(GetLastError()) + "): " + dump_path.string() + "\n";
-            bud::get_or_create_global_logger()->log(msg);
+            bud::get_global_logger()->log(msg);
         }
     } catch (const std::exception& e) {
         bud::eprint("Exception while writing minidump: {}", e.what());
@@ -82,7 +82,7 @@ static void terminate_handler() {
     // Attempt to capture a dump on std::terminate()
     // Use async logger to record termination; keep it asynchronous per project policy
     const char term_msg[] = "std::terminate called - attempting to write minidump\n";
-    bud::get_or_create_global_logger()->log(std::string(term_msg, sizeof(term_msg) - 1));
+    bud::get_global_logger()->log(std::string(term_msg, sizeof(term_msg) - 1));
     write_minidump(nullptr);
     std::abort();
 }

@@ -31,15 +31,15 @@ namespace bud::engine {
 
 		// Initialize VirtualFileSystem as early as possible and anchor root path
 		virtual_file_system = std::make_unique<bud::io::VirtualFileSystem>();
+		logger = std::make_unique<bud::Logger>(virtual_file_system.get()->get_root_path());
+		bud::set_global_logger(logger.get());
+
+		bud::platform::install_crash_handler();
 
 		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height);
-		// Install platform crash handler as early as possible so crashes during
-		// initialization produce minidumps for post-mortem analysis.
-		bud::platform::install_crash_handler();
+
 		task_scheduler = std::make_unique<bud::threading::TaskScheduler>();
 
-		// Create engine-owned logger and inject TaskScheduler for async log writes.
-		logger = std::make_unique<bud::Logger>(task_scheduler.get());
 
 
 		int initial_width = 0;
@@ -91,8 +91,7 @@ namespace bud::engine {
 		rhi->cleanup();
 		rhi.reset();
 
-		// Stop global logger (best-effort flush and shutdown of logging subsystem)
-		bud::stop_global_logger();
+		bud::set_global_logger(nullptr);
 	}
 
 	void BudEngine::run(GameLogic perform_game_logic) {

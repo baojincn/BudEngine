@@ -77,13 +77,14 @@ namespace bud::io {
 	public:
 		VirtualFileSystem();
 		~VirtualFileSystem() = default;
-
+		
 		std::optional<std::filesystem::path> resolve_path(const std::filesystem::path& path);
 		std::optional<std::vector<char>> read_binary(const std::filesystem::path& path);
 		bool write_binary(const std::filesystem::path& path, const std::vector<char>& data);
 		void append_text_async(const std::filesystem::path& path, std::string text, bud::threading::Counter* counter = nullptr, bud::threading::TaskScheduler* scheduler = nullptr);
+		std::filesystem::path get_root_path() const { return root_path; }
 	private:
-		std::filesystem::path root_directory;
+		std::filesystem::path root_path;
 	};
 
 

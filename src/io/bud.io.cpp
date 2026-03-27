@@ -35,38 +35,36 @@ namespace bud::io {
 	}
 
 	VirtualFileSystem::VirtualFileSystem() {
-		// Determine a sensible root directory for the VFS at startup.
 		std::error_code ec;
+		root_path = std::filesystem::current_path(ec);
+
+		if (!root_path.empty() && !std::filesystem::exists(root_path / "data", ec)) {
 #if defined(_WIN32)
-		wchar_t buf[MAX_PATH];
-		DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);
-		if (len != 0) {
-			root_directory = std::filesystem::path(std::wstring(buf, buf + len)).parent_path();
-		}
-#elif defined(__APPLE__)
-		uint32_t size = 0;
-		_NSGetExecutablePath(nullptr, &size);
-		if (size != 0) {
-			std::string buf(size, '\0');
-			if (_NSGetExecutablePath(buf.data(), &size) == 0) {
-				root_directory = std::filesystem::weakly_canonical(std::filesystem::path(buf), ec).parent_path();
+			wchar_t buf[MAX_PATH];
+			DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+			if (len != 0) {
+				root_path = std::filesystem::path(std::wstring(buf, buf + len)).parent_path();
 			}
-		}
+#elif defined(__APPLE__)
+			uint32_t size = 0;
+			_NSGetExecutablePath(nullptr, &size);
+			if (size != 0) {
+				std::string buf(size, '\0');
+				if (_NSGetExecutablePath(buf.data(), &size) == 0) {
+					root_path = std::filesystem::weakly_canonical(std::filesystem::path(buf), ec).parent_path();
+				}
+			}
 #else
-		std::string buf(4096, '\0');
-		ssize_t len = readlink("/proc/self/exe", buf.data(), buf.size());
-		if (len > 0) {
-			buf.resize(static_cast<size_t>(len));
-			root_directory = std::filesystem::path(buf).parent_path();
-		}
+			std::string buf(4096, '\0');
+			ssize_t len = readlink("/proc/self/exe", buf.data(), buf.size());
+			if (len > 0) {
+				buf.resize(static_cast<size_t>(len));
+				root_path = std::filesystem::path(buf).parent_path();
+			}
 #endif
-
-		if (root_directory.empty()) {
-			// Fallback to current working directory
-			root_directory = std::filesystem::current_path(ec);
 		}
 
-		bud::print("[IO] VirtualFileSystem initialized. root={}", root_directory.string());
+		bud::print("[IO] VirtualFileSystem initialized. root={}", root_path.string());
 	}
 
 	void VirtualFileSystem::append_text_async(const std::filesystem::path& path, std::string text, bud::threading::Counter* counter, bud::threading::TaskScheduler* scheduler) {
@@ -118,22 +116,12 @@ namespace bud::io {
 		if (path.is_absolute() && check_exists(path))
 			return normalize(path);
 
-		// Prefer resolving relative paths against the configured root_directory
-		if (!root_directory.empty()) {
-			auto candidate = root_directory / path;
-			if (check_exists(candidate))
-				return normalize(candidate);
-			// Not found under root_directory: report and fail fast
-			bud::eprint("[IO] {} doesn't exist", candidate.string());
-			return std::nullopt;
-		}
+		// Prefer resolving relative paths against the configured root directory
+		auto candidate = root_path / path;
+		if (check_exists(candidate))
+			return normalize(candidate);
 
-		// As a last resort, try current working directory
-		auto cwd_candidate = std::filesystem::current_path() / path;
-		if (check_exists(cwd_candidate))
-			return normalize(cwd_candidate);
-
-		bud::eprint("[IO] Failed to resolve {}: no root_directory configured and not found in CWD", path.string());
+		bud::eprint("[IO] {} doesn't exist", candidate.string());
 		return std::nullopt;
 	}
 
@@ -267,10 +255,6 @@ namespace bud::io {
 		return std::move(img);
 	}
 
-
-	// ==========================================
-	// 3. Model Loader (网格模型)
-	// ==========================================
 
 	ModelLoader::ModelLoader(VirtualFileSystem* virtual_file_system)
 		: virtual_file_system(virtual_file_system) {

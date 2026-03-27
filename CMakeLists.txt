@@ -304,16 +304,9 @@ if(BUD_BUILD_SAMPLES)
     target_link_libraries(triangle_sample PRIVATE bud_engine_core)
     target_include_directories(triangle_sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
     
-    # Output directory
-    # Use the global per-config runtime output directories defined above
-    # (remove explicit single-config override to avoid output path confusion
-    # for multi-config generators / Visual Studio)
-	#set_target_properties(triangle_sample PROPERTIES
-    #    VS_DEBUGGER_WORKING_DIRECTORY_DEBUG       "$<TARGET_FILE_DIR:triangle_sample>"
-    #    VS_DEBUGGER_WORKING_DIRECTORY_RELEASE     "$<TARGET_FILE_DIR:triangle_sample>"
-    #    VS_DEBUGGER_WORKING_DIRECTORY_RELWITHDEBINFO "$<TARGET_FILE_DIR:triangle_sample>"
-    #    VS_DEBUGGER_WORKING_DIRECTORY_MINSIZEREL  "$<TARGET_FILE_DIR:triangle_sample>"
-	#)
+	set_target_properties(triangle_sample PROPERTIES 
+		VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+	)
 
 	if(MSVC)
         target_link_options(triangle_sample PRIVATE "/CETCOMPAT:NO")
