@@ -8,6 +8,7 @@
 
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.core.hpp"
+#include "src/core/bud.logger.hpp"
 #include "src/core/bud.math.hpp"
 #include "src/runtime/bud.input.hpp"
 #include "src/runtime/bud.scene.hpp"
