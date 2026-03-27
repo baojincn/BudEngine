@@ -518,9 +518,9 @@ VkShaderModule create_shader_module(VkDevice device, const std::vector<char>& co
     VkShaderModule shaderModule = VK_NULL_HANDLE;
     VkResult r = vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule);
     if (r != VK_SUCCESS) {
-        // Throw with context so callers can decide how to log/handle it.
-        std::string err = std::format("vkCreateShaderModule failed: code={} worker={}", (int)r, bud::threading::current_worker_index());
-        throw std::runtime_error(err);
+        // Log failure and return VK_NULL_HANDLE so callers can handle gracefully
+        bud::eprint("vkCreateShaderModule failed: code={} worker={}", (int)r, bud::threading::current_worker_index());
+        return VK_NULL_HANDLE;
     }
 
     return shaderModule;
@@ -549,8 +549,20 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 		throw std::runtime_error("failed to create pipeline layout!");
 	}
 
-	VkShaderModule vertModule = create_shader_module(device, desc.vs.code);
-	VkShaderModule fragModule = create_shader_module(device, desc.fs.code);
+    VkShaderModule vertModule = create_shader_module(device, desc.vs.code);
+    if (vertModule == VK_NULL_HANDLE) {
+        // failed to create vertex module, cleanup and return
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        return nullptr;
+    }
+
+    VkShaderModule fragModule = create_shader_module(device, desc.fs.code);
+    if (fragModule == VK_NULL_HANDLE) {
+        // failed to create fragment module, cleanup and return
+        vkDestroyShaderModule(device, vertModule, nullptr);
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        return nullptr;
+    }
 
 #if defined(BUD_HAVE_SPIRV_REFLECT)
     // SPIR-V reflection validation: strict compare reflected descriptor sets against registered layouts
@@ -719,9 +731,14 @@ void* VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& desc) {
 	}
 
 	VkShaderModule computeModule = create_shader_module(device, desc.cs.code);
-	VkPipeline pipeline = pipeline_cache->create_compute_pipeline(computeModule, pipelineLayout);
+    if (computeModule == VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        return nullptr;
+    }
 
-	vkDestroyShaderModule(device, computeModule, nullptr);
+    VkPipeline pipeline = pipeline_cache->create_compute_pipeline(computeModule, pipelineLayout);
+
+    vkDestroyShaderModule(device, computeModule, nullptr);
 
 	VulkanPipelineObject* pipeObj = new VulkanPipelineObject{ pipeline, pipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE };
 	created_layouts.push_back(pipelineLayout);

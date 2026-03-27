@@ -73,18 +73,17 @@ namespace std {
 
 namespace bud::io {
 
-	class FileSystem {
+	class VirtualFileSystem {
 	public:
-		static std::optional<std::filesystem::path> resolve_path(const std::filesystem::path& path);
+		VirtualFileSystem();
+		~VirtualFileSystem() = default;
 
-
-		static std::optional<std::vector<char>> read_binary(const std::filesystem::path& path);
-		static bool write_binary(const std::filesystem::path& path, const std::vector<char>& data);
-        // Append text to a file asynchronously when possible. If 'counter' is provided
-        // it will be incremented for the scheduled task and decremented when the task
-        // completes (compatible with TaskScheduler::spawn signal_counter semantics).
-        // If 'scheduler' is provided, the append task will be scheduled on it.
-        static void append_text_async(const std::filesystem::path& path, std::string text, bud::threading::Counter* counter = nullptr, bud::threading::TaskScheduler* scheduler = nullptr);
+		std::optional<std::filesystem::path> resolve_path(const std::filesystem::path& path);
+		std::optional<std::vector<char>> read_binary(const std::filesystem::path& path);
+		bool write_binary(const std::filesystem::path& path, const std::vector<char>& data);
+		void append_text_async(const std::filesystem::path& path, std::string text, bud::threading::Counter* counter = nullptr, bud::threading::TaskScheduler* scheduler = nullptr);
+	private:
+		std::filesystem::path root_directory;
 	};
 
 
@@ -118,41 +117,43 @@ namespace bud::io {
 
 	class ImageLoader {
 	public:
-		static std::optional<Image> load(const std::filesystem::path& path);
+    ImageLoader(VirtualFileSystem* virtual_file_system);
+    std::optional<Image> load(const std::filesystem::path& path);
+
+private:
+    VirtualFileSystem* virtual_file_system;
 	};
 
 
 	class ModelLoader {
 	public:
-		static std::optional<MeshData> load_obj(const std::filesystem::path& path);
-
-		static std::optional<MeshData> load_gltf(const std::filesystem::path& path);
-		static std::optional<MeshData> load_bud_mesh(const std::filesystem::path& path);
+    ModelLoader(VirtualFileSystem* virtual_file_system);
+    std::optional<MeshData> load_obj(const std::filesystem::path& path);
+    std::optional<MeshData> load_gltf(const std::filesystem::path& path);
+    std::optional<MeshData> load_bud_mesh(const std::filesystem::path& path);
 	private:
-		static MeshData convert_to_mesh_data(const tinygltf::Model& model);
+		MeshData convert_to_mesh_data(const tinygltf::Model& model);
+
+		VirtualFileSystem* virtual_file_system;
 	};
 
 	class AssetManager {
 	public:
-		AssetManager(bud::threading::TaskScheduler* scheduler);
+    AssetManager(VirtualFileSystem* virtual_file_system, bud::threading::TaskScheduler* scheduler);
 
 		void load_mesh_async(const std::string& path, std::function<void(MeshData)> on_loaded);
-
-
 		void load_image_async(const std::string& path, std::function<void(Image)> on_loaded);
-
-
 		void load_file_async(const std::string& path, std::function<void(std::vector<char>)> on_loaded);
-
 		void load_json_async(const std::string& path, std::function<void(nlohmann::json)> on_loaded);
-
 		void save_json_async(const std::string& path, const nlohmann::json& json, std::function<void(bool)> on_finished = nullptr);
-
 		void save_file_async(const std::string& path, std::vector<char> data, std::function<void(bool)> on_finished = nullptr);
 
-
 	private:
-		bud::threading::TaskScheduler* task_scheduler;
+    VirtualFileSystem* virtual_file_system;
+    bud::threading::TaskScheduler* task_scheduler;
+
+    ImageLoader image_loader;
+    ModelLoader model_loader;
 	};
 }
 

@@ -29,6 +29,9 @@ namespace bud::engine {
 
 	BudEngine::BudEngine(const bud::graphics::EngineConfig config) : engine_config(config) {
 
+		// Initialize VirtualFileSystem as early as possible and anchor root path
+		virtual_file_system = std::make_unique<bud::io::VirtualFileSystem>();
+
 		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height);
 		// Install platform crash handler as early as possible so crashes during
 		// initialization produce minidumps for post-mortem analysis.
@@ -45,7 +48,7 @@ namespace bud::engine {
 		last_width = initial_width;
 		last_height = initial_height;
 
-		asset_manager = std::make_unique<bud::io::AssetManager>(task_scheduler.get());
+		asset_manager = std::make_unique<bud::io::AssetManager>(virtual_file_system.get(), task_scheduler.get());
 
 		// TaskScheduler already injected via logger constructor above.
 
@@ -61,7 +64,7 @@ namespace bud::engine {
 		ImGui::CreateContext();
 		ImGuiIO& imgui_io = ImGui::GetIO();
 		
-		auto resolved_imgui_path = bud::io::FileSystem::resolve_path("src/ui/config/imgui.ini");
+		auto resolved_imgui_path = virtual_file_system->resolve_path("src/ui/config/imgui.ini");
 		if (resolved_imgui_path) {
 			imgui_ini_path = resolved_imgui_path->string();
 			imgui_io.IniFilename = imgui_ini_path.c_str();

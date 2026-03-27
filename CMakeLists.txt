@@ -335,36 +335,36 @@ if(BUD_BUILD_SAMPLES)
 
     # Ensure runtime resources are available next to the executable so launching
     # the binary from the filesystem works the same as from Visual Studio.
-    add_custom_command(TARGET triangle_sample POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/data"
-            "$<TARGET_FILE_DIR:triangle_sample>/data"
-        COMMENT "Copying data/ to output directory"
-    )
+    #add_custom_command(TARGET triangle_sample POST_BUILD
+    #    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    #        "${CMAKE_CURRENT_SOURCE_DIR}/data"
+    #        "$<TARGET_FILE_DIR:triangle_sample>/data"
+    #    COMMENT "Copying data/ to output directory"
+    #)
 
     # Preserve original source tree layout for shaders so runtime loader
     # that expects "src/shaders/..." continues to work when launching exe
     # from the binary folder.
-    add_custom_command(TARGET triangle_sample POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-            "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
-            "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
-        COMMENT "Copying src/shaders to output directory preserving path"
-    )
+    #add_custom_command(TARGET triangle_sample POST_BUILD
+    #    COMMAND ${CMAKE_COMMAND} -E make_directory
+    #        "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
+    #    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    #        "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
+    #        "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
+    #    COMMENT "Copying src/shaders to output directory preserving path"
+    #)
 
     # Copy ImGui runtime config so UI layout persists when launching exe directly
     # Preserve ImGui config path under src/ui/config so code that loads
     # "src/ui/config/imgui.ini" works when run from bin.
-    add_custom_command(TARGET triangle_sample POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-            "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/config/imgui.ini"
-            "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config/imgui.ini"
-        COMMENT "Copying src/ui/config/imgui.ini to output directory preserving path"
-    )
+    #add_custom_command(TARGET triangle_sample POST_BUILD
+    #    COMMAND ${CMAKE_COMMAND} -E make_directory
+    #        "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config"
+    #    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    #        "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/config/imgui.ini"
+    #        "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config/imgui.ini"
+    #    COMMENT "Copying src/ui/config/imgui.ini to output directory preserving path"
+    #)
 endif()
 # End, triangle_sample
 

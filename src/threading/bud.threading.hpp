@@ -163,16 +163,17 @@ namespace bud::threading {
 	/// <summary>
 	/// Thread-local pointer that stores a worker thread's stack pointer (RSP) for the current thread.
 	/// </summary>
-	inline thread_local void* t_worker_rsp = nullptr;
-	inline thread_local Fiber* t_current_fiber = nullptr;
-	inline thread_local size_t t_worker_index = 0;
-	inline thread_local TaskScheduler* t_scheduler = nullptr;
+inline thread_local void* t_worker_rsp = nullptr;
+inline thread_local Fiber* t_current_fiber = nullptr;
+// Use signed int for worker index so we can represent "not-a-worker" as -1
+inline thread_local int t_worker_index = -1;
+inline thread_local TaskScheduler* t_scheduler = nullptr;
 
 	// Accessors: lightweight helpers to query current worker index and current task name.
 	// `current_task_name()` returns a valid name only in debug builds; in release it returns nullptr.
-	inline size_t current_worker_index() {
-		return t_worker_index;
-	}
+inline int current_worker_index() {
+    return t_worker_index;
+}
 
 #if defined(_DEBUG)
 	inline const char* current_task_name() {

@@ -77,6 +77,7 @@ namespace bud::engine {
 		std::unique_ptr<bud::graphics::RHI> rhi;
 		std::unique_ptr<bud::io::AssetManager> asset_manager;
 		std::unique_ptr<bud::graphics::Renderer> renderer;
+        std::unique_ptr<bud::io::VirtualFileSystem> virtual_file_system;
 
 		// 场景数据
 		bud::scene::Scene scene;

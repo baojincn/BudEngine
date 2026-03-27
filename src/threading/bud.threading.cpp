@@ -255,8 +255,8 @@ void TaskScheduler::spawn(const char* name, std::move_only_function<void()> work
 	if (counter)
 		counter->fetch_add(1, std::memory_order_relaxed);
 
-	size_t idx = (t_scheduler) ? t_worker_index : 0u;
-	workers[idx]->queue.push(f);
+    size_t idx = (t_scheduler) ? static_cast<size_t>(t_worker_index) : 0u;
+    workers[idx]->queue.push(f);
 }
 
 void TaskScheduler::spawn(std::move_only_function<void()> work, Counter* counter) {
@@ -309,12 +309,12 @@ void TaskScheduler::wait_for_counter(Counter& counter, std::function<void()> on_
 
 			Fiber* f = nullptr;
 
-			auto opt = workers[t_worker_index]->queue.pop();
+            auto opt = workers[static_cast<size_t>(t_worker_index)]->queue.pop();
 			if (opt)
 				f = *opt;
 
 			if (!f)
-				f = steal_task(t_worker_index);
+                f = steal_task(static_cast<size_t>(t_worker_index));
 
 			if (f) {
 				execute_task(f);
@@ -368,13 +368,14 @@ void TaskScheduler::fiber_entry_stub(Fiber* f_dummy) {
 			while (waiting_head) {
 				auto next = waiting_head->next_waiting;
 				waiting_head->next_waiting = nullptr;
-				if (waiting_head->target_thread_index != -1) {
-					auto tidx = waiting_head->target_thread_index;
-					std::lock_guard lock(scheduler->workers[tidx]->pinned_mtx);
-					scheduler->workers[tidx]->pinned_queue.push_back(waiting_head);
-				} else {
-					scheduler->workers[t_worker_index]->queue.push(waiting_head);
-				}
+                if (waiting_head->target_thread_index != -1) {
+                    auto tidx = static_cast<size_t>(waiting_head->target_thread_index);
+                    std::lock_guard lock(scheduler->workers[tidx]->pinned_mtx);
+                    scheduler->workers[tidx]->pinned_queue.push_back(waiting_head);
+                } else {
+                    auto idx = static_cast<size_t>(t_worker_index);
+                    scheduler->workers[idx]->queue.push(waiting_head);
+                }
 				waiting_head = next;
 			}
 		}
@@ -411,13 +412,14 @@ void TaskScheduler::execute_task(Fiber* f) {
 			while (wake_list) {
 				auto next = wake_list->next_waiting;
 				wake_list->next_waiting = nullptr;
-				if (wake_list->target_thread_index != -1) {
-					auto tidx = wake_list->target_thread_index;
-					std::lock_guard lock(workers[tidx]->pinned_mtx);
-					workers[tidx]->pinned_queue.push_back(wake_list);
-				} else {
-					workers[t_worker_index]->queue.push(wake_list);
-				}
+                if (wake_list->target_thread_index != -1) {
+                    auto tidx = static_cast<size_t>(wake_list->target_thread_index);
+                    std::lock_guard lock(workers[tidx]->pinned_mtx);
+                    workers[tidx]->pinned_queue.push_back(wake_list);
+                } else {
+                    auto idx = static_cast<size_t>(t_worker_index);
+                    workers[idx]->queue.push(wake_list);
+                }
 				wake_list = next;
 			}
 		}
@@ -444,7 +446,7 @@ Fiber* TaskScheduler::steal_task(size_t my_idx) {
 
 
 void TaskScheduler::worker_loop(size_t index, std::stop_token st) {
-	t_worker_index = index;
+    t_worker_index = static_cast<int>(index);
 	t_scheduler = this;
 
 #ifdef TRACY_ENABLE
