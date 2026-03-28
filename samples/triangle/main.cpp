@@ -1,4 +1,4 @@
-﻿
+
 #include <exception>
 #include <functional>
 #include <unordered_map>
@@ -93,6 +93,11 @@ public:
 
     void on_update(float delta_time) override {
         auto engine = get_engine();
+
+        // During replay playback the camera sequencer fully controls the camera.
+        // Skip all user camera input so it does not interfere.
+        if (engine->is_replay_active()) return;
+
         auto& input = bud::input::Input::get();
         auto& scene = engine->get_scene();
         auto& cam = scene.main_camera;

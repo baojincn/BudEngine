@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.30.0)
+cmake_minimum_required(VERSION 3.30.0)
 
 # Setup vcpkg toolchain
 if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
@@ -241,6 +241,7 @@ target_sources(bud_engine_core
 
 		"src/runtime/bud.input.cpp"
 		"src/runtime/bud.scene.cpp"
+		"src/runtime/bud.camera_sequencer.cpp"
 
     PUBLIC
 		"src/core/bud.core.hpp"
@@ -253,6 +254,7 @@ target_sources(bud_engine_core
 		"src/threading/bud.threading.hpp"
 		"src/runtime/bud.input.hpp"
 		"src/runtime/bud.scene.hpp"
+		"src/runtime/bud.camera_sequencer.hpp"
 
 		"src/ui/bud.stats.ui.hpp"
 

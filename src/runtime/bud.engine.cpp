@@ -1,4 +1,4 @@
-﻿#include <string>
+#include <string>
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -50,8 +50,6 @@ namespace bud::engine {
 
 		asset_manager = std::make_unique<bud::io::AssetManager>(virtual_file_system.get(), task_scheduler.get());
 
-		// TaskScheduler already injected via logger constructor above.
-
 		rhi = bud::graphics::create_rhi(engine_config.backend);
 
 		auto enable_validation = engine_config.enable_validation;
@@ -79,9 +77,19 @@ namespace bud::engine {
 		renderer = std::make_unique<bud::graphics::Renderer>(rhi.get(), asset_manager.get(), task_scheduler.get());
 
 		render_scenes.resize(engine_config.inflight_frame_count);
+
+		// Initialize camera sequencer with the asset manager for async I/O and
+		// VirtualFileSystem for direct sync writes at shutdown.
+		camera_sequencer = bud::scene::CameraSequencer(asset_manager.get(), virtual_file_system.get());
+		// Async load of the latest saved replay (fires on main thread next frame pump)
+		camera_sequencer.load_latest();
 	}
 
 	BudEngine::~BudEngine() {
+		// Flush the camera sequencer first: if recording is still active, this writes
+		// the track file synchronously on this thread before any subsystems are torn down.
+		camera_sequencer.flush();
+
 		asset_manager.reset();
 		renderer.reset();
 
@@ -125,6 +133,10 @@ namespace bud::engine {
 					bud::threading::Counter logic_counter;
 					task_scheduler->spawn("GameLogic", [&]() {
 						perform_game_logic((float)fixed_dt);
+						// Tick sequencer after user input is applied:
+						// - During RECORDING: samples camera after user movement
+						// - During PLAYING: overrides camera position/rotation
+						camera_sequencer.update((float)fixed_dt, scene.main_camera);
 					}, &logic_counter);
 					task_scheduler->wait_for_counter(logic_counter);
 				}
@@ -160,21 +172,60 @@ namespace bud::engine {
 	void BudEngine::handle_events() {
 		window->poll_events();
 
+		bool is_playing = camera_sequencer.is_playing();
+
 		static bool was_f3_down = false;
 		bool is_f3_down = bud::input::Input::get().is_key_down(bud::input::Key::F3);
-		if (is_f3_down && !was_f3_down) {
+		if (is_f3_down && !was_f3_down && !is_playing) {
 			show_debug_stats = !show_debug_stats;
 		}
 		was_f3_down = is_f3_down;
 
 		static bool was_f4_down = false;
 		bool is_f4_down = bud::input::Input::get().is_key_down(bud::input::Key::F4);
-		if (is_f4_down && !was_f4_down) {
+		if (is_f4_down && !was_f4_down && !is_playing) {
 			auto config = renderer->get_config();
 			config.enable_cluster_visualization = !config.enable_cluster_visualization;
 			renderer->set_config(config);
 		}
 		was_f4_down = is_f4_down;
+
+		// Space: toggle playback pause
+		static bool was_space_down = false;
+		bool is_space_down = bud::input::Input::get().is_key_down(bud::input::Key::Space);
+		if (is_space_down && !was_space_down) {
+			camera_sequencer.toggle_pause();
+		}
+		was_space_down = is_space_down;
+
+		// F8: toggle camera recording — ignored during playback to protect the loaded track.
+		static bool was_f8_down = false;
+		bool is_f8_down = bud::input::Input::get().is_key_down(bud::input::Key::F8);
+		if (is_f8_down && !was_f8_down &&
+		    camera_sequencer.get_state() != bud::scene::SequencerState::PLAYING)
+		{
+			if (camera_sequencer.get_state() == bud::scene::SequencerState::RECORDING) {
+				camera_sequencer.stop_recording();
+			} else {
+				camera_sequencer.start_recording(scene.main_camera);
+			}
+		}
+		was_f8_down = is_f8_down;
+
+		// F9: toggle camera playback
+		// Ctrl+F9: toggle looping camera playback
+		static bool was_f9_down = false;
+		bool is_f9_down  = bud::input::Input::get().is_key_down(bud::input::Key::F9);
+		bool is_ctrl_down = bud::input::Input::get().is_key_down(bud::input::Key::LCtrl);
+		if (is_f9_down && !was_f9_down) {
+			if (camera_sequencer.get_state() == bud::scene::SequencerState::PLAYING) {
+				camera_sequencer.stop_playback();
+			} else {
+				const bool loop = is_ctrl_down;
+				camera_sequencer.start_playback(loop);
+			}
+		}
+		was_f9_down = is_f9_down;
 
 		int width = 0;
 		int height = 0;
@@ -312,7 +363,27 @@ namespace bud::engine {
 			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
 			ImGui::SetNextWindowBgAlpha(0.35f);
 			if (ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
-				bud::ui::StatsUI::render(stats, view_snapshot.delta_time);
+
+				// Build sequencer status string for same-line FPS display
+				std::string seq_status;
+				const auto seq_state      = camera_sequencer.get_state();
+				const auto keyframe_count = camera_sequencer.get_keyframe_count();
+				if (seq_state == bud::scene::SequencerState::RECORDING) {
+					seq_status = std::format("| REC [{} kf]", keyframe_count);
+				} else if (seq_state == bud::scene::SequencerState::PLAYING) {
+					if (camera_sequencer.is_paused()) {
+						seq_status = std::format("| PAUS [{}/{}]",
+							camera_sequencer.get_playback_index(), keyframe_count);
+					} else {
+						const char* mode = camera_sequencer.is_looping() ? "LOOP" : "PLAY";
+						seq_status = std::format("| {} [{}/{}]",
+							mode, camera_sequencer.get_playback_index(), keyframe_count);
+					}
+				} else if (keyframe_count > 0) {
+					seq_status = std::format("| READY [{} kf]", keyframe_count);
+				}
+
+				bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_status);
 			}
 			ImGui::End();
 		}

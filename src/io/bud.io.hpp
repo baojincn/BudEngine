@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vector>
 #include <string>
@@ -83,6 +83,12 @@ namespace bud::io {
 		bool write_binary(const std::filesystem::path& path, const std::vector<char>& data);
 		void append_text_async(const std::filesystem::path& path, std::string text, bud::threading::Counter* counter = nullptr, bud::threading::TaskScheduler* scheduler = nullptr);
 		std::filesystem::path get_root_path() const { return root_path; }
+
+		// Synchronous JSON helpers — VFS is the sync layer; use these when you need
+		// to read/write JSON on the calling thread (e.g. startup load, shutdown flush).
+		std::optional<nlohmann::json> read_json(const std::filesystem::path& path);
+		bool                          write_json(const std::filesystem::path& path, const nlohmann::json& json);
+
 	private:
 		std::filesystem::path root_path;
 	};
@@ -148,6 +154,14 @@ private:
 		void load_json_async(const std::string& path, std::function<void(nlohmann::json)> on_loaded);
 		void save_json_async(const std::string& path, const nlohmann::json& json, std::function<void(bool)> on_finished = nullptr);
 		void save_file_async(const std::string& path, std::vector<char> data, std::function<void(bool)> on_finished = nullptr);
+
+		// Access the underlying synchronous file system layer.
+		// Use this for operations that must run on the calling thread (startup load, shutdown flush).
+		VirtualFileSystem* get_vfs() { return virtual_file_system; }
+
+		// Synchronous helpers kept for compatibility — prefer async variants where possible.
+		bool save_json_sync(const std::string& path, const nlohmann::json& json);
+		std::optional<nlohmann::json> load_json_sync(const std::string& path);
 
 	private:
     VirtualFileSystem* virtual_file_system;

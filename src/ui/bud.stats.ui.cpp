@@ -1,10 +1,13 @@
-﻿#include "bud.stats.ui.hpp"
+#include "bud.stats.ui.hpp"
 #include <imgui.h>
 #include <cmath>
+#include <string_view>
+#include <cstring>
 
 namespace bud::ui {
 
-	void StatsUI::render(const bud::graphics::RenderStats& stats, float delta_time) {
+	void StatsUI::render(const bud::graphics::RenderStats& stats, float delta_time,
+	                     std::string_view sequencer_status) {
 		static float update_timer = 0.0f;
 		static float display_fps = 0.0f;
 		static float display_ms = 0.0f;
@@ -93,6 +96,16 @@ namespace bud::ui {
 		ImVec4 pipe_color = display_pipeline_binds <= 100 ? color_good : (display_pipeline_binds <= 500 ? color_warn : color_bad);
 
 		ImGui::TextColored(fps_color, "FPS: %.1f (%.2f ms)", display_fps, display_ms);
+		if (!sequencer_status.empty()) {
+			ImGui::SameLine();
+			bool is_rec  = sequencer_status.find("REC")  != std::string_view::npos;
+			bool is_play = sequencer_status.find("PLAY") != std::string_view::npos;
+			ImVec4 seq_color = is_rec  ? color_bad
+			                 : is_play ? color_good
+			                 :           color_neutral;
+			ImGui::TextColored(seq_color, " %.*s",
+			    static_cast<int>(sequencer_status.size()), sequencer_status.data());
+		}
 		ImGui::Separator();
 		ImGui::TextColored(color_neutral, "Draw Stats");
 		ImGui::TextColored(dc_color, "Draw Calls: %u", display_draw_calls);

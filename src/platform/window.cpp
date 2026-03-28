@@ -1,4 +1,4 @@
-﻿#include <SDL3/SDL.h>
+#include <SDL3/SDL.h>
 #include <stdexcept>
 #include "src/platform/bud.platform.hpp"
 #include "src/core/bud.core.hpp"
@@ -27,6 +27,9 @@ namespace bud::platform {
 		case SDLK_R:      return bud::input::Key::R;
 		case SDLK_F3:     return bud::input::Key::F3;
 		case SDLK_F4:     return bud::input::Key::F4;
+		case SDLK_F8:     return bud::input::Key::F8;
+		case SDLK_F9:     return bud::input::Key::F9;
+		case SDLK_LCTRL:  return bud::input::Key::LCtrl;
 
 		default:          return bud::input::Key::Unknown;
 		}
