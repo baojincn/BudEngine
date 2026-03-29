@@ -119,14 +119,14 @@ namespace bud::graphics::vulkan {
         if (frame_index < deferred_free_buffers.size()) {
             for (auto& handle : deferred_free_buffers[frame_index]) {
                 if (!handle.is_valid()) continue;
-                auto* vk_buf = static_cast<VulkanBuffer*>(handle.internal_state);
+                auto* vk_buf = handle.internal_state ? reinterpret_cast<VulkanBuffer*>(handle.internal_state) : nullptr;
                 if (!vk_buf) continue;
                 if (vk_buf->owns_allocation) {
                     if (vma_allocator && vk_buf->buffer != VK_NULL_HANDLE) {
                         vmaDestroyBuffer(vma_allocator, vk_buf->buffer, vk_buf->allocation);
                     }
                 }
-                delete vk_buf;
+                // Ownership of the VulkanBuffer object is managed by shared_ptr stored in handle.internal_state.
             }
             deferred_free_buffers[frame_index].clear();
         }
@@ -146,14 +146,15 @@ namespace bud::graphics::vulkan {
         return {};
     }
 
-    void VulkanMemoryAllocator::defer_free(const bud::graphics::BufferHandle& handle, uint32_t frame_index) {
+    void VulkanMemoryAllocator::defer_free(bud::graphics::BufferHandle handle, uint32_t frame_index) {
         if (!handle.is_valid())
             return;
         std::lock_guard lock(mutex);
         if (deferred_free_buffers.empty())
             return;
         uint32_t idx = frame_index % deferred_free_buffers.size();
-        deferred_free_buffers[idx].push_back(handle);
+        // Move the handle into the deferred list to transfer ownership and avoid copies.
+        deferred_free_buffers[idx].push_back(std::move(handle));
     }
 
     void VulkanMemoryAllocator::defer_free(bud::graphics::Texture* texture, uint32_t frame_index) {
@@ -228,6 +229,7 @@ namespace bud::graphics::vulkan {
         vk_buf->owns_allocation = true;
 
         block.internal_state = vk_buf;
+        block.owner = std::shared_ptr<void>(vk_buf, [](void* p) { delete static_cast<VulkanBuffer*>(p); });
         block.offset = 0;
         block.size = size;
         block.mapped_ptr = vk_buf->mapped_ptr;
@@ -287,6 +289,7 @@ namespace bud::graphics::vulkan {
 
         bud::graphics::BufferHandle handle;
         handle.internal_state = vk_buf;
+        handle.owner = std::shared_ptr<void>(vk_buf, [](void* p) { delete static_cast<VulkanBuffer*>(p); });
         handle.size = size;
         handle.mapped_ptr = vk_buf->mapped_ptr;
         return handle;
@@ -324,6 +327,7 @@ namespace bud::graphics::vulkan {
 
         bud::graphics::BufferHandle handle;
         handle.internal_state = vk_buf;
+        handle.owner = std::shared_ptr<void>(vk_buf, [](void* p) { delete static_cast<VulkanBuffer*>(p); });
         handle.size = size;
         handle.mapped_ptr = vk_buf->mapped_ptr;
         return handle;

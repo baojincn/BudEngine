@@ -999,11 +999,11 @@ namespace bud::graphics {
 			font_texture = nullptr;
 		}
 		if (current_vertex_buffer_size > 0 && rhi) {
-			rhi->destroy_buffer(vertex_buffer);
+			rhi->destroy_buffer(std::move(vertex_buffer));
 			current_vertex_buffer_size = 0;
 		}
 		if (current_index_buffer_size > 0 && rhi) {
-			rhi->destroy_buffer(index_buffer);
+			rhi->destroy_buffer(std::move(index_buffer));
 			current_index_buffer_size = 0;
 		}
 	}

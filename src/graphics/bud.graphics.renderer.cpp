@@ -61,36 +61,36 @@ namespace bud::graphics {
 		if (cluster_viz_pass) cluster_viz_pass->shutdown(rhi);
 		if (ui_pass) ui_pass->shutdown(rhi);
 
-		for (auto& mesh : meshes) {
-			// vertex_buffer and index_buffer are now pool offsets, no individual destroy needed
-			if (mesh.meshlet_buffer.is_valid()) rhi->destroy_buffer(mesh.meshlet_buffer);
-			if (mesh.vertex_index_buffer.is_valid()) rhi->destroy_buffer(mesh.vertex_index_buffer);
-			if (mesh.meshlet_index_buffer.is_valid()) rhi->destroy_buffer(mesh.meshlet_index_buffer);
-			if (mesh.cull_data_buffer.is_valid()) rhi->destroy_buffer(mesh.cull_data_buffer);
-		}
+        for (auto& mesh : meshes) {
+            // vertex_buffer and index_buffer are now pool offsets, no individual destroy needed
+            if (mesh.meshlet_buffer.is_valid()) rhi->destroy_buffer(std::move(mesh.meshlet_buffer));
+            if (mesh.vertex_index_buffer.is_valid()) rhi->destroy_buffer(std::move(mesh.vertex_index_buffer));
+            if (mesh.meshlet_index_buffer.is_valid()) rhi->destroy_buffer(std::move(mesh.meshlet_index_buffer));
+            if (mesh.cull_data_buffer.is_valid()) rhi->destroy_buffer(std::move(mesh.cull_data_buffer));
+        }
 
-		if (geometry_pool.vertex_buffer.is_valid()) rhi->destroy_buffer(geometry_pool.vertex_buffer);
-		if (geometry_pool.index_buffer.is_valid())  rhi->destroy_buffer(geometry_pool.index_buffer);
+        if (geometry_pool.vertex_buffer.is_valid()) rhi->destroy_buffer(std::move(geometry_pool.vertex_buffer));
+        if (geometry_pool.index_buffer.is_valid())  rhi->destroy_buffer(std::move(geometry_pool.index_buffer));
 		
-		for (auto& buf : indirect_instance_buffers) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
+        for (auto& buf : indirect_instance_buffers) {
+            if (buf.is_valid()) rhi->destroy_buffer(std::move(buf));
+        }
 		indirect_instance_buffers.clear();
 
-		for (auto& buf : indirect_draw_buffers) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
+        for (auto& buf : indirect_draw_buffers) {
+            if (buf.is_valid()) rhi->destroy_buffer(std::move(buf));
+        }
 
 		indirect_draw_buffers.clear();
 
-		for (auto& buf : stats_readback_buffers) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
+        for (auto& buf : stats_readback_buffers) {
+            if (buf.is_valid()) rhi->destroy_buffer(std::move(buf));
+        }
 		stats_readback_buffers.clear();
 
-		for (auto& buf : instance_data_ssbos) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
+        for (auto& buf : instance_data_ssbos) {
+            if (buf.is_valid()) rhi->destroy_buffer(std::move(buf));
+        }
 		instance_data_ssbos.clear();
 	}
 

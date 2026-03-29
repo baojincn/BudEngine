@@ -476,6 +476,7 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
     vk_buf->owns_allocation = true;
     bud::graphics::BufferHandle handle;
     handle.internal_state = vk_buf;
+    handle.owner = std::shared_ptr<void>(vk_buf, [](void* p) { delete static_cast<bud::graphics::vulkan::VulkanBuffer*>(p); });
     handle.size = size;
     handle.mapped_ptr = vk_buf->mapped_ptr;
     return handle;
@@ -496,13 +497,14 @@ void VulkanRHI::destroy_buffer(bud::graphics::BufferHandle block) {
         memory_allocator->defer_free(block, current_frame);
     } else {
         // Fallback: immediate destroy if no allocator
-        auto* vk_buf = static_cast<bud::graphics::vulkan::VulkanBuffer*>(block.internal_state);
+        auto* vk_buf = block.internal_state ? reinterpret_cast<bud::graphics::vulkan::VulkanBuffer*>(block.internal_state) : nullptr;
         if (vk_buf) {
             auto vma_allocator = get_memory_allocator() ? get_memory_allocator()->get_vma_allocator() : VK_NULL_HANDLE;
             if (vk_buf->owns_allocation && vma_allocator && vk_buf->buffer) {
                 vmaDestroyBuffer(vma_allocator, vk_buf->buffer, vk_buf->allocation);
             }
-            delete vk_buf;
+            // Release ownership immediately
+            block.owner.reset();
         }
     }
 }
@@ -1109,8 +1111,27 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle 
 	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 
-	auto* vk_buf = static_cast<bud::graphics::vulkan::VulkanBuffer*>(buffer.internal_state);
-	barrier.buffer = vk_buf->buffer;
+    if (!buffer.is_valid()) {
+        std::string err = std::format("resource_barrier invalid BufferHandle: valid={} offset={} size={}", buffer.is_valid(), buffer.offset, buffer.size);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
+
+    auto* vk_buf = buffer.internal_state ? reinterpret_cast<bud::graphics::vulkan::VulkanBuffer*>(buffer.internal_state) : nullptr;
+    if (!vk_buf) {
+        std::string err = std::format("resource_barrier null internal VulkanBuffer: vk_buf={}", (void*)vk_buf);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
+    barrier.buffer = vk_buf->buffer;
 	barrier.offset = 0;
 	barrier.size = VK_WHOLE_SIZE;
 
@@ -1142,7 +1163,7 @@ void VulkanRHI::cmd_bind_vertex_buffer(CommandHandle cmd, bud::graphics::BufferH
         return;
 #endif
     }
-    auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
+    auto* vk_buf = buffer.internal_state ? reinterpret_cast<VulkanBuffer*>(buffer.internal_state) : nullptr;
     if (!vk_buf || !vk_buf->buffer) {
         std::string err = std::format("cmd_bind_vertex_buffer null internal VulkanBuffer or VkBuffer: vk_buf={} vk_buffer={}", (void*)vk_buf, vk_buf ? (void*)vk_buf->buffer : nullptr);
         bud::eprint("{}", err);

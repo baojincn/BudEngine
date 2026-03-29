@@ -1,7 +1,8 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <vector>
+#include <memory>
 #include <string>
 
 #include "src/core/bud.core.hpp"
@@ -222,14 +223,26 @@ namespace bud::graphics {
 	};
 	// POD, end
 
-	// BufferHandle replaces the old 'MemoryBlock' to avoid API leakage
-	struct BufferHandle {
-		void* internal_state = nullptr; // e.g. VulkanBuffer*
-		uint64_t offset = 0;
-		uint64_t size = 0;
-		void* mapped_ptr = nullptr;
-		bool is_valid() const { return internal_state != nullptr; }
-	};
+    // BufferHandle replaces the old 'MemoryBlock' to avoid API leakage
+    // Keep a raw pointer for fast access (`internal_state`) and an optional owning
+    // shared_ptr (`owner`) that controls lifetime when this handle represents ownership.
+    struct BufferHandle {
+        void* internal_state = nullptr; // e.g. VulkanBuffer*
+        std::shared_ptr<void> owner;    // optional owning reference with custom deleter
+        uint64_t offset = 0;
+        uint64_t size = 0;
+        void* mapped_ptr = nullptr;
+
+        bool is_valid() const { return internal_state != nullptr; }
+
+        void reset() {
+            internal_state = nullptr;
+            owner.reset();
+            offset = 0;
+            size = 0;
+            mapped_ptr = nullptr;
+        }
+    };
 
 	class Texture;
 
