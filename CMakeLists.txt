@@ -240,6 +240,7 @@ target_sources(bud_engine_core
         "src/third_party/bud_third_party.cpp"
 
 		"src/runtime/bud.input.cpp"
+		"src/input/bud.input.manager.cpp"
 		"src/runtime/bud.scene.cpp"
 		"src/runtime/bud.camera_sequencer.cpp"
 

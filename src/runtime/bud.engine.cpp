@@ -43,6 +43,9 @@ namespace bud::engine {
 
 		task_scheduler = std::make_unique<bud::threading::TaskScheduler>();
 
+		// Input manager for keyboard/mouse action mapping
+		input_manager = std::make_unique<bud::input::InputManager>();
+
 
 
 		int initial_width = 0;
@@ -87,6 +90,52 @@ namespace bud::engine {
 
 		// Initialize the main thread as a worker
 		task_scheduler->init_main_thread_worker();
+
+		// Register default action bindings
+		input_manager->bind_key("ToggleDebug", bud::input::Key::F3);
+		input_manager->bind_key("ToggleClusterVis", bud::input::Key::F4);
+		input_manager->bind_key("TogglePause", bud::input::Key::Space);
+		input_manager->bind_key("ToggleRecord", bud::input::Key::F8);
+		input_manager->bind_key("TogglePlayback", bud::input::Key::F9);
+
+		// Register action callbacks (callbacks run on rising edge detected by InputManager::update())
+		input_manager->register_action_callback("ToggleDebug", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				show_debug_stats = !show_debug_stats;
+			}
+		});
+
+		input_manager->register_action_callback("ToggleClusterVis", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				auto config = renderer->get_config();
+				config.enable_cluster_visualization = !config.enable_cluster_visualization;
+				renderer->set_config(config);
+			}
+		});
+
+		input_manager->register_action_callback("TogglePause", [this]() {
+			camera_sequencer.toggle_pause();
+		});
+
+		input_manager->register_action_callback("ToggleRecord", [this]() {
+			if (camera_sequencer.get_state() != bud::scene::SequencerState::PLAYING) {
+				if (camera_sequencer.get_state() == bud::scene::SequencerState::RECORDING) {
+					camera_sequencer.stop_recording();
+				} else {
+					camera_sequencer.start_recording(scene.main_camera);
+				}
+			}
+		});
+
+		input_manager->register_action_callback("TogglePlayback", [this]() {
+			bool is_ctrl_down = input_manager->is_key_down(bud::input::Key::LCtrl);
+			if (camera_sequencer.get_state() == bud::scene::SequencerState::PLAYING) {
+				camera_sequencer.stop_playback();
+			} else {
+				const bool loop = is_ctrl_down;
+				camera_sequencer.start_playback(loop);
+			}
+		});
 	}
 
 	BudEngine::~BudEngine() {
@@ -202,60 +251,10 @@ namespace bud::engine {
 	void BudEngine::handle_events() {
 		window->poll_events();
 
-		bool is_playing = camera_sequencer.is_playing();
+		// Update input manager (sample current frame keys/mouse)
+		if (input_manager) input_manager->update();
 
-		static bool was_f3_down = false;
-		bool is_f3_down = bud::input::Input::get().is_key_down(bud::input::Key::F3);
-		if (is_f3_down && !was_f3_down && !is_playing) {
-			show_debug_stats = !show_debug_stats;
-		}
-		was_f3_down = is_f3_down;
-
-		static bool was_f4_down = false;
-		bool is_f4_down = bud::input::Input::get().is_key_down(bud::input::Key::F4);
-		if (is_f4_down && !was_f4_down && !is_playing) {
-			auto config = renderer->get_config();
-			config.enable_cluster_visualization = !config.enable_cluster_visualization;
-			renderer->set_config(config);
-		}
-		was_f4_down = is_f4_down;
-
-		// Space: toggle playback pause
-		static bool was_space_down = false;
-		bool is_space_down = bud::input::Input::get().is_key_down(bud::input::Key::Space);
-		if (is_space_down && !was_space_down) {
-			camera_sequencer.toggle_pause();
-		}
-		was_space_down = is_space_down;
-
-		// F8: toggle camera recording — ignored during playback to protect the loaded track.
-		static bool was_f8_down = false;
-		bool is_f8_down = bud::input::Input::get().is_key_down(bud::input::Key::F8);
-		if (is_f8_down && !was_f8_down &&
-		    camera_sequencer.get_state() != bud::scene::SequencerState::PLAYING)
-		{
-			if (camera_sequencer.get_state() == bud::scene::SequencerState::RECORDING) {
-				camera_sequencer.stop_recording();
-			} else {
-				camera_sequencer.start_recording(scene.main_camera);
-			}
-		}
-		was_f8_down = is_f8_down;
-
-		// F9: toggle camera playback
-		// Ctrl+F9: toggle looping camera playback
-		static bool was_f9_down = false;
-		bool is_f9_down  = bud::input::Input::get().is_key_down(bud::input::Key::F9);
-		bool is_ctrl_down = bud::input::Input::get().is_key_down(bud::input::Key::LCtrl);
-		if (is_f9_down && !was_f9_down) {
-			if (camera_sequencer.get_state() == bud::scene::SequencerState::PLAYING) {
-				camera_sequencer.stop_playback();
-			} else {
-				const bool loop = is_ctrl_down;
-				camera_sequencer.start_playback(loop);
-			}
-		}
-		was_f9_down = is_f9_down;
+    	// input actions handled via InputManager callbacks registered in the constructor
 
 		int width = 0;
 		int height = 0;

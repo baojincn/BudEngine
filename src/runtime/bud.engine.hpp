@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <string>
 #include <memory>
@@ -19,6 +19,7 @@
 #include "src/graphics/bud.graphics.scene.hpp"
 #include "src/graphics/bud.graphics.renderer.hpp"
 #include "src/runtime/bud.camera_sequencer.hpp"
+#include "src/input/bud.input.manager.hpp"
 
 
 namespace bud::engine {
@@ -82,6 +83,7 @@ namespace bud::engine {
 		int last_height = 0;
 
 		std::unique_ptr<bud::threading::TaskScheduler> task_scheduler;
+		std::unique_ptr<bud::input::InputManager> input_manager;
 		std::unique_ptr<bud::Logger> logger;
 		std::unique_ptr<bud::graphics::RHI> rhi;
 		std::unique_ptr<bud::io::AssetManager> asset_manager;
