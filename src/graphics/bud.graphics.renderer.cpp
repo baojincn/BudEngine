@@ -1,4 +1,4 @@
-﻿#include <memory>
+#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -61,36 +61,51 @@ namespace bud::graphics {
 		if (cluster_viz_pass) cluster_viz_pass->shutdown(rhi);
 		if (ui_pass) ui_pass->shutdown(rhi);
 
-        for (auto& mesh : meshes) {
-            // vertex_buffer and index_buffer are now pool offsets, no individual destroy needed
-            if (mesh.meshlet_buffer.is_valid()) rhi->destroy_buffer(std::move(mesh.meshlet_buffer));
-            if (mesh.vertex_index_buffer.is_valid()) rhi->destroy_buffer(std::move(mesh.vertex_index_buffer));
-            if (mesh.meshlet_index_buffer.is_valid()) rhi->destroy_buffer(std::move(mesh.meshlet_index_buffer));
-            if (mesh.cull_data_buffer.is_valid()) rhi->destroy_buffer(std::move(mesh.cull_data_buffer));
-        }
+		for (auto& mesh : meshes) {
+			// vertex_buffer and index_buffer are now pool offsets, no individual destroy needed
+			if (mesh.meshlet_buffer.is_valid()) rhi->destroy_buffer(mesh.meshlet_buffer);
+			if (mesh.vertex_index_buffer.is_valid()) rhi->destroy_buffer(mesh.vertex_index_buffer);
+			if (mesh.meshlet_index_buffer.is_valid()) rhi->destroy_buffer(mesh.meshlet_index_buffer);
+			if (mesh.cull_data_buffer.is_valid()) rhi->destroy_buffer(mesh.cull_data_buffer);
+		}
 
-        if (geometry_pool.vertex_buffer.is_valid()) rhi->destroy_buffer(std::move(geometry_pool.vertex_buffer));
-        if (geometry_pool.index_buffer.is_valid())  rhi->destroy_buffer(std::move(geometry_pool.index_buffer));
+		for (auto& buf : stats_readback_buffers) {
+			if (buf.is_valid()) rhi->destroy_buffer(buf);
+		}
+		for (auto& buf : readback_buffers) {
+			if (buf.is_valid()) rhi->destroy_buffer(buf);
+		}
+
+		if (offscreen_target) {
+			auto* pool = rhi->get_resource_pool();
+			if (pool) pool->release_texture(offscreen_target);
+			offscreen_target = nullptr;
+		}
+
+		if (geometry_pool.initialized) {
+			if (geometry_pool.vertex_buffer.is_valid()) rhi->destroy_buffer(geometry_pool.vertex_buffer);
+			if (geometry_pool.index_buffer.is_valid())  rhi->destroy_buffer(geometry_pool.index_buffer);
+		}
 		
-        for (auto& buf : indirect_instance_buffers) {
-            if (buf.is_valid()) rhi->destroy_buffer(std::move(buf));
-        }
+		for (auto& buf : indirect_instance_buffers) {
+			if (buf.is_valid()) rhi->destroy_buffer(buf);
+		}
 		indirect_instance_buffers.clear();
 
-        for (auto& buf : indirect_draw_buffers) {
-            if (buf.is_valid()) rhi->destroy_buffer(std::move(buf));
-        }
+		for (auto& buf : indirect_draw_buffers) {
+			if (buf.is_valid()) rhi->destroy_buffer(buf);
+		}
 
 		indirect_draw_buffers.clear();
 
-        for (auto& buf : stats_readback_buffers) {
-            if (buf.is_valid()) rhi->destroy_buffer(std::move(buf));
-        }
+		for (auto& buf : stats_readback_buffers) {
+			if (buf.is_valid()) rhi->destroy_buffer(buf);
+		}
 		stats_readback_buffers.clear();
 
-        for (auto& buf : instance_data_ssbos) {
-            if (buf.is_valid()) rhi->destroy_buffer(std::move(buf));
-        }
+		for (auto& buf : instance_data_ssbos) {
+			if (buf.is_valid()) rhi->destroy_buffer(buf);
+		}
 		instance_data_ssbos.clear();
 	}
 
@@ -578,6 +593,36 @@ namespace bud::graphics {
 		rhi->set_render_config(render_config);
 
 		auto swapchain_tex = rhi->get_current_swapchain_texture();
+
+		if (rhi->is_headless()) {
+			uint32_t width = rhi->get_width();
+			uint32_t height = rhi->get_height();
+			if (!offscreen_target || offscreen_target->width != width || offscreen_target->height != height) {
+				if (offscreen_target) {
+					auto* pool = rhi->get_resource_pool();
+					if (pool) pool->release_texture(offscreen_target);
+					offscreen_target = nullptr;
+				}
+				
+				if (width > 0 && height > 0) {
+					bud::graphics::TextureDesc desc{};
+					desc.width = width;
+					desc.height = height;
+					desc.format = bud::graphics::TextureFormat::RGBA8_UNORM;
+					desc.is_transfer_src = true;
+					desc.is_storage = true; // Just in case it's bound as storage
+					offscreen_target = rhi->create_texture(desc, nullptr, 0);
+					rhi->set_debug_name(offscreen_target, ObjectType::Texture, "HeadlessOffscreenTarget");
+				}
+			}
+			swapchain_tex = offscreen_target;
+		}
+
+		if (!swapchain_tex) {
+			render_graph.reset();
+			return;
+		}
+
 		auto back_buffer = render_graph.import_texture("Backbuffer", swapchain_tex, ResourceState::RenderTarget);
 		
 		uint32_t current_idx = rhi->get_current_image_index();
@@ -906,7 +951,32 @@ namespace bud::graphics {
 
 		rhi->resource_barrier(cmd, swapchain_tex, ResourceState::Undefined, ResourceState::RenderTarget);
 		render_graph.execute(cmd);
-		rhi->resource_barrier(cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::Present);
+
+		if (rhi->is_headless()) {
+			// Transition to TransferSrc
+			rhi->resource_barrier(cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::TransferSrc);
+			
+			uint32_t current_idx = rhi->get_current_image_index();
+			if (readback_buffers.size() <= current_idx) {
+				readback_buffers.resize(current_idx + 1);
+			}
+
+			uint64_t readback_size = (uint64_t)swapchain_tex->width * swapchain_tex->height * 4; // Assuming RGBA8
+			if (!readback_buffers[current_idx].is_valid() || readback_buffers[current_idx].size != readback_size) {
+				if (readback_buffers[current_idx].is_valid()) {
+					rhi->destroy_buffer(readback_buffers[current_idx]);
+				}
+				// create read_back buffer
+				readback_buffers[current_idx] = rhi->get_allocator()->alloc_read_back(readback_size);
+			}
+
+			// Perform copy
+			rhi->cmd_copy_image_to_buffer(cmd, swapchain_tex, readback_buffers[current_idx]);
+			// Barrier back to Present/Undefined doesn't strictly matter for offscreen, but we leave it as TransferSrc so it's clean next frame
+		} else {
+			rhi->resource_barrier(cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::Present);
+		}
+
 		rhi->end_frame(cmd);
 		render_graph.reset();
 	}
@@ -919,6 +989,15 @@ namespace bud::graphics {
 
 	const RenderConfig& Renderer::get_config() const {
 		return render_config;
+	}
+
+	const void* Renderer::get_readback_pixels() const {
+		if (!rhi->is_headless() || readback_buffers.empty()) return nullptr;
+		uint32_t current_idx = rhi->get_current_image_index();
+		if (current_idx < readback_buffers.size() && readback_buffers[current_idx].is_valid()) {
+			return readback_buffers[current_idx].mapped_ptr;
+		}
+		return nullptr;
 	}
 
 	void Renderer::update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb) {

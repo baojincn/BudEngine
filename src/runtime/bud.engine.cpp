@@ -1,4 +1,4 @@
-#include <string>
+﻿#include <string>
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -34,9 +34,12 @@ namespace bud::engine {
 		logger = std::make_unique<bud::Logger>(virtual_file_system.get()->get_root_path());
 		bud::set_global_logger(logger.get());
 
+		// Inform crash handler of project root so dumps land under <root>/tmp
+		bud::platform::set_crash_dump_root(virtual_file_system.get()->get_root_path().string().c_str());
 		bud::platform::install_crash_handler();
 
-		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height);
+		auto flags = engine_config.is_headless ? bud::platform::WindowFlags::Hidden : bud::platform::WindowFlags::Default;
+		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height, flags);
 
 		task_scheduler = std::make_unique<bud::threading::TaskScheduler>();
 
@@ -56,7 +59,7 @@ namespace bud::engine {
 #if not defined(BUD_BUILD_DEBUG)
 		enable_validation = false;
 #endif
-		rhi->init(window.get(), task_scheduler.get(), enable_validation, engine_config.inflight_frame_count);
+		rhi->init(window.get(), task_scheduler.get(), enable_validation, engine_config.inflight_frame_count, engine_config.is_headless);
 
 		IMGUI_CHECKVERSION();
 		ImGui::CreateContext();
@@ -67,7 +70,7 @@ namespace bud::engine {
 			imgui_ini_path = resolved_imgui_path->string();
 			imgui_io.IniFilename = imgui_ini_path.c_str();
 		} else {
-			imgui_io.IniFilename = nullptr; // Don't save if path is invalid
+			imgui_io.IniFilename = nullptr;
 		}
 
 		imgui_io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -78,16 +81,15 @@ namespace bud::engine {
 
 		render_scenes.resize(engine_config.inflight_frame_count);
 
-		// Initialize camera sequencer with the asset manager for async I/O and
-		// VirtualFileSystem for direct sync writes at shutdown.
 		camera_sequencer = bud::scene::CameraSequencer(asset_manager.get(), virtual_file_system.get());
-		// Async load of the latest saved replay (fires on main thread next frame pump)
+
 		camera_sequencer.load_latest();
+
+		// Initialize the main thread as a worker
+		task_scheduler->init_main_thread_worker();
 	}
 
 	BudEngine::~BudEngine() {
-		// Flush the camera sequencer first: if recording is still active, this writes
-		// the track file synchronously on this thread before any subsystems are torn down.
 		camera_sequencer.flush();
 
 		asset_manager.reset();
@@ -103,9 +105,6 @@ namespace bud::engine {
 	}
 
 	void BudEngine::run(GameLogic perform_game_logic) {
-		// Initialize the main thread as a worker
-		task_scheduler->init_main_thread_worker();
-
 		const double fixed_dt = renderer->get_config().fixed_logic_timestep;
 
 		using Clock = std::chrono::high_resolution_clock;
@@ -126,16 +125,13 @@ namespace bud::engine {
 
 			accumulator += frame_time;
 
-			// 阶段 A: 逻辑更新
+			// 逻辑更新
 			bool logic_updated = false;
 			while (accumulator >= fixed_dt) {
 				if (perform_game_logic) {
 					bud::threading::Counter logic_counter;
 					task_scheduler->spawn("GameLogic", [&]() {
 						perform_game_logic((float)fixed_dt);
-						// Tick sequencer after user input is applied:
-						// - During RECORDING: samples camera after user movement
-						// - During PLAYING: overrides camera position/rotation
 						camera_sequencer.update((float)fixed_dt, scene.main_camera);
 					}, &logic_counter);
 					task_scheduler->wait_for_counter(logic_counter);
@@ -156,7 +152,7 @@ namespace bud::engine {
 				last_committed_index.store(current_write_index, std::memory_order_release);
 			}
 
-			// 阶段 B: 渲染
+			// 渲染
 			uint32_t render_idx = last_committed_index.load(std::memory_order_acquire);
 
 			perform_rendering((float)frame_time, render_idx);
@@ -164,9 +160,43 @@ namespace bud::engine {
 			FrameMark;
 		}
 
-		// 等待所有渲染任务完成
 		task_scheduler->wait_for_counter(render_task_counter);
 		rhi->wait_idle();
+	}
+
+	void BudEngine::step(float fixed_dt, GameLogic perform_game_logic) {
+		task_scheduler->pump_main_thread_tasks();
+		handle_events();
+
+		// Update logic once
+		if (perform_game_logic) {
+			bud::threading::Counter logic_counter;
+			task_scheduler->spawn("GameLogic_Step", [&]() {
+				perform_game_logic((float)fixed_dt);
+				camera_sequencer.update((float)fixed_dt, scene.main_camera);
+			}, &logic_counter);
+			task_scheduler->wait_for_counter(logic_counter);
+		}
+
+		// Stage Render Data
+		uint32_t current_write_index = render_inflight_index.load(std::memory_order_acquire);
+		uint32_t next_write_index = (current_write_index + 1) % render_scenes.size();
+		if (next_write_index == render_inflight_index.load(std::memory_order_acquire)) {
+			task_scheduler->wait_for_counter(render_task_counter);
+		}
+
+		current_write_index = next_write_index;
+		prepare_render_scene(current_write_index);
+		last_committed_index.store(current_write_index, std::memory_order_release);
+
+		// Render Frame immediately inline for step() determinism
+		uint32_t render_idx = last_committed_index.load(std::memory_order_acquire);
+		perform_rendering(fixed_dt, render_idx);
+
+		if (engine_config.is_puppet_mode) {
+			task_scheduler->wait_for_counter(render_task_counter);
+			rhi->wait_idle(); // Guarantee pixel copy is mapped to RAM
+		}
 	}
 
 	void BudEngine::handle_events() {
@@ -355,41 +385,43 @@ namespace bud::engine {
 
 		render_inflight_index.store(render_scene_index, std::memory_order_release);
 
-		ImGui_ImplSDL3_NewFrame();
-		ImGui::NewFrame();
+		if (!engine_config.is_puppet_mode) {
+			ImGui_ImplSDL3_NewFrame();
+			ImGui::NewFrame();
 
-		if (show_debug_stats) {
-			auto stats = rhi->get_stats();
-			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
-			ImGui::SetNextWindowBgAlpha(0.35f);
-			if (ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
+			if (show_debug_stats) {
+				auto stats = rhi->get_stats();
+				ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
+				ImGui::SetNextWindowBgAlpha(0.35f);
+				if (ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
 
-				// Build sequencer status string for same-line FPS display
-				std::string seq_status;
-				const auto seq_state      = camera_sequencer.get_state();
-				const auto keyframe_count = camera_sequencer.get_keyframe_count();
-				if (seq_state == bud::scene::SequencerState::RECORDING) {
-					seq_status = std::format("| REC [{} kf]", keyframe_count);
-				} else if (seq_state == bud::scene::SequencerState::PLAYING) {
-					if (camera_sequencer.is_paused()) {
-						seq_status = std::format("| PAUS [{}/{}]",
-							camera_sequencer.get_playback_index(), keyframe_count);
-					} else {
-						const char* mode = camera_sequencer.is_looping() ? "LOOP" : "PLAY";
-						seq_status = std::format("| {} [{}/{}]",
-							mode, camera_sequencer.get_playback_index(), keyframe_count);
+					// Build sequencer status string for same-line FPS display
+					std::string seq_status;
+					const auto seq_state      = camera_sequencer.get_state();
+					const auto keyframe_count = camera_sequencer.get_keyframe_count();
+					if (seq_state == bud::scene::SequencerState::RECORDING) {
+						seq_status = std::format("| REC [{} kf]", keyframe_count);
+					} else if (seq_state == bud::scene::SequencerState::PLAYING) {
+						if (camera_sequencer.is_paused()) {
+							seq_status = std::format("| PAUS [{}/{}]",
+								camera_sequencer.get_playback_index(), keyframe_count);
+						} else {
+							const char* mode = camera_sequencer.is_looping() ? "LOOP" : "PLAY";
+							seq_status = std::format("| {} [{}/{}]",
+								mode, camera_sequencer.get_playback_index(), keyframe_count);
+						}
+					} else if (keyframe_count > 0) {
+						seq_status = std::format("| READY [{} kf]", keyframe_count);
 					}
-				} else if (keyframe_count > 0) {
-					seq_status = std::format("| READY [{} kf]", keyframe_count);
+
+					bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_status);
 				}
-
-				bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_status);
+				ImGui::End();
 			}
-			ImGui::End();
-		}
 
-		ImGui::Render();
-		renderer->update_ui_draw_data(ImGui::GetDrawData());
+			ImGui::Render();
+			renderer->update_ui_draw_data(ImGui::GetDrawData());
+		}
 
 		// 发射渲染任务 (Fire and Forget), Pin to Worker 1 for Vulkan WSI safety
 		task_scheduler->spawn_on_thread(1, "RenderTask", [this, render_scene_index, view_snapshot]() mutable {

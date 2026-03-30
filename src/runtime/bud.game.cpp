@@ -26,4 +26,18 @@ namespace bud::game {
         }
     }
 
+    void GameFramework::init_puppet(const AppConfig& config) {
+        bud::print("[Framework] Initializing Puppet Environment: {}", config.window_title);
+        engine = std::make_unique<bud::engine::BudEngine>(config.to_engine_config());
+        on_init(config);
+    }
+
+    void GameFramework::step_puppet(float dt) {
+        if (engine) {
+            engine->step(dt, [this](float d) {
+                on_update(d);
+            });
+        }
+    }
+
 }

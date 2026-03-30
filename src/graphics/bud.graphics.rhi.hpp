@@ -28,10 +28,14 @@ namespace bud::graphics {
 	class RHI {
 	public:
 		virtual ~RHI() = default;
-		virtual void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count) = 0;
+		virtual void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count, bool is_headless = false) = 0;
 
 		virtual void resize_swapchain(uint32_t width, uint32_t height) = 0;
 		virtual bool is_swapchain_out_of_date() const { return false; }
+		virtual bool is_headless() const { return false; }
+
+		virtual uint32_t get_width() const = 0;
+		virtual uint32_t get_height() const = 0;
 
 		virtual CommandHandle begin_frame() = 0;
 		virtual void end_frame(CommandHandle cmd) = 0;
@@ -111,5 +115,6 @@ namespace bud::graphics {
 
 		virtual void cmd_copy_buffer(CommandHandle cmd, BufferHandle src, BufferHandle dst, uint64_t size) = 0;
 		virtual void cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) = 0;
+		virtual void cmd_copy_image_to_buffer(CommandHandle cmd, Texture* src, BufferHandle dst) = 0;
 	};
 }

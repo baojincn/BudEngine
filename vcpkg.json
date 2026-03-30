@@ -2,34 +2,35 @@
   "name": "bud-engine",
   "version-string": "1.0.0",
   "builtin-baseline": "4b77da7fed37817f124936239197833469f1b9a8",
-  "dependencies": [
-    {
-      "name": "sdl3",
-      "features": [
-        "vulkan"
-      ]
-    },
-    {
-      "name": "imgui",
-      "features": [
-        "sdl3-binding",
-        "vulkan-binding"
-      ]
-    },
-    "vulkan",
-    "vulkan-memory-allocator",
-    "glm",
-    "tracy",
-    "tinygltf",
-    "tinyobjloader",
-    "pybind11",
-    "onnxruntime",
-    "nlohmann-json",
-    "meshoptimizer",
-    "assimp",
-    "spirv-reflect",
-    "spirv-headers"
-  ],
+	"dependencies": [
+		{
+			"name": "sdl3",
+			"features": [
+				"vulkan"
+			]
+		},
+		{
+			"name": "imgui",
+			"features": [
+				"sdl3-binding",
+				"vulkan-binding"
+			]
+		},
+		"vulkan",
+		"vulkan-memory-allocator",
+		"glm",
+		"tracy",
+		"tinygltf",
+		"tinyobjloader",
+		"python3",
+		"pybind11",
+		"onnxruntime",
+		"nlohmann-json",
+		"meshoptimizer",
+		"assimp",
+		"spirv-reflect",
+		"spirv-headers"
+	],
   "overrides": [
     {
       "name": "sdl3",
@@ -58,6 +59,11 @@
     {
       "name": "tinyobjloader",
       "version-string": "2.0.0rc13"
+    }
+    ,
+    {
+      "name": "python3",
+      "version-string": "3.12.13"
     }
   ],
   "description": "Bud Engine - A full task-driven Game Engine."

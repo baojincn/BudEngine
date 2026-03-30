@@ -97,16 +97,12 @@ bool VulkanRHI::init_aftermath() {
 }
 #endif
 
-
-// Old transition helper removed; use sync2::get_transition2 instead where needed.
-
-
-void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count) {
+void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count, bool headless) {
 	this->task_scheduler = task_scheduler;
 	platform_window = plat_window;
 	max_frames_in_flight = inflight_frame_count;
+	this->headless_mode = headless;
 
-	// store runtime validation flag
 	enable_validation_layers = enable_validation;
 
 #ifdef BUD_ENABLE_AFTERMATH
@@ -116,13 +112,18 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	// 基础构建 (Instance, Surface, Device)
 	create_instance(instance, enable_validation);
 	setup_debug_messenger(enable_validation);
-	create_surface(plat_window);
+	if (!headless_mode) {
+		create_surface(plat_window);
+	}
+
 	pick_physical_device();
 	create_logical_device(enable_validation);
 
 	// 交换链与呈现资源
-	create_swapchain(plat_window);
-	create_image_views();
+	if (!headless_mode) {
+		create_swapchain(plat_window);
+		create_image_views();
+	}
 
 	// 命令池与同步对象
 	create_command_pool();
@@ -171,42 +172,31 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	// 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
 	for (auto& frame : frames) {
+		// Prefer allocating per-frame UBO via VMA (host visible + coherent + persistently mapped)
 		VkBufferCreateInfo buffer_info{};
 		buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 		buffer_info.size = ubo_size;
 		buffer_info.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 		buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-		if (vkCreateBuffer(device, &buffer_info, nullptr, &frame.uniform_buffer) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create uniform buffer!");
+        VmaAllocationCreateInfo vma_alloc_info = {};
+        vma_alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+        // When using VMA_ALLOCATION_CREATE_MAPPED_BIT with VMA_MEMORY_USAGE_AUTO*,
+        // VMA requires specifying either HOST_ACCESS_SEQUENTIAL_WRITE or HOST_ACCESS_RANDOM.
+        // Per-frame UBOs are typically written sequentially each frame, so request
+        // sequential write host access and persistent mapping.
+        vma_alloc_info.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+        vma_alloc_info.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+		VmaAllocationInfo alloc_result_info;
+		VkResult r = vmaCreateBuffer(memory_allocator->get_vma_allocator(), &buffer_info, &vma_alloc_info, &frame.uniform_buffer, &frame.uniform_allocation, &alloc_result_info);
+		if (r != VK_SUCCESS) {
+			std::string err = std::format("VulkanRHI::init vmaCreateBuffer for per-frame UBO failed: {}", (int)r);
+			bud::eprint("{}", err);
+			throw std::runtime_error(err);
 		}
-
-		VkMemoryRequirements mem_reqs;
-		vkGetBufferMemoryRequirements(device, frame.uniform_buffer, &mem_reqs);
-
-		VkPhysicalDeviceMemoryProperties mem_props;
-		vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_props);
-
-		uint32_t memory_type = 0;
-		for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
-			if ((mem_reqs.memoryTypeBits & (1 << i)) &&
-				(mem_props.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-				memory_type = i;
-				break;
-			}
-		}
-
-		VkMemoryAllocateInfo alloc_info{};
-		alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-		alloc_info.allocationSize = mem_reqs.size;
-		alloc_info.memoryTypeIndex = memory_type;
-
-		if (vkAllocateMemory(device, &alloc_info, nullptr, &frame.uniform_memory) != VK_SUCCESS) {
-			throw std::runtime_error("failed to allocate uniform buffer memory!");
-		}
-
-		vkBindBufferMemory(device, frame.uniform_buffer, frame.uniform_memory, 0);
-		vkMapMemory(device, frame.uniform_memory, 0, ubo_size, 0, &frame.uniform_mapped);
+		frame.uniform_alloc_info = alloc_result_info;
+		frame.uniform_mapped = alloc_result_info.pMappedData;
 	}
 
 	// 创建全局 Descriptor Pool (支持 Bindless + UPDATE_AFTER_BIND)
@@ -284,6 +274,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		if (vmaCreateImage(memory_allocator->get_vma_allocator(), &image_info, &alloc_info, &dummy_depth_texture.image, &dummy_depth_texture.allocation, nullptr) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create dummy depth");
 		}
+		
 
 		VkImageViewCreateInfo view_info{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
 		view_info.image = dummy_depth_texture.image;
@@ -328,9 +319,11 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		desc.format = TextureFormat::RGBA8_UNORM;
 
 		// Red Fallback to identify missing textures
-		uint32_t color = 0xFF0000FF; // R=FF, G=00, B=00, A=FF (Little Endian)
-		fallback_texture_ptr = static_cast<VulkanTexture*>(create_texture(desc, &color, 4));
-		update_bindless_texture(0, fallback_texture_ptr);
+        uint32_t color = 0xFF0000FF; // R=FF, G=00, B=00, A=FF (Little Endian)
+        // Use managed texture API to ensure ownership
+        fallback_texture_ptr = resource_pool->acquire_texture_shared(desc);
+        // Initialize fallback image content if needed (not implemented: upload color)
+        update_bindless_texture(0, fallback_texture_ptr.get());
 	}
 
 	bud::print("[Vulkan] RHI Initialized successfully (Clean Architecture).");
@@ -344,13 +337,80 @@ void VulkanRHI::cleanup() {
 	if (dummy_depth_texture.image)
 		vmaDestroyImage(memory_allocator->get_vma_allocator(), dummy_depth_texture.image, dummy_depth_texture.allocation);
 
-	if (fallback_texture_ptr) {
-		resource_pool->release_texture(fallback_texture_ptr);
-		fallback_texture_ptr = nullptr;
-	}
+    if (fallback_texture_ptr) {
+        resource_pool->release_texture_shared(fallback_texture_ptr);
+        fallback_texture_ptr.reset();
+    }
 
-	textures.clear();
-	texture_objects.clear();
+    // Destroy any VulkanTexture instances stored in the RHI maps/containers.
+    // These may hold VMA allocations that must be freed before destroying the allocator.
+    if (memory_allocator) {
+        VmaAllocator alloc = memory_allocator->get_vma_allocator();
+
+        // textures: map<bud::graphics::Texture*, VulkanTexture>
+        for (auto &kv : textures) {
+            VulkanTexture &tex = kv.second;
+
+            for (auto v : tex.layer_views) {
+				if (v)
+					vkDestroyImageView(device, v, nullptr);
+			}
+
+            tex.layer_views.clear();
+            for (auto v : tex.mip_views) {
+				if (v)
+					vkDestroyImageView(device, v, nullptr);
+			}
+
+            tex.mip_views.clear();
+            if (tex.view) {
+				vkDestroyImageView(device, tex.view, nullptr);
+				tex.view = VK_NULL_HANDLE;
+			}
+
+            if (tex.image) {
+                if (alloc) vmaDestroyImage(alloc, tex.image, tex.allocation);
+                tex.image = VK_NULL_HANDLE;
+                tex.allocation = VK_NULL_HANDLE;
+            }
+        }
+        textures.clear();
+
+        // texture_objects: vector<unique_ptr<Texture>>
+        for (auto &up : texture_objects) {
+            if (!up) continue;
+
+            auto *tptr = static_cast<VulkanTexture*>(up.get());
+            if (tptr) {
+                for (auto v : tptr->layer_views) {
+					if (v)
+						vkDestroyImageView(device, v, nullptr);
+				}
+
+                for (auto v : tptr->mip_views) {
+					if (v)
+						vkDestroyImageView(device, v, nullptr);
+				}
+
+                if (tptr->view)
+					vkDestroyImageView(device, tptr->view, nullptr);
+
+                if (tptr->image) {
+                    if (alloc)
+						vmaDestroyImage(alloc, tptr->image, tptr->allocation);
+
+					tptr->image = VK_NULL_HANDLE;
+                    tptr->allocation = VK_NULL_HANDLE;
+                }
+            }
+        }
+
+        texture_objects.clear();
+    } else {
+        // No allocator: still clear containers to avoid dangling pointers
+        textures.clear();
+        texture_objects.clear();
+    }
 
 	descriptor_allocators.clear();
 	if (global_descriptor_pool)
@@ -368,28 +428,66 @@ void VulkanRHI::cleanup() {
 	pipeline_cache.reset();
 	resource_pool.reset();
 
-	if (memory_allocator)
-		memory_allocator->cleanup();
+    // Clear any retained BufferHandles in transient RHI state (compute bindings)
+    if (!current_compute_bindings.empty()) {
+        for (auto &kv : current_compute_bindings) {
+            if (std::holds_alternative<bud::graphics::BufferHandle>(kv.second)) {
+                auto &bh = std::get<bud::graphics::BufferHandle>(kv.second);
+                if (bh.owner)
+					bh.owner.reset();
 
-	memory_allocator.reset();
+                bh.internal_state = nullptr;
+            }
+            // ImageBinding / UBOBinding do not own BufferHandle owners here
+        }
+        current_compute_bindings.clear();
+    }
 
-	for (auto semaphore : render_finished_semaphores)
-		vkDestroySemaphore(device, semaphore, nullptr);
+    // Destroy per-frame uniform buffers before tearing down the allocator.
+    for (auto semaphore : render_finished_semaphores)
+        vkDestroySemaphore(device, semaphore, nullptr);
 
-	for (int i = 0; i < max_frames_in_flight; i++) {
-		if (frames[i].uniform_mapped)
-			vkUnmapMemory(device, frames[i].uniform_memory);
-		if (frames[i].uniform_buffer)
-			vkDestroyBuffer(device, frames[i].uniform_buffer, nullptr);
-		if (frames[i].uniform_memory)
-			vkFreeMemory(device, frames[i].uniform_memory, nullptr);
-		if (frames[i].image_available_semaphore)
-			vkDestroySemaphore(device, frames[i].image_available_semaphore, nullptr);
-		if (frames[i].in_flight_fence)
-			vkDestroyFence(device, frames[i].in_flight_fence, nullptr);
-		if (frames[i].main_command_pool)
-			vkDestroyCommandPool(device, frames[i].main_command_pool, nullptr);
-	}
+    for (int i = 0; i < max_frames_in_flight; i++) {
+        if (memory_allocator) {
+            VmaAllocator alloc = memory_allocator->get_vma_allocator();
+            if (frames[i].uniform_allocation != VK_NULL_HANDLE) {
+                // Allocations were created with VMA_ALLOCATION_CREATE_MAPPED_BIT (persistently mapped).
+                // Do NOT call vmaUnmapMemory here because the mapping was automatic (0-th mapping).
+                // Unmapping an allocation not previously explicitly mapped triggers VMA assertion.
+                if (frames[i].uniform_buffer) vmaDestroyBuffer(alloc, frames[i].uniform_buffer, frames[i].uniform_allocation);
+                frames[i].uniform_buffer = VK_NULL_HANDLE;
+                frames[i].uniform_allocation = VK_NULL_HANDLE;
+                frames[i].uniform_alloc_info = {};
+                frames[i].uniform_mapped = nullptr;
+            } else {
+                // fallback to old path if allocation not created with VMA
+                // We only need to destroy the buffer; older raw device memory is not tracked here.
+                if (frames[i].uniform_buffer)
+                    vkDestroyBuffer(device, frames[i].uniform_buffer, nullptr);
+                frames[i].uniform_buffer = VK_NULL_HANDLE;
+                frames[i].uniform_mapped = nullptr;
+            }
+        } else {
+            if (frames[i].uniform_buffer)
+                vkDestroyBuffer(device, frames[i].uniform_buffer, nullptr);
+            frames[i].uniform_buffer = VK_NULL_HANDLE;
+            frames[i].uniform_mapped = nullptr;
+        }
+
+        if (frames[i].image_available_semaphore)
+            vkDestroySemaphore(device, frames[i].image_available_semaphore, nullptr);
+
+        if (frames[i].in_flight_fence)
+            vkDestroyFence(device, frames[i].in_flight_fence, nullptr);
+
+        if (frames[i].main_command_pool)
+            vkDestroyCommandPool(device, frames[i].main_command_pool, nullptr);
+    }
+
+    if (memory_allocator)
+        memory_allocator->cleanup();
+
+    memory_allocator.reset();
 
 	// Swapchain
 	for (auto imageView : swapchain_image_views)
@@ -406,20 +504,26 @@ void VulkanRHI::cleanup() {
 	// Device & Instance
 	if (shadow_sampler)
 		vkDestroySampler(device, shadow_sampler, nullptr);
+
 	if (default_sampler)
 		vkDestroySampler(device, default_sampler, nullptr);
+
 	if (device)
 		vkDestroyDevice(device, nullptr);
+
 	if (enable_validation_layers && debug_messenger)
 		destroy_debug_utils_messenger_ext(instance, debug_messenger, nullptr);
+
 	if (surface)
 		vkDestroySurfaceKHR(instance, surface, nullptr);
+
 	if (instance)
 		vkDestroyInstance(instance, nullptr);
 }
 
 void VulkanRHI::wait_idle() {
-	if (device) vkDeviceWaitIdle(device);
+	if (device)
+		vkDeviceWaitIdle(device);
 }
 
 
@@ -456,13 +560,19 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
 		alloc_info.requiredFlags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 	}
 
-    auto* vk_buf = new bud::graphics::vulkan::VulkanBuffer();
+    auto sp = std::make_shared<bud::graphics::vulkan::VulkanBuffer>();
+    auto* vk_buf = sp.get();
     auto vma_allocator = get_memory_allocator()->get_vma_allocator();
+    auto* mem_alloc = dynamic_cast<bud::graphics::vulkan::VulkanMemoryAllocator*>(get_allocator());
+    if (mem_alloc) {
+#ifdef BUD_VMA_TRACKING
+        mem_alloc->register_allocation_buffer(vk_buf);
+#endif
+    }
 
     VmaAllocationInfo alloc_result_info;
     VkResult create_result = vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info);
     if (create_result != VK_SUCCESS) {
-        delete vk_buf;
         std::string err = std::format("VulkanRHI::create_gpu_buffer vmaCreateBuffer failed: size={} usage={} result={}", size, (int)buffer_info.usage, (int)create_result);
         bud::eprint("{}", err);
 #if defined(_DEBUG)
@@ -471,12 +581,17 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
         return {};
 #endif
     }
+
     vk_buf->mapped_ptr = alloc_result_info.pMappedData;
     vk_buf->size = size;
     vk_buf->owns_allocation = true;
+    vk_buf->allocator = vma_allocator;
+    vk_buf->owning_allocator = mem_alloc;
+    // Owner deleter will destroy VMA allocation when vk_buf->owns_allocation is true.
     bud::graphics::BufferHandle handle;
     handle.internal_state = vk_buf;
-    handle.owner = std::shared_ptr<void>(vk_buf, [](void* p) { delete static_cast<bud::graphics::vulkan::VulkanBuffer*>(p); });
+    // transfer shared ownership of wrapper to handle so RAII destructor runs
+    handle.owner = std::static_pointer_cast<void>(sp);
     handle.size = size;
     handle.mapped_ptr = vk_buf->mapped_ptr;
     return handle;
@@ -499,12 +614,10 @@ void VulkanRHI::destroy_buffer(bud::graphics::BufferHandle block) {
         // Fallback: immediate destroy if no allocator
         auto* vk_buf = block.internal_state ? reinterpret_cast<bud::graphics::vulkan::VulkanBuffer*>(block.internal_state) : nullptr;
         if (vk_buf) {
-            auto vma_allocator = get_memory_allocator() ? get_memory_allocator()->get_vma_allocator() : VK_NULL_HANDLE;
-            if (vk_buf->owns_allocation && vma_allocator && vk_buf->buffer) {
-                vmaDestroyBuffer(vma_allocator, vk_buf->buffer, vk_buf->allocation);
-            }
-            // Release ownership immediately
+            // Let the owner deleter perform actual VMA destruction. Reset owner to
+            // invoke the deleter immediately in the fallback path.
             block.owner.reset();
+            block.internal_state = nullptr;
         }
     }
 }
@@ -928,6 +1041,24 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	current_frame = (current_frame + 1) % max_frames_in_flight;
 }
 
+
+uint32_t VulkanRHI::get_width() const {
+	if (headless_mode) {
+		int w, h;
+		platform_window->get_size(w, h);
+		return static_cast<uint32_t>(w);
+	}
+	return swapchain_extent.width;
+}
+
+uint32_t VulkanRHI::get_height() const {
+	if (headless_mode) {
+		int w, h;
+		platform_window->get_size(w, h);
+		return static_cast<uint32_t>(h);
+	}
+	return swapchain_extent.height;
+}
 
 void VulkanRHI::resize_swapchain(uint32_t width, uint32_t height) {
 	if (!device || !platform_window)
@@ -2068,6 +2199,39 @@ void VulkanRHI::cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandl
 	vkCmdUpdateBuffer(static_cast<VkCommandBuffer>(cmd), vk_dst->buffer, offset, size, data);
 }
 
+void VulkanRHI::cmd_copy_image_to_buffer(CommandHandle cmd, bud::graphics::Texture* src, bud::graphics::BufferHandle dst) {
+    if (!src || !dst.is_valid()) return;
+
+    auto* vk_src = static_cast<VulkanTexture*>(src);
+    auto* vk_dst = static_cast<VulkanBuffer*>(dst.internal_state);
+
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+
+    region.imageOffset = { 0, 0, 0 };
+    region.imageExtent = {
+        src->width,
+        src->height,
+        1
+    };
+
+    vkCmdCopyImageToBuffer(
+        static_cast<VkCommandBuffer>(cmd),
+        vk_src->image,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        vk_dst->buffer,
+        1,
+        &region
+    );
+}
+
 bud::graphics::BufferHandle VulkanRHI::create_upload_buffer(uint64_t size) {
     // Prefer allocating staging memory from the unified allocator (ring staging). Falls back inside allocator if needed.
     if (memory_allocator) {
@@ -2084,18 +2248,37 @@ bud::graphics::BufferHandle VulkanRHI::create_upload_buffer(uint64_t size) {
     alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
     alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
-    auto* vk_buf = new bud::graphics::vulkan::VulkanBuffer();
+    auto sp = std::make_shared<bud::graphics::vulkan::VulkanBuffer>();
+    auto* vk_buf = sp.get();
     auto vma_allocator = get_memory_allocator()->get_vma_allocator();
+    // If the global VulkanMemoryAllocator is present, register this wrapper so
+    // the allocator can forcibly clean it up on shutdown if leaked.
+    auto* mem_alloc = dynamic_cast<bud::graphics::vulkan::VulkanMemoryAllocator*>(get_allocator());
+    if (mem_alloc) {
+#ifdef BUD_VMA_TRACKING
+        mem_alloc->register_allocation_buffer(vk_buf);
+#endif
+    }
 
     VkResult create_result = vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &vk_buf->alloc_info);
     if (create_result != VK_SUCCESS) {
         delete vk_buf;
         throw std::runtime_error("Failed to create Upload buffer via VMA!");
     }
-
     bud::graphics::BufferHandle handle;
     vk_buf->owns_allocation = true;
     handle.internal_state = vk_buf;
+    // Capture mem_alloc to unregister on deletion if registered above.
+    handle.owner = std::shared_ptr<void>(vk_buf, [mem_alloc, alloc = vma_allocator](void* p) {
+        auto* b = static_cast<bud::graphics::vulkan::VulkanBuffer*>(p);
+        if (mem_alloc) {
+            mem_alloc->unregister_allocation_buffer(b);
+        }
+        if (b->owns_allocation && alloc && b->buffer != VK_NULL_HANDLE && b->allocation != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(alloc, b->buffer, b->allocation);
+        }
+        delete b;
+    });
     handle.offset = 0;
     handle.size = size;
     handle.mapped_ptr = vk_buf->alloc_info.pMappedData;
@@ -2338,7 +2521,7 @@ void VulkanRHI::update_global_instance_data(bud::graphics::BufferHandle buffer) 
 }
 
 bud::graphics::Texture* VulkanRHI::get_fallback_texture() {
-	return fallback_texture_ptr;
+    return fallback_texture_ptr.get();
 }
 
 

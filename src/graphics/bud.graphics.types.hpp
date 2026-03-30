@@ -108,6 +108,7 @@ namespace bud::graphics {
 		TextureFormat format = TextureFormat::RGBA8_UNORM;
 		TextureType type = TextureType::Texture2D;
 		bool is_storage = false;
+		bool is_transfer_src = false;
 		ResourceState initial_state = ResourceState::Undefined;
 	};
 
@@ -119,6 +120,8 @@ namespace bud::graphics {
 		uint32_t inflight_frame_count = 3;
 		bool enable_validation = true;
 		bool vsync = false;
+		bool is_puppet_mode = false;
+		bool is_headless = false;
 	};
 
 	struct RenderConfig {

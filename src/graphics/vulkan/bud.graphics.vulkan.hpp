@@ -51,13 +51,17 @@ namespace bud::graphics::vulkan {
 	public:
 		~VulkanRHI() = default;
 
-		void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count) override;
+		void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count, bool is_headless = false) override;
 		void cleanup() override;
 		void wait_idle() override;
 		uint32_t get_inflight_frame_count() const override { return max_frames_in_flight; }
 
 		void resize_swapchain(uint32_t width, uint32_t height) override;
 		bool is_swapchain_out_of_date() const override { return swapchain_out_of_date.load(std::memory_order_acquire); }
+		bool is_headless() const override { return this->headless_mode; }
+
+		uint32_t get_width() const override;
+		uint32_t get_height() const override;
 
 		bud::graphics::BufferHandle create_gpu_buffer(uint64_t size, bud::graphics::ResourceState usage_state) override;
 		bud::graphics::BufferHandle create_upload_buffer(uint64_t size) override;
@@ -141,7 +145,7 @@ namespace bud::graphics::vulkan {
 
 		void cmd_copy_buffer(CommandHandle cmd, bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size) override;
 		void cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) override;
-
+		void cmd_copy_image_to_buffer(CommandHandle cmd, bud::graphics::Texture* src, bud::graphics::BufferHandle dst) override;
 
 	private:
 		void create_instance(VkInstance& vk_instance, bool enable_validation);
@@ -184,9 +188,10 @@ namespace bud::graphics::vulkan {
 			VkFence in_flight_fence = nullptr;
 			VkCommandPool main_command_pool = nullptr;
 			VkCommandBuffer main_command_buffer = nullptr;
-			VkBuffer uniform_buffer = nullptr;       // Per-frame UBO
-			VkDeviceMemory uniform_memory = nullptr;
-			void* uniform_mapped = nullptr;          // Persistently mapped
+			VkBuffer uniform_buffer = nullptr;       // Per-frame UBO (allocated via VMA when available)
+			VmaAllocation uniform_allocation = VK_NULL_HANDLE; // VMA allocation for the UBO (if used)
+			VmaAllocationInfo uniform_alloc_info = {}; // allocation info containing mapped ptr
+			void* uniform_mapped = nullptr;          // Persistently mapped (points to alloc_info.pMappedData when VMA is used)
 			VkDescriptorSet global_descriptor_set = VK_NULL_HANDLE;
 		};
 
@@ -202,6 +207,7 @@ namespace bud::graphics::vulkan {
 		VkDebugUtilsMessengerEXT debug_messenger = nullptr;
 		bool enable_validation_layers = false;
 		bool aftermath_initialized = false;
+		bool headless_mode = false;
 
 		const std::vector<const char*> validation_layers = { "VK_LAYER_KHRONOS_validation" };
 		std::vector<const char*> device_extensions = {
@@ -247,13 +253,15 @@ namespace bud::graphics::vulkan {
 
 		std::unordered_map<bud::graphics::Texture*, VulkanTexture> textures;
 		std::vector<std::unique_ptr<bud::graphics::Texture>> texture_objects;
+
+
 	
 
 		// Compute Binding state
 		std::unordered_map<uint32_t, ComputeResource> current_compute_bindings;
 		void* current_compute_pipeline = nullptr;
 
-		VulkanTexture* fallback_texture_ptr = nullptr;
+        std::shared_ptr<bud::graphics::Texture> fallback_texture_ptr;
 		std::atomic<bool> swapchain_out_of_date{false};
 
 		RenderStats current_stats;

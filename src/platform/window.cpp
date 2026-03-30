@@ -74,7 +74,7 @@ namespace bud::platform {
 
 	class WindowWin : public Window {
 	public:
-		WindowWin(const std::string& title, int width, int height)
+		WindowWin(const std::string& title, int width, int height, WindowFlags flags)
 			: width(width), height(height)
 		{
 			if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -97,9 +97,13 @@ namespace bud::platform {
 				throw std::runtime_error("Failed to create SDL window");
 			}
 
-			SDL_ShowWindow(window);
+			if ((static_cast<uint32_t>(flags) & static_cast<uint32_t>(WindowFlags::Hidden)) == 0) {
+				SDL_ShowWindow(window);
+			}
+
 			update_window_size();
-			bud::print("Created window: {} ({}x{})", title, width, height);
+			bud::print("Created window: {} ({}x{}){}", title, width, height, 
+				(static_cast<uint32_t>(flags) & static_cast<uint32_t>(WindowFlags::Hidden)) ? " [HIDDEN]" : "");
 		}
 
 		~WindowWin() override {
@@ -271,9 +275,9 @@ namespace bud::platform {
 		return get_display_resolution(display);
 	}
 
-	std::unique_ptr<Window> create_window(const std::string& title, int width, int height) {
+	std::unique_ptr<Window> create_window(const std::string& title, int width, int height, WindowFlags flags) {
 #ifdef _WIN32
-		return std::make_unique<WindowWin>(title, width, height);
+		return std::make_unique<WindowWin>(title, width, height, flags);
 #else
 		throw std::runtime_error("Platform not supported");
 #endif

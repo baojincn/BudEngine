@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <memory>
 #include <vector>
@@ -46,6 +46,8 @@ namespace bud::graphics {
 
 		void set_config(const RenderConfig& config);
 		const RenderConfig& get_config() const;
+
+		const void* get_readback_pixels() const;
 
 		// Game-thread safe snapshot (CPU-side bounds only)
 		std::vector<bud::math::AABB> get_mesh_bounds_snapshot() const;
@@ -117,5 +119,9 @@ namespace bud::graphics {
 		uint32_t instance_data_capacity = 0;
 
 		std::shared_ptr<UploadQueue> upload_queue;
+
+        // Headless Offscreen Rendering
+        bud::graphics::Texture* offscreen_target = nullptr;
+        std::vector<bud::graphics::BufferHandle> readback_buffers;
 	};
 }

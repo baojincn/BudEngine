@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.30.0)
+﻿cmake_minimum_required(VERSION 3.30.0)
 
 # Setup vcpkg toolchain
 if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
@@ -172,7 +172,7 @@ endif()
 
 source_group("Shaders" FILES ${SHADER_FILES})
 
-add_library(bud_engine_core STATIC ${SHADER_FILES})
+add_library(bud_engine_core STATIC ${SHADER_FILES} "samples/triangle/triangle.cpp")
 
 # Ensure shaders are compiled before building the core library
 if(TARGET CompileShaders)
@@ -302,7 +302,7 @@ target_include_directories(bud_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${
 
 # Begin, triangle_sample
 if(BUD_BUILD_SAMPLES)
-    add_executable(triangle_sample samples/triangle/main.cpp)
+    add_executable(triangle_sample samples/triangle/main.cpp "samples/triangle/triangle.cpp")
     target_link_libraries(triangle_sample PRIVATE bud_engine_core)
     target_include_directories(triangle_sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
     
@@ -397,3 +397,28 @@ add_custom_target(GenerateShaderReport
 )
 
 # End, tools
+
+# Python ML Bridge
+set(Python3_FIND_VIRTUALENV FIRST)
+
+find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+ message(STATUS "Python include: ${Python3_INCLUDE_DIRS}")
+     if(NOT Python3_INCLUDE_DIRS)
+       message(FATAL_ERROR "Python3 development headers not found. Install python dev or ensure vcpkg python3 for the triplet is installed.")
+     endif()
+
+    # Ensure triangle_sample links to Python import library when Python is available
+    if(Python3_FOUND)
+        target_link_libraries(triangle_sample PRIVATE Python3::Python)
+    endif()
+find_package(pybind11 CONFIG REQUIRED)
+
+# Ensure bud_engine_core can compile pybind11-using sources when Python was found
+if(Python3_FOUND)
+    target_include_directories(bud_engine_core PUBLIC ${Python3_INCLUDE_DIRS})
+endif()
+
+pybind11_add_module(bud_rl src/ml/bud.ml.rl_py_bind.cpp "samples/triangle/triangle.cpp")
+target_link_libraries(bud_rl PRIVATE pybind11::module bud_engine_core)
+# Output to where python might run
+set_target_properties(bud_rl PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")

@@ -32,7 +32,7 @@ if %errorlevel% neq 0 (
 
 :: 3. Build the sample
 echo [Build Script] Building (Preset: Debug x64)...
-"%CMAKE_EXE%" --build --preset "Debug x64" --target triangle_sample
+"%CMAKE_EXE%" --build --preset "Debug x64"
 if %errorlevel% neq 0 (
     echo [Error] Build failed
     exit /b 1

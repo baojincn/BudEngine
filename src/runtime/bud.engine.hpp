@@ -38,10 +38,13 @@ namespace bud::engine {
 		~BudEngine();
 
 		void run(GameLogic perform_game_logic);
+		void step(float fixed_dt, GameLogic perform_game_logic);
 
 		bud::io::AssetManager* get_asset_manager() { return asset_manager.get(); }
 		bud::graphics::Renderer* get_renderer() { return renderer.get(); }
 		bud::scene::Scene& get_scene() { return scene; }
+
+		const void* get_readback_pixels() const { return renderer->get_readback_pixels(); }
 
 		// Returns true while the camera sequencer is actively playing back a replay.
 		// Use this in on_update() to suppress camera input during playback.
