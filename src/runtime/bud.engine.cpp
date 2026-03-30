@@ -385,43 +385,22 @@ namespace bud::engine {
 
 		render_inflight_index.store(render_scene_index, std::memory_order_release);
 
-		if (!engine_config.is_puppet_mode) {
-			ImGui_ImplSDL3_NewFrame();
-			ImGui::NewFrame();
+        if (!engine_config.is_puppet_mode) {
+            ImGui_ImplSDL3_NewFrame();
+            ImGui::NewFrame();
 
-			if (show_debug_stats) {
-				auto stats = rhi->get_stats();
-				ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
-				ImGui::SetNextWindowBgAlpha(0.35f);
-				if (ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
+            auto stats = rhi->get_stats();
+            const auto seq_state = camera_sequencer.get_state();
+            const auto keyframe_count = camera_sequencer.get_keyframe_count();
+            const auto playback_index = camera_sequencer.get_playback_index();
+            const bool is_paused = camera_sequencer.is_paused();
+            const bool is_looping = camera_sequencer.is_looping();
+            bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats);
 
-					// Build sequencer status string for same-line FPS display
-					std::string seq_status;
-					const auto seq_state      = camera_sequencer.get_state();
-					const auto keyframe_count = camera_sequencer.get_keyframe_count();
-					if (seq_state == bud::scene::SequencerState::RECORDING) {
-						seq_status = std::format("| REC [{} kf]", keyframe_count);
-					} else if (seq_state == bud::scene::SequencerState::PLAYING) {
-						if (camera_sequencer.is_paused()) {
-							seq_status = std::format("| PAUS [{}/{}]",
-								camera_sequencer.get_playback_index(), keyframe_count);
-						} else {
-							const char* mode = camera_sequencer.is_looping() ? "LOOP" : "PLAY";
-							seq_status = std::format("| {} [{}/{}]",
-								mode, camera_sequencer.get_playback_index(), keyframe_count);
-						}
-					} else if (keyframe_count > 0) {
-						seq_status = std::format("| READY [{} kf]", keyframe_count);
-					}
+            ImGui::Render();
 
-					bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_status);
-				}
-				ImGui::End();
-			}
-
-			ImGui::Render();
-			renderer->update_ui_draw_data(ImGui::GetDrawData());
-		}
+            renderer->update_ui_draw_data(ImGui::GetDrawData());
+        }
 
 		// 发射渲染任务 (Fire and Forget), Pin to Worker 1 for Vulkan WSI safety
 		task_scheduler->spawn_on_thread(1, "RenderTask", [this, render_scene_index, view_snapshot]() mutable {

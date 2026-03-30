@@ -388,8 +388,5 @@ namespace bud::graphics {
 			shadow_casters = 0;
 			shadow_caster_submeshes = 0;
 		}
-
-
-
 	};
 }
