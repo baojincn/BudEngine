@@ -1,4 +1,4 @@
-#include "src/runtime/bud.camera_sequencer.hpp"
+﻿#include "src/runtime/bud.camera_sequencer.hpp"
 #include "src/runtime/bud.scene.hpp"
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.logger.hpp"
@@ -71,6 +71,13 @@ namespace bud::scene {
     }
 
     void CameraSequencer::start_playback(bool loop) {
+        // If a recording is in progress and playback is requested, stop recording
+        // and trigger the normal auto-save behavior so the recorded track is not lost.
+        if (m_state == SequencerState::RECORDING) {
+            bud::print("[CameraSequencer] Playback requested while recording: stopping recording and saving.");
+            stop_recording();
+        }
+
         if (m_track.empty()) {
             bud::print("[CameraSequencer] Cannot start playback: track is empty.");
             return;

@@ -6,6 +6,9 @@ out/
 vcpkg/
 vcpkg_installed/
 
+# Generated files
+/data/replays
+
 # IDE files
 .vs/
 .vscode/
