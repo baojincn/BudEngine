@@ -67,3 +67,21 @@ Performance tracing
 ```  json
 "currentDir": "${workspaceRoot}"  
 ```
+
+## Quick .budmesh Validation
+
+A small helper script is included to quickly inspect `.budmesh` files produced by `BudAssetTool`.
+
+- `check_budmesh.py` (project root): prints header fields, material table, texture list and the first N meshlets.
+
+Usage:
+
+- From the project root with Python 3:
+  - `python check_budmesh.py data/meshlets/Cube.budmesh`
+  - `python check_budmesh.py data/meshlets/sponza.budmesh 10`  (prints first 10 meshlets)
+
+Notes:
+
+- The script is intended for quick validation during asset processing and testing. It is not a full verifier.
+- If the `BudMeshHeader` layout changes, update the script's unpack format and bump `MESH_VERSION` in `src/core/bud.asset.types.hpp`.
+

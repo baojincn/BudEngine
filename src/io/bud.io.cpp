@@ -1,4 +1,4 @@
-#include "bud.io.hpp"
+﻿#include "bud.io.hpp"
 #include "src/core/bud.core.hpp"
 #include "src/core/bud.asset.types.hpp"
 #include <fstream>
@@ -718,6 +718,35 @@ namespace bud::io {
 		}
 		else {
 			mesh.texture_paths.push_back("data/textures/default.png");
+		}
+
+		// Materials table (version >= 4)
+		if (header->version >= 4 && header->material_count > 0 && header->material_offset != 0) {
+			mesh.materials.clear();
+			const char* mat_ptr = ptr + header->material_offset;
+			for (uint32_t m = 0; m < header->material_count; ++m) {
+				// MaterialDescriptor is packed as: uint32_t, uint8_t, uint8_t, 2 padding, float
+				uint32_t base_tex = *reinterpret_cast<const uint32_t*>(mat_ptr + m * sizeof(bud::asset::MaterialDescriptor));
+				const uint8_t* byte_ptr = reinterpret_cast<const uint8_t*>(mat_ptr + m * sizeof(bud::asset::MaterialDescriptor));
+				uint8_t alpha_mode = *(byte_ptr + 4);
+				uint8_t double_sided = *(byte_ptr + 5);
+				float alpha_cutoff = *reinterpret_cast<const float*>(mat_ptr + m * sizeof(bud::asset::MaterialDescriptor) + 8);
+				MeshData::Material mm;
+				mm.base_color_texture = base_tex;
+				mm.alpha_mode = alpha_mode;
+				mm.double_sided = double_sided;
+				mm.alpha_cutoff = alpha_cutoff;
+				mesh.materials.push_back(mm);
+			}
+		}
+		else {
+			// fallback: create a default material if none present
+			MeshData::Material mm;
+			mm.base_color_texture = 0;
+            mm.alpha_mode = 0; // OPAQUE
+			mm.double_sided = 0;
+			mm.alpha_cutoff = 0.5f;
+			mesh.materials.push_back(mm);
 		}
 
 		return mesh;

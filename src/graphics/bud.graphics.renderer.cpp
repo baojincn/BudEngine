@@ -329,23 +329,35 @@ namespace bud::graphics {
 				if (!mesh_data_copy->subsets.empty()) {
 					//bud::print("[upload_mesh] Mesh[{}]: Processing {} subsets", assigned_mesh_id, mesh_data_copy->subsets.size());
 
-					for (size_t i = 0; i < mesh_data_copy->subsets.size(); ++i) {
-						const auto& subset = mesh_data_copy->subsets[i];
-						SubMesh sub;
-						sub.index_start = subset.index_start;
-						sub.index_count = subset.index_count;
-						sub.meshlet_start = subset.meshlet_start;
-						sub.meshlet_count = subset.meshlet_count;
+			// Map materials to texture slots (materials refer to texture indices)
+			std::vector<uint32_t> material_to_slot;
+			material_to_slot.resize(mesh_data_copy->materials.size(), 0);
+			for (size_t mi = 0; mi < mesh_data_copy->materials.size(); ++mi) {
+				uint32_t tex_idx = mesh_data_copy->materials[mi].base_color_texture;
+				if (tex_idx < texture_slot_map.size()) {
+					material_to_slot[mi] = texture_slot_map[tex_idx];
+				}
+				else {
+					material_to_slot[mi] = texture_slot_map.empty() ? 0 : texture_slot_map[0];
+				}
+			}
 
-						if (subset.material_index < texture_slot_map.size()) {
-							sub.material_id = texture_slot_map[subset.material_index];
-							//bud::print("  Subset[{}]: mat_idx={} -> GPU_slot={}", i, subset.material_index, sub.material_id);
-						}
-						else {
-							bud::eprint("  Subset[{}]: INVALID mat_idx={} (max: {}) -> using fallback!",
-								i, subset.material_index, texture_slot_map.size());
-							sub.material_id = 0;
-						}
+			for (size_t i = 0; i < mesh_data_copy->subsets.size(); ++i) {
+				const auto& subset = mesh_data_copy->subsets[i];
+				SubMesh sub;
+				sub.index_start = subset.index_start;
+				sub.index_count = subset.index_count;
+				sub.meshlet_start = subset.meshlet_start;
+				sub.meshlet_count = subset.meshlet_count;
+
+				if (subset.material_index < material_to_slot.size()) {
+					sub.material_id = material_to_slot[subset.material_index];
+				}
+				else {
+					bud::eprint("  Subset[{}]: INVALID mat_idx={} (max: {}) -> using fallback!",
+						i, subset.material_index, material_to_slot.size());
+					sub.material_id = texture_slot_map.empty() ? 0 : texture_slot_map[0];
+				}
 
 						sub.aabb = subset.aabb;
 						sub.sphere.center = subset.aabb.center();

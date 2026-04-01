@@ -198,13 +198,18 @@ namespace bud::ui {
                     ImGui::SameLine();
                     // Replace Reset button with a compact checkbox to toggle heuristic occluder enable
                     if (set_occluder_enable) {
+                        // Use a fixed-size checkbox area to avoid auto-resize / wrapping when the
+                        // checkbox state changes (checkbox glyph can affect layout in some fonts).
+                        ImGui::SameLine();
+                        ImGui::PushID("heuristic_occluder_enable");
+                        // Reserve a compact fixed width for the checkbox control
+                        ImGui::PushItemWidth(24.0f);
                         bool tmp = current_occluder_enable;
-                        // Render a SmallButton that shows a check when enabled so it matches +/- button height
-                        const char* lbl = tmp ? "\u2714##heuristic_occluder_enable" : " ##heuristic_occluder_enable";
-                        if (ImGui::SmallButton(lbl)) {
-                            tmp = !tmp;
+                        if (ImGui::Checkbox("##heuristic_occluder_enable", &tmp)) {
                             set_occluder_enable(tmp);
                         }
+                        ImGui::PopItemWidth();
+                        ImGui::PopID();
                     } else {
                         // Fallback: show Reset if no enable setter provided
                         ImGui::SameLine();

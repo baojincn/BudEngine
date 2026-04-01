@@ -67,7 +67,8 @@ static bool reflect_and_validate_spv(const std::filesystem::path& spv_path) {
 
 namespace bud::tool {
 
-    bool AssetProcessor::process_gltf_to_budmesh(const std::string& input_path, const std::string& output_path) {
+    bool AssetProcessor::process_gltf_to_budmesh(const std::string& input_path, const std::string& output_path,
+                                                 size_t max_vertices, size_t max_triangles, float cone_weight) {
         Assimp::Importer importer;
         const aiScene* scene = importer.ReadFile(input_path, 
             aiProcess_Triangulate | 
@@ -97,9 +98,6 @@ namespace bud::tool {
         std::vector<uint32_t> all_meshlet_triangles;
         std::vector<asset::SubMeshDescriptor> submeshes;
 
-        const size_t max_vertices = 64;
-        const size_t max_triangles = 128;
-        const float cone_weight = 0.5f;
 
         std::string input_path_str = std::string(input_path);
         std::string base_dir = "";
@@ -110,23 +108,58 @@ namespace bud::tool {
 
         std::vector<std::string> texture_paths;
         std::map<unsigned int, uint32_t> mat_to_tex_idx;
-        
+        std::map<unsigned int, uint32_t> mat_to_mat_idx;
+        std::vector<asset::MaterialDescriptor> materials;
+
         uint32_t default_tex_idx = 0;
         texture_paths.push_back("data/textures/default.png");
 
         for (unsigned int i = 0; i < scene->mNumMaterials; ++i) {
             aiMaterial* mat = scene->mMaterials[i];
             aiString tex_path;
+
+            uint32_t base_tex = default_tex_idx;
             if (mat->GetTexture(aiTextureType_DIFFUSE, 0, &tex_path) == AI_SUCCESS) {
                 std::string p = tex_path.C_Str();
                 if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) {
                     p = base_dir + p;
                 }
-                mat_to_tex_idx[i] = (uint32_t)texture_paths.size();
+                base_tex = (uint32_t)texture_paths.size();
                 texture_paths.push_back(p);
-            } else {
-                mat_to_tex_idx[i] = default_tex_idx;
             }
+
+            // Default material descriptor
+            asset::MaterialDescriptor md = {};
+            md.base_color_texture = base_tex;
+            md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::OPAQUE);
+            md.double_sided = 0;
+            md.alpha_cutoff = 0.5f;
+
+            // Try to query two-sided and opacity from Assimp material (best-effort)
+            int two_sided = 0;
+            float opacity = 1.0f;
+            if (mat->Get(AI_MATKEY_TWOSIDED, two_sided) == AI_SUCCESS) {
+                md.double_sided = two_sided ? 1 : 0;
+            }
+            if (mat->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS) {
+                if (opacity < 1.0f) {
+                    // If an explicit opacity map exists, treat as MASK; otherwise BLEND
+                    aiString op_tex;
+                    if (mat->GetTexture(aiTextureType_OPACITY, 0, &op_tex) == AI_SUCCESS) {
+                        md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::MASK);
+                    } else {
+                        md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::BLEND);
+                    }
+                    md.alpha_cutoff = 0.5f;
+                }
+            }
+
+            uint32_t mat_out_idx = (uint32_t)materials.size();
+            materials.push_back(md);
+            mat_to_mat_idx[i] = mat_out_idx;
+
+            // Keep a mapping for diffuse texture for backwards compat if needed
+            mat_to_tex_idx[i] = base_tex;
         }
 
         struct MeshInstance {
@@ -154,7 +187,7 @@ namespace bud::tool {
             const auto& instance = instances[i];
             const aiMesh* mesh = scene->mMeshes[instance.mesh_index];
             unsigned int mat_idx = mesh->mMaterialIndex;
-            uint32_t mapped_tex_idx = mat_to_tex_idx[mat_idx];
+            uint32_t mapped_mat_idx = mat_to_mat_idx[mat_idx];
 
             std::vector<asset::Vertex> group_vertices;
             std::vector<uint32_t> group_indices;
@@ -221,7 +254,7 @@ namespace bud::tool {
             sub_desc.index_count = (uint32_t)group_indices.size();
             sub_desc.meshlet_start = group_base_meshlet;
             sub_desc.meshlet_count = (uint32_t)meshlet_count;
-            sub_desc.material_id = mapped_tex_idx;
+            sub_desc.material_id = mapped_mat_idx;
             
             // Compute SubMesh AABB
             sub_desc.aabb_min[0] = sub_desc.aabb_min[1] = sub_desc.aabb_min[2] = std::numeric_limits<float>::max();
@@ -280,7 +313,7 @@ namespace bud::tool {
 
         asset::BudMeshHeader header = {};
         header.magic = asset::MESH_MAGIC;
-        header.version = 3;
+        header.version = asset::MESH_VERSION;
         header.total_vertices = (uint32_t)all_vertices.size();
         header.total_indices = (uint32_t)all_indices.size();
         header.meshlet_count = (uint32_t)all_meshlets.size();
@@ -288,6 +321,7 @@ namespace bud::tool {
 
         // Textures already processed at the start
         header.texture_count = (uint32_t)texture_paths.size();
+        header.material_count = (uint32_t)materials.size();
 
         header.aabb_min[0] = header.aabb_min[1] = header.aabb_min[2] = std::numeric_limits<float>::max();
         header.aabb_max[0] = header.aabb_max[1] = header.aabb_max[2] = -std::numeric_limits<float>::max();
@@ -315,6 +349,8 @@ namespace bud::tool {
         current_offset += all_cull_data.size() * sizeof(asset::MeshletCullData);
         header.submesh_offset = current_offset;
         current_offset += submeshes.size() * sizeof(asset::SubMeshDescriptor);
+        header.material_offset = current_offset;
+        current_offset += materials.size() * sizeof(asset::MaterialDescriptor);
         header.texture_offset = current_offset;
         // Total size of all strings including null terminators
         for (const auto& path : texture_paths) {
@@ -329,12 +365,16 @@ namespace bud::tool {
         out.write(reinterpret_cast<const char*>(all_meshlet_triangles.data()), all_meshlet_triangles.size() * sizeof(uint32_t));
         out.write(reinterpret_cast<const char*>(all_cull_data.data()), all_cull_data.size() * sizeof(asset::MeshletCullData));
         out.write(reinterpret_cast<const char*>(submeshes.data()), submeshes.size() * sizeof(asset::SubMeshDescriptor));
-        
+        // Write material table
+        if (!materials.empty()) {
+            out.write(reinterpret_cast<const char*>(materials.data()), materials.size() * sizeof(asset::MaterialDescriptor));
+        }
+
         for (const auto& path : texture_paths) {
             out.write(path.c_str(), path.length() + 1);
         }
 
-        std::cout << "[BudAssetTool] Successfully exported " << header.submesh_count << " submeshes, " << header.meshlet_count << " meshlets, and " << header.texture_count << " textures to " << output_path << std::endl;
+        std::cout << "[BudAssetTool] Successfully exported " << header.submesh_count << " submeshes, " << header.meshlet_count << " meshlets, " << header.material_count << " materials and " << header.texture_count << " textures to " << output_path << std::endl;
         return true;
     }
 

@@ -10,6 +10,10 @@ void print_usage() {
 int main(int argc, char* argv[]) {
     std::string input_path;
     std::string output_path;
+    // Meshlet generation defaults
+    size_t max_vertices = 64;
+    size_t max_triangles = 128;
+    float cone_weight = 0.5f;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -17,6 +21,12 @@ int main(int argc, char* argv[]) {
             input_path = argv[++i];
         } else if (arg == "--output" && i + 1 < argc) {
             output_path = argv[++i];
+        } else if (arg == "--max-vertices" && i + 1 < argc) {
+            try { max_vertices = std::stoul(argv[++i]); } catch(...) { max_vertices = 64; }
+        } else if (arg == "--max-triangles" && i + 1 < argc) {
+            try { max_triangles = std::stoul(argv[++i]); } catch(...) { max_triangles = 128; }
+        } else if (arg == "--cone-weight" && i + 1 < argc) {
+            try { cone_weight = std::stof(argv[++i]); } catch(...) { cone_weight = 0.5f; }
         } else if (arg == "--help" || arg == "-h") {
             print_usage();
             return 0;
@@ -57,8 +67,9 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "[BudAssetTool] Processing glTF: " << input_path << " -> " << output_path << std::endl;
+    std::cout << "[BudAssetTool] Meshlet params: max_vertices=" << max_vertices << " max_triangles=" << max_triangles << " cone_weight=" << cone_weight << std::endl;
 
-    if (bud::tool::AssetProcessor::process_gltf_to_budmesh(input_path, output_path)) {
+    if (bud::tool::AssetProcessor::process_gltf_to_budmesh(input_path, output_path, max_vertices, max_triangles, cone_weight)) {
         std::cout << "[BudAssetTool] Processed successfully." << std::endl;
         return 0;
     } else {

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <vector>
@@ -7,7 +7,8 @@ namespace bud::asset {
 
     // 0x4255444D ("BUDM")
     constexpr uint32_t MESH_MAGIC = 0x4255444D;
-    constexpr uint32_t MESH_VERSION = 1;
+    // bump when header layout changes
+    constexpr uint32_t MESH_VERSION = 4;
 
 #pragma pack(push, 1)
 
@@ -30,6 +31,7 @@ namespace bud::asset {
         uint32_t meshlet_count;
         uint32_t submesh_count;
         uint32_t texture_count;    // Total unique textures
+        uint32_t material_count;   // Total unique materials
 
         float aabb_min[3];
         float aabb_max[3];
@@ -43,6 +45,7 @@ namespace bud::asset {
         uint64_t meshlet_index_offset;
         uint64_t cull_data_offset;
         uint64_t submesh_offset;
+        uint64_t material_offset;  // Offset to material table
         uint64_t texture_offset;   // Offset to the texture path list (null-terminated strings or similar)
     };
 
@@ -67,13 +70,28 @@ namespace bud::asset {
         float tangent[4]; // Optional, but good to have
     };
 
+    // Material serialization that mirrors glTF semantic choices
+    enum class AlphaMode : uint8_t {
+        OPAQUE = 0,
+        MASK = 1,
+        BLEND = 2
+    };
+
+    struct MaterialDescriptor {
+        uint32_t base_color_texture; // Index into texture table or INVALID_INDEX
+        uint8_t alpha_mode;          // AlphaMode as uint8_t
+        uint8_t double_sided;        // boolean (0/1)
+        uint8_t padding[2];          // reserved for alignment
+        float alpha_cutoff;          // used when alpha_mode == MASK
+    };
+
 #pragma pack(pop)
 
 	constexpr uint32_t INVALID_INDEX = 0xFFFFFFFFu;
 
     // Structural constants for verification
-    constexpr uint32_t MESH_HEADER_SIZE = 124;
-    constexpr uint32_t MESH_HEADER_VERTEX_OFFSET = 60;
+    constexpr uint32_t MESH_HEADER_SIZE = 136;
+    constexpr uint32_t MESH_HEADER_VERTEX_OFFSET = 64;
     constexpr uint32_t MESH_HEADER_SUBMESH_COUNT_OFFSET = 20;
     constexpr uint32_t SUBMESH_DESCRIPTOR_SIZE = 44;
 

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vector>
 #include <string>
@@ -33,6 +33,14 @@ namespace bud::io {
 	};
 
 	struct MeshData {
+
+		struct Material {
+			uint32_t base_color_texture = 0; // index into texture_paths
+			uint8_t alpha_mode = 0; // 0=OPAQUE,1=MASK,2=BLEND
+			uint8_t double_sided = 0;
+			float alpha_cutoff = 0.5f;
+		};
+
 		struct Vertex {
 			glm::vec3 pos;
 			glm::vec3 color;
@@ -46,6 +54,7 @@ namespace bud::io {
 		std::vector<Vertex> vertices;
 		std::vector<uint32_t> indices;
 		std::vector<std::string> texture_paths;
+		std::vector<Material> materials;
 		std::vector<MeshSubset> subsets;
 
 		// Meshlet data

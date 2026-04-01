@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal enabledelayedexpansion
 
 :: Configuration Stage: Set explicit paths for VS 2026 (Professional) on D: drive
@@ -20,8 +20,8 @@ echo [Build Tools Script] Initializing MSVC 2026 Environment...
 call "%VC_VARS%"
 
 :: 2. Ensure CMake uses the explicit compiler
-echo [Build Tools Script] Configuring CMake (Preset: debug)...
-"%CMAKE_EXE%" --preset debug ^
+echo [Build Tools Script] Configuring CMake (Preset: vs-multi)...
+"%CMAKE_EXE%" --preset vs-multi ^
   "-DCMAKE_C_COMPILER=%CL_EXE%" ^
   "-DCMAKE_CXX_COMPILER=%CL_EXE%"
 
@@ -31,7 +31,7 @@ if %errorlevel% neq 0 (
 )
 
 :: 3. Build only BudAssetTool
-echo [Build Tools Script] Building BudAssetTool...
+echo [Build Tools Script] Building BudAssetTool (Debug x64)...
 "%CMAKE_EXE%" --build --preset "Debug x64" --target BudAssetTool
 if %errorlevel% neq 0 (
     echo [Error] Build failed
