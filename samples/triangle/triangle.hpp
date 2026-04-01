@@ -14,5 +14,9 @@ public:
 
 	void on_shutdown() override;
 
+	void init_environment(const bud::game::AppConfig& config) {
+		init_puppet(config);
+	}
+
 	pybind11::array_t<uint8_t> step(float dt);
 };

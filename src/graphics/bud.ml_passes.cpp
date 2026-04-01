@@ -3,9 +3,9 @@
 #include <iostream>
 
 namespace bud::graphics {
-    void OccluderSelectionPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+    void NeuralOccluderPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
         if (!rhi || !asset_manager) {
-            std::string err = std::format("OccluderSelectionPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+            std::string err = std::format("NeuralOccluderPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
             bud::eprint("{}", err);
 #if defined(_DEBUG)
             throw std::runtime_error(err);
@@ -19,14 +19,14 @@ namespace bud::graphics {
             desc.cs.code = shaders[0];
             pipeline = rhi->create_compute_pipeline(desc);
             if (pipeline) {
-                std::cout << "[OccluderSelectionPass] Shader loaded and pipeline created.\n";
+                std::cout << "[NeuralOccluderPass] Shader loaded and pipeline created.\n";
             }
         });
     }
 
-    void OccluderSelectionPass::add_to_graph(RenderGraph& rg, RGHandle input_buffer, RGHandle output_buffer, uint32_t count) {
+    void NeuralOccluderPass::add_to_graph(RenderGraph& rg, RGHandle input_buffer, RGHandle output_buffer, uint32_t count) {
         if (!pipeline) {
-            std::string err = "OccluderSelectionPass::add_to_graph called with null pipeline";
+            std::string err = "NeuralOccluderPass::add_to_graph called with null pipeline";
             bud::eprint("{}", err);
 #if defined(_DEBUG)
             throw std::runtime_error(err);
@@ -35,7 +35,7 @@ namespace bud::graphics {
 #endif
         }
 
-        rg.add_pass("Occluder Selection Pass",
+        rg.add_pass("Neural Occluder Pass",
             [&](RGBuilder& builder) {
                 builder.read(input_buffer, ResourceState::ShaderResource);
                 builder.write(output_buffer, ResourceState::UnorderedAccess);

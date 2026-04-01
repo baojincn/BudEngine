@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <unordered_map>
@@ -11,7 +12,6 @@
 #include "src/runtime/bud.scene.io.hpp"
 
 using namespace bud::game;
-#include <cstring>
 
 
 bool TriangleApp::is_fully_loaded() const {
@@ -133,11 +133,9 @@ void TriangleApp::on_shutdown() {
 }
 
 pybind11::array_t<uint8_t> TriangleApp::step(float dt) {
-	auto engine = get_engine();
-	engine->step(dt, [this](float d) {
-		on_update(d);
-		});
+	step_puppet(dt);
 
+	auto engine = get_engine();
 	const void* pixels = engine->get_readback_pixels();
 	if (!pixels)
 		return pybind11::array_t<uint8_t>();
@@ -146,5 +144,6 @@ pybind11::array_t<uint8_t> TriangleApp::step(float dt) {
 	pybind11::array_t<uint8_t> result({ engine_config.height, engine_config.width, 4 });
     auto req = result.request();
     std::memcpy(req.ptr, pixels, (uint64_t)engine_config.width * engine_config.height * 4);
+
 	return result;
 }

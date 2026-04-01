@@ -14,9 +14,9 @@ namespace bud::ml::rl {
 
 		void set_interactor(std::shared_ptr<Interactor> interactor) { m_interactor = interactor; }
 		void set_environment(std::shared_ptr<Environment> env) { m_environment = env; }
-		void set_policy(std::shared_ptr<IPolicy> policy) { m_policy = policy; }
+        void set_policy(std::shared_ptr<PolicyBase> policy) { m_policy = policy; }
 
-		// 🌟 核心数据流管线 (C++ 独立推理模式下调用)
+		// 核心数据流管线 (C++ 独立推理模式下调用)
 		void tick_inference() {
 			if (m_active_agents.empty() || !m_interactor || !m_policy) return;
 
@@ -40,7 +40,7 @@ namespace bud::ml::rl {
 
 		std::shared_ptr<Interactor> m_interactor;
 		std::shared_ptr<Environment> m_environment;
-		std::shared_ptr<IPolicy> m_policy;
+        std::shared_ptr<PolicyBase> m_policy;
 
 		BatchedObservations m_obs_buffer;
 		BatchedActions m_action_buffer;
