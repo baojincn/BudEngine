@@ -62,19 +62,19 @@ namespace bud::graphics {
 		void add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle hiz_pyramid, uint32_t mip_level);
 	};
 
-	class ZPrepass : public RenderPass {
-	public:
-		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer,
-			const RenderScene& render_scene,
-			const SceneView& view,
-			const RenderConfig& config,
-			const std::vector<RenderMesh>& meshes,
-			const std::vector<SortItem>& sort_list,
-			size_t instance_count,
-			bud::graphics::BufferHandle mega_vertex_buffer,
-			bud::graphics::BufferHandle mega_index_buffer);
-	};
+    class DepthOnlyPass : public RenderPass {
+    public:
+        void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+        RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer,
+            const RenderScene& render_scene,
+            const SceneView& view,
+            const RenderConfig& config,
+            const std::vector<RenderMesh>& meshes,
+            const std::vector<SortItem>& sort_list,
+            size_t instance_count,
+            bud::graphics::BufferHandle mega_vertex_buffer,
+            bud::graphics::BufferHandle mega_index_buffer);
+    };
 
 
 	class CSMShadowPass : public RenderPass {

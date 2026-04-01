@@ -325,9 +325,9 @@ namespace bud::graphics {
 		);
 	}
 
-    void ZPrepass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+    void DepthOnlyPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
         if (!rhi || !asset_manager) {
-            std::string err = std::format("ZPrepass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+            std::string err = std::format("DepthOnlyPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
             bud::eprint("{}", err);
 #if defined(_DEBUG)
             throw std::runtime_error(err);
@@ -336,36 +336,36 @@ namespace bud::graphics {
 #endif
         }
 
-		load_shaders_async(asset_manager, { "src/shaders/zprepass.vert.spv", "src/shaders/zprepass.frag.spv" }, [this, rhi, config](const auto& shaders) {
-			GraphicsPipelineDesc desc;
-			desc.vs.code = shaders[0];
-			desc.fs.code = shaders[1];
-			desc.depth_test = true;
-			desc.depth_write = true;
-			desc.cull_mode = CullMode::None;
-			desc.color_attachment_format = bud::graphics::TextureFormat::Undefined;
-			desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
-			desc.enable_depth_bias = false;
-			desc.vertex_layout = VertexLayoutType::PositionUV;
+        load_shaders_async(asset_manager, { "src/shaders/depth_only.vert.spv", "src/shaders/depth_only.frag.spv" }, [this, rhi, config](const auto& shaders) {
+            GraphicsPipelineDesc desc;
+            desc.vs.code = shaders[0];
+            desc.fs.code = shaders[1];
+            desc.depth_test = true;
+            desc.depth_write = true;
+            desc.cull_mode = CullMode::None;
+            desc.color_attachment_format = bud::graphics::TextureFormat::Undefined;
+            desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
+            desc.enable_depth_bias = false;
+            desc.vertex_layout = VertexLayoutType::PositionUV;
 
-			pipeline = rhi->create_graphics_pipeline(desc);
-			if (pipeline) {
-				bud::print("[ZPrepass] Shaders loaded and pipeline created.");
-			}
-		});
-	}
+            pipeline = rhi->create_graphics_pipeline(desc);
+            if (pipeline) {
+                bud::print("[DepthOnlyPass] Shaders loaded and pipeline created.");
+            }
+        });
+    }
 
-	RGHandle ZPrepass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer,
-		const RenderScene& render_scene,
-		const SceneView& view,
-		const RenderConfig& config,
-		const std::vector<RenderMesh>& meshes,
-		const std::vector<SortItem>& sort_list,
-		size_t instance_count,
-		bud::graphics::BufferHandle mega_vertex_buffer,
-		bud::graphics::BufferHandle mega_index_buffer) {
+    RGHandle DepthOnlyPass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer,
+        const RenderScene& render_scene,
+        const SceneView& view,
+        const RenderConfig& config,
+        const std::vector<RenderMesh>& meshes,
+        const std::vector<SortItem>& sort_list,
+        size_t instance_count,
+        bud::graphics::BufferHandle mega_vertex_buffer,
+        bud::graphics::BufferHandle mega_index_buffer) {
         if (!pipeline) {
-            std::string err = "ZPrepass::add_to_graph pipeline is null";
+            std::string err = "DepthOnlyPass::add_to_graph pipeline is null";
             bud::eprint("{}", err);
 #if defined(_DEBUG)
             throw std::runtime_error(err);
@@ -426,7 +426,7 @@ namespace bud::graphics {
 
 		auto depth_h = std::make_shared<RGHandle>();
 
-		return render_graph.add_pass("Z Prepass",
+        return render_graph.add_pass("Depth Only Pass",
 			[=](RGBuilder& builder) {
 				*depth_h = builder.create("MainDepth", depth_desc);
 				builder.write(*depth_h, ResourceState::DepthWrite);
@@ -434,7 +434,7 @@ namespace bud::graphics {
 			},
 			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) {
-					bud::eprint("[ZPrepass] ERROR: Pipeline is null.");
+                    bud::eprint("[DepthOnlyPass] ERROR: Pipeline is null.");
 					return;
 				}
 

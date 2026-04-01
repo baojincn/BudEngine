@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <memory>
 #include <vector>
@@ -81,8 +81,8 @@ namespace bud::graphics {
 		bud::io::AssetManager* asset_manager;
 		bud::threading::TaskScheduler* task_scheduler;
 
-		std::unique_ptr<CSMShadowPass> csm_pass;
-		std::unique_ptr<ZPrepass> z_prepass;
+        std::unique_ptr<CSMShadowPass> csm_pass;
+        std::unique_ptr<DepthOnlyPass> depth_only_pass;
 		std::unique_ptr<HiZMipPass> hiz_mip_pass;
 		std::unique_ptr<HiZCullingPass> hiz_pass;
 		std::unique_ptr<HiZDebugPass> hiz_debug_pass;

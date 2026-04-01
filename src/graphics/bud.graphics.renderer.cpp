@@ -1,4 +1,4 @@
-#include <memory>
+﻿#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -23,8 +23,8 @@ namespace bud::graphics {
 	Renderer::Renderer(RHI* rhi, bud::io::AssetManager* asset_manager, bud::threading::TaskScheduler* task_scheduler)
 		: rhi(rhi), render_graph(rhi), asset_manager(asset_manager), task_scheduler(task_scheduler) {
 		upload_queue = std::make_shared<UploadQueue>();
-		csm_pass = std::make_unique<CSMShadowPass>();
-		z_prepass = std::make_unique<ZPrepass>();
+        csm_pass = std::make_unique<CSMShadowPass>();
+        depth_only_pass = std::make_unique<DepthOnlyPass>();
 		hiz_mip_pass = std::make_unique<HiZMipPass>();
 		hiz_pass = std::make_unique<HiZCullingPass>();
 		hiz_debug_pass = std::make_unique<HiZDebugPass>();
@@ -32,8 +32,8 @@ namespace bud::graphics {
 		cluster_viz_pass = std::make_unique<ClusterVisualizationPass>();
 		ui_pass = std::make_unique<UIPass>();
 
-		csm_pass->init(rhi, render_config, asset_manager);
-		z_prepass->init(rhi, render_config, asset_manager);
+        csm_pass->init(rhi, render_config, asset_manager);
+        depth_only_pass->init(rhi, render_config, asset_manager);
 		hiz_mip_pass->init(rhi, render_config, asset_manager);
 		hiz_pass->init(rhi, render_config, asset_manager);
 		hiz_debug_pass->init(rhi, render_config, asset_manager);
@@ -52,8 +52,8 @@ namespace bud::graphics {
 		flush_upload_queue();
 		upload_queue.reset();
 
-		if (csm_pass) csm_pass->shutdown(rhi);
-		if (z_prepass) z_prepass->shutdown(rhi);
+        if (csm_pass) csm_pass->shutdown(rhi);
+        if (depth_only_pass) depth_only_pass->shutdown(rhi);
 		if (hiz_mip_pass) hiz_mip_pass->shutdown(rhi);
 		if (hiz_pass) hiz_pass->shutdown(rhi);
 		if (hiz_debug_pass) hiz_debug_pass->shutdown(rhi);
@@ -892,7 +892,7 @@ namespace bud::graphics {
 			if (visible_count > 0) {
 				// Z-Prepass ALWAYS uses CPU frustum-culling (visible_count) regardless of GPU-driven settings,
 				// as it must generate the depth buffer for Hi-Z culling itself.
-				auto depth_prepass = z_prepass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
+                auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
 				
 				if (depth_prepass.is_valid()) {
 					if (render_config.enable_gpu_driven) {

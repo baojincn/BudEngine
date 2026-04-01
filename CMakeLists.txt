@@ -130,8 +130,8 @@ file(GLOB SHADER_FILES
 
 # Ensure new prepass shaders are included
 list(APPEND SHADER_FILES
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/zprepass.vert"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/zprepass.frag"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/depth_only.vert"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/depth_only.frag"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/debug_ui.vert"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/debug_ui.frag"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hiz_cull.comp"
