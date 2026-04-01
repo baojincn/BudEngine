@@ -109,11 +109,11 @@ namespace bud::engine {
 			}
 		});
 
-		// Adjust heuristic occluder fraction with + / - keys
+            // Adjust heuristic occluder fraction with + / - keys
 		input_manager->register_action_callback("OccluderDecrease", [this]() {
 			if (!camera_sequencer.is_playing()) {
 				auto cfg = renderer->get_config();
-				cfg.occluder_fraction = std::clamp(cfg.occluder_fraction - 0.01f, 0.0f, 1.0f);
+                    cfg.heuristic_occluder_fraction = std::clamp(cfg.heuristic_occluder_fraction - 0.01f, 0.0f, 1.0f);
 				renderer->set_config(cfg);
 			}
 		});
@@ -121,7 +121,7 @@ namespace bud::engine {
 		input_manager->register_action_callback("OccluderIncrease", [this]() {
 			if (!camera_sequencer.is_playing()) {
 				auto cfg = renderer->get_config();
-				cfg.occluder_fraction = std::clamp(cfg.occluder_fraction + 0.01f, 0.0f, 1.0f);
+                    cfg.heuristic_occluder_fraction = std::clamp(cfg.heuristic_occluder_fraction + 0.01f, 0.0f, 1.0f);
 				renderer->set_config(cfg);
 			}
 		});
@@ -418,11 +418,18 @@ namespace bud::engine {
             // Provide occluder fraction setter to the stats UI so user can adjust at runtime
             auto set_occluder = [this](float v) {
                 auto cfg = renderer->get_config();
-                cfg.occluder_fraction = v;
+                cfg.heuristic_occluder_fraction = v;
                 renderer->set_config(cfg);
             };
-            float current_occluder = renderer->get_config().occluder_fraction;
-            bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder);
+            float current_occluder = renderer->get_config().heuristic_occluder_fraction;
+            auto set_occluder_enable = [this](bool v) {
+                auto cfg = renderer->get_config();
+                cfg.heuristic_occluder_enable = v;
+                renderer->set_config(cfg);
+            };
+            bool current_occluder_enable = renderer->get_config().heuristic_occluder_enable;
+
+            bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable);
 
             ImGui::Render();
 

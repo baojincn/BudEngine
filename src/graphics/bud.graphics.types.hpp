@@ -148,11 +148,12 @@ namespace bud::graphics {
 		uint32_t debug_hiz_mip = 0;
 		bool enable_cluster_visualization = false;
 
-		// Occluder selection (CPU heuristic prototype)
-		float occluder_fraction = 0.1f; // select top 10% as occluders by default
-		uint32_t occluder_min_count = 1;
-		uint32_t occluder_max_count = 4096;
-		float occluder_tri_weight = 1e-4f; // multiplier for triangle count in score
+        // Heuristic Occluder selection (CPU heuristic prototype)
+        bool heuristic_occluder_enable = true; // enable heuristic occluder selection by default
+        float heuristic_occluder_fraction = 0.1f; // select top 10% as occluders by default
+        uint32_t heuristic_occluder_min_count = 1;
+        uint32_t heuristic_occluder_max_count = 4096;
+        float heuristic_occluder_tri_weight = 1e-4f; // multiplier for triangle count in score
 	};
 
 	struct SceneView {

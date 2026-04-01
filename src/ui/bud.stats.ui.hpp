@@ -22,7 +22,9 @@ namespace bud::ui {
                            bool is_looping,
                            bool show_stats = true,
                            std::function<void(float)> set_occluder = nullptr,
-                           float current_occluder = -1.0f);
+                           float current_occluder = -1.0f,
+                           std::function<void(bool)> set_occluder_enable = nullptr,
+                           bool current_occluder_enable = true);
     };
 
 }

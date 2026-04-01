@@ -892,10 +892,15 @@ namespace bud::graphics {
 			if (visible_count > 0) {
 				// Z-Prepass ALWAYS uses CPU frustum-culling (visible_count) regardless of GPU-driven settings,
 				// as it must generate the depth buffer for Hi-Z culling itself.
-                // Build occluder subset using CPU heuristic
-                size_t occluder_count = static_cast<size_t>(std::max<uint32_t>(render_config.occluder_min_count, static_cast<uint32_t>(std::floor((float)visible_count * render_config.occluder_fraction))));
-                occluder_count = std::min(occluder_count, static_cast<size_t>(render_config.occluder_max_count));
-                occluder_count = std::min(occluder_count, visible_count);
+                // Build occluder subset using CPU heuristic if enabled; otherwise use full list
+                size_t occluder_count = 0;
+                if (render_config.heuristic_occluder_enable) {
+                    occluder_count = static_cast<size_t>(std::max<uint32_t>(render_config.heuristic_occluder_min_count, static_cast<uint32_t>(std::floor((float)visible_count * render_config.heuristic_occluder_fraction))));
+                    occluder_count = std::min(occluder_count, static_cast<size_t>(render_config.heuristic_occluder_max_count));
+                    occluder_count = std::min(occluder_count, visible_count);
+                } else {
+                    occluder_count = visible_count; // use full list when heuristic disabled
+                }
 
                 // Fill persistent occluder list so its lifetime spans render graph execution
                 persistent_occluder_list.clear();
@@ -1162,8 +1167,8 @@ namespace bud::graphics {
 			bud::math::vec3 pos = bud::math::vec3(world_matrix[3]);
 			float dist2 = bud::math::distance2(pos, view.camera_position);
 
-			float score = (radius * radius) / (dist2 + eps);
-			score *= (1.0f + render_config.occluder_tri_weight * static_cast<float>(tri_count));
+            float score = (radius * radius) / (dist2 + eps);
+            score *= (1.0f + render_config.heuristic_occluder_tri_weight * static_cast<float>(tri_count));
 
 			scores.emplace_back(score, i);
 		}

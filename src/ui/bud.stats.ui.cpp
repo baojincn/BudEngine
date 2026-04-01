@@ -11,15 +11,17 @@
 
 namespace bud::ui {
 
-	void StatsUI::render(const bud::graphics::RenderStats& stats, float delta_time,
-		bud::scene::SequencerState sequencer_state,
-		size_t keyframe_count,
-		size_t playback_index,
-		bool is_paused,
-		bool is_looping,
-		bool show_stats,
-		std::function<void(float)> set_occluder,
-		float current_occluder) {
+    void StatsUI::render(const bud::graphics::RenderStats& stats, float delta_time,
+        bud::scene::SequencerState sequencer_state,
+        size_t keyframe_count,
+        size_t playback_index,
+        bool is_paused,
+        bool is_looping,
+        bool show_stats,
+        std::function<void(float)> set_occluder,
+        float current_occluder,
+        std::function<void(bool)> set_occluder_enable,
+        bool current_occluder_enable) {
 
 		if (show_stats) {
 			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
@@ -179,25 +181,38 @@ namespace bud::ui {
 			ImGui::TextColored(color_neutral, "Selected Occluders: %u", display_occluder_count);
 			ImGui::TextColored(color_neutral, "Occluder Tris: %u", display_occluder_tris);
 
-			// Occluder fraction control (if provided)
-			if (set_occluder && current_occluder >= 0.0f) {
-				ImGui::Separator();
-				ImGui::TextColored(color_neutral, "Occluder Fraction: %.1f%%", current_occluder * 100.0f);
-				ImGui::SameLine();
-				if (ImGui::SmallButton("-")) {
-					float v = std::clamp(current_occluder - 0.01f, 0.0f, 1.0f);
-					set_occluder(v);
-				}
-				ImGui::SameLine();
-				if (ImGui::SmallButton("+")) {
-					float v = std::clamp(current_occluder + 0.01f, 0.0f, 1.0f);
-					set_occluder(v);
-				}
-				ImGui::SameLine();
-				if (ImGui::SmallButton("Reset")) {
-					set_occluder(0.1f);
-				}
-			}
+                // Heuristic Occluder fraction control (if provided)
+                if (set_occluder && current_occluder >= 0.0f) {
+                    ImGui::Separator();
+                    ImGui::TextColored(color_neutral, "Heuristic Occluder Frac: %.1f%%", current_occluder * 100.0f);
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("-")) {
+                        float v = std::clamp(current_occluder - 0.01f, 0.0f, 1.0f);
+                        set_occluder(v);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("+")) {
+                        float v = std::clamp(current_occluder + 0.01f, 0.0f, 1.0f);
+                        set_occluder(v);
+                    }
+                    ImGui::SameLine();
+                    // Replace Reset button with a compact checkbox to toggle heuristic occluder enable
+                    if (set_occluder_enable) {
+                        bool tmp = current_occluder_enable;
+                        // Render a SmallButton that shows a check when enabled so it matches +/- button height
+                        const char* lbl = tmp ? "\u2714##heuristic_occluder_enable" : " ##heuristic_occluder_enable";
+                        if (ImGui::SmallButton(lbl)) {
+                            tmp = !tmp;
+                            set_occluder_enable(tmp);
+                        }
+                    } else {
+                        // Fallback: show Reset if no enable setter provided
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Reset")) {
+                            set_occluder(0.1f);
+                        }
+                    }
+                }
 
 				// GPU CULLING
 				ImGui::Separator();
