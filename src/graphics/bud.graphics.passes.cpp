@@ -427,12 +427,13 @@ namespace bud::graphics {
 		auto depth_h = std::make_shared<RGHandle>();
 
         return render_graph.add_pass("Depth Only Pass",
-			[=](RGBuilder& builder) {
-				*depth_h = builder.create("MainDepth", depth_desc);
-				builder.write(*depth_h, ResourceState::DepthWrite);
-				return *depth_h;
-			},
-			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+            [=](RGBuilder& builder) {
+                *depth_h = builder.create("MainDepth", depth_desc);
+                builder.write(*depth_h, ResourceState::DepthWrite);
+                return *depth_h;
+            },
+            // Capture `sort_list` by reference (owned by caller) - caller must ensure lifetime
+            [=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) {
                     bud::eprint("[DepthOnlyPass] ERROR: Pipeline is null.");
 					return;
@@ -920,7 +921,7 @@ namespace bud::graphics {
 				return depth_buffer;
 			},
 
-			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+            [=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) {
 					bud::eprint("[MainPass] ERROR: Pipeline is null.");
 					return;
@@ -1252,7 +1253,7 @@ namespace bud::graphics {
 				builder.read(instance_data, ResourceState::ShaderResource);
 				return backbuffer;
 			},
-			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+            [=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) return;
 
 				bud::graphics::BufferHandle ind_buf_handle;

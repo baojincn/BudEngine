@@ -98,10 +98,31 @@ namespace bud::engine {
 		input_manager->bind_key("ToggleRecord", bud::input::Key::F8);
 		input_manager->bind_key("TogglePlayback", bud::input::Key::F9);
 
+		// Occluder adjustment via keyboard +/-
+		input_manager->bind_key("OccluderDecrease", bud::input::Key::Minus);
+		input_manager->bind_key("OccluderIncrease", bud::input::Key::Plus);
+
 		// Register action callbacks (callbacks run on rising edge detected by InputManager::update())
 		input_manager->register_action_callback("ToggleDebug", [this]() {
 			if (!camera_sequencer.is_playing()) {
 				show_debug_stats = !show_debug_stats;
+			}
+		});
+
+		// Adjust heuristic occluder fraction with + / - keys
+		input_manager->register_action_callback("OccluderDecrease", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				auto cfg = renderer->get_config();
+				cfg.occluder_fraction = std::clamp(cfg.occluder_fraction - 0.01f, 0.0f, 1.0f);
+				renderer->set_config(cfg);
+			}
+		});
+
+		input_manager->register_action_callback("OccluderIncrease", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				auto cfg = renderer->get_config();
+				cfg.occluder_fraction = std::clamp(cfg.occluder_fraction + 0.01f, 0.0f, 1.0f);
+				renderer->set_config(cfg);
 			}
 		});
 
@@ -394,7 +415,14 @@ namespace bud::engine {
             const auto playback_index = camera_sequencer.get_playback_index();
             const bool is_paused = camera_sequencer.is_paused();
             const bool is_looping = camera_sequencer.is_looping();
-            bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats);
+            // Provide occluder fraction setter to the stats UI so user can adjust at runtime
+            auto set_occluder = [this](float v) {
+                auto cfg = renderer->get_config();
+                cfg.occluder_fraction = v;
+                renderer->set_config(cfg);
+            };
+            float current_occluder = renderer->get_config().occluder_fraction;
+            bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder);
 
             ImGui::Render();
 

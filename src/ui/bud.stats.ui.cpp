@@ -7,6 +7,7 @@
 #include <string>
 #include <format>
 #include "src/runtime/bud.camera_sequencer.hpp"
+#include <functional>
 
 namespace bud::ui {
 
@@ -16,7 +17,9 @@ namespace bud::ui {
 		size_t playback_index,
 		bool is_paused,
 		bool is_looping,
-		bool show_stats) {
+		bool show_stats,
+		std::function<void(float)> set_occluder,
+		float current_occluder) {
 
 		if (show_stats) {
 			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
@@ -170,6 +173,32 @@ namespace bud::ui {
 				float cpu_meshlet_cull_rate = cpu_display_total_meshlets > 0 ? (1.0f - (float)cpu_display_visible_meshlets / cpu_display_total_meshlets) * 100.0f : 0.0f;
 				ImGui::TextColored(color_neutral, "Meshlet Cull Ratio: %.1f%%", cpu_meshlet_cull_rate);
 
+			// ML Occlusion / Occluder info: placed after CPU frustum culling and before GPU culling
+			ImGui::Separator();
+			ImGui::TextColored(color_neutral, "ML Occlusion Training");
+			ImGui::TextColored(color_neutral, "Selected Occluders: %u", display_occluder_count);
+			ImGui::TextColored(color_neutral, "Occluder Tris: %u", display_occluder_tris);
+
+			// Occluder fraction control (if provided)
+			if (set_occluder && current_occluder >= 0.0f) {
+				ImGui::Separator();
+				ImGui::TextColored(color_neutral, "Occluder Fraction: %.1f%%", current_occluder * 100.0f);
+				ImGui::SameLine();
+				if (ImGui::SmallButton("-")) {
+					float v = std::clamp(current_occluder - 0.01f, 0.0f, 1.0f);
+					set_occluder(v);
+				}
+				ImGui::SameLine();
+				if (ImGui::SmallButton("+")) {
+					float v = std::clamp(current_occluder + 0.01f, 0.0f, 1.0f);
+					set_occluder(v);
+				}
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Reset")) {
+					set_occluder(0.1f);
+				}
+			}
+
 				// GPU CULLING
 				ImGui::Separator();
 				ImGui::TextColored(color_neutral, "GPU Occlusion Culling");
@@ -192,10 +221,9 @@ namespace bud::ui {
 				float gpu_meshlet_cull_rate = gpu_display_total_meshlets > 0 ? (1.0f - (float)gpu_display_visible_meshlets / gpu_display_total_meshlets) * 100.0f : 0.0f;
 				ImGui::TextColored(color_neutral, "Meshlet Cull Ratio: %.1f%%", gpu_meshlet_cull_rate);
 
-				ImGui::Separator();
-				ImGui::TextColored(color_neutral, "ML Occlusion Training");
-				ImGui::TextColored(color_neutral, "Selected Occluders: %u", display_occluder_count);
-				ImGui::TextColored(color_neutral, "Occluder Tris: %u", display_occluder_tris);
+
+
+
 
 				ImGui::Separator();
 				ImGui::TextColored(color_neutral, "Shadow Casters: %u", display_shadow_casters);

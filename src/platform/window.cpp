@@ -1,4 +1,4 @@
-#include <SDL3/SDL.h>
+﻿#include <SDL3/SDL.h>
 #include <stdexcept>
 #include "src/platform/bud.platform.hpp"
 #include "src/core/bud.core.hpp"
@@ -30,6 +30,11 @@ namespace bud::platform {
 		case SDLK_F8:     return bud::input::Key::F8;
 		case SDLK_F9:     return bud::input::Key::F9;
 		case SDLK_LCTRL:  return bud::input::Key::LCtrl;
+        // Main "+" on many layouts is produced by Shift+'=' -> SDLK_EQUALS
+        case SDLK_EQUALS: return bud::input::Key::Plus;
+        case SDLK_KP_PLUS:return bud::input::Key::Plus;
+        case SDLK_MINUS:  return bud::input::Key::Minus;
+        case SDLK_KP_MINUS:return bud::input::Key::Minus;
 
 		default:          return bud::input::Key::Unknown;
 		}

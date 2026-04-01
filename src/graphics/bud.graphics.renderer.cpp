@@ -892,7 +892,26 @@ namespace bud::graphics {
 			if (visible_count > 0) {
 				// Z-Prepass ALWAYS uses CPU frustum-culling (visible_count) regardless of GPU-driven settings,
 				// as it must generate the depth buffer for Hi-Z culling itself.
-                auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
+                // Build occluder subset using CPU heuristic
+                size_t occluder_count = static_cast<size_t>(std::max<uint32_t>(render_config.occluder_min_count, static_cast<uint32_t>(std::floor((float)visible_count * render_config.occluder_fraction))));
+                occluder_count = std::min(occluder_count, static_cast<size_t>(render_config.occluder_max_count));
+                occluder_count = std::min(occluder_count, visible_count);
+
+                // Fill persistent occluder list so its lifetime spans render graph execution
+                persistent_occluder_list.clear();
+                if (occluder_count > 0 && occluder_count < visible_count) {
+                    std::vector<SortItem> tmp;
+                    select_occluders_cpu(render_scene, scene_view, sort_list, visible_count, tmp, occluder_count);
+                    persistent_occluder_list = std::move(tmp);
+                } else {
+                    // Use full list
+                    persistent_occluder_list = sort_list;
+                }
+                occluder_count = persistent_occluder_list.size();
+
+                bud::print("[Renderer] Depth prepass using {} occluders (visible {}).", occluder_count, visible_count);
+
+                auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, persistent_occluder_list, occluder_count, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
 				
 				if (depth_prepass.is_valid()) {
 					if (render_config.enable_gpu_driven) {
@@ -1112,5 +1131,71 @@ namespace bud::graphics {
 
 			last_split = split;
 		}
+	}
+
+	void Renderer::select_occluders_cpu(const RenderScene& render_scene, const SceneView& view, const std::vector<SortItem>& source_list, size_t source_count, std::vector<SortItem>& out_occluders, size_t out_count) {
+		out_occluders.clear();
+		if (out_count == 0) return;
+
+		size_t n = std::min<size_t>(source_count, source_list.size());
+		std::vector<std::pair<float, size_t>> scores;
+		scores.reserve(n);
+		const float eps = 1e-6f;
+
+		for (size_t i = 0; i < n; ++i) {
+			const auto& item = source_list[i];
+			if (item.entity_index == UINT32_MAX) continue;
+			uint32_t entity_idx = item.entity_index;
+			if (entity_idx >= render_scene.size()) continue;
+			uint32_t mesh_id = render_scene.mesh_indices[entity_idx];
+			if (mesh_id >= meshes.size()) continue;
+			const auto& mesh = meshes[mesh_id];
+
+			float radius = mesh.sphere.radius;
+			uint32_t tri_count = mesh.index_count / 3;
+			if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+				radius = mesh.submeshes[item.submesh_index].sphere.radius;
+				tri_count = mesh.submeshes[item.submesh_index].index_count / 3;
+			}
+
+			auto world_matrix = render_scene.world_matrices[entity_idx];
+			bud::math::vec3 pos = bud::math::vec3(world_matrix[3]);
+			float dist2 = bud::math::distance2(pos, view.camera_position);
+
+			float score = (radius * radius) / (dist2 + eps);
+			score *= (1.0f + render_config.occluder_tri_weight * static_cast<float>(tri_count));
+
+			scores.emplace_back(score, i);
+		}
+
+		if (scores.empty()) return;
+
+		size_t k = std::min(out_count, scores.size());
+		// select top-k by score (descending)
+		std::nth_element(scores.begin(), scores.begin() + k, scores.end(), [](auto& a, auto& b) { return a.first > b.first; });
+
+		// sort top-k for stable order (largest first)
+		std::sort(scores.begin(), scores.begin() + k, [](auto& a, auto& b) { return a.first > b.first; });
+
+		out_occluders.reserve(k);
+		uint32_t tris_sum = 0;
+		for (size_t i = 0; i < k; ++i) {
+			size_t src_idx = scores[i].second;
+			out_occluders.push_back(source_list[src_idx]);
+			const auto& it = source_list[src_idx];
+			uint32_t ent = it.entity_index;
+			if (ent < render_scene.size()) {
+				uint32_t mid = render_scene.mesh_indices[ent];
+				if (mid < meshes.size()) {
+					const auto& m = meshes[mid];
+					if (it.submesh_index != UINT32_MAX && it.submesh_index < m.submeshes.size()) tris_sum += m.submeshes[it.submesh_index].index_count / 3;
+					else tris_sum += m.index_count / 3;
+				}
+			}
+		}
+
+		// Update runtime stats
+		rhi->get_render_stats().occluder_count = static_cast<uint32_t>(out_occluders.size());
+		rhi->get_render_stats().occluder_triangles = tris_sum;
 	}
 }

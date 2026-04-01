@@ -75,6 +75,9 @@ namespace bud::graphics {
 
 		void update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb);
 
+		// CPU heuristic occluder selection (prototype)
+		void select_occluders_cpu(const RenderScene& render_scene, const SceneView& view, const std::vector<SortItem>& source_list, size_t source_count, std::vector<SortItem>& out_occluders, size_t out_count);
+
 		RHI* rhi;
 		RenderGraph render_graph;
 		RenderConfig render_config;
@@ -105,6 +108,10 @@ namespace bud::graphics {
 		mutable std::mutex mesh_bounds_mutex;
 
 		std::vector<SortItem> sort_list;
+
+		// Persistent storage for temporary per-frame occluder lists to ensure lifetime
+		// when render passes capture references to the list.
+		std::vector<SortItem> persistent_occluder_list;
 
 		std::atomic<uint32_t> next_bindless_slot{ 1 };
 		std::atomic<uint32_t> next_mesh_id{ 0 };

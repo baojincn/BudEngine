@@ -16,8 +16,14 @@ void InputManager::update() {
 
     auto& low = Input::get();
 
-    // Sample all known Key enum values (assumes contiguous enum starting at 0)
-    const int max_key = static_cast<int>(Key::LCtrl);
+    // Sample keys that are either in bindings or part of the known base set.
+    // Compute highest key value to iterate a contiguous range (enum is contiguous starting at 0).
+    int max_key = static_cast<int>(Key::LCtrl);
+    for (const auto& entry : bindings_) {
+        for (auto k : entry.second.keys) {
+            max_key = std::max(max_key, static_cast<int>(k));
+        }
+    }
     for (int i = 0; i <= max_key; ++i) {
         Key k = static_cast<Key>(i);
         bool down = low.is_key_down(k);
