@@ -2,6 +2,7 @@
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <cmath>
+#include <cfloat>
 #include <string_view>
 #include <cstring>
 #include <string>
@@ -25,10 +26,14 @@ namespace bud::ui {
 
 		if (show_stats) {
 			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
-			ImGui::SetNextWindowBgAlpha(0.35f);
+            ImGui::SetNextWindowBgAlpha(0.35f);
+            // Prevent the stats window from auto-shrinking too small when internal
+            // controls toggle glyphs. Reserve a sensible minimum width so text
+            // doesn't reflow on control state changes.
+            ImGui::SetNextWindowSizeConstraints(ImVec2(380.0f, 0.0f), ImVec2(FLT_MAX, FLT_MAX));
 			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 8.0f));
 
-			if (ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
+            if (ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
 				static float update_timer = 0.0f;
 				static float display_fps = 0.0f;
 				static float display_ms = 0.0f;
@@ -177,9 +182,12 @@ namespace bud::ui {
 
 			// ML Occlusion / Occluder info: placed after CPU frustum culling and before GPU culling
 			ImGui::Separator();
-			ImGui::TextColored(color_neutral, "ML Occlusion Training");
-			ImGui::TextColored(color_neutral, "Selected Occluders: %u", display_occluder_count);
-			ImGui::TextColored(color_neutral, "Occluder Tris: %u", display_occluder_tris);
+            ImGui::TextColored(color_neutral, "ML Occlusion Training");
+            ImGui::TextColored(color_neutral, "Selected Occluders: %u", display_occluder_count);
+            ImGui::TextColored(color_neutral, "Occluder Tris: %u", display_occluder_tris);
+            // Also show depth-prepass occluder usage (previously logged to console)
+            // Use stats.occluder_count as number of occluders and cpu_visible_instances as visible count
+            ImGui::TextColored(color_neutral, "Depth Only: %u occluders (visible %u)", stats.occluder_count, stats.cpu_visible_instances);
 
                 // Heuristic Occluder fraction control (if provided)
                 if (set_occluder && current_occluder >= 0.0f) {

@@ -1109,24 +1109,61 @@ namespace bud::graphics {
 				if (!pipeline)
 					return;
 
-				// Create or resize buffers
-				uint32_t needed_vb_size = draw_data.total_vtx_count() * sizeof(ImDrawVert);
-				uint32_t needed_ib_size = draw_data.total_idx_count() * sizeof(uint32_t);
+                // Create or resize buffers. Use allocator->alloc_staging (per-frame ring) instead
+                // of ad-hoc upload buffers. Use doubling growth strategy to avoid frequent reallocs.
+                uint32_t needed_vb_size = draw_data.total_vtx_count() * sizeof(ImDrawVert);
+                uint32_t needed_ib_size = draw_data.total_idx_count() * sizeof(uint32_t);
 
-				if (needed_vb_size > current_vertex_buffer_size) {
-					if (current_vertex_buffer_size > 0) rhi->destroy_buffer(vertex_buffer);
-					current_vertex_buffer_size = needed_vb_size + 4096;
-					vertex_buffer = rhi->create_upload_buffer(current_vertex_buffer_size); 
-				}
+                // Vertex buffer growth (double strategy)
+                if (needed_vb_size > current_vertex_buffer_size) {
+                    if (current_vertex_buffer_size > 0) {
+                        rhi->destroy_buffer(vertex_buffer);
+                    }
+                    uint32_t new_size = current_vertex_buffer_size ? std::max<uint32_t>(needed_vb_size, current_vertex_buffer_size * 2u) : std::max<uint32_t>(needed_vb_size, 4096u);
+                    current_vertex_buffer_size = new_size;
+                    auto* alloc = rhi->get_allocator();
+                    if (!alloc) {
+                        bud::eprint("[UIPass] No allocator available for staging vertex buffer");
+                        return;
+                    }
+                    vertex_buffer = alloc->alloc_staging(current_vertex_buffer_size);
+                    if (!vertex_buffer.is_valid() || !vertex_buffer.mapped_ptr) {
+                        bud::eprint("[UIPass] alloc_staging failed for vertex buffer size={}", current_vertex_buffer_size);
+                        return;
+                    }
+                }
 
-				if (needed_ib_size > current_index_buffer_size) {
-					if (current_index_buffer_size > 0) rhi->destroy_buffer(index_buffer);
-					current_index_buffer_size = needed_ib_size + 4096;
-					index_buffer = rhi->create_upload_buffer(current_index_buffer_size);
-				}
+                // Index buffer growth (double strategy)
+                if (needed_ib_size > current_index_buffer_size) {
+                    if (current_index_buffer_size > 0) {
+                        rhi->destroy_buffer(index_buffer);
+                    }
+                    uint32_t new_size = current_index_buffer_size ? std::max<uint32_t>(needed_ib_size, current_index_buffer_size * 2u) : std::max<uint32_t>(needed_ib_size, 4096u);
+                    current_index_buffer_size = new_size;
+                    auto* alloc = rhi->get_allocator();
+                    if (!alloc) {
+                        bud::eprint("[UIPass] No allocator available for staging index buffer");
+                        return;
+                    }
+                    index_buffer = alloc->alloc_staging(current_index_buffer_size);
+                    if (!index_buffer.is_valid() || !index_buffer.mapped_ptr) {
+                        bud::eprint("[UIPass] alloc_staging failed for index buffer size={}", current_index_buffer_size);
+                        return;
+                    }
+                }
 
-				auto* vtx_dst = (ImDrawVert*)vertex_buffer.mapped_ptr;
-				auto* idx_dst = (uint32_t*)index_buffer.mapped_ptr;
+                auto* vtx_dst = (ImDrawVert*)vertex_buffer.mapped_ptr;
+                auto* idx_dst = (uint32_t*)index_buffer.mapped_ptr;
+
+                // Defensive checks
+                if (!vtx_dst) {
+                    bud::eprint("[UIPass] vertex_buffer.mapped_ptr is null (size={})", current_vertex_buffer_size);
+                    return;
+                }
+                if (!idx_dst) {
+                    bud::eprint("[UIPass] index_buffer.mapped_ptr is null (size={})", current_index_buffer_size);
+                    return;
+                }
 
 				for (const auto& cmd_list : draw_data.lists) {
 					std::memcpy(vtx_dst, cmd_list.vertices.data(), cmd_list.vertices.size() * sizeof(ImDrawVert));

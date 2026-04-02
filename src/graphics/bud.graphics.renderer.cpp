@@ -907,8 +907,20 @@ namespace bud::graphics {
                 // Build occluder subset using CPU heuristic if enabled; otherwise use full list
                 size_t occluder_count = 0;
                 if (render_config.heuristic_occluder_enable) {
-                    occluder_count = static_cast<size_t>(std::max<uint32_t>(render_config.heuristic_occluder_min_count, static_cast<uint32_t>(std::floor((float)visible_count * render_config.heuristic_occluder_fraction))));
-                    occluder_count = std::min(occluder_count, static_cast<size_t>(render_config.heuristic_occluder_max_count));
+                    // Compute occluder count from fraction. Ensure 0% still draws at least one occluder,
+                    // and 100% draws all visible objects.
+                    float frac = render_config.heuristic_occluder_fraction;
+                    size_t computed = static_cast<size_t>(std::floor((float)visible_count * frac + 1e-6f));
+                    if (computed == 0) {
+                        // Interpret 0% as "very small" but still draw at least one occluder so Hi-Z has depth data
+                        computed = 1;
+                    }
+
+                    size_t minc = static_cast<size_t>(render_config.heuristic_occluder_min_count);
+                    size_t maxc = static_cast<size_t>(render_config.heuristic_occluder_max_count);
+
+                    // Clamp into configured bounds then to visible_count
+                    occluder_count = std::clamp(computed, minc, maxc);
                     occluder_count = std::min(occluder_count, visible_count);
                 } else {
                     occluder_count = visible_count; // use full list when heuristic disabled
@@ -926,7 +938,25 @@ namespace bud::graphics {
                 }
                 occluder_count = persistent_occluder_list.size();
 
-                bud::print("[Renderer] Depth prepass using {} occluders (visible {}).", occluder_count, visible_count);
+                // Ensure RenderStats reflect the actual occluder count and triangle sum
+                {
+                    uint32_t tris_sum = 0;
+                    for (const auto& it : persistent_occluder_list) {
+                        uint32_t ent = it.entity_index;
+                        if (ent >= render_scene.size()) continue;
+                        uint32_t mid = render_scene.mesh_indices[ent];
+                        if (mid >= meshes.size()) continue;
+                        const auto& m = meshes[mid];
+                        if (it.submesh_index != UINT32_MAX && it.submesh_index < m.submeshes.size())
+                            tris_sum += m.submeshes[it.submesh_index].index_count / 3;
+                        else
+                            tris_sum += m.index_count / 3;
+                    }
+                    rhi->get_render_stats().occluder_count = static_cast<uint32_t>(occluder_count);
+                    rhi->get_render_stats().occluder_triangles = tris_sum;
+                }
+
+                //bud::print("[Renderer] Depth prepass using {} occluders (visible {}).", occluder_count, visible_count);
 
                 auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, persistent_occluder_list, occluder_count, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
 				

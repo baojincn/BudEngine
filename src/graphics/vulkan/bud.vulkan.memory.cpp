@@ -439,23 +439,22 @@ namespace bud::graphics::vulkan {
 
         if (success && current_page) {
             // Sub-allocation from a per-frame staging page
-        auto sp = std::make_shared<VulkanBuffer>();
-        auto* vk_buf = sp.get();
-        vk_buf->buffer = current_page->buffer;
-        vk_buf->allocation = current_page->allocation;
-        vk_buf->owns_allocation = false; // It's a sub-allocation, so it shouldn't destroy the parent buffer
-        vk_buf->allocator = vma_allocator;
-            // Provide a small owning shared_ptr for the VulkanBuffer object itself so the
-            // temporary VulkanBuffer struct is freed when the deferred handle is destroyed.
-            // Note: this shared_ptr DOES NOT own the underlying VMA allocation (owns_allocation=false),
-            // it only manages the lifetime of the VulkanBuffer helper object to avoid leaks.
+            // Create a small wrapper object owned via shared_ptr so the wrapper is
+            // destroyed automatically when the handle owner is released. The wrapper
+            // does NOT own the underlying VMA allocation (owns_allocation = false).
+            auto* vk_buf = new VulkanBuffer();
+            auto sp = std::shared_ptr<VulkanBuffer>(vk_buf);
+            vk_buf->buffer = current_page->buffer;
+            vk_buf->allocation = current_page->allocation;
+            vk_buf->owns_allocation = false; // It's a sub-allocation, so it shouldn't destroy the parent buffer
+            vk_buf->allocator = vma_allocator;
+            vk_buf->owning_allocator = nullptr;
             block.internal_state = vk_buf;
             // transfer shared ownership of wrapper object to handle.owner
             block.owner = std::static_pointer_cast<void>(sp);
             block.offset = offset;
             block.size = size;
             block.mapped_ptr = static_cast<uint8_t*>(current_page->mapped_ptr) + offset;
-            // bud::print("[VulkanMemoryAllocator][alloc_staging] Suballoc VkBuffer={} size={} usage=STAGING_PAGE", (void*)vk_buf->buffer, size); // [LOG REDUCED]
             return block;
         }
 
@@ -471,13 +470,13 @@ namespace bud::graphics::vulkan {
         alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
         alloc_info.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
 
-        auto sp = std::make_shared<VulkanBuffer>();
-        auto* vk_buf = sp.get();
+        // Allocate a dedicated mapped buffer for this staging request. Create a
+        // wrapper and use a plain shared_ptr (destructor will perform cleanup).
+        auto* vk_buf = new VulkanBuffer();
         VmaAllocationInfo alloc_result_info;
         VkResult r = vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info);
         if (r != VK_SUCCESS) {
             delete vk_buf;
-            // As a last resort, return empty handle to let caller handle gracefully
             std::string err = std::format("alloc_staging fallback vmaCreateBuffer failed: {}", (int)r);
             bud::eprint("{}", err);
 #if defined(_DEBUG)
@@ -497,6 +496,7 @@ namespace bud::graphics::vulkan {
 #ifdef BUD_VMA_TRACKING
         register_allocation_buffer(vk_buf);
 #endif
+        auto sp = std::shared_ptr<VulkanBuffer>(vk_buf);
         // transfer shared ownership into handle so destructor runs automatically
         block.owner = std::static_pointer_cast<void>(sp);
         block.offset = 0;
@@ -560,15 +560,12 @@ namespace bud::graphics::vulkan {
 
         bud::graphics::BufferHandle handle;
         handle.internal_state = vk_buf;
+        // Register for diagnostic tracking and create shared ownership; destructor
+        // of VulkanBuffer will perform unregister and VMA destroy as needed.
+        vk_buf->owning_allocator = this;
         register_allocation_buffer(vk_buf);
-        handle.owner = std::shared_ptr<void>(vk_buf, [this, alloc = vma_allocator](void* p) {
-            auto* b = static_cast<VulkanBuffer*>(p);
-                this->unregister_allocation_buffer(b);
-            if (b->owns_allocation && alloc && b->buffer != VK_NULL_HANDLE && b->allocation != VK_NULL_HANDLE) {
-                vmaDestroyBuffer(alloc, b->buffer, b->allocation);
-            }
-            delete b;
-        });
+        auto sp = std::shared_ptr<VulkanBuffer>(vk_buf);
+        handle.owner = std::static_pointer_cast<void>(sp);
         handle.size = size;
         handle.mapped_ptr = vk_buf->mapped_ptr;
         return handle;
@@ -608,15 +605,10 @@ namespace bud::graphics::vulkan {
 
         bud::graphics::BufferHandle handle;
         handle.internal_state = vk_buf;
+        vk_buf->owning_allocator = this;
         register_allocation_buffer(vk_buf);
-        handle.owner = std::shared_ptr<void>(vk_buf, [this, alloc = vma_allocator](void* p) {
-            auto* b = static_cast<VulkanBuffer*>(p);
-                this->unregister_allocation_buffer(b);
-            if (b->owns_allocation && alloc && b->buffer != VK_NULL_HANDLE && b->allocation != VK_NULL_HANDLE) {
-                vmaDestroyBuffer(alloc, b->buffer, b->allocation);
-            }
-            delete b;
-        });
+        auto sp = std::shared_ptr<VulkanBuffer>(vk_buf);
+        handle.owner = std::static_pointer_cast<void>(sp);
         handle.size = size;
         handle.mapped_ptr = vk_buf->mapped_ptr;
         return handle;
@@ -632,8 +624,7 @@ namespace bud::graphics::vulkan {
         alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
         alloc_info.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
 
-        auto sp = std::make_shared<VulkanBuffer>();
-        auto* vk_buf = sp.get();
+        auto* vk_buf = new VulkanBuffer();
         VmaAllocationInfo alloc_result_info;
         if (vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info) != VK_SUCCESS) {
             delete vk_buf;
@@ -656,15 +647,10 @@ namespace bud::graphics::vulkan {
 
         bud::graphics::BufferHandle handle;
         handle.internal_state = vk_buf;
+        vk_buf->owning_allocator = this;
         register_allocation_buffer(vk_buf);
-        handle.owner = std::shared_ptr<void>(vk_buf, [this, alloc = vma_allocator](void* p) {
-            auto* b = static_cast<VulkanBuffer*>(p);
-                this->unregister_allocation_buffer(b);
-            if (b->owns_allocation && alloc && b->buffer != VK_NULL_HANDLE && b->allocation != VK_NULL_HANDLE) {
-                vmaDestroyBuffer(alloc, b->buffer, b->allocation);
-            }
-            delete b;
-        });
+        auto sp = std::shared_ptr<VulkanBuffer>(vk_buf);
+        handle.owner = std::static_pointer_cast<void>(sp);
         handle.size = size;
         handle.mapped_ptr = vk_buf->mapped_ptr;
         return handle;
