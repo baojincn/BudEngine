@@ -54,9 +54,9 @@ namespace bud::graphics::vulkan {
 		~VulkanBuffer();
 	};
 
-	class VulkanMemoryAllocator : public bud::graphics::Allocator {
-	public:
-		VulkanMemoryAllocator(VkInstance instance, VkDevice device, VkPhysicalDevice phy_device, uint32_t frames_in_flight);
+    class VulkanMemoryAllocator : public bud::graphics::Allocator {
+    public:
+        VulkanMemoryAllocator(VkInstance instance, VkDevice device, VkPhysicalDevice phy_device, uint32_t frames_in_flight, uint32_t api_version = VK_API_VERSION_1_1);
 
 		void init() override;
 		void cleanup() override;
@@ -105,6 +105,7 @@ namespace bud::graphics::vulkan {
 		VkInstance instance;
 		VkDevice device;
 		VkPhysicalDevice phy_device;
+        uint32_t vulkan_api_version = VK_API_VERSION_1_1;
 		VmaAllocator vma_allocator = VK_NULL_HANDLE;
 		uint32_t frames_in_flight;
 		uint32_t current_frame_index = 0;

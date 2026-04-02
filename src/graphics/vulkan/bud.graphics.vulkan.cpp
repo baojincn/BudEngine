@@ -132,8 +132,8 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 
 	// 初始化基础设施 (Subsystems)
 	// 接管内存、资源池、管线缓存、描述符分配
-	memory_allocator = std::make_unique<VulkanMemoryAllocator>(instance, device, physical_device, max_frames_in_flight);
-	memory_allocator->init();
+    memory_allocator = std::make_unique<VulkanMemoryAllocator>(instance, device, physical_device, max_frames_in_flight, device_api_version);
+    memory_allocator->init();
 
 	resource_pool = std::make_unique<VulkanResourcePool>(device, memory_allocator.get());
 
@@ -1477,9 +1477,19 @@ void VulkanRHI::load_model_async(const std::string& filepath) {}
 
 void VulkanRHI::create_instance(VkInstance& vk_instance, bool enable_validation) {
 	enable_validation_layers = enable_validation;
-	VkApplicationInfo app_info{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
-	app_info.pApplicationName = "Bud Engine";
-	app_info.apiVersion = VK_API_VERSION_1_3;
+    VkApplicationInfo app_info{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
+    app_info.pApplicationName = "Bud Engine";
+
+    // Query loader/instance supported version and pick highest supported up to 1.4
+    uint32_t loader_instance_version = VK_API_VERSION_1_1;
+    if (vkEnumerateInstanceVersion(&loader_instance_version) != VK_SUCCESS) {
+        // If not supported, assume 1.1
+        loader_instance_version = VK_API_VERSION_1_1;
+    }
+    uint32_t requested = VK_API_VERSION_1_4;
+    instance_api_version = std::min(loader_instance_version, requested);
+    app_info.apiVersion = instance_api_version;
+    bud::print("[Vulkan] Instance target API version set to {}.{}.{}", VK_VERSION_MAJOR(instance_api_version), VK_VERSION_MINOR(instance_api_version), VK_VERSION_PATCH(instance_api_version));
 
 	VkInstanceCreateInfo create_info{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
 	create_info.pApplicationInfo = &app_info;
@@ -1520,13 +1530,20 @@ void VulkanRHI::pick_physical_device() {
 		vkGetPhysicalDeviceProperties(dev, &props);
 		if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
 			physical_device = dev;
-			bud::print("[Vulkan] Selected Discrete GPU: {}", props.deviceName);
+            bud::print("[Vulkan] Selected Discrete GPU: {}", props.deviceName);
+            // Record device API version (capability). Clamp to 1.4 maximum target.
+            device_api_version = std::min(props.apiVersion, VK_API_VERSION_1_4);
+            bud::print("[Vulkan] Physical device API version: {}.{}.{}", VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion));
 			break;
 		}
 	}
 	if (physical_device == nullptr) {
 		physical_device = devices[0];
-		bud::print("[Vulkan] Warning: Using Integrated/Fallback GPU.");
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(physical_device, &props);
+        device_api_version = std::min(props.apiVersion, VK_API_VERSION_1_4);
+        bud::print("[Vulkan] Warning: Using Integrated/Fallback GPU.");
+        bud::print("[Vulkan] Physical device API version: {}.{}.{}", VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion));
 	}
 }
 
@@ -1543,28 +1560,53 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 		queue_infos.push_back(info);
 	}
 
-	VkPhysicalDeviceVulkan13Features features13{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
-	features13.pNext = nullptr;
-	features13.dynamicRendering = VK_TRUE;
-	features13.synchronization2 = VK_TRUE;
+    // Build feature chain depending on device API version support (fallback to 1.1..1.4)
+    VkPhysicalDeviceVulkan13Features features13{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+    features13.pNext = nullptr;
+    features13.dynamicRendering = VK_FALSE;
+    features13.synchronization2 = VK_FALSE;
 
-	VkPhysicalDeviceVulkan12Features features12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
-	features12.pNext = &features13;
-	features12.descriptorBindingPartiallyBound = VK_TRUE;
-	features12.runtimeDescriptorArray = VK_TRUE;
-	features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
-	features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
-	features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
-	features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    VkPhysicalDeviceVulkan12Features features12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    features12.pNext = nullptr;
+    features12.descriptorBindingPartiallyBound = VK_FALSE;
+    features12.runtimeDescriptorArray = VK_FALSE;
+    features12.descriptorBindingSampledImageUpdateAfterBind = VK_FALSE;
+    features12.descriptorBindingUniformBufferUpdateAfterBind = VK_FALSE;
+    features12.descriptorBindingStorageBufferUpdateAfterBind = VK_FALSE;
+    features12.shaderSampledImageArrayNonUniformIndexing = VK_FALSE;
 
-	VkPhysicalDeviceVulkan11Features features11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
-	features11.pNext = &features12;
+    VkPhysicalDeviceVulkan11Features features11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
+    features11.pNext = nullptr;
 
-	// 使用 VkPhysicalDeviceFeatures2 整合所有 Features
-	VkPhysicalDeviceFeatures2 device_features2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
-	device_features2.pNext = &features11;
-	device_features2.features.samplerAnisotropy = VK_TRUE;
-	device_features2.features.multiDrawIndirect = VK_TRUE;
+    // 使用 VkPhysicalDeviceFeatures2 整合所有 Features
+    VkPhysicalDeviceFeatures2 device_features2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    device_features2.pNext = nullptr;
+    device_features2.features.samplerAnisotropy = VK_TRUE;
+    device_features2.features.multiDrawIndirect = VK_TRUE;
+
+    // Chain feature structs according to supported device_api_version
+    if (device_api_version >= VK_API_VERSION_1_3) {
+        features13.dynamicRendering = VK_TRUE;
+        features13.synchronization2 = VK_TRUE;
+        features12.pNext = &features13;
+        features11.pNext = &features12;
+        device_features2.pNext = &features11;
+    } else if (device_api_version >= VK_API_VERSION_1_2) {
+        features12.descriptorBindingPartiallyBound = VK_TRUE;
+        features12.runtimeDescriptorArray = VK_TRUE;
+        features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+        features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+        features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+        features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        features11.pNext = &features12;
+        device_features2.pNext = &features11;
+    } else if (device_api_version >= VK_API_VERSION_1_1) {
+        // Only 1.1 features available, chain features11 only
+        device_features2.pNext = &features11;
+    } else {
+        // No extended feature structs
+        device_features2.pNext = nullptr;
+    }
 
 #ifdef BUD_ENABLE_AFTERMATH
 	// Enable NV_device_diagnostic_checkpoints extension to be able to

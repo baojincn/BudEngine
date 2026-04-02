@@ -201,6 +201,8 @@ namespace bud::graphics::vulkan {
 		VkInstance instance = nullptr;
 		VkPhysicalDevice physical_device = nullptr;
 		VkDevice device = nullptr;
+		uint32_t instance_api_version = VK_API_VERSION_1_1;
+		uint32_t device_api_version = VK_API_VERSION_1_1;
 		VkSurfaceKHR surface = nullptr;
 		VkQueue graphics_queue = nullptr;
 		VkQueue present_queue = nullptr;
