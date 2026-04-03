@@ -162,6 +162,11 @@ namespace bud::engine {
 	BudEngine::~BudEngine() {
 		camera_sequencer.flush();
 
+		if (task_scheduler) {
+			task_scheduler->wait_for_counter(render_task_counter);
+			task_scheduler->pump_main_thread_tasks();
+		}
+
 		asset_manager.reset();
 		renderer.reset();
 
@@ -428,8 +433,12 @@ namespace bud::engine {
                 renderer->set_config(cfg);
             };
             bool current_occluder_enable = renderer->get_config().heuristic_occluder_enable;
+			auto set_meshlet_rendering_enable = [this](bool v) {
+				renderer->request_meshlet_rendering_enabled(v);
+			};
+			bool current_meshlet_rendering_enable = renderer->is_meshlet_rendering_enabled();
 
-            bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable);
+			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_meshlet_rendering_enable, current_meshlet_rendering_enable);
 
             ImGui::Render();
 

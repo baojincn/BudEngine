@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <memory>
+#include <atomic>
 #include <vector>
 #include <mutex>
 #include <limits>
@@ -46,6 +47,8 @@ namespace bud::graphics {
 
 		void set_config(const RenderConfig& config);
 		const RenderConfig& get_config() const;
+		void request_meshlet_rendering_enabled(bool enabled);
+		bool is_meshlet_rendering_enabled() const;
 
 		const void* get_readback_pixels() const;
 
@@ -88,6 +91,10 @@ namespace bud::graphics {
         std::unique_ptr<DepthOnlyPass> depth_only_pass;
 		std::unique_ptr<HiZMipPass> hiz_mip_pass;
 		std::unique_ptr<HiZCullingPass> hiz_pass;
+		std::unique_ptr<MeshletFrustumCullingPass> meshlet_frustum_pass;
+		std::unique_ptr<HeuristicOccluderSelectionPass> heuristic_occluder_pass;
+		std::unique_ptr<MeshletHiZCullingPass> meshlet_hiz_pass;
+		std::unique_ptr<MeshletIndirectEmissionPass> meshlet_indirect_pass;
 		std::unique_ptr<HiZDebugPass> hiz_debug_pass;
 		std::unique_ptr<MainPass> main_pass;
 		std::unique_ptr<ClusterVisualizationPass> cluster_viz_pass;
@@ -95,9 +102,17 @@ namespace bud::graphics {
 
 		// GPU-Driven specific (Per-frame)
 		uint32_t current_indirect_capacity = 0;
+		uint32_t current_meshlet_visibility_capacity = 0;
 		std::vector<bud::graphics::BufferHandle> indirect_instance_buffers;
 		std::vector<bud::graphics::BufferHandle> indirect_draw_buffers;
 		std::vector<bud::graphics::BufferHandle> stats_readback_buffers;
+		std::vector<bud::graphics::BufferHandle> meshlet_frustum_stats_buffers;
+		std::vector<bud::graphics::BufferHandle> meshlet_hiz_stats_buffers;
+		std::vector<bud::graphics::BufferHandle> meshlet_visibility_buffers;
+		std::vector<bud::graphics::BufferHandle> meshlet_hiz_visibility_buffers;
+		std::atomic<bool> meshlet_rendering_enabled{ true };
+		std::atomic<bool> meshlet_rendering_toggle_pending{ false };
+		std::atomic<bool> meshlet_rendering_toggle_value{ true };
 
 		GPUStats last_gpu_stats{};
 

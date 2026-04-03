@@ -131,6 +131,8 @@ namespace bud::graphics {
 			
 			// Who writes what?
 			for (auto& access : pass.writes) {
+				if (!access.handle.is_valid())
+					continue;
 				if (resource_writers.contains(access.handle.id)) {
 					add_dependency(resource_writers[access.handle.id], i);
 				}
@@ -145,6 +147,8 @@ namespace bud::graphics {
 
 			// Who reads what?
 			for (auto& access : pass.reads) {
+				if (!access.handle.is_valid())
+					continue;
 				if (resource_writers.contains(access.handle.id)) {
 					int producer = resource_writers[access.handle.id];
 					add_dependency(producer, i);
@@ -159,15 +163,15 @@ namespace bud::graphics {
 		// (Skipped for conciseness)
 
 		// 3. Topological Sort (Kahn's Algorithm)
-		std::vector<int> queue;
+		std::deque<int> queue;
 		for (int i = 0; i < passes.size(); ++i) {
 			if (in_degree[i] == 0) queue.push_back(i);
 		}
 
 		sorted_passes.clear();
 		while (!queue.empty()) {
-			int u = queue.back();
-			queue.pop_back();
+			int u = queue.front();
+			queue.pop_front();
 			sorted_passes.push_back(u);
 
 			for (int v : adjacency_list[u]) {
@@ -201,6 +205,8 @@ namespace bud::graphics {
 
 			// Process Reads (Transition to ReadState)
 			for (auto& access : pass.reads) {
+				if (!access.handle.is_valid())
+					continue;
 				uint32_t rid = access.handle.id;
 				ResourceState old_state = resource_states[rid].current_state;
 				ResourceState new_state = access.state;
@@ -215,6 +221,8 @@ namespace bud::graphics {
 
 			// Process Writes
 			for (auto& access : pass.writes) {
+				if (!access.handle.is_valid())
+					continue;
 				uint32_t rid = access.handle.id;
 				ResourceState old_state = resource_states[rid].current_state;
 				ResourceState new_state = access.state;
@@ -264,6 +272,8 @@ namespace bud::graphics {
 
 			// Inject Barriers (Phase 3)
 			for (auto& barrier : pass.before_barriers) {
+				if (!barrier.handle.is_valid())
+					continue;
 				auto tex = get_texture(barrier.handle);
 				auto buf = get_buffer(barrier.handle);
 				auto& debug_name = resources[barrier.handle.id].name;

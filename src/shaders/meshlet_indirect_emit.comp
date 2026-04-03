@@ -1,0 +1,112 @@
+#version 460
+
+layout(local_size_x = 256) in;
+
+struct DrawData {
+    uint indexCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint materialId;
+    vec3 min;
+    uint meshId;
+    vec3 max;
+    uint padding1;
+    uint meshletCount;
+    uint padding2[3];
+};
+
+struct MeshletDescriptor {
+    uint vertex_offset;
+    uint vertex_count;
+    uint triangle_offset;
+    uint triangle_count;
+};
+
+struct IndirectCommand {
+    uint index_count;
+    uint instance_count;
+    uint first_index;
+    int vertex_offset;
+    uint first_instance;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer InstanceDataBuffer {
+    DrawData data[];
+} instance_data;
+
+layout(std430, set = 0, binding = 1) readonly buffer MeshletVisibilityBuffer {
+    uint data[];
+} meshlet_visibility;
+
+layout(std430, set = 0, binding = 2) buffer IndirectDrawBuffer {
+    IndirectCommand data[];
+} indirect_draw;
+
+layout(std430, set = 0, binding = 3) buffer StatsBuffer {
+    uint totalInstances;
+    uint visibleInstances;
+    uint totalTriangles;
+    uint visibleTriangles;
+    uint totalMeshlets;
+    uint visibleMeshlets;
+} stats;
+
+layout(set = 0, binding = 4) uniform UniformBufferObject {
+    mat4 view;
+    mat4 proj;
+    mat4 cascade_view_proj[4];
+    vec4 cascade_split_depths;
+    vec3 cam_pos;
+    vec3 light_dir;
+    vec3 light_color;
+    float light_intensity;
+    float ambient_strength;
+    uint cascade_count;
+    uint reversed_z;
+} ubo;
+
+layout(push_constant) uniform PushConstants {
+    uint drawIndex;
+    uint meshletStart;
+    uint meshletCount;
+    uint meshId;
+} pc;
+
+void main()
+{
+    if (gl_WorkGroupID.x != 0u || gl_LocalInvocationIndex != 0u) {
+        return;
+    }
+
+    DrawData draw = instance_data.data[pc.drawIndex];
+
+    atomicAdd(stats.totalInstances, 1u);
+    atomicAdd(stats.totalTriangles, draw.indexCount / 3u);
+    atomicAdd(stats.totalMeshlets, pc.meshletCount);
+
+    uint visible_meshlets = 0u;
+    uint visible_triangles = 0u;
+
+    for (uint i = 0u; i < pc.meshletCount; ++i) {
+        uint meshlet_index = pc.meshletStart + i;
+        if (meshlet_visibility.data[meshlet_index] != 0u) {
+            ++visible_meshlets;
+            visible_triangles += 1u;
+        }
+    }
+
+    IndirectCommand cmd;
+    cmd.index_count = draw.indexCount;
+    cmd.instance_count = visible_meshlets > 0u ? 1u : 0u;
+    cmd.first_index = draw.firstIndex;
+    cmd.vertex_offset = draw.vertexOffset;
+    cmd.first_instance = pc.drawIndex;
+
+    indirect_draw.data[pc.drawIndex] = cmd;
+
+    if (visible_meshlets > 0u) {
+        atomicAdd(stats.visibleInstances, 1u);
+        atomicAdd(stats.visibleTriangles, draw.indexCount / 3u);
+        atomicAdd(stats.visibleMeshlets, visible_meshlets);
+    }
+}

@@ -1,0 +1,150 @@
+#version 460
+
+layout(local_size_x = 256) in;
+
+struct draw_data {
+	uint index_count;
+	uint first_index;
+	int vertex_offset;
+	uint material_id;
+	vec3 min;
+	uint mesh_id;
+	vec3 max;
+	uint padding_0;
+	uint meshlet_count;
+	uint padding_1[3];
+};
+
+struct meshlet_descriptor {
+	uint vertex_offset;
+	uint vertex_count;
+	uint triangle_offset;
+	uint triangle_count;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer InstanceDataBuffer {
+	draw_data data[];
+} instance_data;
+
+layout(std430, set = 0, binding = 1) readonly buffer MeshletDataBuffer {
+	meshlet_descriptor data[];
+} meshlet_data;
+
+layout(std430, set = 0, binding = 2) readonly buffer VertexIndexBuffer {
+	uint data[];
+} vertex_index_data;
+
+layout(std430, set = 0, binding = 3) readonly buffer MeshletIndexBuffer {
+	uint data[];
+} meshlet_index_data;
+
+layout(std430, set = 0, binding = 4) readonly buffer MeshletCullDataBuffer {
+	uint data[];
+} meshlet_cull_data;
+
+layout(std430, set = 0, binding = 5) buffer MeshletVisibilityBuffer {
+	uint data[];
+} meshlet_visibility;
+
+layout(std430, set = 0, binding = 6) buffer StatsBuffer {
+	uint total_instances;
+	uint visible_instances;
+	uint total_triangles;
+	uint visible_triangles;
+	uint total_meshlets;
+	uint visible_meshlets;
+} stats;
+
+layout(set = 0, binding = 7) uniform uniform_buffer_object {
+	mat4 view;
+	mat4 proj;
+	mat4 cascade_view_proj[4];
+	vec4 cascade_split_depths;
+	vec3 cam_pos;
+	vec3 light_dir;
+	vec3 light_color;
+	float light_intensity;
+	float ambient_strength;
+	uint cascade_count;
+	uint reversed_z;
+} ubo;
+
+layout(push_constant) uniform PushConstants {
+	uint draw_index;
+	uint meshlet_start;
+	uint meshlet_count;
+	uint mesh_id;
+} pc;
+
+bool aabb_outside_plane(vec4 plane, vec3 bmin, vec3 bmax)
+{
+	vec3 positive_vertex = vec3(
+		plane.x >= 0.0 ? bmax.x : bmin.x,
+		plane.y >= 0.0 ? bmax.y : bmin.y,
+		plane.z >= 0.0 ? bmax.z : bmin.z);
+	return dot(plane.xyz, positive_vertex) + plane.w < 0.0;
+}
+
+bool aabb_visible(vec3 bmin, vec3 bmax)
+{
+	mat4 clip_matrix = transpose(ubo.proj * ubo.view);
+
+	vec4 planes[6];
+	planes[0] = clip_matrix[3] + clip_matrix[0];
+	planes[1] = clip_matrix[3] - clip_matrix[0];
+	planes[2] = clip_matrix[3] + clip_matrix[1];
+	planes[3] = clip_matrix[3] - clip_matrix[1];
+	planes[4] = clip_matrix[3] + clip_matrix[2];
+	planes[5] = clip_matrix[3] - clip_matrix[2];
+
+	for (int i = 0; i < 6; ++i) {
+		float plane_length = length(planes[i].xyz);
+		if (plane_length > 0.0) {
+			planes[i] /= plane_length;
+		}
+
+		if (aabb_outside_plane(planes[i], bmin, bmax)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void main()
+{
+	if (gl_WorkGroupID.x == 0u && gl_LocalInvocationIndex == 0u) {
+		atomicAdd(stats.total_instances, 1u);
+		atomicAdd(stats.total_meshlets, pc.meshlet_count);
+
+		uint total_triangles = 0u;
+		for (uint i = 0u; i < pc.meshlet_count; ++i) {
+			total_triangles += meshlet_data.data[pc.meshlet_start + i].triangle_count;
+		}
+		atomicAdd(stats.total_triangles, total_triangles);
+	}
+
+	if (pc.meshlet_count == 0u) {
+		return;
+	}
+
+	draw_data draw = instance_data.data[pc.draw_index];
+	bool visible = aabb_visible(draw.min, draw.max);
+
+	uint local_index = gl_GlobalInvocationID.x;
+	if (local_index >= pc.meshlet_count) {
+		return;
+	}
+
+	uint visibility_value = visible ? 1u : 0u;
+	meshlet_visibility.data[pc.meshlet_start + local_index] = visibility_value;
+
+	if (gl_WorkGroupID.x == 0u && gl_LocalInvocationIndex == 0u) {
+		meshlet_visibility.data[pc.draw_index] = visibility_value;
+		if (visible) {
+			atomicAdd(stats.visible_instances, 1u);
+			atomicAdd(stats.visible_triangles, draw.index_count / 3u);
+			atomicAdd(stats.visible_meshlets, pc.meshlet_count);
+		}
+	}
+}

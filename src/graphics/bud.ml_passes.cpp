@@ -16,6 +16,7 @@ namespace bud::graphics {
         
         load_shaders_async(asset_manager, { "src/shaders/ml_identity.comp.spv" }, [this, rhi](const auto& shaders) {
             ComputePipelineDesc desc{};
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::MlIdentity;
             desc.cs.code = shaders[0];
             pipeline = rhi->create_compute_pipeline(desc);
             if (pipeline) {

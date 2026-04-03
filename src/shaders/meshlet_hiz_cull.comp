@@ -1,0 +1,231 @@
+#version 460
+
+layout(local_size_x = 256) in;
+
+struct DrawData {
+    uint indexCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint materialId;
+    vec3 min;
+    uint meshId;
+    vec3 max;
+    uint padding1;
+    uint meshletCount;
+    uint padding2[3];
+};
+
+struct MeshletDescriptor {
+    uint vertex_offset;
+    uint vertex_count;
+    uint triangle_offset;
+    uint triangle_count;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer InstanceDataBuffer {
+    DrawData data[];
+} instance_data;
+
+layout(std430, set = 0, binding = 1) readonly buffer MeshletDataBuffer {
+    MeshletDescriptor data[];
+} meshlet_data;
+
+layout(std430, set = 0, binding = 2) readonly buffer VertexIndexBuffer {
+    uint data[];
+} vertex_index_data;
+
+layout(std430, set = 0, binding = 3) readonly buffer MeshletIndexBuffer {
+    uint data[];
+} meshlet_index_data;
+
+layout(std430, set = 0, binding = 4) readonly buffer MeshletCullDataBuffer {
+    uint data[];
+} meshlet_cull_data;
+
+layout(binding = 5) uniform sampler2D hizPyramid;
+
+layout(std430, set = 0, binding = 6) readonly buffer MeshletVisibilityInBuffer {
+    uint data[];
+} meshlet_visibility_in;
+
+layout(std430, set = 0, binding = 7) buffer MeshletVisibilityOutBuffer {
+    uint data[];
+} meshlet_visibility_out;
+
+layout(std430, set = 0, binding = 8) buffer StatsBuffer {
+    uint totalInstances;
+    uint visibleInstances;
+    uint totalTriangles;
+    uint visibleTriangles;
+    uint totalMeshlets;
+    uint visibleMeshlets;
+} stats;
+
+layout(set = 0, binding = 9) uniform UniformBufferObject {
+    mat4 view;
+    mat4 proj;
+    mat4 cascade_view_proj[4];
+    vec4 cascade_split_depths;
+    vec3 cam_pos;
+    vec3 light_dir;
+    vec3 light_color;
+    float light_intensity;
+    float ambient_strength;
+    uint cascade_count;
+    uint reversed_z;
+} ubo;
+
+layout(push_constant) uniform PushConstants {
+    uint drawIndex;
+    uint meshletStart;
+    uint meshletCount;
+    uint meshId;
+} pc;
+
+bool aabb_visible(vec3 bmin, vec3 bmax)
+{
+    mat4 clip_matrix = transpose(ubo.proj * ubo.view);
+
+    vec4 planes[6];
+    planes[0] = clip_matrix[3] + clip_matrix[0];
+    planes[1] = clip_matrix[3] - clip_matrix[0];
+    planes[2] = clip_matrix[3] + clip_matrix[1];
+    planes[3] = clip_matrix[3] - clip_matrix[1];
+    planes[4] = clip_matrix[3] + clip_matrix[2];
+    planes[5] = clip_matrix[3] - clip_matrix[2];
+
+    for (int i = 0; i < 6; ++i) {
+        float plane_length = length(planes[i].xyz);
+        if (plane_length > 0.0) {
+            planes[i] /= plane_length;
+        }
+
+        vec3 positive_vertex = vec3(
+            planes[i].x >= 0.0 ? bmax.x : bmin.x,
+            planes[i].y >= 0.0 ? bmax.y : bmin.y,
+            planes[i].z >= 0.0 ? bmax.z : bmin.z);
+
+        if (dot(planes[i].xyz, positive_vertex) + planes[i].w < 0.0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+float sample_hiz_depth(vec2 uv, float mip_level)
+{
+    ivec2 mip_size = textureSize(hizPyramid, int(mip_level));
+    ivec2 pmin = ivec2(floor(uv * vec2(mip_size)));
+    ivec2 pmax = ivec2(ceil(uv * vec2(mip_size)));
+
+    float d0 = texelFetch(hizPyramid, clamp(pmin, ivec2(0), mip_size - ivec2(1)), int(mip_level)).r;
+    float d1 = texelFetch(hizPyramid, ivec2(clamp(pmax.x, 0, mip_size.x - 1), clamp(pmin.y, 0, mip_size.y - 1)), int(mip_level)).r;
+    float d2 = texelFetch(hizPyramid, ivec2(clamp(pmin.x, 0, mip_size.x - 1), clamp(pmax.y, 0, mip_size.y - 1)), int(mip_level)).r;
+    float d3 = texelFetch(hizPyramid, clamp(pmax, ivec2(0), mip_size - ivec2(1)), int(mip_level)).r;
+
+    if (ubo.reversed_z == 1u) {
+        return min(min(d0, d1), min(d2, d3));
+    }
+
+    return max(max(d0, d1), max(d2, d3));
+}
+
+bool aabb_occluded(vec3 bmin, vec3 bmax)
+{
+    vec4 corners[8] = vec4[](
+        vec4(bmin.x, bmin.y, bmin.z, 1.0),
+        vec4(bmax.x, bmin.y, bmin.z, 1.0),
+        vec4(bmin.x, bmax.y, bmin.z, 1.0),
+        vec4(bmax.x, bmax.y, bmin.z, 1.0),
+        vec4(bmin.x, bmin.y, bmax.z, 1.0),
+        vec4(bmax.x, bmin.y, bmax.z, 1.0),
+        vec4(bmin.x, bmax.y, bmax.z, 1.0),
+        vec4(bmax.x, bmax.y, bmax.z, 1.0));
+
+    mat4 vp = ubo.proj * ubo.view;
+
+    float min_x = 1e20;
+    float min_y = 1e20;
+    float max_x = -1e20;
+    float max_y = -1e20;
+    float min_z = 1e20;
+    float max_z = -1e20;
+
+    for (int i = 0; i < 8; ++i) {
+        vec4 clip = vp * corners[i];
+        if (clip.w <= 0.0) {
+            return false;
+        }
+
+        vec3 ndc = clip.xyz / clip.w;
+        min_x = min(min_x, ndc.x);
+        min_y = min(min_y, ndc.y);
+        max_x = max(max_x, ndc.x);
+        max_y = max(max_y, ndc.y);
+        min_z = min(min_z, ndc.z);
+        max_z = max(max_z, ndc.z);
+    }
+
+    vec2 uv_min = clamp(vec2(min_x, min_y) * 0.5 + 0.5, 0.0, 1.0);
+    vec2 uv_max = clamp(vec2(max_x, max_y) * 0.5 + 0.5, 0.0, 1.0);
+
+    vec2 size = (uv_max - uv_min) * vec2(textureSize(hizPyramid, 0));
+    float max_dim = max(size.x, size.y);
+    float mip_level = max(ceil(log2(max(max_dim, 1.0))), 0.0);
+
+    float depth0 = sample_hiz_depth(uv_min, mip_level);
+    float depth1 = sample_hiz_depth(vec2(uv_max.x, uv_min.y), mip_level);
+    float depth2 = sample_hiz_depth(vec2(uv_min.x, uv_max.y), mip_level);
+    float depth3 = sample_hiz_depth(uv_max, mip_level);
+
+    if (ubo.reversed_z == 1u) {
+        float depth = min(min(depth0, depth1), min(depth2, depth3));
+        return max_z >= depth;
+    }
+
+    float depth = max(max(depth0, depth1), max(depth2, depth3));
+    return min_z <= depth;
+}
+
+void main()
+{
+    DrawData draw = instance_data.data[pc.drawIndex];
+    bool visible = aabb_visible(draw.min, draw.max) && !aabb_occluded(draw.min, draw.max);
+
+    if (gl_WorkGroupID.x == 0u && gl_LocalInvocationIndex == 0u) {
+        atomicAdd(stats.totalInstances, 1u);
+        atomicAdd(stats.totalMeshlets, pc.meshletCount);
+
+        uint total_triangles = 0u;
+        uint visible_meshlets = 0u;
+        uint visible_triangles = 0u;
+
+        for (uint i = 0u; i < pc.meshletCount; ++i) {
+            uint meshlet_index = pc.meshletStart + i;
+            total_triangles += meshlet_data.data[meshlet_index].triangle_count;
+
+            if (visible && meshlet_visibility_in.data[meshlet_index] != 0u) {
+                ++visible_meshlets;
+                visible_triangles += meshlet_data.data[meshlet_index].triangle_count;
+            }
+        }
+
+        atomicAdd(stats.totalTriangles, total_triangles);
+
+        if (visible && visible_meshlets > 0u) {
+            atomicAdd(stats.visibleInstances, 1u);
+            atomicAdd(stats.visibleMeshlets, visible_meshlets);
+            atomicAdd(stats.visibleTriangles, visible_triangles);
+        }
+    }
+
+    uint local_index = gl_GlobalInvocationID.x;
+    if (local_index >= pc.meshletCount) {
+        return;
+    }
+
+    uint meshlet_index = pc.meshletStart + local_index;
+    uint value = visible && meshlet_visibility_in.data[meshlet_index] != 0u ? 1u : 0u;
+    meshlet_visibility_out.data[meshlet_index] = value;
+}

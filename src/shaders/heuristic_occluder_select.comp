@@ -1,0 +1,135 @@
+#version 460
+
+layout(local_size_x = 1) in;
+
+struct draw_data {
+    uint index_count;
+    uint first_index;
+    int vertex_offset;
+    uint material_id;
+    vec3 min;
+    uint mesh_id;
+    vec3 max;
+    uint padding_0;
+    uint meshlet_count;
+    uint padding_1[3];
+};
+
+struct indirect_command {
+    uint index_count;
+    uint instance_count;
+    uint first_index;
+    int vertex_offset;
+    uint first_instance;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer InstanceDataBuffer {
+    draw_data data[];
+} instance_data;
+
+layout(std430, set = 0, binding = 1) readonly buffer MeshletVisibilityBuffer {
+    uint data[];
+} meshlet_visibility;
+
+layout(std430, set = 0, binding = 2) buffer IndirectDrawBuffer {
+    indirect_command data[];
+} indirect_draw;
+
+layout(std430, set = 0, binding = 3) buffer StatsBuffer {
+    uint total_instances;
+    uint visible_instances;
+    uint total_triangles;
+    uint visible_triangles;
+    uint total_meshlets;
+    uint visible_meshlets;
+} stats;
+
+layout(set = 0, binding = 4) uniform uniform_buffer_object {
+    mat4 view;
+    mat4 proj;
+    mat4 cascade_view_proj[4];
+    vec4 cascade_split_depths;
+    vec3 cam_pos;
+    vec3 light_dir;
+    vec3 light_color;
+    float light_intensity;
+    float ambient_strength;
+    uint cascade_count;
+    uint reversed_z;
+} ubo;
+
+// Pass-specific occluder fraction (uploaded per-frame by HeuristicOccluderSelectionPass)
+layout(std430, set = 0, binding = 5) readonly buffer HeuristicConfig {
+    float fraction;
+} heuristic_config;
+
+bool aabb_visible(vec3 bmin, vec3 bmax)
+{
+    mat4 clip_matrix = transpose(ubo.proj * ubo.view);
+
+    vec4 planes[6];
+    planes[0] = clip_matrix[3] + clip_matrix[0];
+    planes[1] = clip_matrix[3] - clip_matrix[0];
+    planes[2] = clip_matrix[3] + clip_matrix[1];
+    planes[3] = clip_matrix[3] - clip_matrix[1];
+    planes[4] = clip_matrix[3] + clip_matrix[2];
+    planes[5] = clip_matrix[3] - clip_matrix[2];
+
+    for (int i = 0; i < 6; ++i) {
+        float plane_length = length(planes[i].xyz);
+        if (plane_length > 0.0) {
+            planes[i] /= plane_length;
+        }
+
+        vec3 positive_vertex = vec3(
+            planes[i].x >= 0.0 ? bmax.x : bmin.x,
+            planes[i].y >= 0.0 ? bmax.y : bmin.y,
+            planes[i].z >= 0.0 ? bmax.z : bmin.z);
+
+        if (dot(planes[i].xyz, positive_vertex) + planes[i].w < 0.0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+float score_draw(draw_data draw)
+{
+    vec3 extent = max(draw.max - draw.min, vec3(0.0));
+    float area = max(extent.x * extent.y + extent.y * extent.z + extent.z * extent.x, 1e-4);
+    float depth = max(distance(ubo.cam_pos, (draw.min + draw.max) * 0.5), 1e-3);
+    float triangle_bias = float(draw.index_count / 3u) * 0.0001;
+    return area / depth + triangle_bias + float(draw.meshlet_count) * 0.001;
+}
+
+void main()
+{
+    uint draw_index = gl_GlobalInvocationID.x;
+
+    draw_data draw = instance_data.data[draw_index];
+    uint meshlet_visible_hint = meshlet_visibility.data[draw_index];
+
+    atomicAdd(stats.total_instances, 1u);
+    atomicAdd(stats.total_triangles, draw.index_count / 3u);
+    atomicAdd(stats.total_meshlets, draw.meshlet_count);
+
+	bool visible = aabb_visible(draw.min, draw.max);
+	float heuristic_score = visible ? score_draw(draw) : 0.0;
+	bool selected = visible && (heuristic_score > 0.0 || meshlet_visible_hint != 0u);
+
+    indirect_command command;
+    command.index_count = draw.index_count;
+    command.instance_count = selected ? 1u : 0u;
+    command.first_index = draw.first_index;
+    command.vertex_offset = draw.vertex_offset;
+    command.first_instance = draw_index;
+
+    indirect_draw.data[draw_index] = command;
+
+    if (selected) {
+        atomicAdd(stats.visible_instances, 1u);
+        atomicAdd(stats.visible_triangles, draw.index_count / 3u);
+        atomicAdd(stats.visible_meshlets, draw.meshlet_count);
+    }
+}

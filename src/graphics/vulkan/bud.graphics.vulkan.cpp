@@ -1,4 +1,4 @@
-﻿#include <vector>
+#include <vector>
 #include <string>
 #include <iostream>
 #include <optional>
@@ -48,6 +48,7 @@ struct VulkanPipelineObject {
 	VkPipeline pipeline;
 	VkPipelineLayout layout;
 	VkPipelineBindPoint bind_point;
+	ComputePipelineDesc::LayoutKind compute_layout_kind = ComputePipelineDesc::LayoutKind::HiZCulling;
 };
 
 #ifdef BUD_ENABLE_AFTERMATH
@@ -159,15 +160,63 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 
 	global_set_layout = layout_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
 
-	// Compute Pipeline Layout (Unified for Cull & Mip)
-	DescriptorLayoutBuilder compute_builder;
-	compute_builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // Instance / Input
-	compute_builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // Indirect / Output Buffer
-	compute_builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // Stats
-	compute_builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT); // HiZ / Mip In
-	compute_builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // UBO
-	compute_builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT); // HiZ Out
-	compute_set_layout = compute_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	// Compute Pipeline Layouts
+	auto build_small_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+
+	auto build_heuristic_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+
+	auto build_frustum_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+
+	auto build_hiz_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+
+	compute_hiz_cull_set_layout = build_hiz_compute_layout();
+	compute_hiz_mip_set_layout = build_hiz_compute_layout();
+	compute_ml_identity_set_layout = build_small_compute_layout();
+	compute_heuristic_occluder_set_layout = build_heuristic_compute_layout();
+	compute_meshlet_indirect_set_layout = build_small_compute_layout();
+	compute_meshlet_frustum_set_layout = build_frustum_compute_layout();
+	compute_meshlet_hiz_set_layout = build_hiz_compute_layout();
 
 	// 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
@@ -417,8 +466,6 @@ void VulkanRHI::cleanup() {
 		vkDestroyDescriptorPool(device, global_descriptor_pool, nullptr);
 	if (global_set_layout)
 		vkDestroyDescriptorSetLayout(device, global_set_layout, nullptr);
-	if (compute_set_layout)
-		vkDestroyDescriptorSetLayout(device, compute_set_layout, nullptr);
 
 	if (pipeline_cache)
 		pipeline_cache->cleanup();
@@ -500,6 +547,20 @@ void VulkanRHI::cleanup() {
 		vkDestroyPipelineLayout(device, layout, nullptr);
 	}
 	created_layouts.clear();
+	if (compute_hiz_cull_set_layout) vkDestroyDescriptorSetLayout(device, compute_hiz_cull_set_layout, nullptr);
+	if (compute_hiz_mip_set_layout) vkDestroyDescriptorSetLayout(device, compute_hiz_mip_set_layout, nullptr);
+	if (compute_ml_identity_set_layout) vkDestroyDescriptorSetLayout(device, compute_ml_identity_set_layout, nullptr);
+	if (compute_heuristic_occluder_set_layout) vkDestroyDescriptorSetLayout(device, compute_heuristic_occluder_set_layout, nullptr);
+	if (compute_meshlet_frustum_set_layout) vkDestroyDescriptorSetLayout(device, compute_meshlet_frustum_set_layout, nullptr);
+	if (compute_meshlet_indirect_set_layout) vkDestroyDescriptorSetLayout(device, compute_meshlet_indirect_set_layout, nullptr);
+	if (compute_meshlet_hiz_set_layout) vkDestroyDescriptorSetLayout(device, compute_meshlet_hiz_set_layout, nullptr);
+	compute_hiz_cull_set_layout = VK_NULL_HANDLE;
+	compute_hiz_mip_set_layout = VK_NULL_HANDLE;
+	compute_ml_identity_set_layout = VK_NULL_HANDLE;
+	compute_heuristic_occluder_set_layout = VK_NULL_HANDLE;
+	compute_meshlet_frustum_set_layout = VK_NULL_HANDLE;
+	compute_meshlet_indirect_set_layout = VK_NULL_HANDLE;
+	compute_meshlet_hiz_set_layout = VK_NULL_HANDLE;
 
 	// Device & Instance
 	if (shadow_sampler)
@@ -811,6 +872,17 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 
 	created_layouts.push_back(pipelineLayout);
 
+	// Attach a human-readable debug name to the pipeline so tools like Nsight
+	// and RenderDoc can show something meaningful even when command-buffer
+	// labels are missing (e.g. GPU-driven paths). Use shader module pointers
+	// for a compact but stable identifier.
+    try {
+        std::string dbg = std::format("GraphicsPipeline_vs={}_fs={}", (void*)vertModule, (void*)fragModule);
+        set_object_debug_name(reinterpret_cast<uint64_t>(pipeline), ObjectType::Pipeline, dbg);
+    } catch (...) {
+        // best-effort; don't fail pipeline creation on debug naming issues
+    }
+
 	return pipeObj;
 }
 
@@ -831,10 +903,42 @@ void* VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& desc) {
 	push_constant.size = 256; 
 	push_constant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+	VkDescriptorSetLayout chosen_layout = VK_NULL_HANDLE;
+	switch (desc.layout_kind) {
+	case ComputePipelineDesc::LayoutKind::HiZCulling:
+		chosen_layout = compute_hiz_cull_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::HiZMip:
+		chosen_layout = compute_hiz_mip_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::MlIdentity:
+		chosen_layout = compute_ml_identity_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::HeuristicOccluder:
+		chosen_layout = compute_heuristic_occluder_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::MeshletFrustum:
+		chosen_layout = compute_meshlet_frustum_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::MeshletIndirect:
+		chosen_layout = compute_meshlet_indirect_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::MeshletHiZ:
+		chosen_layout = compute_meshlet_hiz_set_layout;
+		break;
+	default:
+		chosen_layout = compute_hiz_cull_set_layout;
+		break;
+	}
+
+	if (!chosen_layout) {
+		throw std::runtime_error("failed to select compute descriptor set layout!");
+	}
+
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 
-	std::vector<VkDescriptorSetLayout> setLayouts = { compute_set_layout };
+	std::vector<VkDescriptorSetLayout> setLayouts = { chosen_layout };
 	pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
 	pipelineLayoutInfo.pSetLayouts = setLayouts.data();
 	pipelineLayoutInfo.pushConstantRangeCount = 1;
@@ -856,7 +960,27 @@ void* VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& desc) {
     vkDestroyShaderModule(device, computeModule, nullptr);
 
 	VulkanPipelineObject* pipeObj = new VulkanPipelineObject{ pipeline, pipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE };
+	pipeObj->compute_layout_kind = desc.layout_kind;
 	created_layouts.push_back(pipelineLayout);
+
+	// Name compute pipeline for external debuggers (Nsight/RenderDoc) so that
+	// GPU-driven dispatches still show meaningful identifiers.
+	try {
+		auto layout_kind_to_string = [](ComputePipelineDesc::LayoutKind k) {
+			switch (k) {
+			case ComputePipelineDesc::LayoutKind::HiZCulling: return "HiZCulling";
+			case ComputePipelineDesc::LayoutKind::HiZMip: return "HiZMip";
+			case ComputePipelineDesc::LayoutKind::MlIdentity: return "MlIdentity";
+			case ComputePipelineDesc::LayoutKind::HeuristicOccluder: return "HeuristicOccluder";
+			case ComputePipelineDesc::LayoutKind::MeshletFrustum: return "MeshletFrustum";
+			case ComputePipelineDesc::LayoutKind::MeshletIndirect: return "MeshletIndirect";
+			case ComputePipelineDesc::LayoutKind::MeshletHiZ: return "MeshletHiZ";
+			default: return "Compute";
+			}
+		};
+		std::string dbg = std::format("ComputePipeline_{}", layout_kind_to_string(desc.layout_kind));
+		set_object_debug_name(reinterpret_cast<uint64_t>(pipeline), ObjectType::Pipeline, dbg);
+	} catch (...) {}
 
 	return pipeObj;
 }
@@ -864,6 +988,33 @@ void* VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& desc) {
 void VulkanRHI::cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group_y, uint32_t group_z) {
 	if (current_compute_pipeline) {
 		auto pipeObj = static_cast<VulkanPipelineObject*>(current_compute_pipeline);
+		auto descriptor_type_for_binding = [&](uint32_t binding) -> VkDescriptorType {
+			switch (pipeObj->compute_layout_kind) {
+			case ComputePipelineDesc::LayoutKind::HiZCulling:
+				if (binding == 3) return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				if (binding == 4) return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				if (binding == 5) return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			case ComputePipelineDesc::LayoutKind::HiZMip:
+				if (binding == 3) return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				if (binding == 5) return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			case ComputePipelineDesc::LayoutKind::MlIdentity:
+			case ComputePipelineDesc::LayoutKind::HeuristicOccluder:
+			case ComputePipelineDesc::LayoutKind::MeshletIndirect:
+				if (binding == 4) return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			case ComputePipelineDesc::LayoutKind::MeshletFrustum:
+				if (binding == 7) return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			case ComputePipelineDesc::LayoutKind::MeshletHiZ:
+				if (binding == 5) return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				if (binding == 9) return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			default:
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			}
+		};
 		
 		if (fpCmdPushDescriptorSetKHR && !current_compute_bindings.empty()) {
 			std::vector<VkWriteDescriptorSet> writes;
@@ -892,7 +1043,7 @@ void VulkanRHI::cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group
 					info.range = buffer_handle.size;
 					buffer_infos.push_back(info);
 					
-					write.descriptorType = (binding == 4) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					write.descriptorType = descriptor_type_for_binding(binding);
 					write.pBufferInfo = &buffer_infos.back();
 				} else if (std::holds_alternative<ImageBinding>(res)) {
 					auto& image_binding = std::get<ImageBinding>(res);
@@ -1276,6 +1427,10 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle 
 
 void VulkanRHI::cmd_bind_pipeline(CommandHandle cmd, void* pipeline) {
 	auto pipeObj = static_cast<VulkanPipelineObject*>(pipeline);
+	if (!pipeObj || !pipeObj->pipeline) {
+		bud::eprint("cmd_bind_pipeline called with invalid pipeline object");
+		return;
+	}
 	if (pipeObj->bind_point == VK_PIPELINE_BIND_POINT_COMPUTE) {
 		current_compute_pipeline = pipeObj;
 		current_compute_bindings.clear();
@@ -1372,6 +1527,10 @@ void VulkanRHI::cmd_draw_indexed_indirect(CommandHandle cmd, bud::graphics::Buff
 
 void VulkanRHI::cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) {
 	auto pipeObj = static_cast<VulkanPipelineObject*>(pipeline_layout);
+	if (!pipeObj || !pipeObj->layout) {
+		bud::eprint("cmd_push_constants called with invalid pipeline layout");
+		return;
+	}
 	VkShaderStageFlags stage = (pipeObj->bind_point == VK_PIPELINE_BIND_POINT_COMPUTE) 
 		? VK_SHADER_STAGE_COMPUTE_BIT 
 		: (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -1398,6 +1557,10 @@ void VulkanRHI::cmd_set_depth_bias(CommandHandle cmd, float constant, float clam
 
 void VulkanRHI::cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint32_t set_index) {
 	auto pipeObj = static_cast<VulkanPipelineObject*>(pipeline);
+	if (!pipeObj || !pipeObj->layout) {
+		bud::eprint("cmd_bind_descriptor_set called with invalid pipeline object");
+		return;
+	}
 	auto& frame = frames[current_frame];
 
 	vkCmdBindDescriptorSets(
@@ -1500,7 +1663,9 @@ void VulkanRHI::create_instance(VkInstance& vk_instance, bool enable_validation)
     if (extensions && count > 0) {
         exts.assign(extensions, extensions + count);
     }
-	if (enable_validation) exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+	// Keep debug utils enabled so Nsight / RenderDoc can see object names and
+	// command buffer labels even when validation layers are disabled.
+	exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 	exts.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 
 	create_info.enabledExtensionCount = static_cast<uint32_t>(exts.size());
@@ -1973,6 +2138,13 @@ void VulkanRHI::destroy_debug_utils_messenger_ext(VkInstance instance, VkDebugUt
 }
 
 void VulkanRHI::setup_debug_messenger(bool enable) {
+	// Always load the debug-utils entry points so object names / labels work in
+	// capture tools even when validation layers are off. Only create the actual
+	// messenger when validation is enabled.
+	fpCmdBeginDebugUtilsLabelEXT = (PFN_vkCmdBeginDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdBeginDebugUtilsLabelEXT");
+	fpCmdEndDebugUtilsLabelEXT = (PFN_vkCmdEndDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdEndDebugUtilsLabelEXT");
+	fpSetDebugUtilsObjectNameEXT = (PFN_vkSetDebugUtilsObjectNameEXT)vkGetInstanceProcAddr(instance, "vkSetDebugUtilsObjectNameEXT");
+
 	if (!enable) return;
 	VkDebugUtilsMessengerCreateInfoEXT create_info{ VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT };
 	create_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
@@ -1983,11 +2155,6 @@ void VulkanRHI::setup_debug_messenger(bool enable) {
 		throw std::runtime_error("Failed to set up debug messenger!");
 	}
 
-	if (enable) {
-		fpCmdBeginDebugUtilsLabelEXT = (PFN_vkCmdBeginDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdBeginDebugUtilsLabelEXT");
-		fpCmdEndDebugUtilsLabelEXT = (PFN_vkCmdEndDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdEndDebugUtilsLabelEXT");
-		fpSetDebugUtilsObjectNameEXT = (PFN_vkSetDebugUtilsObjectNameEXT)vkGetInstanceProcAddr(instance, "vkSetDebugUtilsObjectNameEXT");
-	}
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanRHI::debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData) {

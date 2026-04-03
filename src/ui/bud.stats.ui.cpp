@@ -22,7 +22,9 @@ namespace bud::ui {
         std::function<void(float)> set_occluder,
         float current_occluder,
         std::function<void(bool)> set_occluder_enable,
-        bool current_occluder_enable) {
+		bool current_occluder_enable,
+		std::function<void(bool)> set_meshlet_rendering_enable,
+		bool current_meshlet_rendering_enable) {
 
 		if (show_stats) {
 			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
@@ -120,8 +122,12 @@ namespace bud::ui {
 				ImVec4 dc_color = display_draw_calls <= 5000 ? color_good : (display_draw_calls <= 10000 ? color_warn : color_bad);
 				ImVec4 drawn_tri_color = display_drawn_tris <= 2000000 ? color_good : (display_drawn_tris <= 5000000 ? color_warn : color_bad);
 				ImVec4 pipe_color = display_pipeline_binds <= 100 ? color_good : (display_pipeline_binds <= 500 ? color_warn : color_bad);
+				const char* visibility_path_text = stats.active_visibility_path == bud::graphics::VisibilityPath::Meshlet
+					? "Meshlet"
+					: "Instance/Submesh Fallback";
 
 				ImGui::TextColored(fps_color, "FPS: %.1f (%.2f ms)", display_fps, display_ms);
+				//ImGui::TextColored(color_neutral, "Visibility Path: %s", visibility_path_text);
 
 				// Build and show sequencer status using the supplied values to avoid cross-thread calls.
 				std::string seq_status;
@@ -163,95 +169,95 @@ namespace bud::ui {
 				ImGui::TextColored(color_neutral, "Total Objects/Entities: %u", cpu_display_total_objs);
 				ImGui::TextColored(color_neutral, "Visible Objects/Entities: %u", cpu_display_visible_objs);
 				float cpu_obj_cull_rate = cpu_display_total_objs > 0 ? (1.0f - (float)cpu_display_visible_objs / cpu_display_total_objs) * 100.0f : 0.0f;
-
 				ImGui::TextColored(color_neutral, "Obj Cull Ratio: %.1f%%", cpu_obj_cull_rate);
 				ImGui::TextColored(color_neutral, "Total Submesh Instances: %u", cpu_display_total_instances);
 				ImGui::TextColored(color_neutral, "Visible Submesh Instances: %u", cpu_display_visible_instances);
 				float cpu_instance_cull_rate = cpu_display_total_instances > 0 ? (1.0f - (float)cpu_display_visible_instances / cpu_display_total_instances) * 100.0f : 0.0f;
 				ImGui::TextColored(color_neutral, "Instance Cull Ratio: %.1f%%", cpu_instance_cull_rate);
 
-				ImGui::TextColored(color_neutral, "Total Triangles: %u", cpu_display_total_tris);
-				ImVec4 cpu_tri_color = cpu_display_visible_tris <= 2000000 ? color_good : (cpu_display_visible_tris <= 5000000 ? color_warn : color_bad);
-				ImGui::TextColored(cpu_tri_color, "Visible Triangles: %u", cpu_display_visible_tris);
-				float cpu_tri_cull_rate = cpu_display_total_tris > 0 ? (1.0f - (float)cpu_display_visible_tris / cpu_display_total_tris) * 100.0f : 0.0f;
-				ImGui::TextColored(color_neutral, "Tri Cull Ratio: %.1f%%", cpu_tri_cull_rate);
-				ImGui::TextColored(color_neutral, "Total Meshlets: %u", cpu_display_total_meshlets);
-				ImGui::TextColored(color_neutral, "Visible Meshlets: %u", cpu_display_visible_meshlets);
-				float cpu_meshlet_cull_rate = cpu_display_total_meshlets > 0 ? (1.0f - (float)cpu_display_visible_meshlets / cpu_display_total_meshlets) * 100.0f : 0.0f;
-				ImGui::TextColored(color_neutral, "Meshlet Cull Ratio: %.1f%%", cpu_meshlet_cull_rate);
-
-			// ML Occlusion / Occluder info: placed after CPU frustum culling and before GPU culling
-			ImGui::Separator();
-            ImGui::TextColored(color_neutral, "ML Occlusion Training");
-            ImGui::TextColored(color_neutral, "Selected Occluders: %u", display_occluder_count);
-            ImGui::TextColored(color_neutral, "Occluder Tris: %u", display_occluder_tris);
-            // Also show depth-prepass occluder usage (previously logged to console)
-            // Use stats.occluder_count as number of occluders and cpu_visible_instances as visible count
-            ImGui::TextColored(color_neutral, "Depth Only: %u occluders (visible %u)", stats.occluder_count, stats.cpu_visible_instances);
-
-                // Heuristic Occluder fraction control (if provided)
-                if (set_occluder && current_occluder >= 0.0f) {
-                    ImGui::Separator();
-                    ImGui::TextColored(color_neutral, "Heuristic Occluder Frac: %.1f%%", current_occluder * 100.0f);
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("-")) {
-                        float v = std::clamp(current_occluder - 0.01f, 0.0f, 1.0f);
-                        set_occluder(v);
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("+")) {
-                        float v = std::clamp(current_occluder + 0.01f, 0.0f, 1.0f);
-                        set_occluder(v);
-                    }
-                    ImGui::SameLine();
-                    // Replace Reset button with a compact checkbox to toggle heuristic occluder enable
-                    if (set_occluder_enable) {
-                        // Use a fixed-size checkbox area to avoid auto-resize / wrapping when the
-                        // checkbox state changes (checkbox glyph can affect layout in some fonts).
-                        ImGui::SameLine();
-                        ImGui::PushID("heuristic_occluder_enable");
-                        // Reserve a compact fixed width for the checkbox control
-                        ImGui::PushItemWidth(24.0f);
-                        bool tmp = current_occluder_enable;
-                        if (ImGui::Checkbox("##heuristic_occluder_enable", &tmp)) {
-                            set_occluder_enable(tmp);
-                        }
-                        ImGui::PopItemWidth();
-                        ImGui::PopID();
-                    } else {
-                        // Fallback: show Reset if no enable setter provided
-                        ImGui::SameLine();
-                        if (ImGui::SmallButton("Reset")) {
-                            set_occluder(0.1f);
-                        }
-                    }
-                }
-
-				// GPU CULLING
 				ImGui::Separator();
-				ImGui::TextColored(color_neutral, "GPU Occlusion Culling");
-				ImGui::TextColored(color_neutral, "Total Objects/Entities: %u", gpu_display_total_objs);
-				ImGui::TextColored(color_neutral, "Visible Objects/Entities: %u", gpu_display_visible_objs);
-				float gpu_obj_cull_rate = gpu_display_total_objs > 0 ? (1.0f - (float)gpu_display_visible_objs / gpu_display_total_objs) * 100.0f : 0.0f;
-				ImGui::TextColored(color_neutral, "Obj Cull Ratio: %.1f%%", gpu_obj_cull_rate);
-				ImGui::TextColored(color_neutral, "Total Submesh Instances: %u", gpu_display_total_instances);
-				ImGui::TextColored(color_neutral, "Visible Submesh Instances: %u", gpu_display_visible_instances);
-				float gpu_instance_cull_rate = gpu_display_total_instances > 0 ? (1.0f - (float)gpu_display_visible_instances / gpu_display_total_instances) * 100.0f : 0.0f;
-				ImGui::TextColored(color_neutral, "Instance Cull Ratio: %.1f%%", gpu_instance_cull_rate);
+				ImGui::TextColored(color_neutral, "Meshlet Rendering");
+				if (set_meshlet_rendering_enable) {
+					ImGui::SameLine();
+					ImGui::PushID("meshlet_rendering_enable");
+					ImGui::PushItemWidth(24.0f);
+					bool tmp = current_meshlet_rendering_enable;
+					if (ImGui::Checkbox("##meshlet_rendering_enable", &tmp)) {
+						set_meshlet_rendering_enable(tmp);
+					}
+					ImGui::PopItemWidth();
+					ImGui::PopID();
+				}
 
-				ImGui::TextColored(color_neutral, "Total Triangles: %u", gpu_display_total_tris);
-				ImVec4 gpu_tri_color = gpu_display_visible_tris <= 2000000 ? color_good : (gpu_display_visible_tris <= 5000000 ? color_warn : color_bad);
-				ImGui::TextColored(gpu_tri_color, "Visible Triangles: %u", gpu_display_visible_tris);
-				float gpu_tri_cull_rate = gpu_display_total_tris > 0 ? (1.0f - (float)gpu_display_visible_tris / gpu_display_total_tris) * 100.0f : 0.0f;
-				ImGui::TextColored(color_neutral, "Tri Cull Ratio: %.1f%%", gpu_tri_cull_rate);
-				ImGui::TextColored(color_neutral, "Total Meshlets: %u", gpu_display_total_meshlets);
-				ImGui::TextColored(color_neutral, "Visible Meshlets: %u", gpu_display_visible_meshlets);
-				float gpu_meshlet_cull_rate = gpu_display_total_meshlets > 0 ? (1.0f - (float)gpu_display_visible_meshlets / gpu_display_total_meshlets) * 100.0f : 0.0f;
-				ImGui::TextColored(color_neutral, "Meshlet Cull Ratio: %.1f%%", gpu_meshlet_cull_rate);
+				const auto draw_heuristic_occluder_controls = [&]() {
+					if (set_occluder && current_occluder >= 0.0f) {
+						ImGui::TextColored(color_neutral, "Heuristic Occluder Frac: %.1f%%", current_occluder * 100.0f);
+						ImGui::SameLine();
+						if (ImGui::SmallButton("-")) {
+							float v = std::clamp(current_occluder - 0.01f, 0.0f, 1.0f);
+							set_occluder(v);
+						}
+						ImGui::SameLine();
+						if (ImGui::SmallButton("+")) {
+							float v = std::clamp(current_occluder + 0.01f, 0.0f, 1.0f);
+							set_occluder(v);
+						}
+						if (set_occluder_enable) {
+							ImGui::SameLine();
+							ImGui::PushID("heuristic_occluder_enable");
+							ImGui::PushItemWidth(24.0f);
+							bool tmp = current_occluder_enable;
+							if (ImGui::Checkbox("##heuristic_occluder_enable", &tmp)) {
+								set_occluder_enable(tmp);
+							}
+							ImGui::PopItemWidth();
+							ImGui::PopID();
+						}
+					}
+				};
 
+				if (current_meshlet_rendering_enable) {
+					ImGui::TextColored(color_neutral, "Meshlet Rendering [On]");
+					draw_heuristic_occluder_controls();
 
+					ImGui::Separator();
+					ImGui::TextColored(color_neutral, "Meshlet Frustum Culling");
+					ImGui::TextColored(color_neutral, "Total Meshlets: %u", stats.meshlet_frustum_total_meshlets);
+					ImGui::TextColored(color_neutral, "Visible Meshlets: %u", stats.meshlet_frustum_visible_meshlets);
+					float meshlet_frustum_cull_rate = stats.meshlet_frustum_total_meshlets > 0 ? (1.0f - (float)stats.meshlet_frustum_visible_meshlets / stats.meshlet_frustum_total_meshlets) * 100.0f : 0.0f;
+					ImGui::TextColored(color_neutral, "Meshlet Cull Ratio: %.1f%%", meshlet_frustum_cull_rate);
 
+					ImGui::TextColored(color_neutral, "Selected Occluders: %u", display_occluder_count);
+					ImGui::TextColored(color_neutral, "Occluder Tris: %u", display_occluder_tris);
+					ImGui::TextColored(color_neutral, "Depth Only: %u occluders (visible %u)", stats.occluder_count, stats.cpu_visible_instances);
 
+					ImGui::Separator();
+					ImGui::TextColored(color_neutral, "Meshlet HiZ Culling");
+					ImGui::TextColored(color_neutral, "Total Meshlets: %u", stats.meshlet_hiz_total_meshlets);
+					ImGui::TextColored(color_neutral, "Visible Meshlets: %u", stats.meshlet_hiz_visible_meshlets);
+					float meshlet_hiz_cull_rate = stats.meshlet_hiz_total_meshlets > 0 ? (1.0f - (float)stats.meshlet_hiz_visible_meshlets / stats.meshlet_hiz_total_meshlets) * 100.0f : 0.0f;
+					ImGui::TextColored(color_neutral, "Meshlet Cull Ratio: %.1f%%", meshlet_hiz_cull_rate);
+				}
+				else {
+					ImGui::TextColored(color_neutral, "Meshlet Rendering [Off]");
+					draw_heuristic_occluder_controls();
+
+					ImGui::Separator();
+					ImGui::TextColored(color_neutral, "GPU Instance HiZ Group");
+					ImGui::TextColored(color_neutral, "Total Objects/Entities: %u", gpu_display_total_objs);
+					ImGui::TextColored(color_neutral, "Visible Objects/Entities: %u", gpu_display_visible_objs);
+					float gpu_obj_cull_rate = gpu_display_total_objs > 0 ? (1.0f - (float)gpu_display_visible_objs / gpu_display_total_objs) * 100.0f : 0.0f;
+					ImGui::TextColored(color_neutral, "Obj Cull Ratio: %.1f%%", gpu_obj_cull_rate);
+					ImGui::TextColored(color_neutral, "Total Submesh Instances: %u", gpu_display_total_instances);
+					ImGui::TextColored(color_neutral, "Visible Submesh Instances: %u", gpu_display_visible_instances);
+					float gpu_instance_cull_rate = gpu_display_total_instances > 0 ? (1.0f - (float)gpu_display_visible_instances / gpu_display_total_instances) * 100.0f : 0.0f;
+					ImGui::TextColored(color_neutral, "Instance Cull Ratio: %.1f%%", gpu_instance_cull_rate);
+					ImGui::TextColored(color_neutral, "Total Triangles: %u", gpu_display_total_tris);
+					ImVec4 gpu_tri_color = gpu_display_visible_tris <= 2000000 ? color_good : (gpu_display_visible_tris <= 5000000 ? color_warn : color_bad);
+					ImGui::TextColored(gpu_tri_color, "Visible Triangles: %u", gpu_display_visible_tris);
+					float gpu_tri_cull_rate = gpu_display_total_tris > 0 ? (1.0f - (float)gpu_display_visible_tris / gpu_display_total_tris) * 100.0f : 0.0f;
+					ImGui::TextColored(color_neutral, "Tri Cull Ratio: %.1f%%", gpu_tri_cull_rate);
+				}
 
 				ImGui::Separator();
 				ImGui::TextColored(color_neutral, "Shadow Casters: %u", display_shadow_casters);

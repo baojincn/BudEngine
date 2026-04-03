@@ -65,7 +65,7 @@ namespace bud {
 		std::mutex log_writter_mutex;
 		std::condition_variable resource_condition_guard;
 		std::vector<LogMessage> log_queue;
-		bool is_running{ false };
+		std::atomic<bool> is_running{ false };
 
 		std::thread logger_thread;
 	};

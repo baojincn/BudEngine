@@ -131,7 +131,7 @@ namespace bud::tool {
             // Default material descriptor
             asset::MaterialDescriptor md = {};
             md.base_color_texture = base_tex;
-            md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::OPAQUE);
+			md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::Opaque);
             md.double_sided = 0;
             md.alpha_cutoff = 0.5f;
 
@@ -146,9 +146,9 @@ namespace bud::tool {
                     // If an explicit opacity map exists, treat as MASK; otherwise BLEND
                     aiString op_tex;
                     if (mat->GetTexture(aiTextureType_OPACITY, 0, &op_tex) == AI_SUCCESS) {
-                        md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::MASK);
+						md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::Mask);
                     } else {
-                        md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::BLEND);
+						md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::Blend);
                     }
                     md.alpha_cutoff = 0.5f;
                 }

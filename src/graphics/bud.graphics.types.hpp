@@ -144,13 +144,14 @@ namespace bud::graphics {
 		bool cache_shadows = false; // Disabled: feature has rendering bugs, enable when fixed
 
 		bool enable_gpu_driven = true;
+		bool enable_meshlets = true;
 		bool debug_hiz = false;
 		uint32_t debug_hiz_mip = 0;
 		bool enable_cluster_visualization = false;
 
         // Heuristic Occluder selection (CPU heuristic prototype)
         bool heuristic_occluder_enable = true; // enable heuristic occluder selection by default
-        float heuristic_occluder_fraction = 0.1f; // select top 10% as occluders by default
+        float heuristic_occluder_fraction = 0.3f; // select top 30% as occluders by default
         uint32_t heuristic_occluder_min_count = 1;
         uint32_t heuristic_occluder_max_count = 4096;
         float heuristic_occluder_tri_weight = 1e-4f; // multiplier for triangle count in score
@@ -229,7 +230,18 @@ namespace bud::graphics {
 	};
 
 	struct ComputePipelineDesc {
+		enum class LayoutKind {
+			HiZCulling,
+			HiZMip,
+			MlIdentity,
+			HeuristicOccluder,
+			MeshletFrustum,
+			MeshletIndirect,
+			MeshletHiZ,
+		};
+
 		ShaderStage cs;
+		LayoutKind layout_kind = LayoutKind::HiZCulling;
 	};
 	// POD, end
 
@@ -319,6 +331,13 @@ namespace bud::graphics {
 		std::vector<SubMesh> submeshes;
 
 		bool is_valid() const { return index_count > 0; }
+		bool has_meshlet_data() const {
+			return meshlet_count > 0 &&
+				meshlet_buffer.is_valid() &&
+				vertex_index_buffer.is_valid() &&
+				meshlet_index_buffer.is_valid() &&
+				cull_data_buffer.is_valid();
+		}
 	};
 
 	struct GPUStats {
@@ -328,6 +347,11 @@ namespace bud::graphics {
 		uint32_t visibleTriangles = 0;
 		uint32_t totalMeshlets = 0;
 		uint32_t visibleMeshlets = 0;
+	};
+
+	enum class VisibilityPath {
+		InstanceFallback,
+		Meshlet,
 	};
 
 
@@ -342,6 +366,7 @@ namespace bud::graphics {
 		uint32_t draw_calls = 0;
 		uint32_t drawn_triangles = 0; // Total accumulated across ALL render passes (Shadows, etc)
 		uint32_t pipeline_binds = 0;
+		VisibilityPath active_visibility_path = VisibilityPath::InstanceFallback;
 
 		// 剔除指标 (GPU Occlusion Culling)
 		uint32_t gpu_total_objects = 0;
@@ -352,6 +377,10 @@ namespace bud::graphics {
 		uint32_t gpu_visible_triangles = 0;
 		uint32_t gpu_total_meshlets = 0;
 		uint32_t gpu_visible_meshlets = 0;
+		uint32_t meshlet_frustum_total_meshlets = 0;
+		uint32_t meshlet_frustum_visible_meshlets = 0;
+		uint32_t meshlet_hiz_total_meshlets = 0;
+		uint32_t meshlet_hiz_visible_meshlets = 0;
 
 		// 剔除指标 (CPU Frustum Culling)
 		uint32_t cpu_total_objects = 0;
@@ -374,6 +403,7 @@ namespace bud::graphics {
 			draw_calls = 0;
 			drawn_triangles = 0;
 			pipeline_binds = 0;
+			active_visibility_path = VisibilityPath::InstanceFallback;
 			gpu_total_objects = 0;
 			gpu_visible_objects = 0;
 			gpu_total_instances = 0;
@@ -382,6 +412,10 @@ namespace bud::graphics {
 			gpu_visible_triangles = 0;
 			gpu_total_meshlets = 0;
 			gpu_visible_meshlets = 0;
+			meshlet_frustum_total_meshlets = 0;
+			meshlet_frustum_visible_meshlets = 0;
+			meshlet_hiz_total_meshlets = 0;
+			meshlet_hiz_visible_meshlets = 0;
 			cpu_total_objects = 0;
 			cpu_visible_objects = 0;
 			cpu_total_instances = 0;

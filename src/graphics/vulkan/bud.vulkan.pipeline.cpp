@@ -233,14 +233,14 @@ namespace bud::graphics::vulkan {
         VkPipeline graphicsPipeline = VK_NULL_HANDLE;
         // Diagnostic: record that we are about to create a graphics pipeline
         {
-            std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines: vert_module={} frag_module={} color_fmt={} depth_fmt={}\n",
+            std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines: vert_module={} frag_module={} color_fmt={} depth_fmt={}",
                 (void*)shaderStages[0].module, (void*)shaderStages[1].module, (int)colorFormat, (int)depthFormat);
             bud::print("{}", msg);
         }
 
         VkResult r = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline);
         if (r != VK_SUCCESS) {
-            std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines failed: {}\n", (int)r);
+            std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines failed: {}", (int)r);
             bud::eprint("{}", msg);
 #if defined(_DEBUG)
             throw std::runtime_error("failed to create graphics pipeline!");
@@ -249,8 +249,10 @@ namespace bud::graphics::vulkan {
 #endif
         }
 
-		std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines OK: pipeline={}\n", (void*)graphicsPipeline);
+		std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines OK: pipeline={}", (void*)graphicsPipeline);
 		bud::print("{}", msg);
+
+
 
         return graphicsPipeline;
     }
@@ -267,7 +269,7 @@ namespace bud::graphics::vulkan {
         VkPipeline computePipeline;
         VkResult r2 = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline);
         if (r2 != VK_SUCCESS) {
-            std::string msg = std::format("[Vulkan][Worker] vkCreateComputePipelines failed: {}\n", (int)r2);
+            std::string msg = std::format("[Vulkan][Worker] vkCreateComputePipelines failed: {}", (int)r2);
             bud::eprint("{}", msg);
 #if defined(_DEBUG)
             throw std::runtime_error("failed to create compute pipeline!");

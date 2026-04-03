@@ -72,9 +72,9 @@ namespace bud::asset {
 
     // Material serialization that mirrors glTF semantic choices
     enum class AlphaMode : uint8_t {
-        OPAQUE = 0,
-        MASK = 1,
-        BLEND = 2
+		Opaque = 0,
+		Mask = 1,
+		Blend = 2
     };
 
     struct MaterialDescriptor {

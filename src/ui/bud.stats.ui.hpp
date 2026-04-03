@@ -24,7 +24,9 @@ namespace bud::ui {
                            std::function<void(float)> set_occluder = nullptr,
                            float current_occluder = -1.0f,
                            std::function<void(bool)> set_occluder_enable = nullptr,
-                           bool current_occluder_enable = true);
+					bool current_occluder_enable = true,
+					std::function<void(bool)> set_meshlet_rendering_enable = nullptr,
+					bool current_meshlet_rendering_enable = true);
     };
 
 }

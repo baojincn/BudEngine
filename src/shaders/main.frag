@@ -227,7 +227,7 @@ void main() {
     
     vec3 kS = F;
     vec3 kD = vec3(1.0) - kS;
-    kD *= 1.0 - metallic;	  
+    kD *= 1.0 - metallic;  
 
     float NdotL = max(dot(N, L), 0.0);        
 

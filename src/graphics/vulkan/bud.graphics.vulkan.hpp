@@ -247,7 +247,13 @@ namespace bud::graphics::vulkan {
 
 		// UBO
 		VkDescriptorSetLayout global_set_layout = VK_NULL_HANDLE;
-		VkDescriptorSetLayout compute_set_layout = VK_NULL_HANDLE; // Used for per-dispatch storage buffer binding
+		VkDescriptorSetLayout compute_hiz_cull_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_hiz_mip_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_ml_identity_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_heuristic_occluder_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_meshlet_frustum_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_meshlet_indirect_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_meshlet_hiz_set_layout = VK_NULL_HANDLE;
 		VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
 		VkSampler default_sampler = VK_NULL_HANDLE;
 		VkSampler shadow_sampler = VK_NULL_HANDLE;

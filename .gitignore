@@ -8,6 +8,7 @@ vcpkg_installed/
 
 # Generated files
 /data/replays
+/aftermath_dumps
 
 # IDE files
 .vs/

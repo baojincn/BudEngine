@@ -1,4 +1,4 @@
-﻿#include <vector>
+#include <vector>
 #include <iostream>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -179,6 +179,488 @@ namespace bud::graphics {
 		);
 	}
 
+	void MeshletFrustumCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) {
+			std::string err = std::format("MeshletFrustumCullingPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+			bud::eprint("{}", err);
+#if defined(_DEBUG)
+			throw std::runtime_error(err);
+#else
+			return;
+#endif
+		}
+
+		load_shaders_async(asset_manager, { "src/shaders/meshlet_frustum_cull.comp.spv" }, [this, rhi](const auto& shaders) {
+			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::MeshletFrustum;
+			desc.cs.code = shaders[0];
+			pipeline = rhi->create_compute_pipeline(desc);
+			if (pipeline) {
+				bud::print("[MeshletFrustumCullingPass] Shader loaded and pipeline created.");
+			}
+		});
+	}
+
+	RGHandle MeshletFrustumCullingPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count) {
+		if (!pipeline) {
+			bud::eprint("[MeshletFrustumCullingPass] Skipping pass because pipeline is not ready yet.");
+			return {};
+		}
+
+		return render_graph.add_pass("Meshlet Frustum Culling Pass",
+			[=](RGBuilder& builder) {
+				builder.set_side_effect();
+				builder.read(instance_buffer, ResourceState::ShaderResource);
+				builder.write(meshlet_visibility_buffer, ResourceState::UnorderedAccess);
+				builder.write(stats_buffer, ResourceState::UnorderedAccess);
+				return RGHandle{};
+			},
+			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				bud::graphics::BufferHandle inst_buf{};
+				bud::graphics::BufferHandle vis_buf{};
+				bud::graphics::BufferHandle stat_buf{};
+				try {
+					inst_buf = render_graph.get_buffer(instance_buffer);
+					vis_buf = render_graph.get_buffer(meshlet_visibility_buffer);
+					stat_buf = render_graph.get_buffer(stats_buffer);
+				} catch (const std::exception& e) {
+					bud::eprint("[MeshletFrustumCullingPass] Resource lookup failed: {}", e.what());
+					return;
+				}
+
+				if (!inst_buf.is_valid() || !vis_buf.is_valid() || !stat_buf.is_valid()) {
+					std::string err = std::format("MeshletFrustumCullingPass missing resources: inst={} vis={} stat={}", inst_buf.is_valid(), vis_buf.is_valid(), stat_buf.is_valid());
+					bud::eprint("{}", err);
+#if defined(_DEBUG)
+					throw std::runtime_error(err);
+#else
+					return;
+#endif
+				}
+
+				GPUStats zero_stats{};
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(GPUStats), &zero_stats);
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 5, vis_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 6, stat_buf);
+				rhi->cmd_bind_compute_ubo(cmd, pipeline, 7);
+
+				const size_t dispatch_count = std::min(visible_count, sort_list.size());
+				for (size_t i = 0; i < dispatch_count; ++i) {
+					const auto& item = sort_list[i];
+					if (item.entity_index >= render_scene.mesh_indices.size()) {
+						continue;
+					}
+
+					uint32_t mesh_id = render_scene.mesh_indices[item.entity_index];
+					if (mesh_id >= meshes.size()) {
+						continue;
+					}
+
+					const auto& mesh = meshes[mesh_id];
+					if (!mesh.has_meshlet_data()) {
+						continue;
+					}
+
+					uint32_t meshlet_start = 0;
+					uint32_t meshlet_count = mesh.meshlet_count;
+					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+						const auto& submesh = mesh.submeshes[item.submesh_index];
+						meshlet_start = submesh.meshlet_start;
+						meshlet_count = submesh.meshlet_count;
+					}
+
+					if (meshlet_count == 0) {
+						continue;
+					}
+
+					rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, mesh.meshlet_buffer);
+					rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, mesh.vertex_index_buffer);
+					rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, mesh.meshlet_index_buffer);
+					rhi->cmd_bind_storage_buffer(cmd, pipeline, 4, mesh.cull_data_buffer);
+
+					struct PushConsts {
+						uint32_t drawIndex;
+						uint32_t meshletStart;
+						uint32_t meshletCount;
+						uint32_t meshId;
+					} pc;
+					pc.drawIndex = static_cast<uint32_t>(i);
+					pc.meshletStart = meshlet_start;
+					pc.meshletCount = meshlet_count;
+					pc.meshId = mesh_id;
+
+					rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
+
+					uint32_t group_x = (meshlet_count + 255) / 256;
+					rhi->cmd_dispatch(cmd, group_x, 1, 1);
+				}
+			}
+		);
+	}
+
+	void HeuristicOccluderSelectionPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) {
+			std::string err = std::format("HeuristicOccluderSelectionPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+			bud::eprint("{}", err);
+#if defined(_DEBUG)
+			throw std::runtime_error(err);
+#else
+			return;
+#endif
+		}
+
+		load_shaders_async(asset_manager, { "src/shaders/heuristic_occluder_select.comp.spv" }, [this, rhi](const auto& shaders) {
+			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::HeuristicOccluder;
+			desc.cs.code = shaders[0];
+			pipeline = rhi->create_compute_pipeline(desc);
+			if (pipeline) {
+				bud::print("[HeuristicOccluderSelectionPass] Shader loaded and pipeline created.");
+			}
+		});
+
+		config_ubo = rhi->create_gpu_buffer(sizeof(float) * 4, bud::graphics::ResourceState::UnorderedAccess);
+	}
+
+	void HeuristicOccluderSelectionPass::shutdown(RHI* rhi) {
+		if (config_ubo.is_valid()) {
+			rhi->destroy_buffer(config_ubo);
+			config_ubo = {};
+		}
+	}
+
+	RGHandle HeuristicOccluderSelectionPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, float occluder_fraction) {
+		if (!pipeline) {
+			bud::eprint("[HeuristicOccluderSelectionPass] Skipping pass because pipeline is not ready yet.");
+			return {};
+		}
+
+		return render_graph.add_pass("Heuristic Occluder Selection Pass",
+			[=](RGBuilder& builder) {
+				builder.set_side_effect();
+				builder.read(instance_buffer, ResourceState::ShaderResource);
+				builder.read(meshlet_visibility_buffer, ResourceState::ShaderResource);
+				builder.write(indirect_draw_buffer, ResourceState::UnorderedAccess);
+				builder.write(stats_buffer, ResourceState::UnorderedAccess);
+				return RGHandle{};
+			},
+			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				bud::graphics::BufferHandle inst_buf{};
+				bud::graphics::BufferHandle vis_buf{};
+				bud::graphics::BufferHandle ind_buf{};
+				bud::graphics::BufferHandle stat_buf{};
+				try {
+					inst_buf = render_graph.get_buffer(instance_buffer);
+					vis_buf = render_graph.get_buffer(meshlet_visibility_buffer);
+					ind_buf = render_graph.get_buffer(indirect_draw_buffer);
+					stat_buf = render_graph.get_buffer(stats_buffer);
+				} catch (const std::exception& e) {
+					bud::eprint("[HeuristicOccluderSelectionPass] Resource lookup failed: {}", e.what());
+					return;
+				}
+
+				if (!inst_buf.is_valid() || !vis_buf.is_valid() || !ind_buf.is_valid() || !stat_buf.is_valid()) {
+					std::string err = std::format("HeuristicOccluderSelectionPass missing resources: inst={} vis={} ind={} stat={}", inst_buf.is_valid(), vis_buf.is_valid(), ind_buf.is_valid(), stat_buf.is_valid());
+					bud::eprint("{}", err);
+#if defined(_DEBUG)
+					throw std::runtime_error(err);
+#else
+					return;
+#endif
+				}
+
+				GPUStats zero_stats{};
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(GPUStats), &zero_stats);
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, vis_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, ind_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, stat_buf);
+				rhi->cmd_bind_compute_ubo(cmd, pipeline, 4);
+
+				// Upload occluder fraction to per-pass storage buffer and bind at binding = 5
+				rhi->resource_barrier(cmd, config_ubo, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, config_ubo, 0, sizeof(float), &occluder_fraction);
+				rhi->resource_barrier(cmd, config_ubo, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 5, config_ubo);
+
+				uint32_t group_x = static_cast<uint32_t>(visible_count);
+				rhi->cmd_dispatch(cmd, group_x, 1, 1);
+			}
+		);
+	}
+
+	void MeshletHiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) {
+			std::string err = std::format("MeshletHiZCullingPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+			bud::eprint("{}", err);
+#if defined(_DEBUG)
+			throw std::runtime_error(err);
+#else
+			return;
+#endif
+		}
+
+		load_shaders_async(asset_manager, { "src/shaders/meshlet_hiz_cull.comp.spv" }, [this, rhi](const auto& shaders) {
+			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::MeshletHiZ;
+			desc.cs.code = shaders[0];
+			pipeline = rhi->create_compute_pipeline(desc);
+			if (pipeline) {
+				bud::print("[MeshletHiZCullingPass] Shader loaded and pipeline created.");
+			}
+		});
+	}
+
+	RGHandle MeshletHiZCullingPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_in, RGHandle meshlet_visibility_out, RGHandle stats_buffer, RGHandle hiz_pyramid, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count) {
+		if (!pipeline) {
+			bud::eprint("[MeshletHiZCullingPass] Skipping pass because pipeline is not ready yet.");
+			return {};
+		}
+
+		return render_graph.add_pass("Meshlet HiZ Culling Pass",
+			[=](RGBuilder& builder) {
+				builder.set_side_effect();
+				builder.read(instance_buffer, ResourceState::ShaderResource);
+				builder.read(meshlet_visibility_in, ResourceState::ShaderResource);
+				builder.read(hiz_pyramid, ResourceState::UnorderedAccess);
+				builder.write(meshlet_visibility_out, ResourceState::UnorderedAccess);
+				builder.write(stats_buffer, ResourceState::UnorderedAccess);
+				return RGHandle{};
+			},
+			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				bud::graphics::BufferHandle inst_buf{};
+				bud::graphics::BufferHandle vis_in_buf{};
+				bud::graphics::BufferHandle vis_out_buf{};
+				bud::graphics::BufferHandle stat_buf{};
+				Texture* hiz_tex = nullptr;
+				try {
+					inst_buf = render_graph.get_buffer(instance_buffer);
+					vis_in_buf = render_graph.get_buffer(meshlet_visibility_in);
+					vis_out_buf = render_graph.get_buffer(meshlet_visibility_out);
+					stat_buf = render_graph.get_buffer(stats_buffer);
+					hiz_tex = render_graph.get_texture(hiz_pyramid);
+				} catch (const std::exception& e) {
+					bud::eprint("[MeshletHiZCullingPass] Resource lookup failed: {}", e.what());
+					return;
+				}
+
+				if (!inst_buf.is_valid() || !vis_in_buf.is_valid() || !vis_out_buf.is_valid() || !stat_buf.is_valid() || !hiz_tex) {
+					std::string err = std::format("MeshletHiZCullingPass missing resources: inst={} vis_in={} vis_out={} stat={} hiz={}", inst_buf.is_valid(), vis_in_buf.is_valid(), vis_out_buf.is_valid(), stat_buf.is_valid(), (bool)hiz_tex);
+					bud::eprint("{}", err);
+#if defined(_DEBUG)
+					throw std::runtime_error(err);
+#else
+					return;
+#endif
+				}
+
+				GPUStats zero_stats{};
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(GPUStats), &zero_stats);
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 6, vis_in_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 7, vis_out_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 8, stat_buf);
+				rhi->cmd_bind_compute_texture(cmd, pipeline, 5, hiz_tex, ALL_MIPS, false, true);
+				rhi->cmd_bind_compute_ubo(cmd, pipeline, 9);
+
+				const size_t dispatch_count = std::min(visible_count, sort_list.size());
+				for (size_t i = 0; i < dispatch_count; ++i) {
+					const auto& item = sort_list[i];
+					if (item.entity_index >= render_scene.mesh_indices.size()) {
+						continue;
+					}
+
+					uint32_t mesh_id = render_scene.mesh_indices[item.entity_index];
+					if (mesh_id >= meshes.size()) {
+						continue;
+					}
+
+					const auto& mesh = meshes[mesh_id];
+					if (!mesh.has_meshlet_data()) {
+						continue;
+					}
+
+					uint32_t meshlet_start = 0;
+					uint32_t meshlet_count = mesh.meshlet_count;
+					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+						const auto& submesh = mesh.submeshes[item.submesh_index];
+						meshlet_start = submesh.meshlet_start;
+						meshlet_count = submesh.meshlet_count;
+					}
+
+					if (meshlet_count == 0) {
+						continue;
+					}
+
+					rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, mesh.meshlet_buffer);
+					rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, mesh.vertex_index_buffer);
+					rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, mesh.meshlet_index_buffer);
+					rhi->cmd_bind_storage_buffer(cmd, pipeline, 4, mesh.cull_data_buffer);
+
+					struct PushConsts {
+						uint32_t drawIndex;
+						uint32_t meshletStart;
+						uint32_t meshletCount;
+						uint32_t meshId;
+					} pc;
+					pc.drawIndex = static_cast<uint32_t>(i);
+					pc.meshletStart = meshlet_start;
+					pc.meshletCount = meshlet_count;
+					pc.meshId = mesh_id;
+
+					rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
+
+					uint32_t group_x = (meshlet_count + 255) / 256;
+					rhi->cmd_dispatch(cmd, group_x, 1, 1);
+				}
+			}
+		);
+	}
+
+	void MeshletIndirectEmissionPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) {
+			std::string err = std::format("MeshletIndirectEmissionPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+			bud::eprint("{}", err);
+#if defined(_DEBUG)
+			throw std::runtime_error(err);
+#else
+			return;
+#endif
+		}
+
+		load_shaders_async(asset_manager, { "src/shaders/meshlet_indirect_emit.comp.spv" }, [this, rhi](const auto& shaders) {
+			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::MeshletIndirect;
+			desc.cs.code = shaders[0];
+			pipeline = rhi->create_compute_pipeline(desc);
+			if (pipeline) {
+				bud::print("[MeshletIndirectEmissionPass] Shader loaded and pipeline created.");
+			}
+		});
+	}
+
+	RGHandle MeshletIndirectEmissionPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count) {
+		if (!pipeline) {
+			bud::eprint("[MeshletIndirectEmissionPass] Skipping pass because pipeline is not ready yet.");
+			return {};
+		}
+
+		return render_graph.add_pass("Meshlet Indirect Emission Pass",
+			[=](RGBuilder& builder) {
+				builder.set_side_effect();
+				builder.read(instance_buffer, ResourceState::ShaderResource);
+				builder.read(meshlet_visibility_buffer, ResourceState::ShaderResource);
+				builder.write(indirect_draw_buffer, ResourceState::UnorderedAccess);
+				builder.write(stats_buffer, ResourceState::UnorderedAccess);
+				return RGHandle{};
+			},
+			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				bud::graphics::BufferHandle inst_buf{};
+				bud::graphics::BufferHandle vis_buf{};
+				bud::graphics::BufferHandle draw_buf{};
+				bud::graphics::BufferHandle stat_buf{};
+				try {
+					inst_buf = render_graph.get_buffer(instance_buffer);
+					vis_buf = render_graph.get_buffer(meshlet_visibility_buffer);
+					draw_buf = render_graph.get_buffer(indirect_draw_buffer);
+					stat_buf = render_graph.get_buffer(stats_buffer);
+				} catch (const std::exception& e) {
+					bud::eprint("[MeshletIndirectEmissionPass] Resource lookup failed: {}", e.what());
+					return;
+				}
+
+				if (!inst_buf.is_valid() || !vis_buf.is_valid() || !draw_buf.is_valid() || !stat_buf.is_valid()) {
+					std::string err = std::format("MeshletIndirectEmissionPass missing resources: inst={} vis={} draw={} stat={}", inst_buf.is_valid(), vis_buf.is_valid(), draw_buf.is_valid(), stat_buf.is_valid());
+					bud::eprint("{}", err);
+#if defined(_DEBUG)
+					throw std::runtime_error(err);
+#else
+					return;
+#endif
+				}
+
+				GPUStats zero_stats{};
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(GPUStats), &zero_stats);
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, vis_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, draw_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, stat_buf);
+				rhi->cmd_bind_compute_ubo(cmd, pipeline, 4);
+
+				const size_t dispatch_count = std::min(visible_count, sort_list.size());
+				for (size_t i = 0; i < dispatch_count; ++i) {
+					const auto& item = sort_list[i];
+					if (item.entity_index >= render_scene.mesh_indices.size()) {
+						continue;
+					}
+
+					uint32_t mesh_id = render_scene.mesh_indices[item.entity_index];
+					if (mesh_id >= meshes.size()) {
+						continue;
+					}
+
+					const auto& mesh = meshes[mesh_id];
+					if (!mesh.has_meshlet_data()) {
+						continue;
+					}
+
+					uint32_t meshlet_start = 0;
+					uint32_t meshlet_count = mesh.meshlet_count;
+					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+						const auto& submesh = mesh.submeshes[item.submesh_index];
+						meshlet_start = submesh.meshlet_start;
+						meshlet_count = submesh.meshlet_count;
+					}
+
+					if (meshlet_count == 0) {
+						continue;
+					}
+
+					struct PushConsts {
+						uint32_t drawIndex;
+						uint32_t meshletStart;
+						uint32_t meshletCount;
+						uint32_t meshId;
+					} pc;
+					pc.drawIndex = static_cast<uint32_t>(i);
+					pc.meshletStart = meshlet_start;
+					pc.meshletCount = meshlet_count;
+					pc.meshId = mesh_id;
+
+					rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
+
+					uint32_t group_x = (meshlet_count + 255) / 256;
+					rhi->cmd_dispatch(cmd, group_x, 1, 1);
+				}
+			}
+		);
+	}
+
     void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
         if (!rhi || !asset_manager) {
             std::string err = std::format("HiZMipPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
@@ -192,6 +674,7 @@ namespace bud::graphics {
 
 		load_shaders_async(asset_manager, { "src/shaders/hiz_mip.comp.spv" }, [this, rhi](const auto& shaders) {
 			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::HiZMip;
 			desc.cs.code = shaders[0];
 			pipeline = rhi->create_compute_pipeline(desc);
 			if (pipeline) {
@@ -355,13 +838,14 @@ namespace bud::graphics {
         });
     }
 
-    RGHandle DepthOnlyPass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer,
+	RGHandle DepthOnlyPass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer,
         const RenderScene& render_scene,
         const SceneView& view,
         const RenderConfig& config,
         const std::vector<RenderMesh>& meshes,
         const std::vector<SortItem>& sort_list,
         size_t instance_count,
+		RGHandle indirect_draw_buffer,
         bud::graphics::BufferHandle mega_vertex_buffer,
         bud::graphics::BufferHandle mega_index_buffer) {
         if (!pipeline) {
@@ -382,7 +866,8 @@ namespace bud::graphics {
 			render_scene.flags.size()
 		});
 
-        if (max_scene_count == 0 || sort_list.empty()) {
+		const bool use_indirect_draw = indirect_draw_buffer.is_valid();
+		if (max_scene_count == 0 || (!use_indirect_draw && sort_list.empty())) {
             std::string err = "ZPrepass::add_to_graph empty scene or sort list";
             bud::eprint("{}", err);
 #if defined(_DEBUG)
@@ -430,6 +915,9 @@ namespace bud::graphics {
             [=](RGBuilder& builder) {
                 *depth_h = builder.create("MainDepth", depth_desc);
                 builder.write(*depth_h, ResourceState::DepthWrite);
+                if (use_indirect_draw && indirect_draw_buffer.is_valid()) {
+                    builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
+                }
                 return *depth_h;
             },
             // Capture `sort_list` by reference (owned by caller) - caller must ensure lifetime
@@ -457,6 +945,23 @@ namespace bud::graphics {
 				rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 
+				if (use_indirect_draw) {
+					bud::graphics::BufferHandle ind_buf_handle;
+					try {
+						ind_buf_handle = render_graph.get_buffer(indirect_draw_buffer);
+					} catch (const std::exception& e) {
+						bud::eprint("[DepthOnlyPass] failed to get indirect draw buffer: {}", e.what());
+						return;
+					}
+
+					if (!ind_buf_handle.is_valid()) {
+						bud::eprint("[DepthOnlyPass] invalid indirect draw buffer.");
+						return;
+					}
+
+					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
+				}
+				else {
 				for (size_t i = 0; i < draw_count; ++i) {
 					const auto& item = sort_list[i];
 					uint32_t idx = item.entity_index;
@@ -487,6 +992,7 @@ namespace bud::graphics {
 						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
 						rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, 0);
 					}
+				}
 				}
 
 				rhi->cmd_end_render_pass(cmd);

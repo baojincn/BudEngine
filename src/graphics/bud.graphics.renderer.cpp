@@ -1,4 +1,4 @@
-﻿#include <memory>
+#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -27,6 +27,10 @@ namespace bud::graphics {
         depth_only_pass = std::make_unique<DepthOnlyPass>();
 		hiz_mip_pass = std::make_unique<HiZMipPass>();
 		hiz_pass = std::make_unique<HiZCullingPass>();
+		meshlet_frustum_pass = std::make_unique<MeshletFrustumCullingPass>();
+		heuristic_occluder_pass = std::make_unique<HeuristicOccluderSelectionPass>();
+		meshlet_hiz_pass = std::make_unique<MeshletHiZCullingPass>();
+		meshlet_indirect_pass = std::make_unique<MeshletIndirectEmissionPass>();
 		hiz_debug_pass = std::make_unique<HiZDebugPass>();
 		main_pass = std::make_unique<MainPass>();
 		cluster_viz_pass = std::make_unique<ClusterVisualizationPass>();
@@ -36,6 +40,10 @@ namespace bud::graphics {
         depth_only_pass->init(rhi, render_config, asset_manager);
 		hiz_mip_pass->init(rhi, render_config, asset_manager);
 		hiz_pass->init(rhi, render_config, asset_manager);
+		meshlet_frustum_pass->init(rhi, render_config, asset_manager);
+		heuristic_occluder_pass->init(rhi, render_config, asset_manager);
+		meshlet_hiz_pass->init(rhi, render_config, asset_manager);
+		meshlet_indirect_pass->init(rhi, render_config, asset_manager);
 		hiz_debug_pass->init(rhi, render_config, asset_manager);
 		main_pass->init(rhi, render_config, asset_manager);
 		cluster_viz_pass->init(rhi, render_config, asset_manager);
@@ -45,6 +53,10 @@ namespace bud::graphics {
 		indirect_instance_buffers.resize(max_frames);
 		indirect_draw_buffers.resize(max_frames);
 		stats_readback_buffers.resize(max_frames);
+		meshlet_frustum_stats_buffers.resize(max_frames);
+		meshlet_hiz_stats_buffers.resize(max_frames);
+		meshlet_visibility_buffers.resize(max_frames);
+		meshlet_hiz_visibility_buffers.resize(max_frames);
 		instance_data_ssbos.resize(max_frames);
 	}
 
@@ -56,6 +68,10 @@ namespace bud::graphics {
         if (depth_only_pass) depth_only_pass->shutdown(rhi);
 		if (hiz_mip_pass) hiz_mip_pass->shutdown(rhi);
 		if (hiz_pass) hiz_pass->shutdown(rhi);
+		if (meshlet_frustum_pass) meshlet_frustum_pass->shutdown(rhi);
+		if (heuristic_occluder_pass) heuristic_occluder_pass->shutdown(rhi);
+		if (meshlet_hiz_pass) meshlet_hiz_pass->shutdown(rhi);
+		if (meshlet_indirect_pass) meshlet_indirect_pass->shutdown(rhi);
 		if (hiz_debug_pass) hiz_debug_pass->shutdown(rhi);
 		if (main_pass) main_pass->shutdown(rhi);
 		if (cluster_viz_pass) cluster_viz_pass->shutdown(rhi);
@@ -70,6 +86,18 @@ namespace bud::graphics {
 		}
 
 		for (auto& buf : stats_readback_buffers) {
+			if (buf.is_valid()) rhi->destroy_buffer(buf);
+		}
+		for (auto& buf : meshlet_frustum_stats_buffers) {
+			if (buf.is_valid()) rhi->destroy_buffer(buf);
+		}
+		for (auto& buf : meshlet_hiz_stats_buffers) {
+			if (buf.is_valid()) rhi->destroy_buffer(buf);
+		}
+		for (auto& buf : meshlet_visibility_buffers) {
+			if (buf.is_valid()) rhi->destroy_buffer(buf);
+		}
+		for (auto& buf : meshlet_hiz_visibility_buffers) {
 			if (buf.is_valid()) rhi->destroy_buffer(buf);
 		}
 		for (auto& buf : readback_buffers) {
@@ -102,6 +130,8 @@ namespace bud::graphics {
 			if (buf.is_valid()) rhi->destroy_buffer(buf);
 		}
 		stats_readback_buffers.clear();
+		meshlet_frustum_stats_buffers.clear();
+		meshlet_hiz_stats_buffers.clear();
 
 		for (auto& buf : instance_data_ssbos) {
 			if (buf.is_valid()) rhi->destroy_buffer(buf);
@@ -428,6 +458,10 @@ namespace bud::graphics {
 		// 先处理所有挂起的上传任务
 		flush_upload_queue();
 
+		if (meshlet_rendering_toggle_pending.exchange(false, std::memory_order_acq_rel)) {
+			meshlet_rendering_enabled.store(meshlet_rendering_toggle_value.load(std::memory_order_relaxed), std::memory_order_release);
+		}
+
 		// 重置当前帧统计数据
 		rhi->get_render_stats() = {};
 
@@ -641,7 +675,19 @@ namespace bud::graphics {
 		RGHandle rg_draw;
 		RGHandle rg_inst;
 		RGHandle rg_stats;
+		RGHandle rg_meshlet_frustum_stats;
+		RGHandle rg_meshlet_hiz_stats;
 		RGHandle rg_instance_data;
+		RGHandle rg_meshlet_visibility;
+		RGHandle rg_meshlet_hiz_visibility;
+		uint32_t total_meshlet_count = 0;
+		if (render_config.enable_meshlets) {
+			for (const auto& mesh : meshes) {
+				if (mesh.is_valid()) {
+					total_meshlet_count += mesh.meshlet_count;
+				}
+			}
+		}
 
 		struct DrawData {
 			uint32_t indexCount;
@@ -662,6 +708,8 @@ namespace bud::graphics {
 				indirect_instance_buffers.resize(current_idx + 1);
 				indirect_draw_buffers.resize(current_idx + 1);
 				stats_readback_buffers.resize(current_idx + 1);
+				meshlet_visibility_buffers.resize(current_idx + 1);
+				meshlet_hiz_visibility_buffers.resize(current_idx + 1);
 			}
 
 			if (total_draw_count > current_indirect_capacity) {
@@ -673,6 +721,12 @@ namespace bud::graphics {
 					if (buf.is_valid())
 						rhi->destroy_buffer(buf);
 				for (auto& buf : stats_readback_buffers)
+					if (buf.is_valid())
+						rhi->destroy_buffer(buf);
+				for (auto& buf : meshlet_visibility_buffers)
+					if (buf.is_valid())
+						rhi->destroy_buffer(buf);
+				for (auto& buf : meshlet_hiz_visibility_buffers)
 					if (buf.is_valid())
 						rhi->destroy_buffer(buf);
 				for (auto& buf : instance_data_ssbos)
@@ -690,10 +744,16 @@ namespace bud::graphics {
 						indirect_instance_buffers[i] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(DrawData), ResourceState::UnorderedAccess);
 						indirect_draw_buffers[i] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(IndirectCommand), ResourceState::IndirectArgument);
 						stats_readback_buffers[i] = rhi->create_gpu_buffer(1024, ResourceState::UnorderedAccess);
+						meshlet_frustum_stats_buffers[i] = rhi->create_gpu_buffer(1024, ResourceState::UnorderedAccess);
+						meshlet_hiz_stats_buffers[i] = rhi->create_gpu_buffer(1024, ResourceState::UnorderedAccess);
+						meshlet_visibility_buffers[i] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(uint32_t), ResourceState::UnorderedAccess);
 						
 						rhi->set_debug_name(indirect_instance_buffers[i], ObjectType::Buffer, "IndirectInstanceData_Frame" + std::to_string(i));
 						rhi->set_debug_name(indirect_draw_buffers[i], ObjectType::Buffer, "IndirectDrawCommands_Frame" + std::to_string(i));
 						rhi->set_debug_name(stats_readback_buffers[i], ObjectType::Buffer, "GPUStatsReadback_Frame" + std::to_string(i));
+						rhi->set_debug_name(meshlet_frustum_stats_buffers[i], ObjectType::Buffer, "MeshletFrustumStats_Frame" + std::to_string(i));
+						rhi->set_debug_name(meshlet_hiz_stats_buffers[i], ObjectType::Buffer, "MeshletHiZStats_Frame" + std::to_string(i));
+						rhi->set_debug_name(meshlet_visibility_buffers[i], ObjectType::Buffer, "MeshletVisibility_Frame" + std::to_string(i));
 					}
 				}
 			}
@@ -704,6 +764,75 @@ namespace bud::graphics {
 				instance_data_ssbos[current_idx] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(InstanceData), ResourceState::ShaderResource);
 				rhi->set_debug_name(instance_data_ssbos[current_idx], ObjectType::Buffer, "GlobalInstanceData_Frame" + std::to_string(current_idx));
 			}
+
+			if (render_config.enable_meshlets && current_meshlet_visibility_capacity < total_meshlet_count) {
+				rhi->wait_idle();
+				for (auto& buf : meshlet_visibility_buffers) {
+					if (buf.is_valid()) {
+						rhi->destroy_buffer(buf);
+					}
+				}
+				current_meshlet_visibility_capacity = std::max(current_meshlet_visibility_capacity, total_meshlet_count);
+				for (size_t i = 0; i < meshlet_visibility_buffers.size(); ++i) {
+					meshlet_visibility_buffers[i] = rhi->create_gpu_buffer(static_cast<uint64_t>(current_meshlet_visibility_capacity) * sizeof(uint32_t), ResourceState::UnorderedAccess);
+					rhi->set_debug_name(meshlet_visibility_buffers[i], ObjectType::Buffer, "MeshletVisibility_Frame" + std::to_string(i));
+				}
+			}
+
+			if (render_config.enable_meshlets && !meshlet_visibility_buffers[current_idx].is_valid()) {
+				if (current_meshlet_visibility_capacity == 0) current_meshlet_visibility_capacity = std::max<uint32_t>(total_meshlet_count, 1024u);
+				meshlet_visibility_buffers[current_idx] = rhi->create_gpu_buffer(static_cast<uint64_t>(current_meshlet_visibility_capacity) * sizeof(uint32_t), ResourceState::UnorderedAccess);
+				rhi->set_debug_name(meshlet_visibility_buffers[current_idx], ObjectType::Buffer, "MeshletVisibility_Frame" + std::to_string(current_idx));
+			}
+
+			if (render_config.enable_meshlets && !meshlet_hiz_visibility_buffers[current_idx].is_valid()) {
+				if (current_meshlet_visibility_capacity == 0) current_meshlet_visibility_capacity = std::max<uint32_t>(total_meshlet_count, 1024u);
+				meshlet_hiz_visibility_buffers[current_idx] = rhi->create_gpu_buffer(static_cast<uint64_t>(current_meshlet_visibility_capacity) * sizeof(uint32_t), ResourceState::UnorderedAccess);
+				rhi->set_debug_name(meshlet_hiz_visibility_buffers[current_idx], ObjectType::Buffer, "MeshletHiZVisibility_Frame" + std::to_string(current_idx));
+			}
+
+			if (render_config.enable_gpu_driven && !meshlet_frustum_stats_buffers[current_idx].is_valid()) {
+				meshlet_frustum_stats_buffers[current_idx] = rhi->create_gpu_buffer(1024, ResourceState::UnorderedAccess);
+				rhi->set_debug_name(meshlet_frustum_stats_buffers[current_idx], ObjectType::Buffer, "MeshletFrustumStats_Frame" + std::to_string(current_idx));
+			}
+
+			if (render_config.enable_gpu_driven && !meshlet_hiz_stats_buffers[current_idx].is_valid()) {
+				meshlet_hiz_stats_buffers[current_idx] = rhi->create_gpu_buffer(1024, ResourceState::UnorderedAccess);
+				rhi->set_debug_name(meshlet_hiz_stats_buffers[current_idx], ObjectType::Buffer, "MeshletHiZStats_Frame" + std::to_string(current_idx));
+			}
+
+				auto& render_stats = rhi->get_render_stats();
+				const bool meshlet_pass_ready = meshlet_frustum_pass && meshlet_frustum_pass->is_ready()
+					&& heuristic_occluder_pass && heuristic_occluder_pass->is_ready()
+					&& meshlet_hiz_pass && meshlet_hiz_pass->is_ready()
+					&& meshlet_indirect_pass && meshlet_indirect_pass->is_ready();
+				bool meshlet_visibility_available = render_config.enable_gpu_driven
+					&& render_config.enable_meshlets
+					&& meshlet_rendering_enabled.load(std::memory_order_relaxed)
+					&& meshlet_pass_ready;
+				if (meshlet_visibility_available) {
+					const size_t visible_draw_count = std::min(visible_count, sort_list.size());
+					for (size_t i = 0; i < visible_draw_count; ++i) {
+						const auto& item = sort_list[i];
+						if (item.entity_index >= render_scene.mesh_indices.size()) {
+							meshlet_visibility_available = false;
+							break;
+						}
+
+						uint32_t mesh_id = render_scene.mesh_indices[item.entity_index];
+						if (mesh_id >= meshes.size() || !meshes[mesh_id].has_meshlet_data()) {
+							meshlet_visibility_available = false;
+							break;
+						}
+					}
+				}
+				render_stats.active_visibility_path = meshlet_visibility_available
+					? VisibilityPath::Meshlet
+					: VisibilityPath::InstanceFallback;
+
+				if (render_stats.active_visibility_path == VisibilityPath::Meshlet && meshlet_visibility_buffers[current_idx].is_valid()) {
+					rg_meshlet_visibility = render_graph.import_buffer("MeshletVisibility", meshlet_visibility_buffers[current_idx], ResourceState::UnorderedAccess);
+				}
 
 			// Common Instance Data Upload
 			if (visible_count > 0) {
@@ -789,6 +918,11 @@ namespace bud::graphics {
 					rg_inst = render_graph.import_buffer("IndirectInstanceData", current_inst_buf, ResourceState::UnorderedAccess);
 					rg_draw = render_graph.import_buffer("IndirectDrawCommands", current_draw_buf, ResourceState::IndirectArgument);
 					rg_stats = render_graph.import_buffer("GPUStatsReadback", current_stats_buf, ResourceState::UnorderedAccess);
+						rg_meshlet_frustum_stats = render_graph.import_buffer("MeshletFrustumStats", meshlet_frustum_stats_buffers[current_idx], ResourceState::UnorderedAccess);
+						rg_meshlet_hiz_stats = render_graph.import_buffer("MeshletHiZStats", meshlet_hiz_stats_buffers[current_idx], ResourceState::UnorderedAccess);
+						if (render_stats.active_visibility_path == VisibilityPath::Meshlet && rg_meshlet_visibility.is_valid()) {
+							meshlet_frustum_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_meshlet_frustum_stats, scene_view, render_scene, meshes, sort_list, visible_count);
+						}
 				}
 
 				// Read back previous frame stats (delayed latency) from this exact buffer which is guaranteed finished
@@ -796,6 +930,20 @@ namespace bud::graphics {
 					GPUStats* gpu_stats = static_cast<GPUStats*>(stats_readback_buffers[current_idx].mapped_ptr);
 					if (gpu_stats) {
 						last_gpu_stats = *gpu_stats;
+					}
+				}
+				if (meshlet_frustum_stats_buffers[current_idx].is_valid()) {
+					GPUStats* gpu_stats = static_cast<GPUStats*>(meshlet_frustum_stats_buffers[current_idx].mapped_ptr);
+					if (gpu_stats) {
+						rhi->get_render_stats().meshlet_frustum_total_meshlets = gpu_stats->totalMeshlets;
+						rhi->get_render_stats().meshlet_frustum_visible_meshlets = gpu_stats->visibleMeshlets;
+					}
+				}
+				if (meshlet_hiz_stats_buffers[current_idx].is_valid()) {
+					GPUStats* gpu_stats = static_cast<GPUStats*>(meshlet_hiz_stats_buffers[current_idx].mapped_ptr);
+					if (gpu_stats) {
+						rhi->get_render_stats().meshlet_hiz_total_meshlets = gpu_stats->totalMeshlets;
+						rhi->get_render_stats().meshlet_hiz_visible_meshlets = gpu_stats->visibleMeshlets;
 					}
 				}
 			}
@@ -881,6 +1029,7 @@ namespace bud::graphics {
 				rhi->get_render_stats().gpu_visible_triangles = cpu_visible_tris;
 				rhi->get_render_stats().gpu_total_meshlets = cpu_visible_meshlets;
 				rhi->get_render_stats().gpu_visible_meshlets = cpu_visible_meshlets;
+					// Preserve previously read meshlet GPU counters when meshlet rendering is disabled.
 			}
 			
 			// Push CPU Stats
@@ -902,68 +1051,83 @@ namespace bud::graphics {
 				rhi->update_global_instance_data(instance_data_ssbos[current_idx]);
 			}
 			if (visible_count > 0) {
-				// Z-Prepass ALWAYS uses CPU frustum-culling (visible_count) regardless of GPU-driven settings,
-				// as it must generate the depth buffer for Hi-Z culling itself.
-                // Build occluder subset using CPU heuristic if enabled; otherwise use full list
-                size_t occluder_count = 0;
-                if (render_config.heuristic_occluder_enable) {
-                    // Compute occluder count from fraction. Ensure 0% still draws at least one occluder,
-                    // and 100% draws all visible objects.
-                    float frac = render_config.heuristic_occluder_fraction;
-                    size_t computed = static_cast<size_t>(std::floor((float)visible_count * frac + 1e-6f));
-                    if (computed == 0) {
-                        // Interpret 0% as "very small" but still draw at least one occluder so Hi-Z has depth data
-                        computed = 1;
-                    }
+				const bool use_gpu_occluder_selection = render_config.enable_gpu_driven
+					&& render_config.enable_meshlets
+					&& render_stats.active_visibility_path == VisibilityPath::Meshlet
+					&& heuristic_occluder_pass
+					&& heuristic_occluder_pass->is_ready()
+					&& rg_draw.is_valid();
 
-                    size_t minc = static_cast<size_t>(render_config.heuristic_occluder_min_count);
-                    size_t maxc = static_cast<size_t>(render_config.heuristic_occluder_max_count);
+				size_t occluder_count = visible_count;
+				if (!use_gpu_occluder_selection) {
+					// Keep the original CPU heuristic path when meshlet GPU culling is not active.
+					if (render_config.heuristic_occluder_enable) {
+						float frac = render_config.heuristic_occluder_fraction;
+						size_t computed = static_cast<size_t>(std::floor((float)visible_count * frac + 1e-6f));
+						if (computed == 0) {
+							computed = 1;
+						}
 
-                    // Clamp into configured bounds then to visible_count
-                    occluder_count = std::clamp(computed, minc, maxc);
-                    occluder_count = std::min(occluder_count, visible_count);
-                } else {
-                    occluder_count = visible_count; // use full list when heuristic disabled
-                }
+						size_t minc = static_cast<size_t>(render_config.heuristic_occluder_min_count);
+						size_t maxc = static_cast<size_t>(render_config.heuristic_occluder_max_count);
 
-                // Fill persistent occluder list so its lifetime spans render graph execution
-                persistent_occluder_list.clear();
-                if (occluder_count > 0 && occluder_count < visible_count) {
-                    std::vector<SortItem> tmp;
-                    select_occluders_cpu(render_scene, scene_view, sort_list, visible_count, tmp, occluder_count);
-                    persistent_occluder_list = std::move(tmp);
-                } else {
-                    // Use full list
-                    persistent_occluder_list = sort_list;
-                }
-                occluder_count = persistent_occluder_list.size();
+						occluder_count = std::clamp(computed, minc, maxc);
+						occluder_count = std::min(occluder_count, visible_count);
+					}
 
-                // Ensure RenderStats reflect the actual occluder count and triangle sum
-                {
-                    uint32_t tris_sum = 0;
-                    for (const auto& it : persistent_occluder_list) {
-                        uint32_t ent = it.entity_index;
-                        if (ent >= render_scene.size()) continue;
-                        uint32_t mid = render_scene.mesh_indices[ent];
-                        if (mid >= meshes.size()) continue;
-                        const auto& m = meshes[mid];
-                        if (it.submesh_index != UINT32_MAX && it.submesh_index < m.submeshes.size())
-                            tris_sum += m.submeshes[it.submesh_index].index_count / 3;
-                        else
-                            tris_sum += m.index_count / 3;
-                    }
-                    rhi->get_render_stats().occluder_count = static_cast<uint32_t>(occluder_count);
-                    rhi->get_render_stats().occluder_triangles = tris_sum;
-                }
+					persistent_occluder_list.clear();
+					if (occluder_count > 0 && occluder_count < visible_count) {
+						std::vector<SortItem> tmp;
+						select_occluders_cpu(render_scene, scene_view, sort_list, visible_count, tmp, occluder_count);
+						persistent_occluder_list = std::move(tmp);
+					}
+					else {
+						persistent_occluder_list = sort_list;
+					}
+					occluder_count = persistent_occluder_list.size();
 
-                //bud::print("[Renderer] Depth prepass using {} occluders (visible {}).", occluder_count, visible_count);
+					uint32_t tris_sum = 0;
+					for (const auto& it : persistent_occluder_list) {
+						uint32_t ent = it.entity_index;
+						if (ent >= render_scene.size()) continue;
+						uint32_t mid = render_scene.mesh_indices[ent];
+						if (mid >= meshes.size()) continue;
+						const auto& m = meshes[mid];
+						if (it.submesh_index != UINT32_MAX && it.submesh_index < m.submeshes.size())
+							tris_sum += m.submeshes[it.submesh_index].index_count / 3;
+						else
+							tris_sum += m.index_count / 3;
+					}
+					rhi->get_render_stats().occluder_count = static_cast<uint32_t>(occluder_count);
+					rhi->get_render_stats().occluder_triangles = tris_sum;
+				}
+				else {
+					occluder_count = visible_count;
+					rhi->get_render_stats().occluder_count = static_cast<uint32_t>(occluder_count);
+					rhi->get_render_stats().occluder_triangles = 0;
+				}
 
-                auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, persistent_occluder_list, occluder_count, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
+				if (use_gpu_occluder_selection) {
+					heuristic_occluder_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count, render_config.heuristic_occluder_fraction);
+				}
+
+				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, persistent_occluder_list, occluder_count, use_gpu_occluder_selection ? rg_draw : RGHandle{}, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
 				
 				if (depth_prepass.is_valid()) {
 					if (render_config.enable_gpu_driven) {
 						auto rg_hiz = hiz_mip_pass->add_to_graph(render_graph, depth_prepass, render_config);
-						hiz_pass->add_to_graph(render_graph, rg_inst, rg_draw, rg_stats, rg_hiz, scene_view, (uint32_t)visible_count);
+						if (meshlet_visibility_available
+							&& meshlet_hiz_pass
+							&& rg_meshlet_visibility.is_valid()
+							&& rg_meshlet_hiz_visibility.is_valid()
+							&& rg_meshlet_hiz_stats.is_valid()) {
+							meshlet_hiz_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_meshlet_hiz_visibility, rg_meshlet_hiz_stats, rg_hiz, scene_view, render_scene, meshes, sort_list, visible_count);
+							if (meshlet_indirect_pass && rg_draw.is_valid()) {
+								meshlet_indirect_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_hiz_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count);
+							}
+						} else {
+							hiz_pass->add_to_graph(render_graph, rg_inst, rg_draw, rg_stats, rg_hiz, scene_view, (uint32_t)visible_count);
+						}
 
 						if (render_config.debug_hiz) {
 							hiz_debug_pass->add_to_graph(render_graph, back_buffer, rg_hiz, render_config.debug_hiz_mip);
@@ -974,6 +1138,7 @@ namespace bud::graphics {
 					for (uint32_t i = 0; i < cascade_count; ++i) csm_visible_instances[i] = std::move(culled_results[i + 1]);
 
 					auto shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), geometry_pool.vertex_buffer, geometry_pool.index_buffer);
+
 					if (shadow_map.is_valid()) {
 						if (render_config.enable_cluster_visualization) {
 							cluster_viz_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
@@ -1055,6 +1220,15 @@ namespace bud::graphics {
 
 	const RenderConfig& Renderer::get_config() const {
 		return render_config;
+	}
+
+	void Renderer::request_meshlet_rendering_enabled(bool enabled) {
+		meshlet_rendering_toggle_value.store(enabled, std::memory_order_relaxed);
+		meshlet_rendering_toggle_pending.store(true, std::memory_order_release);
+	}
+
+	bool Renderer::is_meshlet_rendering_enabled() const {
+		return meshlet_rendering_enabled.load(std::memory_order_relaxed);
 	}
 
 	const void* Renderer::get_readback_pixels() const {

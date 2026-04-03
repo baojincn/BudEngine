@@ -43,28 +43,42 @@ namespace bud {
 	Logger::Logger(const std::filesystem::path& root_dir) {
 		backend_mask.store(LogBackend_Console | LogBackend_DebugOutput);
 
-		if (!root_dir.empty()) {
-			auto make_timestamp = []() -> std::string {
-				using namespace std::chrono;
-				auto now = system_clock::now();
-				std::time_t t = system_clock::to_time_t(now);
-				std::tm tm_info{};
+		// Ensure logs are written under a `log/` directory. If `root_dir` is empty,
+		// fall back to the current working directory. Create the directory if it
+		// does not already exist.
+		auto make_timestamp = []() -> std::string {
+			using namespace std::chrono;
+			auto now = system_clock::now();
+			std::time_t t = system_clock::to_time_t(now);
+			std::tm tm_info{};
 #ifdef _WIN32
-				localtime_s(&tm_info, &t);
+			localtime_s(&tm_info, &t);
 #else
-				localtime_r(&t, &tm_info);
+			localtime_r(&t, &tm_info);
 #endif
-				std::ostringstream ss;
-				ss << std::put_time(&tm_info, "%Y%m%d_%H%M%S");
-				return ss.str();
-				};
+			std::ostringstream ss;
+			ss << std::put_time(&tm_info, "%Y%m%d_%H%M%S");
+			return ss.str();
+		};
 
-			auto ts = make_timestamp();
-			auto log_path = root_dir / ("bud_" + ts + ".log");
+		auto ts = make_timestamp();
+		std::filesystem::path dir;
+		if (!root_dir.empty()) {
+			dir = root_dir / "log";
+		} else {
+			dir = std::filesystem::current_path() / "log";
+		}
+
+		std::error_code ec;
+		std::filesystem::create_directories(dir, ec);
+		if (ec) {
+			bud::eprint("[Logger] Failed to create log directory '{}': {}", dir.string(), ec.message());
+		} else {
+			auto log_path = dir / ("bud_" + ts + ".log");
 			set_log_file(log_path.string());
 		}
 
-		is_running = true;
+		is_running.store(true, std::memory_order_release);
 		logger_thread = std::thread(&Logger::io_thread_loop, this);
 	}
 
@@ -87,12 +101,22 @@ namespace bud {
 		}
 
 		if (!path.empty()) {
+			// Ensure parent directory exists
+			std::filesystem::path p(path);
+			std::filesystem::path dir = p.parent_path();
+			if (!dir.empty()) {
+				std::error_code ec;
+				std::filesystem::create_directories(dir, ec);
+				if (ec) {
+					bud::eprint("[Logger] Failed to create log directory '{}': {}", dir.string(), ec.message());
+				}
+			}
+
 			log_file_path = path;
 			file_stream.open(path, std::ios::app);
 			if (file_stream) {
 				backend_mask.fetch_or(LogBackend_File, std::memory_order_relaxed);
-			}
-			else {
+			} else {
 				backend_mask.fetch_and(~LogBackend_File, std::memory_order_relaxed);
 				std::println(stderr, "[Logger] FATAL: Can't open : {}", path);
 			}
@@ -104,12 +128,13 @@ namespace bud {
 	}
 
 	void Logger::enqueue_log(const std::string& msg, bool is_error) {
-		if (!is_running) return;
+		if (!is_running.load(std::memory_order_acquire)) return;
 
 		std::string full_msg = make_log_prefix() + msg;
 
 		{
 			std::lock_guard<std::mutex> lock(log_writter_mutex);
+			if (!is_running.load(std::memory_order_acquire)) return;
 			log_queue.push_back({ std::move(full_msg), is_error });
 		}
 
@@ -140,13 +165,8 @@ namespace bud {
 	}
 
 	void Logger::stop() {
-		{
-			std::lock_guard<std::mutex> lock(log_writter_mutex);
-			if (!is_running)
-				return; // 防止重复 stop
-
-			is_running = false;
-		}
+		if (!is_running.exchange(false, std::memory_order_acq_rel))
+			return; // 防止重复 stop
 
 		resource_condition_guard.notify_all();
 
@@ -167,10 +187,10 @@ namespace bud {
 			{
 				std::unique_lock<std::mutex> lock(log_writter_mutex);
 				resource_condition_guard.wait(lock, [this]() {
-					return !log_queue.empty() || !is_running;
+					return !log_queue.empty() || !is_running.load(std::memory_order_acquire);
 					});
 
-				if (log_queue.empty() && !is_running) {
+				if (log_queue.empty() && !is_running.load(std::memory_order_acquire)) {
 					break;
 				}
 
