@@ -57,7 +57,11 @@ namespace bud::graphics {
 	};
 
 	class HeuristicOccluderSelectionPass : public RenderPass {
+		void* histogram_pipeline = nullptr;
+		void* prefix_sum_pipeline = nullptr;
 		bud::graphics::BufferHandle config_ubo;
+		bud::graphics::BufferHandle histogram_buffer;
+		uint32_t frame_counter = 0;
 	public:
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		void shutdown(RHI* rhi) override;

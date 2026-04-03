@@ -1,6 +1,6 @@
 #version 460
 
-layout(local_size_x = 1) in;
+layout(local_size_x = 256) in;
 
 struct draw_data {
     uint index_count;
@@ -35,13 +35,16 @@ layout(std430, set = 0, binding = 2) buffer IndirectDrawBuffer {
     indirect_command data[];
 } indirect_draw;
 
-layout(std430, set = 0, binding = 3) buffer StatsBuffer {
+layout(std430, set = 0, binding = 3) coherent buffer StatsBuffer {
     uint total_instances;
     uint visible_instances;
     uint total_triangles;
     uint visible_triangles;
     uint total_meshlets;
     uint visible_meshlets;
+    uint heuristic_total_count;
+    uint heuristic_cutoff_bucket;
+    uint heuristic_remaining;
 } stats;
 
 layout(set = 0, binding = 4) uniform uniform_buffer_object {
@@ -58,9 +61,12 @@ layout(set = 0, binding = 4) uniform uniform_buffer_object {
     uint reversed_z;
 } ubo;
 
-// Pass-specific occluder fraction (uploaded per-frame by HeuristicOccluderSelectionPass)
-layout(std430, set = 0, binding = 5) readonly buffer HeuristicConfig {
+// Pass-specific configuration and selection thresholds
+layout(std430, set = 0, binding = 5) buffer HeuristicConfig {
     float fraction;
+    uint cutoff_bucket;
+    uint remaining_in_cutoff;
+    uint cutoff_counter;
 } heuristic_config;
 
 bool aabb_visible(vec3 bmin, vec3 bmax)
@@ -103,9 +109,14 @@ float score_draw(draw_data draw)
     return area / depth + triangle_bias + float(draw.meshlet_count) * 0.001;
 }
 
+layout(push_constant) uniform PushConstants {
+    uint total_instances;
+} pc;
+
 void main()
 {
     uint draw_index = gl_GlobalInvocationID.x;
+    if (draw_index >= pc.total_instances) return;
 
     draw_data draw = instance_data.data[draw_index];
     uint meshlet_visible_hint = meshlet_visibility.data[draw_index];
@@ -115,8 +126,30 @@ void main()
     atomicAdd(stats.total_meshlets, draw.meshlet_count);
 
 	bool visible = aabb_visible(draw.min, draw.max);
-	float heuristic_score = visible ? score_draw(draw) : 0.0;
-	bool selected = visible && (heuristic_score > 0.0 || meshlet_visible_hint != 0u);
+    bool selected = false;
+
+    if (visible) {
+        if (meshlet_visible_hint != 0u) {
+            // Temporal hint forces bypass (guaranteed selection)
+            selected = true;
+        } else {
+            // Recompute score and bucket identity
+            float score = score_draw(draw);
+            if (score > 0.0) {
+                float compressed = log2(1.0 + score * 10.0) * 150.0;
+                uint bucket = uint(clamp(compressed, 0.0, 2047.0));
+
+                if (bucket > heuristic_config.cutoff_bucket) {
+                    selected = true;
+                } else if (bucket == heuristic_config.cutoff_bucket) {
+                    uint pos = atomicAdd(heuristic_config.cutoff_counter, 1u);
+                    if (pos < heuristic_config.remaining_in_cutoff) {
+                        selected = true;
+                    }
+                }
+            }
+        }
+    }
 
     indirect_command command;
     command.index_count = draw.index_count;

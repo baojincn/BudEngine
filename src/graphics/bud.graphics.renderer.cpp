@@ -1101,14 +1101,25 @@ namespace bud::graphics {
 					rhi->get_render_stats().occluder_count = static_cast<uint32_t>(occluder_count);
 					rhi->get_render_stats().occluder_triangles = tris_sum;
 				}
+				float effective_fraction = 1.0f;
+				if (render_config.heuristic_occluder_enable && visible_count > 0) {
+					uint32_t target_count = static_cast<uint32_t>(static_cast<float>(visible_count) * render_config.heuristic_occluder_fraction);
+					target_count = std::clamp(target_count, render_config.heuristic_occluder_min_count, render_config.heuristic_occluder_max_count);
+					target_count = std::min(target_count, static_cast<uint32_t>(visible_count));
+					effective_fraction = static_cast<float>(target_count) / static_cast<float>(visible_count);
+					occluder_count = target_count;
+				}
 				else {
 					occluder_count = visible_count;
-					rhi->get_render_stats().occluder_count = static_cast<uint32_t>(occluder_count);
-					rhi->get_render_stats().occluder_triangles = 0;
 				}
 
+				rhi->get_render_stats().occluder_count = static_cast<uint32_t>(occluder_count);
+
 				if (use_gpu_occluder_selection) {
-					heuristic_occluder_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count, render_config.heuristic_occluder_fraction);
+					heuristic_occluder_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count, effective_fraction);
+				}
+				else {
+					rhi->get_render_stats().occluder_triangles = 0; // Handled by CPU path above if !use_gpu
 				}
 
 				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, persistent_occluder_list, occluder_count, use_gpu_occluder_selection ? rg_draw : RGHandle{}, geometry_pool.vertex_buffer, geometry_pool.index_buffer);

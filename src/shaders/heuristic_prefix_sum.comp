@@ -1,0 +1,76 @@
+#version 460
+
+layout(local_size_x = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer HistogramBuffer {
+    uint counts[2048];
+} histogram;
+
+layout(std430, set = 0, binding = 5) buffer HeuristicConfig {
+    float fraction;
+    uint cutoff_bucket;
+    uint remaining_in_cutoff;
+    uint cutoff_counter;
+} heuristic_config;
+
+layout(std430, set = 0, binding = 3) coherent buffer StatsBuffer {
+    layout(offset = 0) uint total_instances;
+    layout(offset = 4) uint visible_instances;
+    layout(offset = 8) uint total_triangles;
+    layout(offset = 12) uint visible_triangles;
+    layout(offset = 16) uint total_meshlets;
+    layout(offset = 20) uint visible_meshlets;
+    layout(offset = 24) uint heuristic_total_count;
+    layout(offset = 28) uint heuristic_cutoff_bucket;
+    layout(offset = 32) uint heuristic_remaining;
+} stats;
+
+void main()
+{
+    // 1. Calculate total items in the histogram
+    uint total_items = 0;
+    for (int i = 0; i < 2048; ++i) {
+        total_items += histogram.counts[i];
+    }
+
+    // 2. Determine target selection K
+    uint K = uint(ceil(float(total_items) * heuristic_config.fraction));
+
+    uint target_bucket = 0;
+    uint remaining = 0;
+    uint accumulated = 0;
+
+    if (K == 0) {
+        target_bucket = 2047;
+        remaining = 0;
+    } else {
+        // 3. Find the cutoff bucket from top to bottom
+        for (int i = 2047; i >= 0; --i) {
+            uint count = histogram.counts[i];
+            if (accumulated + count >= K) {
+                target_bucket = i;
+                // The remaining amount to pick from this specific bucket
+                if (K > accumulated) {
+                    remaining = K - accumulated;
+                } else {
+                    remaining = 0;
+                }
+                break;
+            }
+            accumulated += count;
+        }
+    }
+
+    // Edge case: if fraction is 1.0 or K is larger than total, 
+    // it will run through to bucket 0 and target_bucket=0, remaining ensures all taken.
+
+    // 4. Output the cutoff data
+    heuristic_config.cutoff_bucket = target_bucket;
+    heuristic_config.remaining_in_cutoff = remaining;
+    heuristic_config.cutoff_counter = 0; // Initialize atomic counter for Pass 2
+
+    // 5. Output Debug Stats
+    stats.heuristic_total_count = total_items;
+    stats.heuristic_cutoff_bucket = target_bucket;
+    stats.heuristic_remaining = remaining;
+}

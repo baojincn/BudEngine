@@ -1,4 +1,4 @@
-﻿#include "bud.stats.ui.hpp"
+#include "bud.stats.ui.hpp"
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <cmath>
@@ -217,7 +217,7 @@ namespace bud::ui {
 				};
 
 				if (current_meshlet_rendering_enable) {
-					ImGui::TextColored(color_neutral, "Meshlet Rendering [On]");
+					ImGui::TextColored(color_neutral, "Occluders: %u", display_occluder_count);
 					draw_heuristic_occluder_controls();
 
 					ImGui::Separator();

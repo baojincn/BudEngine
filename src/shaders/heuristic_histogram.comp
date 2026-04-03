@@ -1,0 +1,116 @@
+#version 460
+
+layout(local_size_x = 256) in;
+
+struct draw_data {
+    uint index_count;
+    uint first_index;
+    int vertex_offset;
+    uint material_id;
+    vec3 min;
+    uint mesh_id;
+    vec3 max;
+    uint padding_0;
+    uint meshlet_count;
+    uint padding_1[3];
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer InstanceDataBuffer {
+    draw_data data[];
+} instance_data;
+
+layout(std430, set = 0, binding = 1) readonly buffer MeshletVisibilityBuffer {
+    uint data[];
+} meshlet_visibility;
+
+layout(std430, set = 0, binding = 2) buffer HistogramBuffer {
+    uint counts[2048];
+} histogram;
+
+layout(set = 0, binding = 4) uniform uniform_buffer_object {
+    mat4 view;
+    mat4 proj;
+    mat4 cascade_view_proj[4];
+    vec4 cascade_split_depths;
+    vec3 cam_pos;
+    vec3 light_dir;
+    vec3 light_color;
+    float light_intensity;
+    float ambient_strength;
+    uint cascade_count;
+    uint reversed_z;
+} ubo;
+
+bool aabb_visible(vec3 bmin, vec3 bmax)
+{
+    mat4 clip_matrix = transpose(ubo.proj * ubo.view);
+    vec4 planes[6] = {
+        clip_matrix[3] + clip_matrix[0],
+        clip_matrix[3] - clip_matrix[0],
+        clip_matrix[3] + clip_matrix[1],
+        clip_matrix[3] - clip_matrix[1],
+        clip_matrix[3] + clip_matrix[2],
+        clip_matrix[3] - clip_matrix[2]
+    };
+
+    for (int i = 0; i < 6; ++i) {
+        float plane_length = length(planes[i].xyz);
+        if (plane_length > 0.0) {
+            planes[i] /= plane_length;
+        }
+
+        vec3 positive_vertex = vec3(
+            planes[i].x >= 0.0 ? bmax.x : bmin.x,
+            planes[i].y >= 0.0 ? bmax.y : bmin.y,
+            planes[i].z >= 0.0 ? bmax.z : bmin.z);
+
+        if (dot(planes[i].xyz, positive_vertex) + planes[i].w < 0.0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+float score_draw(draw_data draw)
+{
+    vec3 extent = max(draw.max - draw.min, vec3(0.0));
+    float area = max(extent.x * extent.y + extent.y * extent.z + extent.z * extent.x, 1e-4);
+    float depth = max(distance(ubo.cam_pos, (draw.min + draw.max) * 0.5), 1e-3);
+    float triangle_bias = float(draw.index_count / 3u) * 0.0001;
+    return area / depth + triangle_bias + float(draw.meshlet_count) * 0.001;
+}
+
+layout(push_constant) uniform PushConstants {
+    uint total_instances;
+} pc;
+
+void main()
+{
+    uint draw_index = gl_GlobalInvocationID.x;
+    if (draw_index >= pc.total_instances) return;
+
+    draw_data draw = instance_data.data[draw_index];
+    uint meshlet_visible_hint = meshlet_visibility.data[draw_index];
+
+    // If temporal hint says visible, we BYPASS the heuristic fractional selection.
+    // So we DO NOT add it to the histogram budget to preserve accurate selection fractions for new/unhinted ones.
+    if (meshlet_visible_hint != 0u) {
+        return;
+    }
+
+    bool visible = aabb_visible(draw.min, draw.max);
+    if (!visible) return;
+
+    float score = score_draw(draw);
+    if (score <= 0.0) return;
+
+    // Normalize and bucketize the score. Needs tuning, using log2 / mapping.
+    // Assuming scores range from ~0.1 to large values (like 1000.0). We compress using log2 or log(1.0 + x).
+    // A simple non-linear mapping:
+    // log2(1.0 + score * 100.0) mapping the range into [0, 2047].
+    float compressed = log2(1.0 + score * 10.0) * 150.0; 
+    uint bucket = uint(clamp(compressed, 0.0, 2047.0));
+
+    atomicAdd(histogram.counts[bucket], 1u);
+}

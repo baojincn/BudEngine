@@ -9,6 +9,7 @@
 #include <imgui.h>
 #include <format>
 #include <atomic>
+#include <chrono>
 #include "src/graphics/bud.graphics.passes.hpp"
 
 #include "src/io/bud.io.hpp"
@@ -150,9 +151,9 @@ namespace bud::graphics {
 				}
 
 				// Clear stats buffer (all counters = 0)
-				GPUStats zero_stats{};
+				bud::graphics::GPUStats zero_stats{};
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(GPUStats), &zero_stats);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(bud::graphics::GPUStats), &zero_stats);
 
 				// Barrier: ensure the UpdateBuffer write is visible to the compute shader
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
@@ -240,9 +241,9 @@ namespace bud::graphics {
 #endif
 				}
 
-				GPUStats zero_stats{};
+				bud::graphics::GPUStats zero_stats{};
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(GPUStats), &zero_stats);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(bud::graphics::GPUStats), &zero_stats);
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
 
 				rhi->cmd_bind_pipeline(cmd, pipeline);
@@ -316,25 +317,47 @@ namespace bud::graphics {
 #endif
 		}
 
-		load_shaders_async(asset_manager, { "src/shaders/heuristic_occluder_select.comp.spv" }, [this, rhi](const auto& shaders) {
+		load_shaders_async(asset_manager, { 
+            "src/shaders/heuristic_histogram.comp.spv",
+            "src/shaders/heuristic_prefix_sum.comp.spv",
+            "src/shaders/heuristic_occluder_select.comp.spv"
+        }, [this, rhi](const auto& shaders) {
 			ComputePipelineDesc desc;
 			desc.layout_kind = ComputePipelineDesc::LayoutKind::HeuristicOccluder;
+            
 			desc.cs.code = shaders[0];
-			pipeline = rhi->create_compute_pipeline(desc);
-			if (pipeline) {
-				bud::print("[HeuristicOccluderSelectionPass] Shader loaded and pipeline created.");
+			histogram_pipeline = rhi->create_compute_pipeline(desc);
+
+            desc.cs.code = shaders[1];
+            prefix_sum_pipeline = rhi->create_compute_pipeline(desc);
+
+            desc.cs.code = shaders[2];
+            pipeline = rhi->create_compute_pipeline(desc);
+
+			if (histogram_pipeline && prefix_sum_pipeline && pipeline) {
+				bud::print("[HeuristicOccluderSelectionPass] Shaders loaded and 3 pipelines created.");
 			}
 		});
 
 		config_ubo = rhi->create_gpu_buffer(sizeof(float) * 4, bud::graphics::ResourceState::UnorderedAccess);
+        histogram_buffer = rhi->create_gpu_buffer(sizeof(uint32_t) * 2048, bud::graphics::ResourceState::UnorderedAccess);
 	}
 
 	void HeuristicOccluderSelectionPass::shutdown(RHI* rhi) {
-		if (config_ubo.is_valid()) {
-			rhi->destroy_buffer(config_ubo);
-			config_ubo = {};
-		}
+        if (histogram_pipeline) { rhi->destroy_pipeline(histogram_pipeline); histogram_pipeline = nullptr; }
+        if (prefix_sum_pipeline) { rhi->destroy_pipeline(prefix_sum_pipeline); prefix_sum_pipeline = nullptr; }
+        if (pipeline) { rhi->destroy_pipeline(pipeline); pipeline = nullptr; }
+
+		if (config_ubo.is_valid()) { rhi->destroy_buffer(config_ubo); config_ubo = {}; }
+        if (histogram_buffer.is_valid()) { rhi->destroy_buffer(histogram_buffer); histogram_buffer = {}; }
 	}
+
+	struct HeuristicConfigLayout {
+		float fraction;
+		uint32_t cutoff_bucket;
+		uint32_t remaining;
+		uint32_t counter;
+	};
 
 	RGHandle HeuristicOccluderSelectionPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, float occluder_fraction) {
 		if (!pipeline) {
@@ -378,26 +401,137 @@ namespace bud::graphics {
 #endif
 				}
 
-				GPUStats zero_stats{};
-				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(GPUStats), &zero_stats);
-				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+				// --- Async Debug Logging (Previous Frame Results) ---
+				frame_counter++;
+				if (frame_counter % 240 == 0) {
+					// 1. Histogram Summary
+					uint32_t* host_histogram = static_cast<uint32_t*>(histogram_buffer.mapped_ptr);
+					uint32_t histogram_sum = 0;
+					uint32_t max_bucket_val = 0;
+					uint32_t max_bucket_idx = 0;
+					if (host_histogram) {
+						for (int i = 0; i < 2048; ++i) {
+							histogram_sum += host_histogram[i];
+							if (host_histogram[i] > max_bucket_val) {
+								max_bucket_val = host_histogram[i];
+								max_bucket_idx = i;
+							}
+						}
+					}
+					
+					// 2. Cutoff results from config_ubo
+					HeuristicConfigLayout* host_config = static_cast<HeuristicConfigLayout*>(config_ubo.mapped_ptr);
 
-				rhi->cmd_bind_pipeline(cmd, pipeline);
-				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
-				rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, vis_buf);
-				rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, ind_buf);
-				rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, stat_buf);
-				rhi->cmd_bind_compute_ubo(cmd, pipeline, 4);
+					// 4. Stats Buffer
+					bud::graphics::GPUStats* host_stats = static_cast<bud::graphics::GPUStats*>(stat_buf.mapped_ptr);
+
+					// 5. Indirect Buffer Emit
+					IndirectCommand* host_ind = static_cast<IndirectCommand*>(ind_buf.mapped_ptr);
+					uint32_t total_emitted_instances = 0;
+					if (host_ind && host_stats) {
+						// Note: host_stats->visibleInstances is the number of indirect commands emitted
+						for (uint32_t i = 0; i < host_stats->visibleInstances; ++i) {
+							total_emitted_instances += host_ind[i].instance_count;
+						}
+					}
+					else if (!host_ind) {
+						bud::eprint("[HeuStats][Warning] IndirectDrawBuffer is NOT host-mapped! Cannot verify emitted count.");
+					}
+
+					bud::print("[HeuStats][Histogram] total={} buckets=2048 dispatched={}", histogram_sum, static_cast<uint32_t>(visible_count));
+					if (host_config) {
+						bud::print("[HeuStats][Cutoff] frac={:.3f} bucket={} remaining={} counter={}", host_config->fraction, host_config->cutoff_bucket, host_config->remaining, host_config->counter);
+						bud::print("[HeuStats][CutoffCounter] final={} expected_remaining={}", host_config->counter, host_config->remaining);
+					}
+					if (host_stats) {
+						bud::print("[HeuStats][Stats] total={} vis={} tri_total={} tri_vis={} meshlet_total={} meshlet_vis={}", host_stats->totalInstances, host_stats->visibleInstances, host_stats->totalTriangles, host_stats->visibleTriangles, host_stats->totalMeshlets, host_stats->visibleMeshlets);
+						bud::print("[HeuStats][Heuristics] heu_total={} heu_cutoff_bucket={} heu_remaining={}", host_stats->heuristicTotalCount, host_stats->heuristicCutoffBucket, host_stats->heuristicRemaining);
+					}
+					bud::print("[HeuStats][Indirect] emitted={} expected_vis={}", total_emitted_instances, (host_stats ? host_stats->visibleInstances : 0));
+					if (host_ind && host_stats && host_stats->visibleInstances > 0) {
+						bud::print("[HeuStats][Sample] sample0=(inst={} first_inst={})", host_ind[0].instance_count, host_ind[0].first_instance);
+					}
+					if (host_stats && host_stats->visibleInstances > 0 && total_emitted_instances == 0) {
+						bud::eprint("[HeuStats][Error] Discrepancy: Stats show {} visible instances, but IndirectBuffer emitted 0!", host_stats->visibleInstances);
+					}
+					bud::print("[HeuStats][Hotspot] max_count={} bucket={}", max_bucket_val, max_bucket_idx);
+				}
+
+				bud::graphics::GPUStats zero_stats{};
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(bud::graphics::GPUStats), &zero_stats);
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
 
 				// Upload occluder fraction to per-pass storage buffer and bind at binding = 5
 				rhi->resource_barrier(cmd, config_ubo, ResourceState::UnorderedAccess, ResourceState::TransferDst);
 				rhi->cmd_copy_to_buffer(cmd, config_ubo, 0, sizeof(float), &occluder_fraction);
 				rhi->resource_barrier(cmd, config_ubo, ResourceState::TransferDst, ResourceState::UnorderedAccess);
-				rhi->cmd_bind_storage_buffer(cmd, pipeline, 5, config_ubo);
 
-				uint32_t group_x = static_cast<uint32_t>(visible_count);
+				// Zero out Histogram and Cutoff part of config_ubo
+				uint32_t zero_histogram[2048] = {0};
+				uint32_t zero_cutoff_data[3] = {0}; // cutoff_bucket, remaining, counter
+				
+				rhi->resource_barrier(cmd, histogram_buffer, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, histogram_buffer, 0, sizeof(uint32_t) * 2048, zero_histogram);
+				rhi->resource_barrier(cmd, histogram_buffer, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				rhi->resource_barrier(cmd, config_ubo, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, config_ubo, sizeof(float), sizeof(uint32_t) * 3, zero_cutoff_data);
+				rhi->resource_barrier(cmd, config_ubo, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				uint32_t dispatch_instances = static_cast<uint32_t>(visible_count);
+				uint32_t push_constant = dispatch_instances;
+
+				auto start_time = std::chrono::high_resolution_clock::now();
+
+				// --- Pass 0: Histogram ---
+				rhi->cmd_bind_pipeline(cmd, histogram_pipeline);
+				rhi->cmd_push_constants(cmd, histogram_pipeline, sizeof(uint32_t), &push_constant);
+				rhi->cmd_bind_storage_buffer(cmd, histogram_pipeline, 0, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, histogram_pipeline, 1, vis_buf);
+				rhi->cmd_bind_storage_buffer(cmd, histogram_pipeline, 2, histogram_buffer);
+				rhi->cmd_bind_compute_ubo(cmd, histogram_pipeline, 4);
+				uint32_t group_x = (dispatch_instances + 255) / 256;
 				rhi->cmd_dispatch(cmd, group_x, 1, 1);
+
+				// Memory Barrier before Pass 1 so histogram is written
+				rhi->resource_barrier(cmd, histogram_buffer, ResourceState::UnorderedAccess, ResourceState::UnorderedAccess);
+
+				auto t1 = std::chrono::high_resolution_clock::now();
+
+				// --- Pass 1: Prefix Sum ---
+				rhi->cmd_bind_pipeline(cmd, prefix_sum_pipeline);
+				rhi->cmd_bind_storage_buffer(cmd, prefix_sum_pipeline, 0, histogram_buffer);
+				rhi->cmd_bind_storage_buffer(cmd, prefix_sum_pipeline, 3, stat_buf); // Pass 1 sets summary GPU stats
+				rhi->cmd_bind_compute_ubo(cmd, prefix_sum_pipeline, 4); // Added missing UBO binding for complete descriptor set
+				rhi->cmd_bind_storage_buffer(cmd, prefix_sum_pipeline, 5, config_ubo);
+				rhi->cmd_dispatch(cmd, 1, 1, 1);
+
+				// Memory Barrier before Pass 2 so cutoff data and stats summary are written
+				rhi->resource_barrier(cmd, config_ubo, ResourceState::UnorderedAccess, ResourceState::UnorderedAccess);
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::UnorderedAccess);
+
+				auto t2 = std::chrono::high_resolution_clock::now();
+
+				// --- Pass 2: Selection & Emit ---
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_push_constants(cmd, pipeline, sizeof(uint32_t), &push_constant);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, vis_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, ind_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, stat_buf);
+				rhi->cmd_bind_compute_ubo(cmd, pipeline, 4);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 5, config_ubo);
+				rhi->cmd_dispatch(cmd, group_x, 1, 1);
+
+				auto end_time = std::chrono::high_resolution_clock::now();
+
+				if (frame_counter % 240 == 0) {
+					std::chrono::duration<float, std::milli> p0 = t1 - start_time;
+					std::chrono::duration<float, std::milli> p1 = t2 - t1;
+					std::chrono::duration<float, std::milli> p2 = end_time - t2;
+					bud::print("[HeuStats][Timing] pass0={:.3f}ms pass1={:.3f}ms pass2={:.3f}ms total={:.3f}ms", p0.count(), p1.count(), p2.count(), p0.count() + p1.count() + p2.count());
+				}
 			}
 		);
 	}
@@ -469,9 +603,9 @@ namespace bud::graphics {
 #endif
 				}
 
-				GPUStats zero_stats{};
+				bud::graphics::GPUStats zero_stats{};
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(GPUStats), &zero_stats);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(bud::graphics::GPUStats), &zero_stats);
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
 
 				rhi->cmd_bind_pipeline(cmd, pipeline);
@@ -600,9 +734,9 @@ namespace bud::graphics {
 #endif
 				}
 
-				GPUStats zero_stats{};
+				bud::graphics::GPUStats zero_stats{};
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(GPUStats), &zero_stats);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(bud::graphics::GPUStats), &zero_stats);
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
 
 				rhi->cmd_bind_pipeline(cmd, pipeline);

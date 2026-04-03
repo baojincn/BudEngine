@@ -615,8 +615,10 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
 	VmaAllocationCreateInfo alloc_info = {};
 	alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
 	
-	// For UAV/TransferSrc buffers (like our stats counter), ensure host access so we can map it for readback.
-	if (usage_state == bud::graphics::ResourceState::UnorderedAccess || (buffer_info.usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+	// For UAV/TransferSrc/IndirectArgument buffers (like our stats counter), ensure host access so we can map it for readback.
+	if (usage_state == bud::graphics::ResourceState::UnorderedAccess 
+        || usage_state == bud::graphics::ResourceState::IndirectArgument
+        || (buffer_info.usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
 		alloc_info.flags |= VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
 		alloc_info.requiredFlags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 	}

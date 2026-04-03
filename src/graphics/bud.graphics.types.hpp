@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstdint>
 #include <vector>
@@ -153,7 +153,7 @@ namespace bud::graphics {
         bool heuristic_occluder_enable = true; // enable heuristic occluder selection by default
         float heuristic_occluder_fraction = 0.3f; // select top 30% as occluders by default
         uint32_t heuristic_occluder_min_count = 1;
-        uint32_t heuristic_occluder_max_count = 4096;
+        uint32_t heuristic_occluder_max_count = 500;
         float heuristic_occluder_tri_weight = 1e-4f; // multiplier for triangle count in score
 	};
 
@@ -347,6 +347,9 @@ namespace bud::graphics {
 		uint32_t visibleTriangles = 0;
 		uint32_t totalMeshlets = 0;
 		uint32_t visibleMeshlets = 0;
+		uint32_t heuristicTotalCount = 0;
+		uint32_t heuristicCutoffBucket = 0;
+		uint32_t heuristicRemaining = 0;
 	};
 
 	enum class VisibilityPath {
@@ -392,9 +395,12 @@ namespace bud::graphics {
 		uint32_t cpu_total_meshlets = 0;
 		uint32_t cpu_visible_meshlets = 0;
 
-		// ML Occluder Stats
+		// Neural/Heuristic Occluder Stats
 		uint32_t occluder_count = 0;
 		uint32_t occluder_triangles = 0;
+		uint32_t heuristic_total_count = 0;
+		uint32_t heuristic_cutoff_bucket = 0;
+		uint32_t heuristic_remaining = 0;
 
 		uint32_t shadow_casters = 0;
 		uint32_t shadow_caster_submeshes = 0;
@@ -426,6 +432,9 @@ namespace bud::graphics {
 			cpu_visible_meshlets = 0;
 			occluder_count = 0;
 			occluder_triangles = 0;
+			heuristic_total_count = 0;
+			heuristic_cutoff_bucket = 0;
+			heuristic_remaining = 0;
 			shadow_casters = 0;
 			shadow_caster_submeshes = 0;
 		}
