@@ -9,6 +9,7 @@
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.math.hpp"
 #include "src/graphics/bud.graphics.scene.hpp"
+#include "src/graphics/bud.graphics.gpu_scene.hpp"
 #include "src/graphics/bud.graphics.sortkey.hpp"
 
 #include "src/graphics/bud.graphics.types.hpp"
@@ -62,20 +63,6 @@ namespace bud::graphics {
 			std::vector<std::function<void()>> commands;
 		};
 
-		// Global Geometry Pool (Mega-Buffer) that all meshes are packed into
-		struct GeometryPool {
-			static constexpr uint64_t kVertexPoolSize = 256ull * 1024 * 1024; // 256 MB
-			static constexpr uint64_t kIndexPoolSize  = 128ull * 1024 * 1024; // 128 MB
-
-			bud::graphics::BufferHandle vertex_buffer;
-			bud::graphics::BufferHandle index_buffer;
-
-			std::atomic<uint32_t> next_vertex{ 0 }; // in vertices
-			std::atomic<uint32_t> next_index{ 0 };  // in indices
-
-			bool initialized = false;
-		};
-
 		void update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb);
 
 		// CPU heuristic occluder selection (prototype)
@@ -115,8 +102,7 @@ namespace bud::graphics {
 		std::atomic<bool> meshlet_rendering_toggle_value{ true };
 
 		GPUStats last_gpu_stats{};
-
-		GeometryPool geometry_pool;
+		GPUScene gpu_scene;
 
 		std::vector<RenderMesh> meshes;
 		std::vector<bud::math::AABB> mesh_bounds;

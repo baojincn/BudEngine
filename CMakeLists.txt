@@ -219,6 +219,7 @@ target_sources(bud_engine_core
 		"src/ui/bud.stats.ui.cpp"
 		"src/graphics/bud.graphics.cpp"
 		"src/graphics/bud.graphics.scene.cpp"
+		"src/graphics/bud.graphics.gpu_scene.cpp"
         "src/graphics/bud.graphics.passes.cpp"
 		"src/graphics/bud.graphics.graph.cpp"
 		"src/graphics/bud.graphics.renderer.cpp"
@@ -255,6 +256,7 @@ target_sources(bud_engine_core
 		"src/threading/bud.threading.hpp"
 		"src/runtime/bud.input.hpp"
 		"src/runtime/bud.scene.hpp"
+		"src/graphics/bud.graphics.gpu_scene.hpp"
 		"src/runtime/bud.camera_sequencer.hpp"
 
 		"src/ui/bud.stats.ui.hpp"
