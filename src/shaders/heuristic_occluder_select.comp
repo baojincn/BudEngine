@@ -36,15 +36,16 @@ layout(std430, set = 0, binding = 2) buffer IndirectDrawBuffer {
 } indirect_draw;
 
 layout(std430, set = 0, binding = 3) coherent buffer StatsBuffer {
-    uint total_instances;
-    uint visible_instances;
-    uint total_triangles;
-    uint visible_triangles;
-    uint total_meshlets;
-    uint visible_meshlets;
-    uint heuristic_total_count;
-    uint heuristic_cutoff_bucket;
-    uint heuristic_remaining;
+    layout(offset = 0) uint total_instances;
+    layout(offset = 4) uint visible_instances;
+    layout(offset = 8) uint total_triangles;
+    layout(offset = 12) uint visible_triangles;
+    layout(offset = 16) uint total_meshlets;
+    layout(offset = 20) uint visible_meshlets;
+    layout(offset = 24) uint heuristic_total_count;
+    layout(offset = 28) uint heuristic_cutoff_bucket;
+    layout(offset = 32) uint heuristic_remaining;
+    layout(offset = 36) uint heuristic_visible_instances;
 } stats;
 
 layout(set = 0, binding = 4) uniform uniform_buffer_object {
@@ -129,10 +130,11 @@ void main()
     bool selected = false;
 
     if (visible) {
-        if (meshlet_visible_hint != 0u) {
-            // Temporal hint forces bypass (guaranteed selection)
-            selected = true;
-        } else {
+        // Temporal hint is disabled because draw_index is not stable across frames due to sorting.
+        // uint meshlet_visible_hint = meshlet_visibility.data[draw_index];
+        // if (meshlet_visible_hint != 0u) {
+        //     selected = true;
+        // } else {
             // Recompute score and bucket identity
             float score = score_draw(draw);
             if (score > 0.0) {
@@ -148,7 +150,7 @@ void main()
                     }
                 }
             }
-        }
+        // }
     }
 
     indirect_command command;
@@ -162,6 +164,7 @@ void main()
 
     if (selected) {
         atomicAdd(stats.visible_instances, 1u);
+        atomicAdd(stats.heuristic_visible_instances, 1u);
         atomicAdd(stats.visible_triangles, draw.index_count / 3u);
         atomicAdd(stats.visible_meshlets, draw.meshlet_count);
     }

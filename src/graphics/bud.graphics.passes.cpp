@@ -153,7 +153,7 @@ namespace bud::graphics {
 				// Clear stats buffer (all counters = 0)
 				bud::graphics::GPUStats zero_stats{};
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(bud::graphics::GPUStats), &zero_stats);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, 24, &zero_stats);
 
 				// Barrier: ensure the UpdateBuffer write is visible to the compute shader
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
@@ -243,7 +243,7 @@ namespace bud::graphics {
 
 				bud::graphics::GPUStats zero_stats{};
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(bud::graphics::GPUStats), &zero_stats);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, 24, &zero_stats);
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
 
 				rhi->cmd_bind_pipeline(cmd, pipeline);
@@ -490,6 +490,7 @@ namespace bud::graphics {
 				rhi->cmd_bind_storage_buffer(cmd, histogram_pipeline, 0, inst_buf);
 				rhi->cmd_bind_storage_buffer(cmd, histogram_pipeline, 1, vis_buf);
 				rhi->cmd_bind_storage_buffer(cmd, histogram_pipeline, 2, histogram_buffer);
+				rhi->cmd_bind_storage_buffer(cmd, histogram_pipeline, 3, stat_buf);
 				rhi->cmd_bind_compute_ubo(cmd, histogram_pipeline, 4);
 				uint32_t group_x = (dispatch_instances + 255) / 256;
 				rhi->cmd_dispatch(cmd, group_x, 1, 1);
@@ -605,7 +606,7 @@ namespace bud::graphics {
 
 				bud::graphics::GPUStats zero_stats{};
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(bud::graphics::GPUStats), &zero_stats);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, 24, &zero_stats);
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
 
 				rhi->cmd_bind_pipeline(cmd, pipeline);
@@ -736,7 +737,7 @@ namespace bud::graphics {
 
 				bud::graphics::GPUStats zero_stats{};
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(bud::graphics::GPUStats), &zero_stats);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, 24, &zero_stats);
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
 
 				rhi->cmd_bind_pipeline(cmd, pipeline);

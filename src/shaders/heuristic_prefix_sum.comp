@@ -23,7 +23,10 @@ layout(std430, set = 0, binding = 3) coherent buffer StatsBuffer {
     layout(offset = 24) uint heuristic_total_count;
     layout(offset = 28) uint heuristic_cutoff_bucket;
     layout(offset = 32) uint heuristic_remaining;
+    layout(offset = 36) uint heuristic_visible_instances;
 } stats;
+
+const uint NO_CUTOFF_BUCKET = 2047;
 
 void main()
 {
@@ -41,7 +44,7 @@ void main()
     uint accumulated = 0;
 
     if (K == 0) {
-        target_bucket = 2047;
+        target_bucket = NO_CUTOFF_BUCKET;	 // No cutoff
         remaining = 0;
     } else {
         // 3. Find the cutoff bucket from top to bottom

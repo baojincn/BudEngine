@@ -350,6 +350,7 @@ namespace bud::graphics {
 		uint32_t heuristicTotalCount = 0;
 		uint32_t heuristicCutoffBucket = 0;
 		uint32_t heuristicRemaining = 0;
+		uint32_t heuristicVisibleInstances = 0;
 	};
 
 	enum class VisibilityPath {
@@ -401,6 +402,7 @@ namespace bud::graphics {
 		uint32_t heuristic_total_count = 0;
 		uint32_t heuristic_cutoff_bucket = 0;
 		uint32_t heuristic_remaining = 0;
+		uint32_t gpu_occluder_instances = 0;
 
 		uint32_t shadow_casters = 0;
 		uint32_t shadow_caster_submeshes = 0;
@@ -435,6 +437,7 @@ namespace bud::graphics {
 			heuristic_total_count = 0;
 			heuristic_cutoff_bucket = 0;
 			heuristic_remaining = 0;
+			gpu_occluder_instances = 0;
 			shadow_casters = 0;
 			shadow_caster_submeshes = 0;
 		}

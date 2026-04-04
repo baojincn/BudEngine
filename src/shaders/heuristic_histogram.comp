@@ -27,6 +27,19 @@ layout(std430, set = 0, binding = 2) buffer HistogramBuffer {
     uint counts[2048];
 } histogram;
 
+layout(std430, set = 0, binding = 3) buffer StatsBuffer {
+    layout(offset = 0) uint total_instances;
+    layout(offset = 4) uint visible_instances;
+    layout(offset = 8) uint total_triangles;
+    layout(offset = 12) uint visible_triangles;
+    layout(offset = 16) uint total_meshlets;
+    layout(offset = 20) uint visible_meshlets;
+    layout(offset = 24) uint heuristic_total_count;
+    layout(offset = 28) uint heuristic_cutoff_bucket;
+    layout(offset = 32) uint heuristic_remaining;
+    layout(offset = 36) uint heuristic_visible_instances;
+} stats;
+
 layout(set = 0, binding = 4) uniform uniform_buffer_object {
     mat4 view;
     mat4 proj;
@@ -91,13 +104,9 @@ void main()
     if (draw_index >= pc.total_instances) return;
 
     draw_data draw = instance_data.data[draw_index];
-    uint meshlet_visible_hint = meshlet_visibility.data[draw_index];
+    // Temporal hint is disabled because draw_index is not stable across frames due to sorting.
+    // uint meshlet_visible_hint = meshlet_visibility.data[draw_index];
 
-    // If temporal hint says visible, we BYPASS the heuristic fractional selection.
-    // So we DO NOT add it to the histogram budget to preserve accurate selection fractions for new/unhinted ones.
-    if (meshlet_visible_hint != 0u) {
-        return;
-    }
 
     bool visible = aabb_visible(draw.min, draw.max);
     if (!visible) return;

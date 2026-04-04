@@ -62,6 +62,10 @@ namespace bud::ui {
 				static uint32_t gpu_display_total_meshlets = 0;
 				static uint32_t gpu_display_visible_meshlets = 0;
 
+				static uint32_t display_heuristic_total_count = 0;
+				static uint32_t display_heuristic_cutoff_bucket = 0;
+				static uint32_t display_heuristic_remaining = 0;
+
 				static uint32_t display_shadow_casters = 0;
 				static uint32_t display_occluder_count = 0;
 				static uint32_t display_occluder_tris = 0;
@@ -103,8 +107,12 @@ namespace bud::ui {
 					gpu_display_total_meshlets = stats.gpu_total_meshlets;
 					gpu_display_visible_meshlets = stats.gpu_visible_meshlets;
 
+					display_heuristic_total_count = stats.heuristic_total_count;
+					display_heuristic_cutoff_bucket = stats.heuristic_cutoff_bucket;
+					display_heuristic_remaining = stats.heuristic_remaining;
+
 					display_shadow_casters = stats.shadow_casters;
-					display_occluder_count = stats.occluder_count;
+					display_occluder_count = current_occluder_enable ? stats.gpu_occluder_instances : stats.occluder_count;
 					display_occluder_tris = stats.occluder_triangles;
 					display_shadow_caster_submeshes = stats.shadow_caster_submeshes;
 					update_timer = 0.0f;
@@ -219,6 +227,12 @@ namespace bud::ui {
 				if (current_meshlet_rendering_enable) {
 					ImGui::TextColored(color_neutral, "Occluders: %u", display_occluder_count);
 					draw_heuristic_occluder_controls();
+					
+					if (current_occluder_enable && current_occluder >= 0.0f) {
+						ImGui::TextColored(color_neutral, "Valid Total: %u", display_heuristic_total_count);
+						ImGui::TextColored(color_neutral, "Cutoff Bucket: %u", display_heuristic_cutoff_bucket);
+						ImGui::TextColored(color_neutral, "Remaining: %u", display_heuristic_remaining);
+					}
 
 					ImGui::Separator();
 					ImGui::TextColored(color_neutral, "Meshlet Frustum Culling");
@@ -229,7 +243,7 @@ namespace bud::ui {
 
 					ImGui::TextColored(color_neutral, "Selected Occluders: %u", display_occluder_count);
 					ImGui::TextColored(color_neutral, "Occluder Tris: %u", display_occluder_tris);
-					ImGui::TextColored(color_neutral, "Depth Only: %u occluders (visible %u)", stats.occluder_count, stats.cpu_visible_instances);
+					ImGui::TextColored(color_neutral, "Depth Only CPU Culling: %u limit (visible %u)", stats.occluder_count, stats.cpu_visible_instances);
 
 					ImGui::Separator();
 					ImGui::TextColored(color_neutral, "Meshlet HiZ Culling");

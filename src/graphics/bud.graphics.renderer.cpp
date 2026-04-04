@@ -1,4 +1,4 @@
-#include <memory>
+﻿#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -1012,6 +1012,10 @@ namespace bud::graphics {
 					rhi->get_render_stats().gpu_visible_triangles = last_gpu_stats.visibleTriangles;
 					rhi->get_render_stats().gpu_total_meshlets = last_gpu_stats.totalMeshlets;
 					rhi->get_render_stats().gpu_visible_meshlets = last_gpu_stats.visibleMeshlets;
+					rhi->get_render_stats().heuristic_total_count = last_gpu_stats.heuristicTotalCount;
+					rhi->get_render_stats().heuristic_cutoff_bucket = last_gpu_stats.heuristicCutoffBucket;
+					rhi->get_render_stats().heuristic_remaining = last_gpu_stats.heuristicRemaining;
+					rhi->get_render_stats().gpu_occluder_instances = last_gpu_stats.heuristicVisibleInstances;
 				} else {
 					last_gpu_stats = {};
 					rhi->get_render_stats().gpu_total_instances = 0;
@@ -1020,6 +1024,10 @@ namespace bud::graphics {
 					rhi->get_render_stats().gpu_visible_triangles = 0;
 					rhi->get_render_stats().gpu_total_meshlets = 0;
 					rhi->get_render_stats().gpu_visible_meshlets = 0;
+					rhi->get_render_stats().heuristic_total_count = 0;
+					rhi->get_render_stats().heuristic_cutoff_bucket = 0;
+					rhi->get_render_stats().heuristic_remaining = 0;
+					rhi->get_render_stats().gpu_occluder_instances = 0;
 				}
 			} else {
 				rhi->add_culling_stats(scene_total_objs, (uint32_t)visible_instance_count, total_shadow_casters);
@@ -1047,10 +1055,17 @@ namespace bud::graphics {
 			rhi->get_render_stats().shadow_caster_submeshes = total_shadow_caster_submeshes;
 
 			bool has_main_pass = false;
+				RGHandle shadow_map;
 			if (rg_instance_data.is_valid()) {
 				rhi->update_global_instance_data(instance_data_ssbos[current_idx]);
 			}
 			if (visible_count > 0) {
+					std::vector<std::vector<uint32_t>> csm_visible_instances(cascade_count);
+					for (uint32_t i = 0; i < cascade_count; ++i)
+						csm_visible_instances[i] = std::move(culled_results[i + 1]);
+
+					shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), geometry_pool.vertex_buffer, geometry_pool.index_buffer);
+
 				const bool use_gpu_occluder_selection = render_config.enable_gpu_driven
 					&& render_config.enable_meshlets
 					&& render_stats.active_visibility_path == VisibilityPath::Meshlet
@@ -1122,7 +1137,7 @@ namespace bud::graphics {
 					rhi->get_render_stats().occluder_triangles = 0; // Handled by CPU path above if !use_gpu
 				}
 
-				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, persistent_occluder_list, occluder_count, use_gpu_occluder_selection ? rg_draw : RGHandle{}, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
+				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, persistent_occluder_list, use_gpu_occluder_selection ? visible_count : occluder_count, use_gpu_occluder_selection ? rg_draw : RGHandle{}, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
 				
 				if (depth_prepass.is_valid()) {
 					if (render_config.enable_gpu_driven) {
@@ -1144,11 +1159,6 @@ namespace bud::graphics {
 							hiz_debug_pass->add_to_graph(render_graph, back_buffer, rg_hiz, render_config.debug_hiz_mip);
 						}
 					}
-
-					std::vector<std::vector<uint32_t>> csm_visible_instances(cascade_count);
-					for (uint32_t i = 0; i < cascade_count; ++i) csm_visible_instances[i] = std::move(culled_results[i + 1]);
-
-					auto shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), geometry_pool.vertex_buffer, geometry_pool.index_buffer);
 
 					if (shadow_map.is_valid()) {
 						if (render_config.enable_cluster_visualization) {
