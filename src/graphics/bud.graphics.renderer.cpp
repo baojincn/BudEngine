@@ -918,11 +918,8 @@ namespace bud::graphics {
 					rg_inst = render_graph.import_buffer("IndirectInstanceData", current_inst_buf, ResourceState::UnorderedAccess);
 					rg_draw = render_graph.import_buffer("IndirectDrawCommands", current_draw_buf, ResourceState::IndirectArgument);
 					rg_stats = render_graph.import_buffer("GPUStatsReadback", current_stats_buf, ResourceState::UnorderedAccess);
-						rg_meshlet_frustum_stats = render_graph.import_buffer("MeshletFrustumStats", meshlet_frustum_stats_buffers[current_idx], ResourceState::UnorderedAccess);
-						rg_meshlet_hiz_stats = render_graph.import_buffer("MeshletHiZStats", meshlet_hiz_stats_buffers[current_idx], ResourceState::UnorderedAccess);
-						if (render_stats.active_visibility_path == VisibilityPath::Meshlet && rg_meshlet_visibility.is_valid()) {
-							meshlet_frustum_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_meshlet_frustum_stats, scene_view, render_scene, meshes, sort_list, visible_count);
-						}
+					rg_meshlet_frustum_stats = render_graph.import_buffer("MeshletFrustumStats", meshlet_frustum_stats_buffers[current_idx], ResourceState::UnorderedAccess);
+					rg_meshlet_hiz_stats = render_graph.import_buffer("MeshletHiZStats", meshlet_hiz_stats_buffers[current_idx], ResourceState::UnorderedAccess);
 				}
 
 				// Read back previous frame stats (delayed latency) from this exact buffer which is guaranteed finished
@@ -1055,16 +1052,16 @@ namespace bud::graphics {
 			rhi->get_render_stats().shadow_caster_submeshes = total_shadow_caster_submeshes;
 
 			bool has_main_pass = false;
-				RGHandle shadow_map;
+			RGHandle shadow_map;
 			if (rg_instance_data.is_valid()) {
 				rhi->update_global_instance_data(instance_data_ssbos[current_idx]);
 			}
 			if (visible_count > 0) {
-					std::vector<std::vector<uint32_t>> csm_visible_instances(cascade_count);
-					for (uint32_t i = 0; i < cascade_count; ++i)
-						csm_visible_instances[i] = std::move(culled_results[i + 1]);
+				std::vector<std::vector<uint32_t>> csm_visible_instances(cascade_count);
+				for (uint32_t i = 0; i < cascade_count; ++i)
+					csm_visible_instances[i] = std::move(culled_results[i + 1]);
 
-					shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), geometry_pool.vertex_buffer, geometry_pool.index_buffer);
+				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), geometry_pool.vertex_buffer, geometry_pool.index_buffer);
 
 				const bool use_gpu_occluder_selection = render_config.enable_gpu_driven
 					&& render_config.enable_meshlets
@@ -1138,10 +1135,19 @@ namespace bud::graphics {
 				}
 
 				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, persistent_occluder_list, use_gpu_occluder_selection ? visible_count : occluder_count, use_gpu_occluder_selection ? rg_draw : RGHandle{}, geometry_pool.vertex_buffer, geometry_pool.index_buffer);
-				
+
 				if (depth_prepass.is_valid()) {
 					if (render_config.enable_gpu_driven) {
 						auto rg_hiz = hiz_mip_pass->add_to_graph(render_graph, depth_prepass, render_config);
+
+						if (render_stats.active_visibility_path == VisibilityPath::Meshlet
+							&& meshlet_visibility_available
+							&& meshlet_frustum_pass
+							&& rg_meshlet_visibility.is_valid()
+							&& rg_meshlet_frustum_stats.is_valid()) {
+							meshlet_frustum_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_meshlet_frustum_stats, scene_view, render_scene, meshes, sort_list, visible_count);
+						}
+
 						if (meshlet_visibility_available
 							&& meshlet_hiz_pass
 							&& rg_meshlet_visibility.is_valid()
@@ -1151,7 +1157,8 @@ namespace bud::graphics {
 							if (meshlet_indirect_pass && rg_draw.is_valid()) {
 								meshlet_indirect_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_hiz_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count);
 							}
-						} else {
+						}
+						else {
 							hiz_pass->add_to_graph(render_graph, rg_inst, rg_draw, rg_stats, rg_hiz, scene_view, (uint32_t)visible_count);
 						}
 

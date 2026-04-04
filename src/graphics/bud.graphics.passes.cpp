@@ -75,7 +75,317 @@ namespace bud::graphics {
 		}
 	}
 
-    void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+    RGHandle CSMShadowPass::add_to_graph(RenderGraph& render_graph, const SceneView& view, const RenderConfig& config,
+		const RenderScene& render_scene,
+		const std::vector<RenderMesh>& meshes,
+		std::vector<std::vector<uint32_t>> csm_visible_instances,
+		bud::graphics::BufferHandle mega_vertex_buffer,
+		bud::graphics::BufferHandle mega_index_buffer)
+	{
+		if (config.shadow_map_size == 0 || config.cascade_count == 0) {
+			bud::eprint("[CSMShadowPass] ERROR: Invalid shadow config (size={}, cascades={}).",
+				config.shadow_map_size, config.cascade_count);
+			return {};
+		}
+
+		const uint32_t cascade_count = std::min(config.cascade_count, MAX_CASCADES);
+		if (cascade_count != config.cascade_count) {
+			bud::eprint("[CSMShadowPass] WARNING: cascade_count clamped to MAX_CASCADES ({})", MAX_CASCADES);
+		}
+
+		const size_t max_scene_count = std::min({
+			render_scene.world_matrices.size(),
+			render_scene.world_aabbs.size(),
+			render_scene.mesh_indices.size(),
+			render_scene.material_indices.size(),
+			render_scene.flags.size()
+		});
+
+		if (max_scene_count == 0) {
+			bud::eprint("[CSMShadowPass] ERROR: RenderScene arrays are empty.");
+			return {};
+		}
+
+		TextureDesc desc;
+		desc.width = config.shadow_map_size;
+		desc.height = config.shadow_map_size;
+		desc.format = bud::graphics::TextureFormat::D32_FLOAT;
+		desc.type = TextureType::Texture2DArray;
+		desc.array_layers = cascade_count;
+
+		if (!config.cache_shadows && static_cache_texture) {
+			shutdown(stored_rhi);
+		}
+
+		bool light_changed = bud::math::length(view.light_dir - last_light_dir) > 0.001f;
+		bool view_changed = !has_last_view_proj || !mat4_nearly_equal(view.view_proj_matrix, last_view_proj);
+		bool config_changed = !has_last_config || !shadow_config_equal(config, last_config);
+		bool need_update = !cache_initialized || light_changed || view_changed || config_changed || !config.cache_shadows;
+
+		if (config.cache_shadows) {
+			if (light_changed) last_light_dir = view.light_dir;
+
+			if (need_update) {
+				last_view_proj = view.view_proj_matrix;
+				last_config = config;
+				has_last_view_proj = true;
+				has_last_config = true;
+			}
+
+			bool needs_recreate = !static_cache_texture
+				|| static_cache_texture->width != desc.width
+				|| static_cache_texture->height != desc.height
+				|| static_cache_texture->format != desc.format
+				|| static_cache_texture->type != desc.type
+				|| static_cache_texture->array_layers != desc.array_layers;
+
+			if (stored_rhi && needs_recreate) {
+				if (static_cache_texture) {
+					auto* pool = stored_rhi->get_resource_pool();
+					if (pool) {
+						pool->release_texture(static_cache_texture);
+					}
+				}
+				static_cache_texture = stored_rhi->create_texture(desc, nullptr, 0);
+				need_update = true;
+			}
+		}
+
+		auto shadow_map_h = std::make_shared<RGHandle>();
+
+		// [CSM] 2. Static Cache Update Pass
+		RGHandle static_cache_h;
+		bool valid_cache = config.cache_shadows && static_cache_texture;
+
+                if (valid_cache) {
+                    static_cache_h = render_graph.import_texture("StaticShadowCache", static_cache_texture, ResourceState::Undefined);
+
+                    if (need_update) {
+                        render_graph.add_pass("CSM Static Update",
+                            [&](RGBuilder& builder) {
+                                builder.write(static_cache_h, ResourceState::DepthWrite);
+                                return static_cache_h;
+                            },
+                            [=, csm_vis = csm_visible_instances, &render_graph, &render_scene, &meshes, &view](RHI* rhi, CommandHandle cmd) {
+                                if (!pipeline) return;
+
+                                for (uint32_t i = 0; i < cascade_count; ++i) {
+                                    auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
+                                    bud::math::Frustum cascade_view_frustum_dbg;
+                                    cascade_view_frustum_dbg.update(cascade_light_view_proj);
+
+                                    RenderPassBeginInfo info;
+                                    Texture* static_tex = nullptr;
+                                    try {
+                                        static_tex = render_graph.get_texture(static_cache_h);
+                                    } catch (const std::exception& e) {
+                                        bud::eprint("[CSMShadowPass] failed to get static cache texture: {}", e.what());
+                                        return;
+                                    }
+                                    info.depth_attachment = static_tex;
+                                    info.clear_depth = true;
+                                    info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
+                                    info.base_array_layer = i;
+                                    info.layer_count = 1;
+
+                                    rhi->cmd_begin_render_pass(cmd, info);
+							rhi->cmd_bind_pipeline(cmd, pipeline);
+							rhi->cmd_set_viewport(cmd, (float)config.shadow_map_size, (float)config.shadow_map_size);
+							rhi->cmd_set_scissor(cmd, config.shadow_map_size, config.shadow_map_size);
+
+							rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, 0.0f, config.shadow_bias_slope);
+							rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
+
+							// Bind global Mega-Buffer once per cascade
+							// NOTE: For diagnostics we support an alternative binding scheme where we bind
+							// the vertex buffer with a byte-offset per-mesh and issue draw calls with
+							// vertexOffset=0. This helps detect whether vertexOffset is being
+							// interpreted in vertices vs bytes by the driver/pipeline.
+							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+							static constexpr bool kUseBindVertexByteOffset = true; // A/B test toggle
+
+							struct PushConsts {
+								bud::math::mat4 light_view_proj;
+								bud::math::mat4 model;
+								bud::math::vec4 light_dir;
+								uint32_t material_id;
+								uint32_t padding[3];
+							} push_consts;
+
+							push_consts.light_view_proj = cascade_light_view_proj;
+							push_consts.light_dir = bud::math::vec4(bud::math::normalize(view.light_dir), 0.0f);
+
+							const auto& visible_instances = csm_vis[i];
+
+							size_t _max_count = std::min(visible_instances.size(), max_scene_count);
+
+							for (size_t i = 0; i < _max_count; ++i) {
+								size_t idx = visible_instances[i];
+
+								// 1. 检查是否是静态物体, 利用flags
+								auto is_static = (render_scene.flags[idx] & 1) != 0;
+								if (!is_static) continue; // ONLY STATIC for cache
+
+								auto mesh_id = render_scene.mesh_indices[idx];
+
+								if (mesh_id >= meshes.size()) continue;
+								const auto& mesh = meshes[mesh_id];
+								if (!mesh.is_valid()) continue;
+
+
+								// 2. Culling
+								// 使用 RenderScene 里的 World Matrix 变换包围体
+								const auto& model_matrix = render_scene.world_matrices[idx];
+								bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
+								if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) continue;
+
+								// 3. Draw
+								push_consts.model = model_matrix;
+
+								uint32_t sub_idx = render_scene.submesh_indices[idx];
+								if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
+									const auto& sub = mesh.submeshes[sub_idx];
+									push_consts.material_id = sub.material_id;
+									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+									rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh.first_index + sub.index_start, mesh.vertex_offset, 0);
+								}
+								else {
+									push_consts.material_id = render_scene.material_indices[idx];
+									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+									if (kUseBindVertexByteOffset) {
+										auto vb = mega_vertex_buffer;
+										vb.offset = static_cast<uint64_t>(mesh.vertex_offset) * sizeof(bud::io::MeshData::Vertex);
+										rhi->cmd_bind_vertex_buffer(cmd, vb);
+										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, 0, 0);
+									}
+									else {
+										rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, 0);
+									}
+								}
+							}
+							rhi->cmd_end_render_pass(cmd);
+						}
+					}
+				);
+				cache_initialized = true;
+			}
+		}
+
+		// Main Shadow Pass (Dynamic + Copy) TODO: dynamic shadows cover everything
+		return render_graph.add_pass("CSM Shadow",
+			[&, shadow_map_h](RGBuilder& builder) {
+				*shadow_map_h = builder.create("CSM ShadowMap", desc);
+				builder.write(*shadow_map_h, ResourceState::DepthWrite);
+				if (valid_cache)
+					builder.read(static_cache_h, ResourceState::DepthRead);
+
+				return *shadow_map_h;
+			},
+			[=, csm_vis = std::move(csm_visible_instances), &render_graph, &render_scene, &meshes, &view](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				auto active_map = render_graph.get_texture(*shadow_map_h);
+				bool did_copy = false;
+
+                if (valid_cache && cache_initialized) {
+                    Texture* static_map = nullptr;
+                    try {
+                        static_map = render_graph.get_texture(static_cache_h);
+                    } catch (const std::exception& e) {
+                        bud::eprint("[CSMShadowPass] failed to get static cache texture for copy: {}", e.what());
+                        static_map = nullptr;
+                    }
+                    if (static_map) {
+                        rhi->resource_barrier(cmd, static_map, ResourceState::DepthRead, ResourceState::TransferSrc);
+                        rhi->resource_barrier(cmd, active_map, ResourceState::DepthWrite, ResourceState::TransferDst);
+                        rhi->cmd_copy_image(cmd, static_map, active_map);
+                        rhi->resource_barrier(cmd, active_map, ResourceState::TransferDst, ResourceState::DepthWrite);
+                        rhi->resource_barrier(cmd, static_map, ResourceState::TransferSrc, ResourceState::DepthRead);
+                        did_copy = true;
+                    }
+                }
+
+				for (uint32_t i = 0; i < config.cascade_count; ++i) {
+					auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
+					bud::math::Frustum cascade_view_frustum_dbg;
+					cascade_view_frustum_dbg.update(cascade_light_view_proj);
+
+					RenderPassBeginInfo info;
+					info.depth_attachment = active_map;
+					info.clear_depth = !did_copy;
+					info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
+					info.base_array_layer = i;
+					info.layer_count = 1;
+
+					rhi->cmd_begin_render_pass(cmd, info);
+					rhi->cmd_bind_pipeline(cmd, pipeline);
+					rhi->cmd_set_viewport(cmd, (float)config.shadow_map_size, (float)config.shadow_map_size);
+					rhi->cmd_set_scissor(cmd, config.shadow_map_size, config.shadow_map_size);
+
+					rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, 0.0f, config.shadow_bias_slope);
+					rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
+
+					// Bind global Mega-Buffer once per cascade
+					rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+
+					struct PushConsts {
+						bud::math::mat4 light_view_proj;
+						bud::math::mat4 model;
+						bud::math::vec4 light_dir;
+						uint32_t material_id;
+						uint32_t padding[3];
+					} push_consts;
+
+					push_consts.light_view_proj = cascade_light_view_proj;
+					push_consts.light_dir = bud::math::vec4(bud::math::normalize(view.light_dir), 0.0f);
+
+					const auto& visible_instances = csm_vis[i];
+					size_t count = visible_instances.size();
+
+					for (size_t i = 0; i < count; ++i) {
+						size_t idx = visible_instances[i];
+
+						bool is_static = (render_scene.flags[idx] & 1) != 0;
+						if (did_copy && is_static) continue;
+
+						uint32_t mesh_id = render_scene.mesh_indices[idx];
+						if (mesh_id >= meshes.size()) continue;
+						const auto& mesh = meshes[mesh_id];
+						if (!mesh.is_valid()) continue;
+
+
+						// Culling
+						const auto& model_matrix = render_scene.world_matrices[idx];
+						bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
+						if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) continue;
+
+						// Draw
+						push_consts.model = model_matrix;
+
+						uint32_t sub_idx = render_scene.submesh_indices[idx];
+						if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
+							const auto& sub = mesh.submeshes[sub_idx];
+							push_consts.material_id = sub.material_id;
+							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh.first_index + sub.index_start, mesh.vertex_offset, 0);
+						}
+						else {
+							push_consts.material_id = render_scene.material_indices[idx];
+							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, 0);
+						}
+					}
+					rhi->cmd_end_render_pass(cmd);
+				}
+			}
+		);
+	}
+	
+	
+
+void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
         if (!rhi || !asset_manager) {
             std::string err = std::format("HiZCullingPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
             bud::eprint("{}", err);
@@ -796,7 +1106,171 @@ namespace bud::graphics {
 		);
 	}
 
-    void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+    RGHandle DepthOnlyPass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer,
+        const RenderScene& render_scene,
+        const SceneView& view,
+        const RenderConfig& config,
+        const std::vector<RenderMesh>& meshes,
+        const std::vector<SortItem>& sort_list,
+        size_t instance_count,
+		RGHandle indirect_draw_buffer,
+        bud::graphics::BufferHandle mega_vertex_buffer,
+        bud::graphics::BufferHandle mega_index_buffer) {
+        if (!pipeline) {
+            std::string err = "DepthOnlyPass::add_to_graph pipeline is null";
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return {};
+#endif
+        }
+
+		const size_t max_scene_count = std::min({
+			render_scene.world_matrices.size(),
+			render_scene.world_aabbs.size(),
+			render_scene.mesh_indices.size(),
+			render_scene.material_indices.size(),
+			render_scene.flags.size()
+		});
+
+		const bool use_indirect_draw = indirect_draw_buffer.is_valid();
+		if (max_scene_count == 0 || (!use_indirect_draw && sort_list.empty())) {
+            std::string err = "ZPrepass::add_to_graph empty scene or sort list";
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return {};
+#endif
+        }
+
+		Texture* backbuffer_tex = nullptr;
+		try {
+			backbuffer_tex = render_graph.get_texture(backbuffer);
+		} catch (const std::exception& e) {
+			bud::eprint("ZPrepass::add_to_graph: failed to get backbuffer texture: {}", e.what());
+#if defined(_DEBUG)
+			throw;
+#else
+			return {};
+#endif
+		}
+		if (!backbuffer_tex || backbuffer_tex->width == 0 || backbuffer_tex->height == 0) {
+			bud::eprint("ZPrepass::add_to_graph invalid backbuffer: tex={} w={} h={}", (void*)backbuffer_tex, backbuffer_tex ? backbuffer_tex->width : 0, backbuffer_tex ? backbuffer_tex->height : 0);
+#if defined(_DEBUG)
+			throw std::runtime_error("ZPrepass::add_to_graph invalid backbuffer");
+#else
+			return {};
+#endif
+		}
+
+		// instance_count = exploded submesh draw count; sort_list is sized to match.
+		// max_scene_count guards accessing render_scene arrays, but entity_index in
+		// sort_list items are already validated — do NOT clamp draw_count by it.
+		const size_t draw_count = std::min(instance_count, sort_list.size());
+		uint32_t target_width = backbuffer_tex->width;
+		uint32_t target_height = backbuffer_tex->height;
+
+		TextureDesc depth_desc;
+		depth_desc.width = target_width;
+		depth_desc.height = target_height;
+		depth_desc.format = bud::graphics::TextureFormat::D32_FLOAT;
+
+		auto depth_h = std::make_shared<RGHandle>();
+
+        return render_graph.add_pass("Depth Only Pass",
+            [=](RGBuilder& builder) {
+                *depth_h = builder.create("MainDepth", depth_desc);
+                builder.write(*depth_h, ResourceState::DepthWrite);
+                if (use_indirect_draw && indirect_draw_buffer.is_valid()) {
+                    builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
+                }
+                return *depth_h;
+            },
+            // Capture `sort_list` by reference (owned by caller) - caller must ensure lifetime
+            [=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) {
+                    bud::eprint("[DepthOnlyPass] ERROR: Pipeline is null.");
+					return;
+				}
+
+
+				RenderPassBeginInfo info;
+				info.depth_attachment = render_graph.get_texture(*depth_h);
+				info.clear_depth = true;
+				info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
+
+				rhi->cmd_begin_render_pass(cmd, info);
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_set_viewport(cmd, (float)target_width, (float)target_height);
+				rhi->cmd_set_scissor(cmd, target_width, target_height);
+
+				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
+				rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
+
+				// Bind global Mega-Buffer once for the entire pass
+				rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+
+				if (use_indirect_draw) {
+					bud::graphics::BufferHandle ind_buf_handle;
+					try {
+						ind_buf_handle = render_graph.get_buffer(indirect_draw_buffer);
+					} catch (const std::exception& e) {
+						bud::eprint("[DepthOnlyPass] failed to get indirect draw buffer: {}", e.what());
+						return;
+					}
+
+					if (!ind_buf_handle.is_valid()) {
+						bud::eprint("[DepthOnlyPass] invalid indirect draw buffer.");
+						return;
+					}
+
+					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
+				}
+				else {
+				for (size_t i = 0; i < draw_count; ++i) {
+					const auto& item = sort_list[i];
+					uint32_t idx = item.entity_index;
+
+					uint32_t mesh_id = render_scene.mesh_indices[idx];
+					uint32_t material_id = render_scene.material_indices[idx];
+					const auto& model_matrix = render_scene.world_matrices[idx];
+
+					if (mesh_id >= meshes.size()) continue;
+					const auto& mesh = meshes[mesh_id];
+					if (!mesh.is_valid()) continue;
+
+					struct PushVars {
+						bud::math::mat4 model;
+						uint32_t material_id;
+						uint32_t padding[3];
+					} push_vars;
+
+					push_vars.model = model_matrix;
+
+					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+						const auto& sub = mesh.submeshes[item.submesh_index];
+						push_vars.material_id = sub.material_id;
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
+						rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh.first_index + sub.index_start, mesh.vertex_offset, 0);
+					} else {
+						push_vars.material_id = material_id;
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
+						rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, 0);
+					}
+				}
+				}
+
+				rhi->cmd_end_render_pass(cmd);
+			}
+		);
+	}
+
+	
+
+void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
         if (!rhi || !asset_manager) {
             std::string err = std::format("HiZMipPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
             bud::eprint("{}", err);
@@ -973,168 +1447,6 @@ namespace bud::graphics {
         });
     }
 
-	RGHandle DepthOnlyPass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer,
-        const RenderScene& render_scene,
-        const SceneView& view,
-        const RenderConfig& config,
-        const std::vector<RenderMesh>& meshes,
-        const std::vector<SortItem>& sort_list,
-        size_t instance_count,
-		RGHandle indirect_draw_buffer,
-        bud::graphics::BufferHandle mega_vertex_buffer,
-        bud::graphics::BufferHandle mega_index_buffer) {
-        if (!pipeline) {
-            std::string err = "DepthOnlyPass::add_to_graph pipeline is null";
-            bud::eprint("{}", err);
-#if defined(_DEBUG)
-            throw std::runtime_error(err);
-#else
-            return {};
-#endif
-        }
-
-		const size_t max_scene_count = std::min({
-			render_scene.world_matrices.size(),
-			render_scene.world_aabbs.size(),
-			render_scene.mesh_indices.size(),
-			render_scene.material_indices.size(),
-			render_scene.flags.size()
-		});
-
-		const bool use_indirect_draw = indirect_draw_buffer.is_valid();
-		if (max_scene_count == 0 || (!use_indirect_draw && sort_list.empty())) {
-            std::string err = "ZPrepass::add_to_graph empty scene or sort list";
-            bud::eprint("{}", err);
-#if defined(_DEBUG)
-            throw std::runtime_error(err);
-#else
-            return {};
-#endif
-        }
-
-		Texture* backbuffer_tex = nullptr;
-		try {
-			backbuffer_tex = render_graph.get_texture(backbuffer);
-		} catch (const std::exception& e) {
-			bud::eprint("ZPrepass::add_to_graph: failed to get backbuffer texture: {}", e.what());
-#if defined(_DEBUG)
-			throw;
-#else
-			return {};
-#endif
-		}
-		if (!backbuffer_tex || backbuffer_tex->width == 0 || backbuffer_tex->height == 0) {
-			bud::eprint("ZPrepass::add_to_graph invalid backbuffer: tex={} w={} h={}", (void*)backbuffer_tex, backbuffer_tex ? backbuffer_tex->width : 0, backbuffer_tex ? backbuffer_tex->height : 0);
-#if defined(_DEBUG)
-			throw std::runtime_error("ZPrepass::add_to_graph invalid backbuffer");
-#else
-			return {};
-#endif
-		}
-
-		// instance_count = exploded submesh draw count; sort_list is sized to match.
-		// max_scene_count guards accessing render_scene arrays, but entity_index in
-		// sort_list items are already validated — do NOT clamp draw_count by it.
-		const size_t draw_count = std::min(instance_count, sort_list.size());
-		uint32_t target_width = backbuffer_tex->width;
-		uint32_t target_height = backbuffer_tex->height;
-
-		TextureDesc depth_desc;
-		depth_desc.width = target_width;
-		depth_desc.height = target_height;
-		depth_desc.format = bud::graphics::TextureFormat::D32_FLOAT;
-
-		auto depth_h = std::make_shared<RGHandle>();
-
-        return render_graph.add_pass("Depth Only Pass",
-            [=](RGBuilder& builder) {
-                *depth_h = builder.create("MainDepth", depth_desc);
-                builder.write(*depth_h, ResourceState::DepthWrite);
-                if (use_indirect_draw && indirect_draw_buffer.is_valid()) {
-                    builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
-                }
-                return *depth_h;
-            },
-            // Capture `sort_list` by reference (owned by caller) - caller must ensure lifetime
-            [=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
-				if (!pipeline) {
-                    bud::eprint("[DepthOnlyPass] ERROR: Pipeline is null.");
-					return;
-				}
-
-
-				RenderPassBeginInfo info;
-				info.depth_attachment = render_graph.get_texture(*depth_h);
-				info.clear_depth = true;
-				info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
-
-				rhi->cmd_begin_render_pass(cmd, info);
-				rhi->cmd_bind_pipeline(cmd, pipeline);
-				rhi->cmd_set_viewport(cmd, (float)target_width, (float)target_height);
-				rhi->cmd_set_scissor(cmd, target_width, target_height);
-
-				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
-				rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
-
-				// Bind global Mega-Buffer once for the entire pass
-				rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-
-				if (use_indirect_draw) {
-					bud::graphics::BufferHandle ind_buf_handle;
-					try {
-						ind_buf_handle = render_graph.get_buffer(indirect_draw_buffer);
-					} catch (const std::exception& e) {
-						bud::eprint("[DepthOnlyPass] failed to get indirect draw buffer: {}", e.what());
-						return;
-					}
-
-					if (!ind_buf_handle.is_valid()) {
-						bud::eprint("[DepthOnlyPass] invalid indirect draw buffer.");
-						return;
-					}
-
-					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
-				}
-				else {
-				for (size_t i = 0; i < draw_count; ++i) {
-					const auto& item = sort_list[i];
-					uint32_t idx = item.entity_index;
-
-					uint32_t mesh_id = render_scene.mesh_indices[idx];
-					uint32_t material_id = render_scene.material_indices[idx];
-					const auto& model_matrix = render_scene.world_matrices[idx];
-
-					if (mesh_id >= meshes.size()) continue;
-					const auto& mesh = meshes[mesh_id];
-					if (!mesh.is_valid()) continue;
-
-					struct PushVars {
-						bud::math::mat4 model;
-						uint32_t material_id;
-						uint32_t padding[3];
-					} push_vars;
-
-					push_vars.model = model_matrix;
-
-					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
-						const auto& sub = mesh.submeshes[item.submesh_index];
-						push_vars.material_id = sub.material_id;
-						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
-						rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh.first_index + sub.index_start, mesh.vertex_offset, 0);
-					} else {
-						push_vars.material_id = material_id;
-						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
-						rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, 0);
-					}
-				}
-				}
-
-				rhi->cmd_end_render_pass(cmd);
-			}
-		);
-	}
-
 	CSMShadowPass::~CSMShadowPass() {
 	}
 
@@ -1182,314 +1494,6 @@ namespace bud::graphics {
 		});
 	}
 
-	RGHandle CSMShadowPass::add_to_graph(RenderGraph& render_graph, const SceneView& view, const RenderConfig& config,
-		const RenderScene& render_scene,
-		const std::vector<RenderMesh>& meshes,
-		std::vector<std::vector<uint32_t>> csm_visible_instances,
-		bud::graphics::BufferHandle mega_vertex_buffer,
-		bud::graphics::BufferHandle mega_index_buffer)
-	{
-		if (config.shadow_map_size == 0 || config.cascade_count == 0) {
-			bud::eprint("[CSMShadowPass] ERROR: Invalid shadow config (size={}, cascades={}).",
-				config.shadow_map_size, config.cascade_count);
-			return {};
-		}
-
-		const uint32_t cascade_count = std::min(config.cascade_count, MAX_CASCADES);
-		if (cascade_count != config.cascade_count) {
-			bud::eprint("[CSMShadowPass] WARNING: cascade_count clamped to MAX_CASCADES ({})", MAX_CASCADES);
-		}
-
-		const size_t max_scene_count = std::min({
-			render_scene.world_matrices.size(),
-			render_scene.world_aabbs.size(),
-			render_scene.mesh_indices.size(),
-			render_scene.material_indices.size(),
-			render_scene.flags.size()
-		});
-
-		if (max_scene_count == 0) {
-			bud::eprint("[CSMShadowPass] ERROR: RenderScene arrays are empty.");
-			return {};
-		}
-
-		TextureDesc desc;
-		desc.width = config.shadow_map_size;
-		desc.height = config.shadow_map_size;
-		desc.format = bud::graphics::TextureFormat::D32_FLOAT;
-		desc.type = TextureType::Texture2DArray;
-		desc.array_layers = cascade_count;
-
-		if (!config.cache_shadows && static_cache_texture) {
-			shutdown(stored_rhi);
-		}
-
-		bool light_changed = bud::math::length(view.light_dir - last_light_dir) > 0.001f;
-		bool view_changed = !has_last_view_proj || !mat4_nearly_equal(view.view_proj_matrix, last_view_proj);
-		bool config_changed = !has_last_config || !shadow_config_equal(config, last_config);
-		bool need_update = !cache_initialized || light_changed || view_changed || config_changed || !config.cache_shadows;
-
-		if (config.cache_shadows) {
-			if (light_changed) last_light_dir = view.light_dir;
-
-			if (need_update) {
-				last_view_proj = view.view_proj_matrix;
-				last_config = config;
-				has_last_view_proj = true;
-				has_last_config = true;
-			}
-
-			bool needs_recreate = !static_cache_texture
-				|| static_cache_texture->width != desc.width
-				|| static_cache_texture->height != desc.height
-				|| static_cache_texture->format != desc.format
-				|| static_cache_texture->type != desc.type
-				|| static_cache_texture->array_layers != desc.array_layers;
-
-			if (stored_rhi && needs_recreate) {
-				if (static_cache_texture) {
-					auto* pool = stored_rhi->get_resource_pool();
-					if (pool) {
-						pool->release_texture(static_cache_texture);
-					}
-				}
-				static_cache_texture = stored_rhi->create_texture(desc, nullptr, 0);
-				need_update = true;
-			}
-		}
-
-		auto shadow_map_h = std::make_shared<RGHandle>();
-
-		// [CSM] 2. Static Cache Update Pass
-		RGHandle static_cache_h;
-		bool valid_cache = config.cache_shadows && static_cache_texture;
-
-                if (valid_cache) {
-                    static_cache_h = render_graph.import_texture("StaticShadowCache", static_cache_texture, ResourceState::Undefined);
-
-                    if (need_update) {
-                        render_graph.add_pass("CSM Static Update",
-                            [&](RGBuilder& builder) {
-                                builder.write(static_cache_h, ResourceState::DepthWrite);
-                                return static_cache_h;
-                            },
-                            [=, csm_vis = csm_visible_instances, &render_graph, &render_scene, &meshes, &view](RHI* rhi, CommandHandle cmd) {
-                                if (!pipeline) return;
-
-                                for (uint32_t i = 0; i < cascade_count; ++i) {
-                                    auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
-                                    bud::math::Frustum cascade_view_frustum_dbg;
-                                    cascade_view_frustum_dbg.update(cascade_light_view_proj);
-
-                                    RenderPassBeginInfo info;
-                                    Texture* static_tex = nullptr;
-                                    try {
-                                        static_tex = render_graph.get_texture(static_cache_h);
-                                    } catch (const std::exception& e) {
-                                        bud::eprint("[CSMShadowPass] failed to get static cache texture: {}", e.what());
-                                        return;
-                                    }
-                                    info.depth_attachment = static_tex;
-                                    info.clear_depth = true;
-                                    info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
-                                    info.base_array_layer = i;
-                                    info.layer_count = 1;
-
-                                    rhi->cmd_begin_render_pass(cmd, info);
-							rhi->cmd_bind_pipeline(cmd, pipeline);
-							rhi->cmd_set_viewport(cmd, (float)config.shadow_map_size, (float)config.shadow_map_size);
-							rhi->cmd_set_scissor(cmd, config.shadow_map_size, config.shadow_map_size);
-
-							rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, 0.0f, config.shadow_bias_slope);
-							rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
-
-							// Bind global Mega-Buffer once per cascade
-							// NOTE: For diagnostics we support an alternative binding scheme where we bind
-							// the vertex buffer with a byte-offset per-mesh and issue draw calls with
-							// vertexOffset=0. This helps detect whether vertexOffset is being
-							// interpreted in vertices vs bytes by the driver/pipeline.
-							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-							static constexpr bool kUseBindVertexByteOffset = true; // A/B test toggle
-
-							struct PushConsts {
-								bud::math::mat4 light_view_proj;
-								bud::math::mat4 model;
-								bud::math::vec4 light_dir;
-								uint32_t material_id;
-								uint32_t padding[3];
-							} push_consts;
-
-							push_consts.light_view_proj = cascade_light_view_proj;
-							push_consts.light_dir = bud::math::vec4(bud::math::normalize(view.light_dir), 0.0f);
-
-							const auto& visible_instances = csm_vis[i];
-
-							size_t _max_count = std::min(visible_instances.size(), max_scene_count);
-
-							for (size_t i = 0; i < _max_count; ++i) {
-								size_t idx = visible_instances[i];
-
-								// 1. 检查是否是静态物体, 利用flags
-								auto is_static = (render_scene.flags[idx] & 1) != 0;
-								if (!is_static) continue; // ONLY STATIC for cache
-
-								auto mesh_id = render_scene.mesh_indices[idx];
-
-								if (mesh_id >= meshes.size()) continue;
-								const auto& mesh = meshes[mesh_id];
-								if (!mesh.is_valid()) continue;
-
-
-								// 2. Culling
-								// 使用 RenderScene 里的 World Matrix 变换包围体
-								const auto& model_matrix = render_scene.world_matrices[idx];
-								bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
-								if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) continue;
-
-								// 3. Draw
-								push_consts.model = model_matrix;
-
-								uint32_t sub_idx = render_scene.submesh_indices[idx];
-								if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
-									const auto& sub = mesh.submeshes[sub_idx];
-									push_consts.material_id = sub.material_id;
-									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-									rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh.first_index + sub.index_start, mesh.vertex_offset, 0);
-								}
-								else {
-									push_consts.material_id = render_scene.material_indices[idx];
-									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-									if (kUseBindVertexByteOffset) {
-										auto vb = mega_vertex_buffer;
-										vb.offset = static_cast<uint64_t>(mesh.vertex_offset) * sizeof(bud::io::MeshData::Vertex);
-										rhi->cmd_bind_vertex_buffer(cmd, vb);
-										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, 0, 0);
-									}
-									else {
-										rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, 0);
-									}
-								}
-							}
-							rhi->cmd_end_render_pass(cmd);
-						}
-					}
-				);
-				cache_initialized = true;
-			}
-		}
-
-		// Main Shadow Pass (Dynamic + Copy) TODO: dynamic shadows cover everything
-		return render_graph.add_pass("CSM Shadow",
-			[&, shadow_map_h](RGBuilder& builder) {
-				*shadow_map_h = builder.create("CSM ShadowMap", desc);
-				builder.write(*shadow_map_h, ResourceState::DepthWrite);
-				if (valid_cache)
-					builder.read(static_cache_h, ResourceState::DepthRead);
-
-				return *shadow_map_h;
-			},
-			[=, csm_vis = std::move(csm_visible_instances), &render_graph, &render_scene, &meshes, &view](RHI* rhi, CommandHandle cmd) {
-				if (!pipeline) return;
-
-				auto active_map = render_graph.get_texture(*shadow_map_h);
-				bool did_copy = false;
-
-                if (valid_cache && cache_initialized) {
-                    Texture* static_map = nullptr;
-                    try {
-                        static_map = render_graph.get_texture(static_cache_h);
-                    } catch (const std::exception& e) {
-                        bud::eprint("[CSMShadowPass] failed to get static cache texture for copy: {}", e.what());
-                        static_map = nullptr;
-                    }
-                    if (static_map) {
-                        rhi->resource_barrier(cmd, static_map, ResourceState::DepthRead, ResourceState::TransferSrc);
-                        rhi->resource_barrier(cmd, active_map, ResourceState::DepthWrite, ResourceState::TransferDst);
-                        rhi->cmd_copy_image(cmd, static_map, active_map);
-                        rhi->resource_barrier(cmd, active_map, ResourceState::TransferDst, ResourceState::DepthWrite);
-                        rhi->resource_barrier(cmd, static_map, ResourceState::TransferSrc, ResourceState::DepthRead);
-                        did_copy = true;
-                    }
-                }
-
-				for (uint32_t i = 0; i < config.cascade_count; ++i) {
-					auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
-					bud::math::Frustum cascade_view_frustum_dbg;
-					cascade_view_frustum_dbg.update(cascade_light_view_proj);
-
-					RenderPassBeginInfo info;
-					info.depth_attachment = active_map;
-					info.clear_depth = !did_copy;
-					info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
-					info.base_array_layer = i;
-					info.layer_count = 1;
-
-					rhi->cmd_begin_render_pass(cmd, info);
-					rhi->cmd_bind_pipeline(cmd, pipeline);
-					rhi->cmd_set_viewport(cmd, (float)config.shadow_map_size, (float)config.shadow_map_size);
-					rhi->cmd_set_scissor(cmd, config.shadow_map_size, config.shadow_map_size);
-
-					rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, 0.0f, config.shadow_bias_slope);
-					rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
-
-					// Bind global Mega-Buffer once per cascade
-					rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-
-					struct PushConsts {
-						bud::math::mat4 light_view_proj;
-						bud::math::mat4 model;
-						bud::math::vec4 light_dir;
-						uint32_t material_id;
-						uint32_t padding[3];
-					} push_consts;
-
-					push_consts.light_view_proj = cascade_light_view_proj;
-					push_consts.light_dir = bud::math::vec4(bud::math::normalize(view.light_dir), 0.0f);
-
-					const auto& visible_instances = csm_vis[i];
-					size_t count = visible_instances.size();
-
-					for (size_t i = 0; i < count; ++i) {
-						size_t idx = visible_instances[i];
-
-						bool is_static = (render_scene.flags[idx] & 1) != 0;
-						if (did_copy && is_static) continue;
-
-						uint32_t mesh_id = render_scene.mesh_indices[idx];
-						if (mesh_id >= meshes.size()) continue;
-						const auto& mesh = meshes[mesh_id];
-						if (!mesh.is_valid()) continue;
-
-
-						// Culling
-						const auto& model_matrix = render_scene.world_matrices[idx];
-						bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
-						if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) continue;
-
-						// Draw
-						push_consts.model = model_matrix;
-
-						uint32_t sub_idx = render_scene.submesh_indices[idx];
-						if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
-							const auto& sub = mesh.submeshes[sub_idx];
-							push_consts.material_id = sub.material_id;
-							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh.first_index + sub.index_start, mesh.vertex_offset, 0);
-						}
-						else {
-							push_consts.material_id = render_scene.material_indices[idx];
-							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, 0);
-						}
-					}
-					rhi->cmd_end_render_pass(cmd);
-				}
-			}
-		);
-	}
-	
 	void MainPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
 		if (!rhi || !asset_manager) return;
 
