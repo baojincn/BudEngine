@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vector>
 #include <mutex>
@@ -18,6 +18,7 @@
 #include "src/graphics/bud.graphics.sortkey.hpp"
 
 namespace bud::graphics {
+	class GPUScene;
 	class RenderPassBase {
 	public:
 		virtual ~RenderPassBase() = default;
@@ -103,6 +104,7 @@ namespace bud::graphics {
             const std::vector<SortItem>& sort_list,
             size_t instance_count,
 			RGHandle indirect_draw_buffer,
+			const GPUScene& gpu_scene,
             bud::graphics::BufferHandle mega_vertex_buffer,
             bud::graphics::BufferHandle mega_index_buffer);
     };
@@ -128,7 +130,7 @@ namespace bud::graphics {
 		};
 
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances, bud::graphics::BufferHandle mega_vertex_buffer, bud::graphics::BufferHandle mega_index_buffer);
+		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances, const GPUScene& gpu_scene, bud::graphics::BufferHandle mega_vertex_buffer, bud::graphics::BufferHandle mega_index_buffer);
 	};
 
 	
@@ -144,6 +146,7 @@ namespace bud::graphics {
 			size_t instance_count,
 			bud::graphics::RGHandle indirect_draw_buffer,
 			bud::graphics::RGHandle instance_data,
+			const GPUScene& gpu_scene,
 			bud::graphics::BufferHandle mega_vertex_buffer,
 			bud::graphics::BufferHandle mega_index_buffer);
 	};
@@ -160,6 +163,7 @@ namespace bud::graphics {
 			size_t instance_count,
 			bud::graphics::RGHandle indirect_draw_buffer,
 			bud::graphics::RGHandle instance_data,
+			const GPUScene& gpu_scene,
 			bud::graphics::BufferHandle mega_vertex_buffer,
 			bud::graphics::BufferHandle mega_index_buffer);
 	};

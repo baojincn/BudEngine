@@ -87,16 +87,6 @@ namespace bud::graphics {
 		std::unique_ptr<ClusterVisualizationPass> cluster_viz_pass;
 		std::unique_ptr<UIPass> ui_pass;
 
-		// GPU-Driven specific (Per-frame)
-		uint32_t current_indirect_capacity = 0;
-		uint32_t current_meshlet_visibility_capacity = 0;
-		std::vector<bud::graphics::BufferHandle> indirect_instance_buffers;
-		std::vector<bud::graphics::BufferHandle> indirect_draw_buffers;
-		std::vector<bud::graphics::BufferHandle> stats_readback_buffers;
-		std::vector<bud::graphics::BufferHandle> meshlet_frustum_stats_buffers;
-		std::vector<bud::graphics::BufferHandle> meshlet_hiz_stats_buffers;
-		std::vector<bud::graphics::BufferHandle> meshlet_visibility_buffers;
-		std::vector<bud::graphics::BufferHandle> meshlet_hiz_visibility_buffers;
 		std::atomic<bool> meshlet_rendering_enabled{ true };
 		std::atomic<bool> meshlet_rendering_toggle_pending{ false };
 		std::atomic<bool> meshlet_rendering_toggle_value{ true };
@@ -122,9 +112,6 @@ namespace bud::graphics {
 			uint32_t material_id;
 			uint32_t padding[3];
 		};
-
-		std::vector<bud::graphics::BufferHandle> instance_data_ssbos;
-		uint32_t instance_data_capacity = 0;
 
 		std::shared_ptr<UploadQueue> upload_queue;
 

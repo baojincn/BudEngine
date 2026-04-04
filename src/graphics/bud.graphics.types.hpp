@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <vector>
@@ -314,9 +314,6 @@ namespace bud::graphics {
 	};
 
 	struct RenderMesh {
-		// Offsets into the global Geometry Pool Mega-Buffers
-		uint32_t first_index = 0;
-		int32_t  vertex_offset = 0;
 		uint32_t index_count = 0;
 
 		// GPU-Driven Meshlet data

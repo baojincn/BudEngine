@@ -44,6 +44,7 @@ namespace bud::graphics {
 			}
 		}
 
+		mesh_geometry_.clear();
 		frame_resources_.clear();
 	}
 
@@ -61,6 +62,19 @@ namespace bud::graphics {
 
 	BufferHandle GPUScene::get_index_buffer() const {
 		return geometry_pool_.index_buffer;
+	}
+
+	void GPUScene::set_mesh_geometry(uint32_t mesh_id, uint32_t first_index, int32_t vertex_offset) {
+		if (mesh_geometry_.size() <= mesh_id) {
+			mesh_geometry_.resize(mesh_id + 1);
+		}
+
+		mesh_geometry_[mesh_id].first_index = first_index;
+		mesh_geometry_[mesh_id].vertex_offset = vertex_offset;
+	}
+
+	const GPUScene::MeshGeometry& GPUScene::mesh_geometry(uint32_t mesh_id) const {
+		return mesh_geometry_.at(mesh_id);
 	}
 
 	GPUScene::FrameResources& GPUScene::frame_resources(uint32_t frame_index) {

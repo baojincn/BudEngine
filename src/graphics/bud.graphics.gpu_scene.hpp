@@ -12,6 +12,11 @@ namespace bud::graphics {
 
 	class GPUScene {
 	public:
+		struct MeshGeometry {
+			uint32_t first_index = 0;
+			int32_t vertex_offset = 0;
+		};
+
 		struct GeometryPool {
 			static constexpr uint64_t kVertexPoolSize = 256ull * 1024 * 1024;
 			static constexpr uint64_t kIndexPoolSize = 128ull * 1024 * 1024;
@@ -55,6 +60,9 @@ namespace bud::graphics {
 		BufferHandle get_vertex_buffer() const;
 		BufferHandle get_index_buffer() const;
 
+		void set_mesh_geometry(uint32_t mesh_id, uint32_t first_index, int32_t vertex_offset);
+		const MeshGeometry& mesh_geometry(uint32_t mesh_id) const;
+
 		FrameResources& frame_resources(uint32_t frame_index);
 		const FrameResources& frame_resources(uint32_t frame_index) const;
 
@@ -72,6 +80,7 @@ namespace bud::graphics {
 
 	private:
 		GeometryPool geometry_pool_;
+		std::vector<MeshGeometry> mesh_geometry_;
 		std::vector<FrameResources> frame_resources_;
 	};
 }

@@ -49,16 +49,6 @@ namespace bud::graphics {
 		cluster_viz_pass->init(rhi, render_config, asset_manager);
 		ui_pass->init(rhi, render_config, asset_manager);
 		gpu_scene.init(rhi, rhi->get_inflight_frame_count());
-
-		uint32_t max_frames = rhi->get_inflight_frame_count();
-		indirect_instance_buffers.resize(max_frames);
-		indirect_draw_buffers.resize(max_frames);
-		stats_readback_buffers.resize(max_frames);
-		meshlet_frustum_stats_buffers.resize(max_frames);
-		meshlet_hiz_stats_buffers.resize(max_frames);
-		meshlet_visibility_buffers.resize(max_frames);
-		meshlet_hiz_visibility_buffers.resize(max_frames);
-		instance_data_ssbos.resize(max_frames);
 	}
 
 	Renderer::~Renderer() {
@@ -86,22 +76,6 @@ namespace bud::graphics {
 			if (mesh.meshlet_index_buffer.is_valid()) rhi->destroy_buffer(mesh.meshlet_index_buffer);
 			if (mesh.cull_data_buffer.is_valid()) rhi->destroy_buffer(mesh.cull_data_buffer);
 		}
-
-		for (auto& buf : stats_readback_buffers) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
-		for (auto& buf : meshlet_frustum_stats_buffers) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
-		for (auto& buf : meshlet_hiz_stats_buffers) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
-		for (auto& buf : meshlet_visibility_buffers) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
-		for (auto& buf : meshlet_hiz_visibility_buffers) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
 		for (auto& buf : readback_buffers) {
 			if (buf.is_valid()) rhi->destroy_buffer(buf);
 		}
@@ -112,28 +86,6 @@ namespace bud::graphics {
 			offscreen_target = nullptr;
 		}
 
-		for (auto& buf : indirect_instance_buffers) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
-		indirect_instance_buffers.clear();
-
-		for (auto& buf : indirect_draw_buffers) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
-
-		indirect_draw_buffers.clear();
-
-		for (auto& buf : stats_readback_buffers) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
-		stats_readback_buffers.clear();
-		meshlet_frustum_stats_buffers.clear();
-		meshlet_hiz_stats_buffers.clear();
-
-		for (auto& buf : instance_data_ssbos) {
-			if (buf.is_valid()) rhi->destroy_buffer(buf);
-		}
-		instance_data_ssbos.clear();
 	}
 
 	std::vector<bud::math::AABB> Renderer::get_mesh_bounds_snapshot() const {
@@ -207,7 +159,7 @@ namespace bud::graphics {
 
 				auto tex_path = mesh_data.texture_paths[i];
 
-				// 发起异步加载
+				// 發起異步加載
 				asset_manager->load_image_async(tex_path,
 					[queue_weak, rhi_ptr, current_slot, tex_path](bud::io::Image img) {
 						auto img_ptr = std::make_shared<bud::io::Image>(std::move(img));
@@ -292,8 +244,7 @@ namespace bud::graphics {
 				const uint64_t vertex_pool_byte_offset = (uint64_t)vertex_base * sizeof(bud::io::MeshData::Vertex);
 				const uint64_t index_pool_byte_offset = (uint64_t)index_base * sizeof(uint32_t);
 
-				new_mesh.first_index = index_base;
-				new_mesh.vertex_offset = (int32_t)vertex_base;
+				gpu_scene.set_mesh_geometry(assigned_mesh_id, index_base, static_cast<int32_t>(vertex_base));
 
 				//bud::print("[GeometryPool] mesh={} vertex_offset={} first_index={} v_size={}B i_size={}B",
 				//	assigned_mesh_id, vertex_base, index_base, v_size, i_size);
@@ -720,104 +671,6 @@ namespace bud::graphics {
 
 			auto& frame = gpu_scene.frame_resources(current_idx);
 
-			if (instance_data_ssbos.size() <= current_idx) {
-				instance_data_ssbos.resize(current_idx + 1);
-				indirect_instance_buffers.resize(current_idx + 1);
-				indirect_draw_buffers.resize(current_idx + 1);
-				stats_readback_buffers.resize(current_idx + 1);
-				meshlet_visibility_buffers.resize(current_idx + 1);
-				meshlet_hiz_visibility_buffers.resize(current_idx + 1);
-			}
-
-			if (total_draw_count > current_indirect_capacity) {
-				rhi->wait_idle();
-				for (auto& buf : indirect_instance_buffers)
-					if (buf.is_valid())
-						rhi->destroy_buffer(buf);
-				for (auto& buf : indirect_draw_buffers)
-					if (buf.is_valid())
-						rhi->destroy_buffer(buf);
-				for (auto& buf : stats_readback_buffers)
-					if (buf.is_valid())
-						rhi->destroy_buffer(buf);
-				for (auto& buf : meshlet_visibility_buffers)
-					if (buf.is_valid())
-						rhi->destroy_buffer(buf);
-				for (auto& buf : meshlet_hiz_visibility_buffers)
-					if (buf.is_valid())
-						rhi->destroy_buffer(buf);
-				for (auto& buf : instance_data_ssbos)
-					if (buf.is_valid())
-						rhi->destroy_buffer(buf);
-
-				constexpr uint32_t kCapacityHeadroom = 1024;
-				current_indirect_capacity = std::max(current_indirect_capacity * 2, static_cast<uint32_t>(total_draw_count) + kCapacityHeadroom);
-
-				for (size_t i = 0; i < instance_data_ssbos.size(); ++i) {
-					instance_data_ssbos[i] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(InstanceData), ResourceState::ShaderResource);
-					rhi->set_debug_name(instance_data_ssbos[i], ObjectType::Buffer, "GlobalInstanceData_Frame" + std::to_string(i));
-
-					if (render_config.enable_gpu_driven) {
-						indirect_instance_buffers[i] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(DrawData), ResourceState::UnorderedAccess);
-						indirect_draw_buffers[i] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(IndirectCommand), ResourceState::IndirectArgument);
-						stats_readback_buffers[i] = rhi->create_gpu_buffer(1024, ResourceState::UnorderedAccess);
-						meshlet_frustum_stats_buffers[i] = rhi->create_gpu_buffer(1024, ResourceState::UnorderedAccess);
-						meshlet_hiz_stats_buffers[i] = rhi->create_gpu_buffer(1024, ResourceState::UnorderedAccess);
-						meshlet_visibility_buffers[i] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(uint32_t), ResourceState::UnorderedAccess);
-
-						rhi->set_debug_name(indirect_instance_buffers[i], ObjectType::Buffer, "IndirectInstanceData_Frame" + std::to_string(i));
-						rhi->set_debug_name(indirect_draw_buffers[i], ObjectType::Buffer, "IndirectDrawCommands_Frame" + std::to_string(i));
-						rhi->set_debug_name(stats_readback_buffers[i], ObjectType::Buffer, "GPUStatsReadback_Frame" + std::to_string(i));
-						rhi->set_debug_name(meshlet_frustum_stats_buffers[i], ObjectType::Buffer, "MeshletFrustumStats_Frame" + std::to_string(i));
-						rhi->set_debug_name(meshlet_hiz_stats_buffers[i], ObjectType::Buffer, "MeshletHiZStats_Frame" + std::to_string(i));
-						rhi->set_debug_name(meshlet_visibility_buffers[i], ObjectType::Buffer, "MeshletVisibility_Frame" + std::to_string(i));
-					}
-				}
-			}
-
-			// Ensure current frame buffer is valid even if capacity didn't change (e.g. first frame if capacity > total_draw_count)
-			if (!instance_data_ssbos[current_idx].is_valid()) {
-				if (current_indirect_capacity == 0) current_indirect_capacity = std::max<uint32_t>(static_cast<uint32_t>(total_draw_count) + 1024u, 1024u);
-				instance_data_ssbos[current_idx] = rhi->create_gpu_buffer(current_indirect_capacity * sizeof(InstanceData), ResourceState::ShaderResource);
-				rhi->set_debug_name(instance_data_ssbos[current_idx], ObjectType::Buffer, "GlobalInstanceData_Frame" + std::to_string(current_idx));
-			}
-
-			if (render_config.enable_meshlets && current_meshlet_visibility_capacity < total_meshlet_count) {
-				rhi->wait_idle();
-				for (auto& buf : meshlet_visibility_buffers) {
-					if (buf.is_valid()) {
-						rhi->destroy_buffer(buf);
-					}
-				}
-				current_meshlet_visibility_capacity = std::max(current_meshlet_visibility_capacity, total_meshlet_count);
-				for (size_t i = 0; i < meshlet_visibility_buffers.size(); ++i) {
-					meshlet_visibility_buffers[i] = rhi->create_gpu_buffer(static_cast<uint64_t>(current_meshlet_visibility_capacity) * sizeof(uint32_t), ResourceState::UnorderedAccess);
-					rhi->set_debug_name(meshlet_visibility_buffers[i], ObjectType::Buffer, "MeshletVisibility_Frame" + std::to_string(i));
-				}
-			}
-
-			if (render_config.enable_meshlets && !meshlet_visibility_buffers[current_idx].is_valid()) {
-				if (current_meshlet_visibility_capacity == 0) current_meshlet_visibility_capacity = std::max<uint32_t>(total_meshlet_count, 1024u);
-				meshlet_visibility_buffers[current_idx] = rhi->create_gpu_buffer(static_cast<uint64_t>(current_meshlet_visibility_capacity) * sizeof(uint32_t), ResourceState::UnorderedAccess);
-				rhi->set_debug_name(meshlet_visibility_buffers[current_idx], ObjectType::Buffer, "MeshletVisibility_Frame" + std::to_string(current_idx));
-			}
-
-			if (render_config.enable_meshlets && !meshlet_hiz_visibility_buffers[current_idx].is_valid()) {
-				if (current_meshlet_visibility_capacity == 0) current_meshlet_visibility_capacity = std::max<uint32_t>(total_meshlet_count, 1024u);
-				meshlet_hiz_visibility_buffers[current_idx] = rhi->create_gpu_buffer(static_cast<uint64_t>(current_meshlet_visibility_capacity) * sizeof(uint32_t), ResourceState::UnorderedAccess);
-				rhi->set_debug_name(meshlet_hiz_visibility_buffers[current_idx], ObjectType::Buffer, "MeshletHiZVisibility_Frame" + std::to_string(current_idx));
-			}
-
-			if (render_config.enable_gpu_driven && !meshlet_frustum_stats_buffers[current_idx].is_valid()) {
-				meshlet_frustum_stats_buffers[current_idx] = rhi->create_gpu_buffer(1024, ResourceState::UnorderedAccess);
-				rhi->set_debug_name(meshlet_frustum_stats_buffers[current_idx], ObjectType::Buffer, "MeshletFrustumStats_Frame" + std::to_string(current_idx));
-			}
-
-			if (render_config.enable_gpu_driven && !meshlet_hiz_stats_buffers[current_idx].is_valid()) {
-				meshlet_hiz_stats_buffers[current_idx] = rhi->create_gpu_buffer(1024, ResourceState::UnorderedAccess);
-				rhi->set_debug_name(meshlet_hiz_stats_buffers[current_idx], ObjectType::Buffer, "MeshletHiZStats_Frame" + std::to_string(current_idx));
-			}
-
 			auto& render_stats = rhi->get_render_stats();
 			const bool meshlet_pass_ready = meshlet_frustum_pass && meshlet_frustum_pass->is_ready()
 				&& heuristic_occluder_pass && heuristic_occluder_pass->is_ready()
@@ -886,12 +739,13 @@ namespace bud::graphics {
 						uint32_t entity_idx = item.entity_index;
 						uint32_t mesh_id = render_scene.mesh_indices[entity_idx];
 						const auto& mesh = meshes[mesh_id];
+						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
 
 						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
 							const auto& sub = mesh.submeshes[item.submesh_index];
 							mapped[i].indexCount = sub.index_count;
-							mapped[i].firstIndex = mesh.first_index + sub.index_start;
-							mapped[i].vertexOffset = mesh.vertex_offset;
+							mapped[i].firstIndex = mesh_geometry.first_index + sub.index_start;
+							mapped[i].vertexOffset = mesh_geometry.vertex_offset;
 							mapped[i].materialId = sub.material_id;
 							mapped[i].meshId = mesh_id;
 
@@ -902,8 +756,8 @@ namespace bud::graphics {
 						}
 						else {
 							mapped[i].indexCount = mesh.index_count;
-							mapped[i].firstIndex = mesh.first_index;
-							mapped[i].vertexOffset = mesh.vertex_offset;
+							mapped[i].firstIndex = mesh_geometry.first_index;
+							mapped[i].vertexOffset = mesh_geometry.vertex_offset;
 							mapped[i].materialId = render_scene.material_indices[entity_idx];
 							mapped[i].meshId = mesh_id;
 
@@ -1067,7 +921,7 @@ namespace bud::graphics {
 				for (uint32_t i = 0; i < cascade_count; ++i)
 					csm_visible_instances[i] = std::move(culled_results[i + 1]);
 
-				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
+				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
 
 				const bool use_gpu_occluder_selection = render_config.enable_gpu_driven
 					&& render_config.enable_meshlets
@@ -1140,7 +994,7 @@ namespace bud::graphics {
 					rhi->get_render_stats().occluder_triangles = 0; // Handled by CPU path above if !use_gpu
 				}
 
-				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, persistent_occluder_list, use_gpu_occluder_selection ? visible_count : occluder_count, use_gpu_occluder_selection ? rg_draw : RGHandle{}, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
+				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, persistent_occluder_list, use_gpu_occluder_selection ? visible_count : occluder_count, use_gpu_occluder_selection ? rg_draw : RGHandle{}, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
 
 				if (depth_prepass.is_valid()) {
 					if (render_config.enable_gpu_driven) {
@@ -1175,10 +1029,10 @@ namespace bud::graphics {
 
 					if (shadow_map.is_valid()) {
 						if (render_config.enable_cluster_visualization) {
-							cluster_viz_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
+							cluster_viz_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
 						}
 						else {
-							main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
+							main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
 						}
 						has_main_pass = true;
 					}
