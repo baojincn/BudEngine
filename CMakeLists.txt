@@ -226,6 +226,8 @@ target_sources(bud_engine_core
 		"src/graphics/bud.ml_passes.cpp"
 		"src/graphics/bud.ml_perception.cpp"
 
+		"src/streaming/bud.streaming.manager.cpp"
+
 		"src/core/bud.logger.cpp"
 
 
@@ -278,6 +280,8 @@ target_sources(bud_engine_core
 		"src/graphics/vulkan/bud.vulkan.pool.hpp"
 		"src/graphics/vulkan/bud.vulkan.types.hpp"
 		"src/graphics/vulkan/bud.vulkan.utils.hpp"
+
+		"src/streaming/bud.streaming.manager.hpp"
 
 		"src/graphics/bud.ml_passes.hpp"
 		"src/graphics/bud.ml_perception.hpp"

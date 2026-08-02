@@ -25,6 +25,21 @@ void TriangleApp::on_init(const AppConfig& config) {
 	auto asset_manager = engine->get_asset_manager();
 	auto renderer = engine->get_renderer();
 
+	streaming_manager = std::make_unique<bud::streaming::StreamingManager>(
+		asset_manager, &renderer->get_gpu_scene(), renderer, renderer->get_rhi());
+
+	streaming_manager->set_page_registered_callback([engine](uint32_t mesh_id, const bud::math::AABB&) {
+		auto& s = engine->get_scene();
+		bud::scene::Entity e;
+		e.asset_path = "[page_streaming]";
+		e.mesh_index = mesh_id;
+		e.material_index = 0;
+		e.is_active = true;
+		e.is_static = true;
+		e.transform = glm::mat4(1.0f);
+		s.entities.push_back(std::move(e));
+	});
+
 	// 1. Initial Render Config
 	bud::graphics::RenderConfig render_config;
 	render_config.shadow_bias_constant = 0.005f;
@@ -45,9 +60,17 @@ void TriangleApp::on_init(const AppConfig& config) {
 				bud::print("[TriangleApp] Scene file parsed. Entities found: {}", scene.entities.size());
 
 				// Count pending mesh loads
+				// Route .budmesh.json assets through streaming
+				for (auto& e : scene.entities) {
+					if (!e.asset_path.empty() && e.asset_path.ends_with(".budmesh.json")) {
+						if (streaming_manager)
+							streaming_manager->register_budmesh_async(e.asset_path);
+					}
+				}
+
 				int count = 0;
 				for (auto& e : scene.entities)
-					if (!e.asset_path.empty())
+					if (!e.asset_path.empty() && !e.asset_path.ends_with(".budmesh.json"))
 						++count;
 
 				pending_mesh_loads->store(count);
@@ -59,7 +82,7 @@ void TriangleApp::on_init(const AppConfig& config) {
 
 				for (size_t i = 0; i < scene.entities.size(); ++i) {
 					const auto asset_path = scene.entities[i].asset_path;
-					if (asset_path.empty()) continue;
+						if (asset_path.empty() || asset_path.ends_with(".budmesh.json")) continue;
 
 					asset_manager->load_mesh_async(asset_path, [this, engine, renderer, pending_mesh = pending_mesh_loads, asset_path, i](bud::io::MeshData mesh) mutable {
 						auto mesh_handle = renderer->upload_mesh(mesh);
@@ -105,6 +128,11 @@ void TriangleApp::on_update(float delta_time) {
 	auto engine = get_engine();
 
 	if (engine->is_replay_active()) return;
+
+	if (streaming_manager) {
+		auto& cam = engine->get_scene().main_camera;
+		streaming_manager->update(bud::math::vec3(cam.position.x, cam.position.y, cam.position.z));
+	}
 
 	auto& input = bud::input::Input::get();
 	auto& scene = engine->get_scene();

@@ -160,6 +160,8 @@ private:
 		void load_mesh_async(const std::string& path, std::function<void(MeshData)> on_loaded);
 		void load_image_async(const std::string& path, std::function<void(Image)> on_loaded);
 		void load_file_async(const std::string& path, std::function<void(std::vector<char>)> on_loaded);
+		void load_file_chunk_async(const std::string& path, uint64_t offset, uint64_t size,
+			std::function<void(std::vector<char>)> on_loaded);
 		void load_json_async(const std::string& path, std::function<void(nlohmann::json)> on_loaded);
 		void save_json_async(const std::string& path, const nlohmann::json& json, std::function<void(bool)> on_finished = nullptr);
 		void save_file_async(const std::string& path, std::vector<char> data, std::function<void(bool)> on_finished = nullptr);

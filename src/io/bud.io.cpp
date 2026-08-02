@@ -868,6 +868,30 @@ namespace bud::io {
 			});
 	}
 
+	void AssetManager::load_file_chunk_async(const std::string& path, uint64_t offset, uint64_t size,
+		std::function<void(std::vector<char>)> on_loaded)
+	{
+		task_scheduler->spawn("AsyncChunkLoad", [this, path, offset, size, on_loaded]() {
+			auto resolved = this->virtual_file_system->resolve_path(path);
+			std::vector<char> data;
+			if (resolved) {
+				std::ifstream file(*resolved, std::ios::binary);
+				if (file.is_open()) {
+					file.seekg(static_cast<std::streamoff>(offset));
+					data.resize(size);
+					file.read(data.data(), static_cast<std::streamsize>(size));
+					data.resize(static_cast<size_t>(file.gcount()));
+				}
+				else {
+					bud::eprint("[IO] Failed to open chunk file: {}", resolved->string());
+				}
+			}
+			task_scheduler->submit_main_thread_task([on_loaded, data = std::move(data)]() mutable {
+				on_loaded(std::move(data));
+			});
+		});
+	}
+
 	void AssetManager::load_json_async(const std::string& path, std::function<void(nlohmann::json)> on_loaded) {
 		task_scheduler->spawn("AsyncJSONLoad", [this, path, on_loaded]() {
 			auto data_opt = this->virtual_file_system->read_binary(path);
