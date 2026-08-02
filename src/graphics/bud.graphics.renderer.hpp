@@ -57,7 +57,13 @@ namespace bud::graphics {
 		std::vector<bud::math::AABB> get_mesh_bounds_snapshot() const;
 		std::vector<std::vector<bud::math::AABB>> get_submesh_bounds_snapshot() const;
 
-	private:
+			GPUScene& get_gpu_scene() { return gpu_scene; }
+			RHI* get_rhi() { return rhi; }
+			uint32_t register_page_backed_mesh(uint32_t page_index, uint32_t meshlet_count,
+				uint32_t index_count, const bud::math::AABB& aabb,
+				uint32_t vertex_data_offset = 0, uint32_t index_data_offset = 0);
+
+		private:
 		struct UploadQueue {
 			std::mutex mutex;
 			std::vector<std::function<void()>> commands;
@@ -97,6 +103,7 @@ namespace bud::graphics {
 		std::vector<RenderMesh> meshes;
 		std::vector<bud::math::AABB> mesh_bounds;
 		mutable std::mutex mesh_bounds_mutex;
+		std::mutex mesh_mutex;
 
 		std::vector<SortItem> sort_list;
 

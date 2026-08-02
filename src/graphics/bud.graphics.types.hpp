@@ -323,12 +323,20 @@ namespace bud::graphics {
 		BufferHandle cull_data_buffer;
 		uint32_t meshlet_count = 0;
 
+		// Virtual geometry page residency
+		bool is_page_backed = false;
+		uint32_t page_index = ~0u;
+		uint32_t page_vertex_data_offset = 0;
+		uint32_t page_index_data_offset = 0;
+
 		bud::math::AABB aabb;
 		bud::math::BoundingSphere sphere;
 		std::vector<SubMesh> submeshes;
 
 		bool is_valid() const { return index_count > 0; }
 		bool has_meshlet_data() const {
+			if (is_page_backed)
+				return meshlet_count > 0 && page_index != ~0u;
 			return meshlet_count > 0 &&
 				meshlet_buffer.is_valid() &&
 				vertex_index_buffer.is_valid() &&

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <string>
 #include <vector>
@@ -114,7 +114,7 @@ namespace bud::graphics {
 		virtual void add_culling_stats(uint32_t total, uint32_t visible, uint32_t casters) = 0;
 
 		virtual void cmd_copy_buffer(CommandHandle cmd, BufferHandle src, BufferHandle dst, uint64_t size) = 0;
-		virtual void cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) = 0;
-		virtual void cmd_copy_image_to_buffer(CommandHandle cmd, Texture* src, BufferHandle dst) = 0;
-	};
+			virtual void cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) = 0;
+			virtual void cmd_copy_image_to_buffer(CommandHandle cmd, Texture* src, BufferHandle dst) = 0;
+		};
 }

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 #include "src/graphics/bud.graphics.memory.hpp"
@@ -27,6 +28,28 @@ namespace bud::graphics {
 			std::atomic<uint32_t> next_index{ 0 };
 			bool initialized = false;
 		};
+
+		struct PagePool {
+			static constexpr uint64_t kPagePoolSize = 512ull * 1024 * 1024;
+			static constexpr uint32_t kPageSize = 128 * 1024;
+			static constexpr uint32_t kMaxPages = kPagePoolSize / kPageSize;
+
+			BufferHandle page_pool_buffer;
+			std::vector<uint32_t> free_slots;
+			std::mutex mutex;
+			bool initialized = false;
+
+			uint32_t allocate_page();
+			void free_page(uint32_t page_index);
+			uint32_t get_page_offset(uint32_t page_index) const { return page_index * kPageSize; }
+		};
+
+		struct PageTableEntry {
+			uint32_t valid;
+			uint32_t padding;
+			uint32_t pool_offset;
+		};
+		static constexpr uint32_t kMaxPageTableEntries = 4096;
 
 		struct FrameResources {
 			BufferHandle instance_data;
@@ -60,6 +83,12 @@ namespace bud::graphics {
 		BufferHandle get_vertex_buffer() const;
 		BufferHandle get_index_buffer() const;
 
+		PagePool& get_page_pool();
+		const PagePool& get_page_pool() const;
+		BufferHandle get_page_pool_buffer() const;
+		BufferHandle get_page_table_buffer() const;
+		void update_page_table_entry(uint32_t page_index, uint32_t pool_offset);
+
 		void set_mesh_geometry(uint32_t mesh_id, uint32_t first_index, int32_t vertex_offset);
 		const MeshGeometry& mesh_geometry(uint32_t mesh_id) const;
 
@@ -80,6 +109,8 @@ namespace bud::graphics {
 
 	private:
 		GeometryPool geometry_pool_;
+		PagePool page_pool_;
+		BufferHandle page_table_buffer_;
 		std::vector<MeshGeometry> mesh_geometry_;
 		std::vector<FrameResources> frame_resources_;
 	};

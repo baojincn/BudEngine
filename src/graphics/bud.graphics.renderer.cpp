@@ -108,6 +108,38 @@ namespace bud::graphics {
 		return result;
 	}
 
+	uint32_t Renderer::register_page_backed_mesh(uint32_t page_index, uint32_t meshlet_count,
+		uint32_t index_count, const bud::math::AABB& aabb,
+		uint32_t vertex_data_offset, uint32_t index_data_offset)
+	{
+		std::scoped_lock lock(mesh_mutex, mesh_bounds_mutex);
+
+		uint32_t mesh_id = next_mesh_id.fetch_add(1, std::memory_order_relaxed);
+
+		RenderMesh mesh{};
+		mesh.index_count = index_count;
+		mesh.meshlet_count = meshlet_count;
+		mesh.is_page_backed = true;
+		mesh.page_index = page_index;
+		mesh.page_vertex_data_offset = vertex_data_offset;
+		mesh.page_index_data_offset = index_data_offset;
+		mesh.aabb = aabb;
+
+		if (mesh_id >= meshes.size())
+			meshes.resize(mesh_id + 1);
+		meshes[mesh_id] = std::move(mesh);
+
+		if (mesh_id >= mesh_bounds.size())
+			mesh_bounds.resize(mesh_id + 1);
+		mesh_bounds[mesh_id] = aabb;
+
+		gpu_scene.set_mesh_geometry(mesh_id, index_data_offset / 4, 0);
+
+		bud::print("[Renderer] Registered page-backed mesh_id={} page_index={} meshlets={}",
+			mesh_id, page_index, meshlet_count);
+		return mesh_id;
+	}
+
 	MeshAssetHandle Renderer::upload_mesh(const bud::io::MeshData& mesh_data) {
 		if (mesh_data.vertices.empty()) {
 			std::string err = "Renderer::upload_mesh called with empty vertex list";

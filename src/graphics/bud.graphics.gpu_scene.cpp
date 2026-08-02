@@ -14,6 +14,21 @@ namespace bud::graphics {
 		geometry_pool_.vertex_buffer = rhi->create_gpu_buffer(GeometryPool::kVertexPoolSize, ResourceState::VertexBuffer);
 		geometry_pool_.index_buffer = rhi->create_gpu_buffer(GeometryPool::kIndexPoolSize, ResourceState::IndexBuffer);
 		geometry_pool_.initialized = geometry_pool_.vertex_buffer.is_valid() && geometry_pool_.index_buffer.is_valid();
+
+		if (!page_pool_.initialized) {
+			page_pool_.page_pool_buffer = rhi->create_gpu_buffer(PagePool::kPagePoolSize, ResourceState::UnorderedAccess);
+			page_pool_.initialized = page_pool_.page_pool_buffer.is_valid();
+			if (page_pool_.initialized) {
+				std::lock_guard lock(page_pool_.mutex);
+				page_pool_.free_slots.reserve(PagePool::kMaxPages);
+				for (int32_t i = PagePool::kMaxPages - 1; i >= 0; --i)
+					page_pool_.free_slots.push_back(i);
+			}
+		}
+
+		if (!page_table_buffer_.is_valid()) {
+			page_table_buffer_ = rhi->create_gpu_buffer(kMaxPageTableEntries * sizeof(PageTableEntry), ResourceState::UnorderedAccess);
+		}
 	}
 
 	void GPUScene::shutdown(RHI* rhi) {
@@ -29,6 +44,22 @@ namespace bud::graphics {
 		geometry_pool_.next_vertex.store(0, std::memory_order_relaxed);
 		geometry_pool_.next_index.store(0, std::memory_order_relaxed);
 		geometry_pool_.initialized = false;
+
+		if (rhi && page_pool_.initialized) {
+			if (page_pool_.page_pool_buffer.is_valid())
+				rhi->destroy_buffer(page_pool_.page_pool_buffer);
+		}
+		page_pool_.page_pool_buffer = {};
+		{
+			std::lock_guard lock(page_pool_.mutex);
+			page_pool_.free_slots.clear();
+		}
+		page_pool_.initialized = false;
+
+		if (rhi && page_table_buffer_.is_valid()) {
+			rhi->destroy_buffer(page_table_buffer_);
+		}
+		page_table_buffer_ = {};
 
 		if (rhi) {
 			for (auto& frame_resource : frame_resources_) {
@@ -156,5 +187,32 @@ namespace bud::graphics {
 
 			frame_resource.meshlet_visibility_capacity = desired_meshlet_capacity;
 		}
+	}
+
+	GPUScene::PagePool& GPUScene::get_page_pool() { return page_pool_; }
+	const GPUScene::PagePool& GPUScene::get_page_pool() const { return page_pool_; }
+	BufferHandle GPUScene::get_page_pool_buffer() const { return page_pool_.page_pool_buffer; }
+	BufferHandle GPUScene::get_page_table_buffer() const { return page_table_buffer_; }
+
+	void GPUScene::update_page_table_entry(uint32_t page_index, uint32_t pool_offset) {
+		if (!page_table_buffer_.is_valid() || page_index >= kMaxPageTableEntries)
+			return;
+		if (!page_table_buffer_.mapped_ptr) return;
+		auto* entries = static_cast<PageTableEntry*>(page_table_buffer_.mapped_ptr);
+		entries[page_index].valid = 1;
+		entries[page_index].pool_offset = pool_offset;
+	}
+
+	uint32_t GPUScene::PagePool::allocate_page() {
+		std::lock_guard lock(mutex);
+		if (free_slots.empty()) return ~0u;
+		uint32_t slot = free_slots.back();
+		free_slots.pop_back();
+		return slot;
+	}
+
+	void GPUScene::PagePool::free_page(uint32_t page_index) {
+		std::lock_guard lock(mutex);
+		free_slots.push_back(page_index);
 	}
 }

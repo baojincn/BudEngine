@@ -87,6 +87,27 @@ namespace bud::asset {
 
 #pragma pack(pop)
 
+	// Virtual Geometry Page Binary Layout
+	// Each page in the GPU Page Pool: 64-byte header + data sections
+	struct PageBinaryHeader {
+		static constexpr uint32_t MAGIC = 0x50414745;
+		static constexpr uint32_t VERSION = 1;
+		uint32_t magic;
+		uint32_t version;
+		uint32_t meshlet_count;
+		uint32_t vertex_count;
+		uint32_t index_count;
+		float aabb_min[3];
+		float aabb_max[3];
+		uint32_t vertex_data_offset;
+		uint32_t index_data_offset;
+		uint32_t padding[3];
+	};
+	static constexpr uint32_t PAGE_HEADER_SIZE = 64;
+	static constexpr uint32_t PAGE_MESHLET_DESC_STRIDE = 24;
+	static constexpr uint32_t PAGE_CULL_DATA_STRIDE = 16;
+	static constexpr uint32_t PAGE_VERTEX_STRIDE = 48;
+
 	constexpr uint32_t INVALID_INDEX = 0xFFFFFFFFu;
 
     // Structural constants for verification
