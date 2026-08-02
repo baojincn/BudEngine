@@ -65,6 +65,20 @@ layout(set = 0, binding = 4) uniform UniformBufferObject {
     uint reversed_z;
 } ubo;
 
+struct PageTableEntry {
+    uint valid;
+    uint padding;
+    uint pool_offset;
+};
+
+layout(std430, set = 0, binding = 5) readonly buffer PageTableBuffer {
+    PageTableEntry data[];
+} page_table;
+
+layout(std430, set = 0, binding = 6) readonly buffer PagePoolBuffer {
+    uint data[];
+} page_pool;
+
 layout(push_constant) uniform PushConstants {
     uint drawIndex;
     uint meshletStart;

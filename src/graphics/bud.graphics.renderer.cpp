@@ -1045,9 +1045,9 @@ namespace bud::graphics {
 							&& rg_meshlet_visibility.is_valid()
 							&& rg_meshlet_hiz_visibility.is_valid()
 							&& rg_meshlet_hiz_stats.is_valid()) {
-							meshlet_hiz_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_meshlet_hiz_visibility, rg_meshlet_hiz_stats, rg_hiz, scene_view, render_scene, meshes, sort_list, visible_count);
+							meshlet_hiz_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_meshlet_hiz_visibility, rg_meshlet_hiz_stats, rg_hiz, scene_view, render_scene, meshes, sort_list, visible_count, gpu_scene);
 							if (meshlet_indirect_pass && rg_draw.is_valid()) {
-								meshlet_indirect_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_hiz_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count);
+								meshlet_indirect_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_hiz_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count, gpu_scene);
 							}
 						}
 						else {

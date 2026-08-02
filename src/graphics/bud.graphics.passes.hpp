@@ -72,13 +72,13 @@ namespace bud::graphics {
 	class MeshletHiZCullingPass : public RenderPass {
 	public:
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, RGHandle instance_buffer, RGHandle meshlet_visibility_in, RGHandle meshlet_visibility_out, RGHandle stats_buffer, RGHandle hiz_pyramid, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count);
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle instance_buffer, RGHandle meshlet_visibility_in, RGHandle meshlet_visibility_out, RGHandle stats_buffer, RGHandle hiz_pyramid, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, const GPUScene& gpu_scene);
 	};
 
 	class MeshletIndirectEmissionPass : public RenderPass {
 	public:
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count);
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, const GPUScene& gpu_scene);
 	};
 
 	class HiZMipPass : public RenderPass {

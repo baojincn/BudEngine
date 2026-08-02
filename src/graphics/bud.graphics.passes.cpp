@@ -873,7 +873,7 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 		});
 	}
 
-	RGHandle MeshletHiZCullingPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_in, RGHandle meshlet_visibility_out, RGHandle stats_buffer, RGHandle hiz_pyramid, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count) {
+	RGHandle MeshletHiZCullingPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_in, RGHandle meshlet_visibility_out, RGHandle stats_buffer, RGHandle hiz_pyramid, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, const GPUScene& gpu_scene) {
 		if (!pipeline) {
 			bud::eprint("[MeshletHiZCullingPass] Skipping pass because pipeline is not ready yet.");
 			return {};
@@ -889,7 +889,7 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 				builder.write(stats_buffer, ResourceState::UnorderedAccess);
 				return RGHandle{};
 			},
-			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+			[=, &render_graph, &render_scene, &meshes, &sort_list, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) return;
 
 				bud::graphics::BufferHandle inst_buf{};
@@ -931,7 +931,14 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 				rhi->cmd_bind_compute_texture(cmd, pipeline, 5, hiz_tex, ALL_MIPS, false, true);
 				rhi->cmd_bind_compute_ubo(cmd, pipeline, 9);
 
-				const size_t dispatch_count = std::min(visible_count, sort_list.size());
+					auto pt_buf = gpu_scene.get_page_table_buffer();
+					auto pp_buf = gpu_scene.get_page_pool_buffer();
+					if (pt_buf.is_valid())
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 10, pt_buf);
+					if (pp_buf.is_valid())
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 11, pp_buf);
+
+					const size_t dispatch_count = std::min(visible_count, sort_list.size());
 				for (size_t i = 0; i < dispatch_count; ++i) {
 					const auto& item = sort_list[i];
 					if (item.entity_index >= render_scene.mesh_indices.size()) {
@@ -1007,7 +1014,7 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 		});
 	}
 
-	RGHandle MeshletIndirectEmissionPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count) {
+	RGHandle MeshletIndirectEmissionPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, const GPUScene& gpu_scene) {
 		if (!pipeline) {
 			bud::eprint("[MeshletIndirectEmissionPass] Skipping pass because pipeline is not ready yet.");
 			return {};
@@ -1022,7 +1029,7 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 				builder.write(stats_buffer, ResourceState::UnorderedAccess);
 				return RGHandle{};
 			},
-			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+			[=, &render_graph, &render_scene, &meshes, &sort_list, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) return;
 
 				bud::graphics::BufferHandle inst_buf{};
@@ -1061,7 +1068,14 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 				rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, stat_buf);
 				rhi->cmd_bind_compute_ubo(cmd, pipeline, 4);
 
-				const size_t dispatch_count = std::min(visible_count, sort_list.size());
+					auto pt_buf = gpu_scene.get_page_table_buffer();
+					auto pp_buf = gpu_scene.get_page_pool_buffer();
+					if (pt_buf.is_valid())
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 5, pt_buf);
+					if (pp_buf.is_valid())
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 6, pp_buf);
+
+					const size_t dispatch_count = std::min(visible_count, sort_list.size());
 				for (size_t i = 0; i < dispatch_count; ++i) {
 					const auto& item = sort_list[i];
 					if (item.entity_index >= render_scene.mesh_indices.size()) {
