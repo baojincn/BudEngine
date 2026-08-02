@@ -90,6 +90,8 @@ namespace bud::graphics {
 		virtual Texture* get_fallback_texture() = 0;
 		virtual void update_global_shadow_map(Texture* texture) = 0;
 		virtual void update_global_instance_data(bud::graphics::BufferHandle buffer) = 0;
+			virtual void update_global_page_table(bud::graphics::BufferHandle buffer) = 0;
+			virtual void update_global_page_pool(bud::graphics::BufferHandle buffer) = 0;
 		virtual void cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) = 0; // Shadow Caching
 		virtual void cmd_blit_image(CommandHandle cmd, Texture* src, Texture* dst) = 0;
 		virtual void cmd_set_scissor(CommandHandle cmd, uint32_t width, uint32_t height) = 0;

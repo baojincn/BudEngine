@@ -946,8 +946,11 @@ namespace bud::graphics {
 			bool has_main_pass = false;
 			RGHandle shadow_map;
 			if (rg_instance_data.is_valid()) {
-				rhi->update_global_instance_data(frame.instance_data);
-			}
+					rhi->update_global_instance_data(frame.instance_data);
+				}
+
+				rhi->update_global_page_table(gpu_scene.get_page_table_buffer());
+				rhi->update_global_page_pool(gpu_scene.get_page_pool_buffer());
 			if (visible_count > 0) {
 				std::vector<std::vector<uint32_t>> csm_visible_instances(cascade_count);
 				for (uint32_t i = 0; i < cascade_count; ++i)

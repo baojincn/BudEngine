@@ -1636,26 +1636,33 @@ void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManage
 					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
 				}
 				else {
-					for (size_t i = 0; i < draw_count; ++i) {
-						const auto& item = sort_list[i];
-						uint32_t idx = item.entity_index;
+						auto pp_buf = gpu_scene.get_page_pool_buffer();
+						for (size_t i = 0; i < draw_count; ++i) {
+							const auto& item = sort_list[i];
+							uint32_t idx = item.entity_index;
 
-						uint32_t mesh_id = render_scene.mesh_indices[idx];
-						if (mesh_id >= meshes.size()) continue;
+							uint32_t mesh_id = render_scene.mesh_indices[idx];
+							if (mesh_id >= meshes.size()) continue;
 
-						const auto& mesh = meshes[mesh_id];
-						if (!mesh.is_valid()) continue;
-						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+							const auto& mesh = meshes[mesh_id];
+							if (!mesh.is_valid()) continue;
+							const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
 
-						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
-							const auto& sub = mesh.submeshes[item.submesh_index];
-							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
-						}
-						else {
-							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
+							if (mesh.is_page_backed && pp_buf.is_valid()) {
+								rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+								rhi->cmd_bind_index_buffer(cmd, pp_buf);
+								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1,
+									mesh.page_index_data_offset / 4,
+									mesh.page_vertex_data_offset / 48, (uint32_t)i);
+							} else if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+								const auto& sub = mesh.submeshes[item.submesh_index];
+								rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
+							}
+							else {
+								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
+							}
 						}
 					}
-				}
 
 				rhi->cmd_end_render_pass(cmd);
 			}

@@ -157,6 +157,8 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	layout_builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	layout_builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+	layout_builder.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+	layout_builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 
 	global_set_layout = layout_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
 
@@ -2731,6 +2733,28 @@ void VulkanRHI::update_global_instance_data(bud::graphics::BufferHandle buffer) 
 	for (int i = 0; i < max_frames_in_flight; i++) {
 		DescriptorWriter writer;
 		writer.write_buffer(3, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+		writer.update_set(device, frames[i].global_descriptor_set);
+	}
+}
+
+void VulkanRHI::update_global_page_table(bud::graphics::BufferHandle buffer) {
+	if (!buffer.is_valid()) return;
+	auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
+
+	for (int i = 0; i < max_frames_in_flight; i++) {
+		DescriptorWriter writer;
+		writer.write_buffer(4, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+		writer.update_set(device, frames[i].global_descriptor_set);
+	}
+}
+
+void VulkanRHI::update_global_page_pool(bud::graphics::BufferHandle buffer) {
+	if (!buffer.is_valid()) return;
+	auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
+
+	for (int i = 0; i < max_frames_in_flight; i++) {
+		DescriptorWriter writer;
+		writer.write_buffer(5, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 		writer.update_set(device, frames[i].global_descriptor_set);
 	}
 }

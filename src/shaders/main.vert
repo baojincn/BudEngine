@@ -1,4 +1,5 @@
-#version 450
+#version 460
+#extension GL_ARB_shader_draw_parameters : enable
 
 layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_color;
@@ -13,43 +14,57 @@ layout(location = 3) out vec3 frag_color;
 layout(location = 4) flat out uint frag_material_id;
 
 layout(binding = 0) uniform UniformBufferObject {
-    mat4 view;
-    mat4 proj;
+	mat4 view;
+	mat4 proj;
 	// [CSM]
 	mat4 cascade_view_proj[4];
 	vec4 cascade_split_depths;
-	
-    vec3 cam_pos;
-    vec3 light_dir;
+
+	vec3 cam_pos;
+	vec3 light_dir;
 	vec3 light_color;
-    float light_intensity;
-    float ambient_strength;
+	float light_intensity;
+	float ambient_strength;
 	uint cascade_count;
-    uint debug_cascades;
+	uint debug_cascades;
 	uint reversed_z;
 	uint padding[3];
 } ubo;
 
 struct InstanceData {
-    mat4 model;
-    uint material_id;
-    uint padding[3];
+	mat4 model;
+	uint material_id;
+	uint padding[3];
 };
 
 layout(std430, binding = 3) readonly buffer InstanceBuffer {
-    InstanceData data[];
+	InstanceData data[];
 } instance_buffer;
 
+struct PageTableEntry {
+	uint valid;
+	uint padding;
+	uint pool_offset;
+};
+
+layout(std430, binding = 4) readonly buffer PageTableBuffer {
+	PageTableEntry data[];
+} page_table;
+
+layout(std430, binding = 5) readonly buffer PagePoolBuffer {
+	uint data[];
+} page_pool;
+
 void main() {
-    InstanceData instance = instance_buffer.data[gl_InstanceIndex];
-    vec4 world_pos = instance.model * vec4(in_position, 1.0);
-    frag_world_pos = world_pos.xyz;
+	InstanceData instance = instance_buffer.data[gl_InstanceIndex];
+	vec4 world_pos = instance.model * vec4(in_position, 1.0);
+	frag_world_pos = world_pos.xyz;
 
-    frag_normal = in_normal;
-    frag_color = in_color;
-    frag_material_id = instance.material_id;
+	frag_normal = in_normal;
+	frag_color = in_color;
+	frag_material_id = instance.material_id;
 
-    gl_Position = ubo.proj * ubo.view * world_pos;
+	gl_Position = ubo.proj * ubo.view * world_pos;
 
-    frag_tex_coord = in_tex_coord;
+	frag_tex_coord = in_tex_coord;
 }
