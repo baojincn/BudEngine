@@ -605,11 +605,15 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 						uint32_t meshletStart;
 						uint32_t meshletCount;
 						uint32_t meshId;
+						uint32_t pageBacked;
+						uint32_t pageIndex;
 					} pc;
 					pc.drawIndex = static_cast<uint32_t>(i);
 					pc.meshletStart = meshlet_start;
 					pc.meshletCount = meshlet_count;
 					pc.meshId = mesh_id;
+					pc.pageBacked = mesh.is_page_backed ? 1u : 0u;
+					pc.pageIndex = mesh.page_index;
 
 					rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
 
@@ -976,12 +980,16 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 						uint32_t drawIndex;
 						uint32_t meshletStart;
 						uint32_t meshletCount;
-						uint32_t meshId;
+						uint32_t meshId;		
+						uint32_t pageBacked;
+						uint32_t pageIndex;
 					} pc;
 					pc.drawIndex = static_cast<uint32_t>(i);
 					pc.meshletStart = meshlet_start;
 					pc.meshletCount = meshlet_count;
 					pc.meshId = mesh_id;
+					pc.pageBacked = mesh.is_page_backed ? 1u : 0u;
+					pc.pageIndex = mesh.page_index;
 
 					rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
 
@@ -1108,12 +1116,16 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 						uint32_t drawIndex;
 						uint32_t meshletStart;
 						uint32_t meshletCount;
-						uint32_t meshId;
+						uint32_t meshId;		   
+						uint32_t pageBacked;
+						uint32_t pageIndex;
 					} pc;
 					pc.drawIndex = static_cast<uint32_t>(i);
 					pc.meshletStart = meshlet_start;
 					pc.meshletCount = meshlet_count;
 					pc.meshId = mesh_id;
+					pc.pageBacked = mesh.is_page_backed ? 1u : 0u;
+					pc.pageIndex = mesh.page_index;
 
 					rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
 

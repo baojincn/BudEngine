@@ -94,6 +94,8 @@ layout(push_constant) uniform PushConstants {
     uint meshletStart;
     uint meshletCount;
     uint meshId;
+    uint pageBacked;
+    uint pageIndex;
 } pc;
 
 bool aabb_visible(vec3 bmin, vec3 bmax)
@@ -202,6 +204,15 @@ bool aabb_occluded(vec3 bmin, vec3 bmax)
     return min_z <= depth;
 }
 
+// MeshletDescriptor is 16 bytes (vertex_offset, vertex_count, triangle_offset, triangle_count)
+const uint MESHLET_DESC_DWORDS = 4u;
+const uint PAGE_HEADER_DWORDS = 16u; // 64-byte PageBinaryHeader
+
+uint get_triangle_count_from_pool(uint meshlet_idx) {
+    uint base = page_table.data[pc.pageIndex].pool_offset / 4u + PAGE_HEADER_DWORDS + meshlet_idx * MESHLET_DESC_DWORDS;
+    return page_pool.data[base + 3u]; // triangle_count is 4th field
+}
+
 void main()
 {
     DrawData draw = instance_data.data[pc.drawIndex];
@@ -217,11 +228,14 @@ void main()
 
         for (uint i = 0u; i < pc.meshletCount; ++i) {
             uint meshlet_index = pc.meshletStart + i;
-            total_triangles += meshlet_data.data[meshlet_index].triangle_count;
+            uint tri_cnt = (pc.pageBacked != 0u)
+                ? get_triangle_count_from_pool(meshlet_index)
+                : meshlet_data.data[meshlet_index].triangle_count;
+            total_triangles += tri_cnt;
 
             if (visible && meshlet_visibility_in.data[meshlet_index] != 0u) {
                 ++visible_meshlets;
-                visible_triangles += meshlet_data.data[meshlet_index].triangle_count;
+                visible_triangles += tri_cnt;
             }
         }
 
