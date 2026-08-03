@@ -1134,7 +1134,7 @@ namespace bud::graphics {
 							&& meshlet_frustum_pass
 							&& rg_meshlet_visibility.is_valid()
 							&& rg_meshlet_frustum_stats.is_valid()) {
-							meshlet_frustum_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_meshlet_frustum_stats, scene_view, render_scene, meshes, sort_list, visible_count);
+							meshlet_frustum_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_meshlet_frustum_stats, scene_view, render_scene, meshes, sort_list, visible_count, gpu_scene);
 						}
 
 						if (meshlet_visibility_available

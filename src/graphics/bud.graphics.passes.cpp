@@ -545,7 +545,7 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 		});
 	}
 
-	RGHandle MeshletFrustumCullingPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count) {
+	RGHandle MeshletFrustumCullingPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, const GPUScene& gpu_scene) {
 		if (!pipeline) {
 			bud::eprint("[MeshletFrustumCullingPass] Skipping pass because pipeline is not ready yet.");
 			return {};
@@ -559,7 +559,7 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 				builder.write(stats_buffer, ResourceState::UnorderedAccess);
 				return RGHandle{};
 			},
-		    [=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+		    [=, &render_graph, &render_scene, &meshes, &sort_list, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) return;
 
 				bud::graphics::BufferHandle inst_buf{};
@@ -595,6 +595,13 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 				rhi->cmd_bind_storage_buffer(cmd, pipeline, 6, stat_buf);
 				rhi->cmd_bind_compute_ubo(cmd, pipeline, 7);
 
+				auto pt_buf = gpu_scene.get_page_table_buffer();
+				auto pp_buf = gpu_scene.get_page_pool_buffer();
+				if (pt_buf.is_valid())
+					rhi->cmd_bind_storage_buffer(cmd, pipeline, 10, pt_buf);
+				if (pp_buf.is_valid())
+					rhi->cmd_bind_storage_buffer(cmd, pipeline, 11, pp_buf);
+
 				const size_t dispatch_count = std::min(visible_count, sort_list.size());
 				for (size_t i = 0; i < dispatch_count; ++i) {
 					const auto& item = sort_list[i];
@@ -624,10 +631,12 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 						continue;
 					}
 
-					rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, mesh.meshlet_buffer);
-					rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, mesh.vertex_index_buffer);
-					rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, mesh.meshlet_index_buffer);
-					rhi->cmd_bind_storage_buffer(cmd, pipeline, 4, mesh.cull_data_buffer);
+					if (!mesh.is_page_backed) {
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, mesh.meshlet_buffer);
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, mesh.vertex_index_buffer);
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, mesh.meshlet_index_buffer);
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 4, mesh.cull_data_buffer);
+					}
 
 					struct PushConsts {
 						uint32_t drawIndex;
@@ -1000,10 +1009,12 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 						continue;
 					}
 
-					rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, mesh.meshlet_buffer);
-					rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, mesh.vertex_index_buffer);
-					rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, mesh.meshlet_index_buffer);
-					rhi->cmd_bind_storage_buffer(cmd, pipeline, 4, mesh.cull_data_buffer);
+					if (!mesh.is_page_backed) {
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, mesh.meshlet_buffer);
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, mesh.vertex_index_buffer);
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, mesh.meshlet_index_buffer);
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 4, mesh.cull_data_buffer);
+					}
 
 					struct PushConsts {
 						uint32_t drawIndex;
@@ -1287,6 +1298,23 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 					if (!ind_buf_handle.is_valid()) {
 						bud::eprint("[DepthOnlyPass] invalid indirect draw buffer.");
 						return;
+					}
+
+					bool use_page_pool = false;
+					if (draw_count > 0 && sort_list[0].entity_index < render_scene.mesh_indices.size()) {
+						uint32_t mid = render_scene.mesh_indices[sort_list[0].entity_index];
+						if (mid < meshes.size() && meshes[mid].is_page_backed) {
+							use_page_pool = true;
+						}
+					}
+					auto pp_buf = gpu_scene.get_page_pool_buffer();
+					if (use_page_pool && pp_buf.is_valid()) {
+						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+						rhi->cmd_bind_index_buffer(cmd, pp_buf);
+					}
+					else {
+						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 					}
 
 					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
@@ -1678,6 +1706,23 @@ void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManage
 				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 
 				if (config.enable_gpu_driven) {
+					bool use_page_pool = false;
+					if (draw_count > 0 && sort_list[0].entity_index < render_scene.mesh_indices.size()) {
+						uint32_t mid = render_scene.mesh_indices[sort_list[0].entity_index];
+						if (mid < meshes.size() && meshes[mid].is_page_backed) {
+							use_page_pool = true;
+						}
+					}
+					auto pp_buf = gpu_scene.get_page_pool_buffer();
+					if (use_page_pool && pp_buf.is_valid()) {
+						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+						rhi->cmd_bind_index_buffer(cmd, pp_buf);
+					}
+					else {
+						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+					}
+
 					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
 				}
 				else {
@@ -2066,6 +2111,23 @@ void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManage
 				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 
 				if (config.enable_gpu_driven && ind_buf_handle.is_valid()) {
+					bool use_page_pool = false;
+					if (draw_count > 0 && sort_list[0].entity_index < render_scene.mesh_indices.size()) {
+						uint32_t mid = render_scene.mesh_indices[sort_list[0].entity_index];
+						if (mid < meshes.size() && meshes[mid].is_page_backed) {
+							use_page_pool = true;
+						}
+					}
+					auto pp_buf = gpu_scene.get_page_pool_buffer();
+					if (use_page_pool && pp_buf.is_valid()) {
+						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+						rhi->cmd_bind_index_buffer(cmd, pp_buf);
+					}
+					else {
+						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+					}
+
 					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
 				}
 				else {

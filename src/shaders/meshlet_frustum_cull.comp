@@ -69,12 +69,36 @@ layout(set = 0, binding = 7) uniform uniform_buffer_object {
 	uint reversed_z;
 } ubo;
 
+struct PageTableEntry {
+	uint valid;
+	uint padding;
+	uint pool_offset;
+};
+
+layout(std430, set = 0, binding = 10) readonly buffer PageTableBuffer {
+	PageTableEntry data[];
+} page_table;
+
+layout(std430, set = 0, binding = 11) readonly buffer PagePoolBuffer {
+	uint data[];
+} page_pool;
+
 layout(push_constant) uniform PushConstants {
 	uint draw_index;
 	uint meshlet_start;
 	uint meshlet_count;
 	uint mesh_id;
+	uint page_backed;
+	uint page_index;
 } pc;
+
+const uint MESHLET_DESC_DWORDS = 4u;
+const uint PAGE_HEADER_DWORDS = 16u; // 64-byte PageBinaryHeader
+
+uint get_triangle_count_from_pool(uint meshlet_idx) {
+	uint base = page_table.data[pc.page_index].pool_offset / 4u + PAGE_HEADER_DWORDS + meshlet_idx * MESHLET_DESC_DWORDS;
+	return page_pool.data[base + 3u]; // triangle_count is 4th field
+}
 
 bool aabb_outside_plane(vec4 plane, vec3 bmin, vec3 bmax)
 {
@@ -119,7 +143,10 @@ void main()
 
 		uint total_triangles = 0u;
 		for (uint i = 0u; i < pc.meshlet_count; ++i) {
-			total_triangles += meshlet_data.data[pc.meshlet_start + i].triangle_count;
+			uint tri_cnt = (pc.page_backed != 0u)
+				? get_triangle_count_from_pool(pc.meshlet_start + i)
+				: meshlet_data.data[pc.meshlet_start + i].triangle_count;
+			total_triangles += tri_cnt;
 		}
 		atomicAdd(stats.total_triangles, total_triangles);
 	}

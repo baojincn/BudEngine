@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "src/graphics/bud.graphics.types.hpp"
 #include <functional>
@@ -26,7 +26,9 @@ namespace bud::ui {
                            std::function<void(bool)> set_occluder_enable = nullptr,
 					bool current_occluder_enable = true,
 					std::function<void(bool)> set_meshlet_rendering_enable = nullptr,
-					bool current_meshlet_rendering_enable = true);
+					bool current_meshlet_rendering_enable = true,
+					std::function<void(bool)> set_gpu_driven_enable = nullptr,
+					bool current_gpu_driven_enable = true);
     };
 
 }

@@ -24,7 +24,9 @@ namespace bud::ui {
         std::function<void(bool)> set_occluder_enable,
 		bool current_occluder_enable,
 		std::function<void(bool)> set_meshlet_rendering_enable,
-		bool current_meshlet_rendering_enable) {
+		bool current_meshlet_rendering_enable,
+		std::function<void(bool)> set_gpu_driven_enable,
+		bool current_gpu_driven_enable) {
 
 		if (show_stats) {
 			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
@@ -192,6 +194,19 @@ namespace bud::ui {
 					bool tmp = current_meshlet_rendering_enable;
 					if (ImGui::Checkbox("##meshlet_rendering_enable", &tmp)) {
 						set_meshlet_rendering_enable(tmp);
+					}
+					ImGui::PopItemWidth();
+					ImGui::PopID();
+				}
+				if (set_gpu_driven_enable) {
+					ImGui::SameLine();
+					ImGui::TextColored(color_neutral, " | GPU Driven");
+					ImGui::SameLine();
+					ImGui::PushID("gpu_driven_enable");
+					ImGui::PushItemWidth(24.0f);
+					bool tmp = current_gpu_driven_enable;
+					if (ImGui::Checkbox("##gpu_driven_enable", &tmp)) {
+						set_gpu_driven_enable(tmp);
 					}
 					ImGui::PopItemWidth();
 					ImGui::PopID();

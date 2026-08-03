@@ -1,4 +1,4 @@
-﻿#include <string>
+#include <string>
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -437,8 +437,14 @@ namespace bud::engine {
 				renderer->request_meshlet_rendering_enabled(v);
 			};
 			bool current_meshlet_rendering_enable = renderer->is_meshlet_rendering_enabled();
+			auto set_gpu_driven_enable = [this](bool v) {
+				auto cfg = renderer->get_config();
+				cfg.enable_gpu_driven = v;
+				renderer->set_config(cfg);
+			};
+			bool current_gpu_driven_enable = renderer->get_config().enable_gpu_driven;
 
-			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_meshlet_rendering_enable, current_meshlet_rendering_enable);
+			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_meshlet_rendering_enable, current_meshlet_rendering_enable, set_gpu_driven_enable, current_gpu_driven_enable);
 
             ImGui::Render();
 
