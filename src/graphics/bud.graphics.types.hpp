@@ -143,7 +143,7 @@ namespace bud::graphics {
 		bool debug_cascades = false;
 		bool cache_shadows = false; // Disabled: feature has rendering bugs, enable when fixed
 
-		bool enable_gpu_driven = true;
+		bool enable_gpu_driven = false; // TEMP for page streaming debug
 		bool enable_meshlets = true;
 		bool debug_hiz = false;
 		uint32_t debug_hiz_mip = 0;

@@ -62,6 +62,33 @@ namespace bud::asset {
         int8_t cone_cutoff;        // cos(angle/2) for backface culling
     };
 
+    // UE5-style Unified Terminology (Page-first)
+    struct ClusterDescriptor {
+        uint32_t vertex_offset;
+        uint32_t vertex_count;
+        uint32_t triangle_offset;
+        uint32_t triangle_count;
+        uint32_t lod_level;
+        float cluster_error;
+        float parent_error;
+    };
+
+    struct ClusterCullData {
+        float bounding_sphere[4];
+        int8_t cone_axis[3];
+        int8_t cone_cutoff;
+    };
+
+    struct PageTableEntry {
+        uint32_t page_id;
+        uint32_t cluster_start;
+        uint32_t cluster_count;
+        uint64_t data_size;
+        uint32_t dependency_page_id;
+        uint64_t file_offset;
+        uint64_t capacity;
+    };
+
     // Vertex structure for BudEngine (Must match what is written in BudAssetTool)
     struct Vertex {
         float position[3];

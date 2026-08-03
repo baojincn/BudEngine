@@ -1583,6 +1583,8 @@ void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManage
 		// max_scene_count guards accessing render_scene arrays, but entity_index in
 		// sort_list items are already validated — do NOT clamp draw_count by it.
 		const size_t draw_count = std::min(instance_count, sort_list.size());
+		bud::print("[MainPass] draw_count={} instance_count={} sort_list={} gpu_driven={}",
+			draw_count, instance_count, sort_list.size(), config.enable_gpu_driven);
 
 		uint32_t target_width = backbuffer_tex->width;
 		uint32_t target_height = backbuffer_tex->height;
@@ -1637,6 +1639,7 @@ void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManage
 				}
 				else {
 						auto pp_buf = gpu_scene.get_page_pool_buffer();
+						size_t page_backed_draws = 0;
 						for (size_t i = 0; i < draw_count; ++i) {
 							const auto& item = sort_list[i];
 							uint32_t idx = item.entity_index;
@@ -1651,9 +1654,8 @@ void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManage
 							if (mesh.is_page_backed && pp_buf.is_valid()) {
 								rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
 								rhi->cmd_bind_index_buffer(cmd, pp_buf);
-								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1,
-									mesh.page_index_data_offset / 4,
-									mesh.page_vertex_data_offset / 48, (uint32_t)i);
+								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
+								page_backed_draws++;
 							} else if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
 								const auto& sub = mesh.submeshes[item.submesh_index];
 								rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
@@ -1661,6 +1663,11 @@ void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManage
 							else {
 								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
 							}
+						}
+						if (page_backed_draws > 0) {
+							const auto& first_mesh_geom = gpu_scene.mesh_geometry(0);
+							bud::print("[MainPass] page_backed_draws={} first_index={} vertex_offset={} pp_buf_valid={}",
+								page_backed_draws, first_mesh_geom.first_index, first_mesh_geom.vertex_offset, pp_buf.is_valid());
 						}
 					}
 

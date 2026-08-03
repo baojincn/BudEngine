@@ -2,8 +2,10 @@
 #include <iostream>
 #include <fstream>
 #include <algorithm>
+#include <cfloat>
 #include <limits>
 #include <map>
+#include <unordered_map>
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
@@ -68,7 +70,8 @@ static bool reflect_and_validate_spv(const std::filesystem::path& spv_path) {
 namespace bud::tool {
 
     bool AssetProcessor::process_gltf_to_budmesh(const std::string& input_path, const std::string& output_path,
-                                                 size_t max_vertices, size_t max_triangles, float cone_weight) {
+                                                 size_t max_vertices, size_t max_triangles, float cone_weight,
+                                                 size_t page_size) {
         Assimp::Importer importer;
         const aiScene* scene = importer.ReadFile(input_path, 
             aiProcess_Triangulate | 
@@ -374,6 +377,125 @@ namespace bud::tool {
             out.write(path.c_str(), path.length() + 1);
         }
 
+        if (page_size > 0) {
+            out.close();
+
+            std::string json_path = output_path;
+            std::string bin_path = output_path;
+            if (json_path.find(".budmesh") != std::string::npos) {
+                json_path = json_path.substr(0, json_path.rfind('.')) + ".budmesh.json";
+                bin_path  = bin_path.substr(0, bin_path.rfind('.')) + ".budmesh.bin";
+            }
+
+            // Build page table
+            // Reserve 64B header + up to 47B alignment + 1 vertex margin per page
+            constexpr uint64_t page_reserve = 64 + 47 + 48;
+            std::vector<uint32_t> page_starts, page_counts;
+            uint64_t cur_sz = 0;
+            uint32_t cur_st = 0;
+            for (uint32_t m = 0; m < (uint32_t)all_meshlets.size(); ++m) {
+                uint64_t ms = all_meshlets[m].vertex_count * sizeof(asset::Vertex)
+                            + all_meshlets[m].triangle_count * 3 * sizeof(uint32_t)
+                            + sizeof(asset::MeshletDescriptor) + sizeof(asset::MeshletCullData);
+                if (cur_sz + ms > page_size - page_reserve && cur_sz > 0) {
+                    page_starts.push_back(cur_st);
+                    page_counts.push_back(m - cur_st);
+                    cur_st = m; cur_sz = 0;
+                }
+                cur_sz += ms;
+            }
+            if (cur_sz > 0) { page_starts.push_back(cur_st); page_counts.push_back((uint32_t)all_meshlets.size() - cur_st); }
+
+            // JSON
+            nlohmann::json j;
+            j["magic"] = "BUDM"; j["version"] = asset::MESH_VERSION;
+            j["data_uri"] = std::filesystem::path(bin_path).filename().string();
+            j["pages"] = nlohmann::json::array();
+            for (uint32_t i = 0; i < (uint32_t)page_starts.size(); ++i)
+                j["pages"].push_back({{"page_id",i},{"file_offset",(uint64_t)i*page_size},{"capacity",page_size},{"cluster_start",page_starts[i]},{"cluster_count",page_counts[i]}});
+            std::ofstream jf(json_path); if (jf.is_open()) jf << j.dump(4);
+
+            // Binary
+            std::ofstream bf(bin_path, std::ios::binary);
+            if (bf.is_open()) {
+                for (uint32_t pi = 0; pi < (uint32_t)page_starts.size(); ++pi) {
+                    uint32_t ms = page_starts[pi], mc = page_counts[pi];
+                    uint64_t pg_start = bf.tellp();
+
+                    float amin[3]={FLT_MAX,FLT_MAX,FLT_MAX}, amax[3]={-FLT_MAX,-FLT_MAX,-FLT_MAX};
+                    uint32_t vcnt = 0;
+                    for (uint32_t m = 0; m < mc; ++m) {
+                        const auto& md = all_meshlets[ms+m];
+                        vcnt += md.vertex_count;
+                        for (uint32_t v=0; v<md.vertex_count; ++v) {
+                            const auto& vt = all_vertices[all_meshlet_vertices[md.vertex_offset+v]];
+                            for (int k=0;k<3;++k){amin[k]=std::min(amin[k],vt.position[k]);amax[k]=std::max(amax[k],vt.position[k]);}
+                        }
+                    }
+                    uint32_t ce = asset::PAGE_HEADER_SIZE + mc*asset::PAGE_MESHLET_DESC_STRIDE + mc*asset::PAGE_CULL_DATA_STRIDE;
+                    uint32_t vo = ce, io = vo + vcnt*asset::PAGE_VERTEX_STRIDE;
+
+                    // Build page-local vertex remap: global vertex id -> page-local vertex id
+                    std::unordered_map<uint32_t,uint32_t> page_remap;
+                    std::vector<uint32_t> page_vertex_ids; // page-local vertex id -> global vertex id
+                    std::vector<uint32_t> meshlet_local_vert_off; // per meshlet: page-local vertex offset
+                    std::vector<uint32_t> meshlet_local_tri_off;  // per meshlet: page-local triangle offset
+
+                    uint32_t tri_total = 0;
+                    for (uint32_t m=0;m<mc;++m) {
+                        const auto& md = all_meshlets[ms+m];
+                        meshlet_local_vert_off.push_back((uint32_t)page_vertex_ids.size());
+                        for(uint32_t v=0;v<md.vertex_count;++v) {
+                            uint32_t gvid = all_meshlet_vertices[md.vertex_offset+v];
+                            if (page_remap.find(gvid) == page_remap.end()) {
+                                page_remap[gvid] = (uint32_t)page_vertex_ids.size();
+                                page_vertex_ids.push_back(gvid);
+                            }
+                        }
+                        meshlet_local_tri_off.push_back(tri_total);
+                        tri_total += md.triangle_count*3;
+                    }
+
+                    asset::PageBinaryHeader h={};
+                    h.magic=asset::PageBinaryHeader::MAGIC; h.version=1; h.meshlet_count=mc;
+                    h.vertex_count=(uint32_t)page_vertex_ids.size(); h.index_count=tri_total;
+                    std::memcpy(h.aabb_min,amin,sizeof(amin)); std::memcpy(h.aabb_max,amax,sizeof(amax));
+                    // Align vertex data offset to 48-byte stride so draw vertexOffset stays integer-exact
+                    uint32_t vo2 = (ce + asset::PAGE_VERTEX_STRIDE - 1) / asset::PAGE_VERTEX_STRIDE * asset::PAGE_VERTEX_STRIDE;
+                    uint32_t io2 = vo2 + (uint32_t)page_vertex_ids.size()*asset::PAGE_VERTEX_STRIDE;
+                    h.vertex_data_offset=vo2; h.index_data_offset=io2;
+                    bf.write((const char*)&h,sizeof(h));
+
+                    for (uint32_t m=0;m<mc;++m) {
+                        asset::MeshletDescriptor pd = all_meshlets[ms+m];
+                        pd.vertex_offset = meshlet_local_vert_off[m];
+                        pd.triangle_offset = meshlet_local_tri_off[m];
+                        bf.write((const char*)&pd,sizeof(pd));
+                    }
+                    for (uint32_t m=0;m<mc;++m) bf.write((const char*)&all_cull_data[ms+m],sizeof(asset::MeshletCullData));
+                    // Pad to aligned vertex_data_offset
+                    {
+                        uint64_t cur = (uint64_t)bf.tellp() - pg_start;
+                        if (cur < vo2) { std::vector<char> pad((size_t)(vo2-cur),0); bf.write(pad.data(),pad.size()); }
+                    }
+                    for (uint32_t gvid : page_vertex_ids) bf.write((const char*)&all_vertices[gvid],sizeof(asset::Vertex));
+                    for (uint32_t m=0;m<mc;++m){
+                        const auto& md = all_meshlets[ms+m];
+                        for(uint32_t t=0;t<md.triangle_count*3;++t) {
+                            uint32_t local_vi = all_meshlet_triangles[md.triangle_offset+t];
+                            uint32_t gvid = all_meshlet_vertices[md.vertex_offset+local_vi];
+                            uint32_t pvid = page_remap[gvid];
+                            bf.write((const char*)&pvid,sizeof(uint32_t));
+                        }
+                    }
+                    uint64_t wr = (uint64_t)bf.tellp()-pg_start;
+                    if (wr < page_size) { std::vector<char> pad((size_t)(page_size-wr),0); bf.write(pad.data(),pad.size()); }
+                }
+            }
+            std::cout << "[BudAssetTool] Exported " << all_meshlets.size() << " meshlets in " << page_starts.size() << " pages to " << json_path << std::endl;
+            return true;
+        }
+
         std::cout << "[BudAssetTool] Successfully exported " << header.submesh_count << " submeshes, " << header.meshlet_count << " meshlets, " << header.material_count << " materials and " << header.texture_count << " textures to " << output_path << std::endl;
         return true;
     }
@@ -606,4 +728,5 @@ bool bud::tool::AssetProcessor::validate_shaders_in_directory(const std::string&
 
 
 // end of file
+
 

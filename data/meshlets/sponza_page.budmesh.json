@@ -1,0 +1,805 @@
+{
+    "data_uri": "sponza_page.budmesh.bin",
+    "magic": "BUDM",
+    "pages": [
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 0,
+            "file_offset": 0,
+            "page_id": 0
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 35,
+            "cluster_start": 33,
+            "file_offset": 131072,
+            "page_id": 1
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 68,
+            "file_offset": 262144,
+            "page_id": 2
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 35,
+            "cluster_start": 100,
+            "file_offset": 393216,
+            "page_id": 3
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 35,
+            "cluster_start": 135,
+            "file_offset": 524288,
+            "page_id": 4
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 37,
+            "cluster_start": 170,
+            "file_offset": 655360,
+            "page_id": 5
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 34,
+            "cluster_start": 207,
+            "file_offset": 786432,
+            "page_id": 6
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 34,
+            "cluster_start": 241,
+            "file_offset": 917504,
+            "page_id": 7
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 36,
+            "cluster_start": 275,
+            "file_offset": 1048576,
+            "page_id": 8
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 40,
+            "cluster_start": 311,
+            "file_offset": 1179648,
+            "page_id": 9
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 39,
+            "cluster_start": 351,
+            "file_offset": 1310720,
+            "page_id": 10
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 40,
+            "cluster_start": 390,
+            "file_offset": 1441792,
+            "page_id": 11
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 40,
+            "cluster_start": 430,
+            "file_offset": 1572864,
+            "page_id": 12
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 47,
+            "cluster_start": 470,
+            "file_offset": 1703936,
+            "page_id": 13
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 45,
+            "cluster_start": 517,
+            "file_offset": 1835008,
+            "page_id": 14
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 47,
+            "cluster_start": 562,
+            "file_offset": 1966080,
+            "page_id": 15
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 46,
+            "cluster_start": 609,
+            "file_offset": 2097152,
+            "page_id": 16
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 37,
+            "cluster_start": 655,
+            "file_offset": 2228224,
+            "page_id": 17
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 34,
+            "cluster_start": 692,
+            "file_offset": 2359296,
+            "page_id": 18
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 34,
+            "cluster_start": 726,
+            "file_offset": 2490368,
+            "page_id": 19
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 37,
+            "cluster_start": 760,
+            "file_offset": 2621440,
+            "page_id": 20
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 38,
+            "cluster_start": 797,
+            "file_offset": 2752512,
+            "page_id": 21
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 38,
+            "cluster_start": 835,
+            "file_offset": 2883584,
+            "page_id": 22
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 38,
+            "cluster_start": 873,
+            "file_offset": 3014656,
+            "page_id": 23
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 39,
+            "cluster_start": 911,
+            "file_offset": 3145728,
+            "page_id": 24
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 38,
+            "cluster_start": 950,
+            "file_offset": 3276800,
+            "page_id": 25
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 39,
+            "cluster_start": 988,
+            "file_offset": 3407872,
+            "page_id": 26
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 38,
+            "cluster_start": 1027,
+            "file_offset": 3538944,
+            "page_id": 27
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 39,
+            "cluster_start": 1065,
+            "file_offset": 3670016,
+            "page_id": 28
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 38,
+            "cluster_start": 1104,
+            "file_offset": 3801088,
+            "page_id": 29
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 38,
+            "cluster_start": 1142,
+            "file_offset": 3932160,
+            "page_id": 30
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 37,
+            "cluster_start": 1180,
+            "file_offset": 4063232,
+            "page_id": 31
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 38,
+            "cluster_start": 1217,
+            "file_offset": 4194304,
+            "page_id": 32
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 35,
+            "cluster_start": 1255,
+            "file_offset": 4325376,
+            "page_id": 33
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 1290,
+            "file_offset": 4456448,
+            "page_id": 34
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 1323,
+            "file_offset": 4587520,
+            "page_id": 35
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 1356,
+            "file_offset": 4718592,
+            "page_id": 36
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 1389,
+            "file_offset": 4849664,
+            "page_id": 37
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 1421,
+            "file_offset": 4980736,
+            "page_id": 38
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 1454,
+            "file_offset": 5111808,
+            "page_id": 39
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 34,
+            "cluster_start": 1487,
+            "file_offset": 5242880,
+            "page_id": 40
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 1521,
+            "file_offset": 5373952,
+            "page_id": 41
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 1553,
+            "file_offset": 5505024,
+            "page_id": 42
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 1586,
+            "file_offset": 5636096,
+            "page_id": 43
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 1618,
+            "file_offset": 5767168,
+            "page_id": 44
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 1651,
+            "file_offset": 5898240,
+            "page_id": 45
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 1682,
+            "file_offset": 6029312,
+            "page_id": 46
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 1713,
+            "file_offset": 6160384,
+            "page_id": 47
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 1744,
+            "file_offset": 6291456,
+            "page_id": 48
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 1775,
+            "file_offset": 6422528,
+            "page_id": 49
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 1806,
+            "file_offset": 6553600,
+            "page_id": 50
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 1837,
+            "file_offset": 6684672,
+            "page_id": 51
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 1868,
+            "file_offset": 6815744,
+            "page_id": 52
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 1899,
+            "file_offset": 6946816,
+            "page_id": 53
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 1930,
+            "file_offset": 7077888,
+            "page_id": 54
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 1961,
+            "file_offset": 7208960,
+            "page_id": 55
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 1993,
+            "file_offset": 7340032,
+            "page_id": 56
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2024,
+            "file_offset": 7471104,
+            "page_id": 57
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2055,
+            "file_offset": 7602176,
+            "page_id": 58
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2086,
+            "file_offset": 7733248,
+            "page_id": 59
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2117,
+            "file_offset": 7864320,
+            "page_id": 60
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 35,
+            "cluster_start": 2148,
+            "file_offset": 7995392,
+            "page_id": 61
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 37,
+            "cluster_start": 2183,
+            "file_offset": 8126464,
+            "page_id": 62
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 36,
+            "cluster_start": 2220,
+            "file_offset": 8257536,
+            "page_id": 63
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 37,
+            "cluster_start": 2256,
+            "file_offset": 8388608,
+            "page_id": 64
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 37,
+            "cluster_start": 2293,
+            "file_offset": 8519680,
+            "page_id": 65
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 2330,
+            "file_offset": 8650752,
+            "page_id": 66
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2363,
+            "file_offset": 8781824,
+            "page_id": 67
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 2394,
+            "file_offset": 8912896,
+            "page_id": 68
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 2426,
+            "file_offset": 9043968,
+            "page_id": 69
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2458,
+            "file_offset": 9175040,
+            "page_id": 70
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 2489,
+            "file_offset": 9306112,
+            "page_id": 71
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2521,
+            "file_offset": 9437184,
+            "page_id": 72
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2552,
+            "file_offset": 9568256,
+            "page_id": 73
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2583,
+            "file_offset": 9699328,
+            "page_id": 74
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 2614,
+            "file_offset": 9830400,
+            "page_id": 75
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2646,
+            "file_offset": 9961472,
+            "page_id": 76
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2677,
+            "file_offset": 10092544,
+            "page_id": 77
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 2708,
+            "file_offset": 10223616,
+            "page_id": 78
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2740,
+            "file_offset": 10354688,
+            "page_id": 79
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2771,
+            "file_offset": 10485760,
+            "page_id": 80
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2802,
+            "file_offset": 10616832,
+            "page_id": 81
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 2833,
+            "file_offset": 10747904,
+            "page_id": 82
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 31,
+            "cluster_start": 2865,
+            "file_offset": 10878976,
+            "page_id": 83
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 36,
+            "cluster_start": 2896,
+            "file_offset": 11010048,
+            "page_id": 84
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 2932,
+            "file_offset": 11141120,
+            "page_id": 85
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 37,
+            "cluster_start": 2965,
+            "file_offset": 11272192,
+            "page_id": 86
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3002,
+            "file_offset": 11403264,
+            "page_id": 87
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 37,
+            "cluster_start": 3035,
+            "file_offset": 11534336,
+            "page_id": 88
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3072,
+            "file_offset": 11665408,
+            "page_id": 89
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 37,
+            "cluster_start": 3105,
+            "file_offset": 11796480,
+            "page_id": 90
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3142,
+            "file_offset": 11927552,
+            "page_id": 91
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 34,
+            "cluster_start": 3175,
+            "file_offset": 12058624,
+            "page_id": 92
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3209,
+            "file_offset": 12189696,
+            "page_id": 93
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3242,
+            "file_offset": 12320768,
+            "page_id": 94
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 34,
+            "cluster_start": 3275,
+            "file_offset": 12451840,
+            "page_id": 95
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3309,
+            "file_offset": 12582912,
+            "page_id": 96
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3342,
+            "file_offset": 12713984,
+            "page_id": 97
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3375,
+            "file_offset": 12845056,
+            "page_id": 98
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3408,
+            "file_offset": 12976128,
+            "page_id": 99
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 34,
+            "cluster_start": 3441,
+            "file_offset": 13107200,
+            "page_id": 100
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3475,
+            "file_offset": 13238272,
+            "page_id": 101
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 3508,
+            "file_offset": 13369344,
+            "page_id": 102
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 3540,
+            "file_offset": 13500416,
+            "page_id": 103
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3572,
+            "file_offset": 13631488,
+            "page_id": 104
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3605,
+            "file_offset": 13762560,
+            "page_id": 105
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 34,
+            "cluster_start": 3638,
+            "file_offset": 13893632,
+            "page_id": 106
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3672,
+            "file_offset": 14024704,
+            "page_id": 107
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 32,
+            "cluster_start": 3705,
+            "file_offset": 14155776,
+            "page_id": 108
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3737,
+            "file_offset": 14286848,
+            "page_id": 109
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 33,
+            "cluster_start": 3770,
+            "file_offset": 14417920,
+            "page_id": 110
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 35,
+            "cluster_start": 3803,
+            "file_offset": 14548992,
+            "page_id": 111
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 35,
+            "cluster_start": 3838,
+            "file_offset": 14680064,
+            "page_id": 112
+        },
+        {
+            "capacity": 131072,
+            "cluster_count": 25,
+            "cluster_start": 3873,
+            "file_offset": 14811136,
+            "page_id": 113
+        }
+    ],
+    "version": 4
+}

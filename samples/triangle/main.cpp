@@ -7,7 +7,7 @@ int main(int argc, char* argv[]) {
     try {
         bud::game::AppConfig config;
         config.window_title = "Bud Engine";
-        config.scene_file = "data/scenes/sponza_scene.json";
+        config.scene_file = "data/scenes/sponza_page_scene.json";
 
         const auto screen = bud::platform::get_current_screen_resolution();
         if (screen.width > 0 && screen.height > 0) {

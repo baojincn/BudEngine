@@ -46,10 +46,12 @@ void StreamingManager::register_budmesh_async(const std::string& json_path) {
 		asset.data_uri = data_uri;
 
 		if (j.contains("pages")) {
+			uint32_t idx = 0;
 			for (const auto& pj : j["pages"]) {
 				StreamingPage sp;
 				sp.asset_id = json_path;
 				sp.page_id = pj.value("page_id", 0u);
+				sp.file_page_index = idx++;
 				sp.file_offset = pj.value("file_offset", 0ull);
 				sp.capacity = pj.value("capacity", 131072ull);
 				sp.bin_path = bin_path;
@@ -58,13 +60,21 @@ void StreamingManager::register_budmesh_async(const std::string& json_path) {
 		}
 
 		{
-			std::scoped_lock lock(mutex_);
-			for (const auto& sp : asset.pages)
-				all_pages_.emplace(sp.get_unique_id(), sp);
-			managed_assets_[json_path] = std::move(asset);
-		}
+				std::scoped_lock lock(mutex_);
+				for (const auto& sp : asset.pages)
+					all_pages_.emplace(sp.get_unique_id(), sp);
+				managed_assets_[json_path] = std::move(asset);
 
-		bud::print("[Streaming] Registered budmesh: {} with {} pages", json_path, managed_assets_[json_path].pages.size());
+				// Auto-register a bounding region covering all pages of this asset
+				RegionManifest region;
+				region.id = json_path;
+				region.aabb = bud::math::AABB(bud::math::vec3(-1e6f), bud::math::vec3(1e6f));
+				for (const auto& sp : managed_assets_[json_path].pages)
+					region.pages.push_back(sp.get_unique_id());
+				regions_.push_back(std::move(region));
+			}
+
+			bud::print("[Streaming] Registered budmesh: {} with {} pages", json_path, managed_assets_[json_path].pages.size());
 	});
 }
 
@@ -97,7 +107,8 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 
 		if (auto it = all_pages_.find(p); it != all_pages_.end()) {
 			const auto& sp = it->second;
-			asset_manager_->load_file_chunk_async(sp.bin_path, sp.file_offset, sp.capacity,
+				uint64_t offset = sp.file_offset;
+			asset_manager_->load_file_chunk_async(sp.bin_path, offset, sp.capacity,
 				[this, p, sp](std::vector<char> data) {
 					if (data.empty()) return;
 
@@ -109,13 +120,15 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 					if (data.size() >= sizeof(bud::asset::PageBinaryHeader)) {
 						auto* hdr = reinterpret_cast<const bud::asset::PageBinaryHeader*>(data.data());
 						if (hdr->magic == bud::asset::PageBinaryHeader::MAGIC) {
-							meshlet_count = hdr->meshlet_count;
-							index_count = hdr->index_count;
-							vertex_data_offset = hdr->vertex_data_offset;
-							index_data_offset = hdr->index_data_offset;
-							page_aabb.min = bud::math::vec3(hdr->aabb_min[0], hdr->aabb_min[1], hdr->aabb_min[2]);
-							page_aabb.max = bud::math::vec3(hdr->aabb_max[0], hdr->aabb_max[1], hdr->aabb_max[2]);
-						}
+								meshlet_count = hdr->meshlet_count;
+								index_count = hdr->index_count;
+								vertex_data_offset = hdr->vertex_data_offset;
+								index_data_offset = hdr->index_data_offset;
+								page_aabb.min = bud::math::vec3(hdr->aabb_min[0], hdr->aabb_min[1], hdr->aabb_min[2]);
+								page_aabb.max = bud::math::vec3(hdr->aabb_max[0], hdr->aabb_max[1], hdr->aabb_max[2]);
+							} else {
+								bud::eprint("[Streaming] Bad page header magic=0x{:X} size={}", hdr->magic, data.size());
+							}
 					}
 
 					uint32_t slot = gpu_scene_->get_page_pool().allocate_page();
@@ -127,14 +140,14 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 
 					// Copy data to page pool via staging upload
 					if (rhi_) {
-						auto* allocator = rhi_->get_allocator();
-						if (allocator) {
 							auto* mapped = static_cast<uint8_t*>(gpu_scene_->get_page_pool_buffer().mapped_ptr);
 							if (mapped) {
 								std::memcpy(mapped + gpu_offset, data.data(), data.size());
+								bud::print("[Streaming] Copied {} bytes to page pool offset {}", data.size(), gpu_offset);
+							} else {
+								bud::eprint("[Streaming] page_pool_buffer mapped_ptr is NULL!");
 							}
 						}
-					}
 
 					gpu_scene_->update_page_table_entry(slot, gpu_offset);
 

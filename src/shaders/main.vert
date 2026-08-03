@@ -2,10 +2,9 @@
 #extension GL_ARB_shader_draw_parameters : enable
 
 layout(location = 0) in vec3 in_position;
-layout(location = 1) in vec3 in_color;
-layout(location = 2) in vec3 in_normal; 
-layout(location = 3) in vec2 in_tex_coord; 
-layout(location = 4) in float in_tex_index;
+layout(location = 1) in vec3 in_normal;
+layout(location = 2) in vec2 in_tex_coord;
+layout(location = 3) in vec4 in_tangent;
 
 layout(location = 0) out vec3 frag_world_pos;
 layout(location = 1) out vec3 frag_normal;
@@ -61,7 +60,7 @@ void main() {
 	frag_world_pos = world_pos.xyz;
 
 	frag_normal = in_normal;
-	frag_color = in_color;
+	frag_color = vec3(1.0); // Page-backed meshes have no per-vertex color; use white
 	frag_material_id = instance.material_id;
 
 	gl_Position = ubo.proj * ubo.view * world_pos;

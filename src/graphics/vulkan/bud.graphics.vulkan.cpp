@@ -2767,7 +2767,7 @@ bud::graphics::Texture* VulkanRHI::get_fallback_texture() {
 VkVertexInputBindingDescription Vertex::get_binding_description() {
 	VkVertexInputBindingDescription bindingDescription{};
 	bindingDescription.binding = 0;
-	bindingDescription.stride = sizeof(Vertex);
+	bindingDescription.stride = 48; // asset::Vertex layout: pos(12)+normal(12)+uv(8)+tangent(16)
 	bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 	return bindingDescription;
 }
@@ -2779,31 +2779,25 @@ std::vector<VkVertexInputAttributeDescription> attributeDescriptions(4);
 	attributeDescriptions[0].binding = 0;
 	attributeDescriptions[0].location = 0;
 	attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-	attributeDescriptions[0].offset = offsetof(Vertex, pos);
+	attributeDescriptions[0].offset = 0; // asset::Vertex::position
 
-	// Color (Location 1) -> Offset 12 
+	// Normal (Location 1) -> Offset 12
 	attributeDescriptions[1].binding = 0;
 	attributeDescriptions[1].location = 1;
 	attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-	attributeDescriptions[1].offset = offsetof(Vertex, color);
+	attributeDescriptions[1].offset = 12; // asset::Vertex::normal
 
-	// Normal (Location 2) -> Offset 24
+	// UV (Location 2) -> Offset 24
 	attributeDescriptions[2].binding = 0;
 	attributeDescriptions[2].location = 2;
-	attributeDescriptions[2].format = VK_FORMAT_R32G32B32_SFLOAT;
-	attributeDescriptions[2].offset = offsetof(Vertex, normal);
+	attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
+	attributeDescriptions[2].offset = 24; // asset::Vertex::uv
 
-	// UV (Location 3) -> Offset 36
+	// Tangent (Location 3) -> Offset 32
 	attributeDescriptions[3].binding = 0;
 	attributeDescriptions[3].location = 3;
-	attributeDescriptions[3].format = VK_FORMAT_R32G32_SFLOAT;
-	attributeDescriptions[3].offset = offsetof(Vertex, uv);
-
-	// TexIndex (Location 4) -> Offset 44
-	//attributeDescriptions[4].binding = 0;
-	//attributeDescriptions[4].location = 4;
-	//attributeDescriptions[4].format = VK_FORMAT_R32_SFLOAT;
-	//attributeDescriptions[4].offset = offsetof(Vertex, tex_index);
+	attributeDescriptions[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+	attributeDescriptions[3].offset = 32; // asset::Vertex::tangent
 
 	return attributeDescriptions;
 }

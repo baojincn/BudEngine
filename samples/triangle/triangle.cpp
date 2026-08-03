@@ -15,7 +15,7 @@ using namespace bud::game;
 
 
 bool TriangleApp::is_fully_loaded() const {
-	return pending_mesh_loads && pending_mesh_loads->load() == 0;
+	return true; // Page streaming is async, start rendering immediately
 }
 
 void TriangleApp::on_init(const AppConfig& config) {
@@ -38,6 +38,7 @@ void TriangleApp::on_init(const AppConfig& config) {
 		e.is_static = true;
 		e.transform = glm::mat4(1.0f);
 		s.entities.push_back(std::move(e));
+		bud::print("[TriangleApp] Page entity added: mesh_id={} total_entities={}", mesh_id, s.entities.size());
 	});
 
 	// 1. Initial Render Config

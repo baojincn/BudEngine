@@ -18,6 +18,7 @@ namespace bud::streaming {
 struct StreamingPage {
 	std::string asset_id;
 	uint32_t page_id;
+	uint32_t file_page_index;
 	uint64_t file_offset;
 	uint64_t capacity;
 	std::string bin_path;

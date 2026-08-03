@@ -181,14 +181,19 @@ void main() {
 	uint tex_id = frag_material_id;
     vec4 albedo_sample;
     
-    // Handle unbound texture index 0 or missing textures
-    if (tex_id <= 0) {
-        albedo_sample = vec4(0.8, 0.1, 0.8, 1.0); // Highlight non-textured things in Magenta
-    } else {
-        albedo_sample = texture(tex_samplers[nonuniformEXT(tex_id)], frag_tex_coord);
-    }
+	// Handle unbound texture index 0 or missing textures
+	if (tex_id <= 0) {
+		albedo_sample = vec4(0.7, 0.7, 0.7, 1.0); // Grey for non-textured (page-streamed) meshes
+	} else {
+		// Page-streamed meshes may reference textures that aren't bound yet; fall back to grey
+		if (tex_id >= 1000u) {
+			albedo_sample = vec4(0.7, 0.7, 0.7, 1.0);
+		} else {
+			albedo_sample = texture(tex_samplers[nonuniformEXT(tex_id)], frag_tex_coord);
+		}
+	}
 
-	if (albedo_sample.a < 0.5)
+	if (albedo_sample.a < 0.5 && tex_id > 0 && tex_id < 1000u)
 		discard;
 
     vec3 albedo = albedo_sample.rgb; 
