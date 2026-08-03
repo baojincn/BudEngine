@@ -406,13 +406,43 @@ namespace bud::tool {
             }
             if (cur_sz > 0) { page_starts.push_back(cur_st); page_counts.push_back((uint32_t)all_meshlets.size() - cur_st); }
 
+            // Per-meshlet base color texture index (from the owning submesh's material)
+            std::vector<uint32_t> meshlet_tex_index(all_meshlets.size(), 0);
+            for (const auto& sub : submeshes) {
+                uint32_t tex = materials[sub.material_id].base_color_texture;
+                for (uint32_t m = sub.meshlet_start; m < sub.meshlet_start + sub.meshlet_count; ++m)
+                    meshlet_tex_index[m] = tex;
+            }
+
             // JSON
             nlohmann::json j;
             j["magic"] = "BUDM"; j["version"] = asset::MESH_VERSION;
             j["data_uri"] = std::filesystem::path(bin_path).filename().string();
             j["pages"] = nlohmann::json::array();
-            for (uint32_t i = 0; i < (uint32_t)page_starts.size(); ++i)
-                j["pages"].push_back({{"page_id",i},{"file_offset",(uint64_t)i*page_size},{"capacity",page_size},{"cluster_start",page_starts[i]},{"cluster_count",page_counts[i]}});
+            for (uint32_t i = 0; i < (uint32_t)page_starts.size(); ++i) {
+                // Split the page into contiguous per-material (per-texture) submeshes
+                nlohmann::json subs = nlohmann::json::array();
+                uint32_t cum_idx = 0;
+                uint32_t cur_tex = meshlet_tex_index[page_starts[i]];
+                uint32_t run_count = 0;
+                for (uint32_t k = 0; k < page_counts[i]; ++k) {
+                    uint32_t m = page_starts[i] + k;
+                    uint32_t tex = meshlet_tex_index[m];
+                    uint32_t tris = all_meshlets[m].triangle_count * 3;
+                    if (tex != cur_tex && run_count > 0) {
+                        subs.push_back({{"index_start", cum_idx - run_count}, {"index_count", run_count}, {"material_id", cur_tex}});
+                        cur_tex = tex;
+                        run_count = 0;
+                    }
+                    run_count += tris;
+                    cum_idx += tris;
+                }
+                if (run_count > 0)
+                    subs.push_back({{"index_start", cum_idx - run_count}, {"index_count", run_count}, {"material_id", cur_tex}});
+
+                j["pages"].push_back({{"page_id",i},{"file_offset",(uint64_t)i*page_size},{"capacity",page_size},{"cluster_start",page_starts[i]},{"cluster_count",page_counts[i]},{"material_id",meshlet_tex_index[page_starts[i]]},{"submeshes",subs}});
+            }
+            j["textures"] = nlohmann::json(texture_paths);
             std::ofstream jf(json_path); if (jf.is_open()) jf << j.dump(4);
 
             // Binary
@@ -464,6 +494,7 @@ namespace bud::tool {
                     uint32_t vo2 = (ce + asset::PAGE_VERTEX_STRIDE - 1) / asset::PAGE_VERTEX_STRIDE * asset::PAGE_VERTEX_STRIDE;
                     uint32_t io2 = vo2 + (uint32_t)page_vertex_ids.size()*asset::PAGE_VERTEX_STRIDE;
                     h.vertex_data_offset=vo2; h.index_data_offset=io2;
+                    h.padding[0] = meshlet_tex_index[ms]; // base color texture index for this page
                     bf.write((const char*)&h,sizeof(h));
 
                     for (uint32_t m=0;m<mc;++m) {

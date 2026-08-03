@@ -61,7 +61,13 @@ namespace bud::graphics {
 			RHI* get_rhi() { return rhi; }
 			uint32_t register_page_backed_mesh(uint32_t page_index, uint32_t meshlet_count,
 				uint32_t index_count, const bud::math::AABB& aabb,
-				uint32_t vertex_data_offset = 0, uint32_t index_data_offset = 0);
+				uint32_t vertex_data_offset = 0, uint32_t index_data_offset = 0,
+				const std::vector<PageSubMesh>& submeshes = {});
+
+			// Reserves a bindless texture slot, binds the fallback immediately, and
+			// queues an async texture upload. Returns the bindless slot (>= 1) to use
+			// as the material id for page-backed meshes.
+			uint32_t bind_texture_async(const std::string& path);
 
 		private:
 		struct UploadQueue {

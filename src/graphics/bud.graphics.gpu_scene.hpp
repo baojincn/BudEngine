@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <atomic>
 #include <cstdint>
@@ -31,7 +31,8 @@ namespace bud::graphics {
 
 		struct PagePool {
 			static constexpr uint64_t kPagePoolSize = 512ull * 1024 * 1024;
-			static constexpr uint32_t kPageSize = 128 * 1024;
+			// 131040 is an exact multiple of 48 (sizeof asset::Vertex), 24, 16, and 4
+			static constexpr uint32_t kPageSize = 131040;
 			static constexpr uint32_t kMaxPages = kPagePoolSize / kPageSize;
 
 			BufferHandle page_pool_buffer;

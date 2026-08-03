@@ -313,6 +313,14 @@ namespace bud::graphics {
 		bud::math::BoundingSphere sphere;
 	};
 
+	// Per-material draw range inside a virtual geometry page.
+	// index_start/index_count are page-local (relative to the page's index data).
+	struct PageSubMesh {
+		uint32_t index_start = 0;
+		uint32_t index_count = 0;
+		uint32_t material_id = 0; // bindless texture slot (resolved at runtime)
+	};
+
 	struct RenderMesh {
 		uint32_t index_count = 0;
 

@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <functional>
 #include <mutex>
 
@@ -22,6 +23,8 @@ struct StreamingPage {
 	uint64_t file_offset;
 	uint64_t capacity;
 	std::string bin_path;
+	uint32_t material_id = 0; // base color texture index (into BudMeshAsset::textures)
+	std::vector<bud::graphics::PageSubMesh> submeshes; // per-material runs (material_id = texture index)
 	std::string get_unique_id() const { return asset_id + ":page_" + std::to_string(page_id); }
 };
 
@@ -29,6 +32,8 @@ struct BudMeshAsset {
 	std::string metadata_path;
 	std::string data_uri;
 	std::vector<StreamingPage> pages;
+	std::vector<std::string> textures;
+	std::vector<uint32_t> texture_slots; // parallel to textures: resolved bindless slots (0 = unbound)
 };
 
 struct RegionManifest {
@@ -55,6 +60,11 @@ public:
 	bool is_page_resident(const std::string& page_key) const;
 
 private:
+	// Resolves a base color texture index to a bindless slot, reserving/loading
+	// the texture on first use. Returns 0 if unavailable (fallback/grey).
+	uint32_t resolve_texture_slot(const std::string& asset_key, uint32_t tex_index);
+
+private:
 	bud::io::AssetManager* asset_manager_ = nullptr;
 	bud::graphics::GPUScene* gpu_scene_ = nullptr;
 	bud::graphics::Renderer* renderer_ = nullptr;
@@ -66,6 +76,7 @@ private:
 
 	mutable std::mutex mutex_;
 	std::unordered_map<std::string, bool> residency_;
+	std::unordered_set<std::string> pending_loads_;
 	std::unordered_map<std::string, uint32_t> page_gpu_slots_;
 	std::unordered_map<std::string, uint32_t> page_mesh_ids_;
 

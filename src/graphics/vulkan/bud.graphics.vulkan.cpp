@@ -613,6 +613,8 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
 	}
 	if (usage_state == bud::graphics::ResourceState::UnorderedAccess) {
 		buffer_info.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+		// Page pool / general-purpose buffers may be bound as vertex+index buffers too.
+		buffer_info.usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 	}
 	if (usage_state == bud::graphics::ResourceState::ShaderResource) {
 		buffer_info.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;

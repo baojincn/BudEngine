@@ -516,6 +516,8 @@ namespace bud::graphics::vulkan {
             usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         } else if (usage_state == bud::graphics::ResourceState::UnorderedAccess) {
             usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            // Page pool / general-purpose buffers may be bound as vertex+index buffers too.
+            usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
         } else if (usage_state == bud::graphics::ResourceState::ShaderResource) {
             usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         }

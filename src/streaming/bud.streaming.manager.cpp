@@ -1,4 +1,4 @@
-﻿#include "src/streaming/bud.streaming.manager.hpp"
+#include "src/streaming/bud.streaming.manager.hpp"
 #include "src/core/bud.logger.hpp"
 #include "src/core/bud.asset.types.hpp"
 #include "src/graphics/bud.graphics.renderer.hpp"
@@ -53,10 +53,26 @@ void StreamingManager::register_budmesh_async(const std::string& json_path) {
 				sp.page_id = pj.value("page_id", 0u);
 				sp.file_page_index = idx++;
 				sp.file_offset = pj.value("file_offset", 0ull);
-				sp.capacity = pj.value("capacity", 131072ull);
+				sp.capacity = pj.value("capacity", static_cast<uint64_t>(bud::graphics::GPUScene::PagePool::kPageSize));
 				sp.bin_path = bin_path;
+				sp.material_id = pj.value("material_id", 0u);
+				if (pj.contains("submeshes") && pj["submeshes"].is_array()) {
+					for (const auto& sm : pj["submeshes"]) {
+						bud::graphics::PageSubMesh ps;
+						ps.index_start = sm.value("index_start", 0u);
+						ps.index_count = sm.value("index_count", 0u);
+						ps.material_id = sm.value("material_id", 0u);
+						if (ps.index_count > 0)
+							sp.submeshes.push_back(ps);
+					}
+				}
 				asset.pages.push_back(sp);
 			}
+		}
+
+		if (j.contains("textures") && j["textures"].is_array()) {
+			for (const auto& t : j["textures"])
+				asset.textures.push_back(t.get<std::string>());
 		}
 
 		{
@@ -94,7 +110,8 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 						page_gpu_slots_.erase(it);
 					}
 					page_mesh_ids_.erase(p);
-					residency_.erase(p);
+						pending_loads_.erase(p);
+						residency_.erase(p);
 				}
 			}
 		}
@@ -102,15 +119,20 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 
 	for (const auto& p : to_load) {
 		std::scoped_lock lock(mutex_);
-		if (residency_[p]) continue;
+		if (residency_[p] || pending_loads_.count(p)) continue;
 		residency_[p] = false;
+		pending_loads_.insert(p);
 
 		if (auto it = all_pages_.find(p); it != all_pages_.end()) {
 			const auto& sp = it->second;
 				uint64_t offset = sp.file_offset;
 			asset_manager_->load_file_chunk_async(sp.bin_path, offset, sp.capacity,
 				[this, p, sp](std::vector<char> data) {
-					if (data.empty()) return;
+					if (data.empty()) {
+						std::scoped_lock lock(mutex_);
+						pending_loads_.erase(p);
+						return;
+					}
 
 					uint32_t meshlet_count = 0;
 					uint32_t index_count = 0;
@@ -153,23 +175,42 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 
 					uint32_t mesh_id = ~0u;
 					if (renderer_ && meshlet_count > 0) {
+						std::vector<bud::graphics::PageSubMesh> resolved_submeshes;
+						if (!sp.submeshes.empty()) {
+							resolved_submeshes.reserve(sp.submeshes.size());
+							for (const auto& sm : sp.submeshes) {
+								bud::graphics::PageSubMesh rs;
+								rs.index_start = sm.index_start;
+								rs.index_count = sm.index_count;
+								rs.material_id = resolve_texture_slot(sp.asset_id, sm.material_id);
+								resolved_submeshes.push_back(rs);
+							}
+						}
+						else {
+							bud::graphics::PageSubMesh rs;
+							rs.index_start = 0;
+							rs.index_count = index_count;
+							rs.material_id = resolve_texture_slot(sp.asset_id, sp.material_id);
+							resolved_submeshes.push_back(rs);
+						}
 						mesh_id = renderer_->register_page_backed_mesh(slot, meshlet_count, index_count, page_aabb,
-							vertex_data_offset, index_data_offset);
+							vertex_data_offset, index_data_offset, resolved_submeshes);
 					}
 
 					if (mesh_id != ~0u && page_registered_cb_)
 						page_registered_cb_(mesh_id, page_aabb);
 
-					{
-						std::scoped_lock lock(mutex_);
-						page_gpu_slots_[p] = slot;
-						page_mesh_ids_[p] = mesh_id;
-						residency_[p] = true;
-					}
+						{
+							std::scoped_lock lock(mutex_);
+							page_gpu_slots_[p] = slot;
+							page_mesh_ids_[p] = mesh_id;
+							residency_[p] = true;
+							pending_loads_.erase(p);
+						}
 
-					bud::print("[Streaming] Page resident: {} slot={} mesh_id={} meshlets={}",
-						p, slot, mesh_id, meshlet_count);
-				});
+						bud::print("[Streaming] Page resident: {} slot={} mesh_id={} meshlets={}",
+							p, slot, mesh_id, meshlet_count);
+					});
 		}
 	}
 }
@@ -178,6 +219,28 @@ bool StreamingManager::is_page_resident(const std::string& page_key) const {
 	std::scoped_lock lock(mutex_);
 	auto it = residency_.find(page_key);
 	return it != residency_.end() && it->second;
+}
+
+uint32_t StreamingManager::resolve_texture_slot(const std::string& asset_key, uint32_t tex_index) {
+	std::scoped_lock lock(mutex_);
+
+	auto it = managed_assets_.find(asset_key);
+	if (it == managed_assets_.end() || tex_index >= it->second.textures.size())
+		return 0;
+
+	auto& asset = it->second;
+	if (asset.texture_slots.empty())
+		asset.texture_slots.resize(asset.textures.size(), 0);
+
+	uint32_t& slot = asset.texture_slots[tex_index];
+	if (slot == 0) {
+		if (!renderer_) {
+			bud::eprint("[Streaming] resolve_texture_slot called but renderer is null!");
+			return 0;
+		}
+		slot = renderer_->bind_texture_async(asset.textures[tex_index]);
+	}
+	return slot;
 }
 
 } // namespace bud::streaming

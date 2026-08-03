@@ -1,4 +1,4 @@
-﻿#include <vector>
+#include <vector>
 #include <iostream>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -245,17 +245,34 @@ namespace bud::graphics {
 								// 3. Draw
 								push_consts.model = model_matrix;
 
+								const auto pp_buf = gpu_scene.get_page_pool_buffer();
+								const bool is_paged = mesh.is_page_backed && pp_buf.is_valid();
+
 								uint32_t sub_idx = render_scene.submesh_indices[idx];
 								if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
 									const auto& sub = mesh.submeshes[sub_idx];
 									push_consts.material_id = sub.material_id;
 									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-									rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+									if (is_paged) {
+										rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+										rhi->cmd_bind_index_buffer(cmd, pp_buf);
+										rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+									}
+									else {
+										rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+										rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+										rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+									}
 								}
 								else {
 									push_consts.material_id = render_scene.material_indices[idx];
 									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-									if (kUseBindVertexByteOffset) {
+									if (is_paged) {
+										rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+										rhi->cmd_bind_index_buffer(cmd, pp_buf);
+										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, 0);
+									}
+									else if (kUseBindVertexByteOffset) {
 										auto vb = mega_vertex_buffer;
 										vb.offset = static_cast<uint64_t>(mesh_geometry.vertex_offset) * sizeof(bud::io::MeshData::Vertex);
 										rhi->cmd_bind_vertex_buffer(cmd, vb);
@@ -364,6 +381,18 @@ namespace bud::graphics {
 						bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
 						if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) continue;
 						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+
+						// Page-backed meshes live in the GPU page pool, not the mega
+						// geometry pool, so rebind the buffers before issuing the draw.
+						const auto pp_buf = gpu_scene.get_page_pool_buffer();
+						if (mesh.is_page_backed && pp_buf.is_valid()) {
+							rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+							rhi->cmd_bind_index_buffer(cmd, pp_buf);
+						}
+						else {
+							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+						}
 
 						// Draw
 						push_consts.model = model_matrix;
@@ -1244,6 +1273,8 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 				rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 
+				const auto pp_buf = gpu_scene.get_page_pool_buffer();
+
 				if (use_indirect_draw) {
 					bud::graphics::BufferHandle ind_buf_handle;
 					try {
@@ -1273,6 +1304,17 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 					const auto& mesh = meshes[mesh_id];
 					if (!mesh.is_valid()) continue;
 					const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+
+					// Page-backed meshes are backed by the GPU page pool, not the mega
+					// geometry pool, so rebind the buffers before issuing the draw.
+					if (mesh.is_page_backed && pp_buf.is_valid()) {
+						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+						rhi->cmd_bind_index_buffer(cmd, pp_buf);
+					}
+					else {
+						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+					}
 
 					struct PushVars {
 						bud::math::mat4 model;
@@ -1618,6 +1660,7 @@ void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManage
 				info.clear_color = true;
 				info.clear_color_value = { 0.5f, 0.5f, 0.5f, 1.0f };
 				info.clear_depth = false;
+				info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
 
 				rhi->cmd_begin_render_pass(cmd, info);
 				rhi->cmd_bind_pipeline(cmd, pipeline);
@@ -1654,13 +1697,26 @@ void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManage
 							if (mesh.is_page_backed && pp_buf.is_valid()) {
 								rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
 								rhi->cmd_bind_index_buffer(cmd, pp_buf);
-								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
+								// Multi-material pages carry per-material submeshes; draw the
+								// specific one when the sort item selects it.
+								if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+									const auto& sub = mesh.submeshes[item.submesh_index];
+									rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
+								}
+								else {
+									rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
+								}
 								page_backed_draws++;
 							} else if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+								// Rebind mega buffers: the previous draw may have left the page pool bound.
+								rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+								rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 								const auto& sub = mesh.submeshes[item.submesh_index];
 								rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
 							}
 							else {
+								rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+								rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
 							}
 						}

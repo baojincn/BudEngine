@@ -66,6 +66,10 @@ void TriangleApp::on_init(const AppConfig& config) {
 					if (!e.asset_path.empty() && e.asset_path.ends_with(".budmesh.json")) {
 						if (streaming_manager)
 							streaming_manager->register_budmesh_async(e.asset_path);
+						// The virtual entity's geometry is fully streamed via pages;
+						// clear its mesh index so it is not drawn on top of the
+						// page-registered entity (which would render the same mesh).
+						e.mesh_index = bud::asset::INVALID_INDEX;
 					}
 				}
 

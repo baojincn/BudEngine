@@ -196,7 +196,7 @@ void main() {
 	if (albedo_sample.a < 0.5 && tex_id > 0 && tex_id < 1000u)
 		discard;
 
-    vec3 albedo = albedo_sample.rgb; 
+	vec3 albedo = albedo_sample.rgb; 
 
     float metallic = 0.1; 
     float roughness = 0.5;
@@ -240,8 +240,8 @@ void main() {
 
 	float shadow = ShadowCalculation(frag_world_pos, N, L);
 
-    // Apply Shadow
-    Lo *= (1.0 - shadow);
+	// Apply Shadow
+	Lo *= (1.0 - shadow);
 
     vec3 ambient = vec3(ubo.ambient_strength) * albedo * ao;
     vec3 color = ambient + Lo;

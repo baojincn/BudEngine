@@ -1,4 +1,4 @@
-﻿#include <memory>
+#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -49,6 +49,7 @@ namespace bud::graphics {
 		cluster_viz_pass->init(rhi, render_config, asset_manager);
 		ui_pass->init(rhi, render_config, asset_manager);
 		gpu_scene.init(rhi, rhi->get_inflight_frame_count());
+
 	}
 
 	Renderer::~Renderer() {
@@ -110,7 +111,8 @@ namespace bud::graphics {
 
 	uint32_t Renderer::register_page_backed_mesh(uint32_t page_index, uint32_t meshlet_count,
 		uint32_t index_count, const bud::math::AABB& aabb,
-		uint32_t vertex_data_offset, uint32_t index_data_offset)
+		uint32_t vertex_data_offset, uint32_t index_data_offset,
+		const std::vector<PageSubMesh>& page_submeshes)
 	{
 		std::scoped_lock lock(mesh_mutex, mesh_bounds_mutex);
 
@@ -130,21 +132,36 @@ namespace bud::graphics {
 			mesh.sphere = bud::math::BoundingSphere(center, radius);
 		}
 
-		// Create a default submesh so draw-count accounting (submeshes.size())
-		// and per-instance draw expansion work for page-backed meshes.
-		SubMesh sub{};
-		sub.index_start = 0;
-		sub.index_count = index_count;
-		sub.meshlet_start = 0;
-		sub.meshlet_count = meshlet_count;
-		sub.material_id = 0;
-		sub.aabb = aabb;
-		{
-			bud::math::vec3 center = (aabb.min + aabb.max) * 0.5f;
-			float radius = bud::math::length(aabb.max - center);
-			sub.sphere = bud::math::BoundingSphere(center, radius);
+		// Build one render submesh per per-material run inside the page so draw-count
+		// accounting, per-submesh culling and material assignment all work for pages.
+		if (page_submeshes.empty()) {
+			SubMesh fallback_sub{};
+			fallback_sub.index_start = 0;
+			fallback_sub.index_count = index_count;
+			fallback_sub.meshlet_start = 0;
+			fallback_sub.meshlet_count = meshlet_count;
+			fallback_sub.material_id = 0;
+			fallback_sub.aabb = aabb;
+			{
+				bud::math::vec3 center = (aabb.min + aabb.max) * 0.5f;
+				float radius = bud::math::length(aabb.max - center);
+				fallback_sub.sphere = bud::math::BoundingSphere(center, radius);
+			}
+			mesh.submeshes.push_back(fallback_sub);
 		}
-		mesh.submeshes.push_back(sub);
+		else {
+			for (const auto& ps : page_submeshes) {
+				SubMesh sub{};
+				sub.index_start = ps.index_start;
+				sub.index_count = ps.index_count;
+				sub.meshlet_start = 0;
+				sub.meshlet_count = 0;
+				sub.material_id = ps.material_id;
+				sub.aabb = aabb; // conservative page AABB
+				sub.sphere = mesh.sphere;
+				mesh.submeshes.push_back(sub);
+			}
+		}
 
 		if (mesh_id >= meshes.size())
 			meshes.resize(mesh_id + 1);
@@ -160,6 +177,58 @@ namespace bud::graphics {
 		bud::print("[Renderer] Registered page-backed mesh_id={} page_index={} meshlets={}",
 			mesh_id, page_index, meshlet_count);
 		return mesh_id;
+	}
+
+	uint32_t Renderer::bind_texture_async(const std::string& path) {
+		uint32_t current_slot = next_bindless_slot.fetch_add(1, std::memory_order_relaxed);
+
+		auto queue = upload_queue;
+		auto queue_weak = std::weak_ptr<UploadQueue>(upload_queue);
+		auto rhi_ptr = rhi;
+
+		{
+			std::lock_guard lock(queue->mutex);
+			queue->commands.push_back([rhi_ptr, current_slot]() {
+				rhi_ptr->update_bindless_texture(current_slot, rhi_ptr->get_fallback_texture());
+				});
+		}
+
+		// Kick off async image load and bind to the reserved slot once decoded.
+		asset_manager->load_image_async(path,
+			[queue_weak, rhi_ptr, current_slot, path](bud::io::Image img) {
+				auto img_ptr = std::make_shared<bud::io::Image>(std::move(img));
+
+				auto queue_locked = queue_weak.lock();
+				if (!queue_locked) {
+					std::string err = "Renderer::bind_texture_async upload queue was destroyed before callback";
+					bud::eprint("{}", err);
+#if defined(_DEBUG)
+					throw std::runtime_error(err);
+#else
+					return;
+#endif
+				}
+
+				std::lock_guard lock(queue_locked->mutex);
+				queue_locked->commands.push_back([rhi_ptr, current_slot, path, img_ptr]() {
+					bud::graphics::TextureDesc desc{};
+					desc.width = (uint32_t)img_ptr->width;
+					desc.height = (uint32_t)img_ptr->height;
+					desc.format = bud::graphics::TextureFormat::RGBA8_UNORM;
+					desc.mips = static_cast<uint32_t>(std::floor(std::log2(std::max(desc.width, desc.height)))) + 1;
+
+					auto tex = rhi_ptr->create_texture(desc, (const void*)img_ptr->pixels,
+						(uint64_t)img_ptr->width * img_ptr->height * 4);
+					rhi_ptr->set_debug_name(tex, ObjectType::Texture, path);
+					rhi_ptr->update_bindless_texture(current_slot, tex);
+
+					bud::print("[Renderer] Texture BOUND: {} -> Slot {}", path, current_slot);
+					});
+			}
+		);
+
+		bud::print("[Renderer] Texture slot reserved: {} -> Slot {}", path, current_slot);
+		return current_slot;
 	}
 
 	MeshAssetHandle Renderer::upload_mesh(const bud::io::MeshData& mesh_data) {
