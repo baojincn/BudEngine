@@ -1,4 +1,4 @@
-#include <memory>
+﻿#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -174,8 +174,8 @@ namespace bud::graphics {
 		gpu_scene.set_mesh_geometry(mesh_id, (page_index * GPUScene::PagePool::kPageSize + index_data_offset) / 4,
 			(page_index * GPUScene::PagePool::kPageSize + vertex_data_offset) / 48);
 
-		bud::print("[Renderer] Registered page-backed mesh_id={} page_index={} meshlets={}",
-			mesh_id, page_index, meshlet_count);
+		//bud::print("[Renderer] Registered page-backed mesh_id={} page_index={} meshlets={}",
+		//	mesh_id, page_index, meshlet_count);
 		return mesh_id;
 	}
 
@@ -222,7 +222,7 @@ namespace bud::graphics {
 					rhi_ptr->set_debug_name(tex, ObjectType::Texture, path);
 					rhi_ptr->update_bindless_texture(current_slot, tex);
 
-					bud::print("[Renderer] Texture BOUND: {} -> Slot {}", path, current_slot);
+					//bud::print("[Renderer] Texture BOUND: {} -> Slot {}", path, current_slot);
 					});
 			}
 		);
@@ -282,7 +282,6 @@ namespace bud::graphics {
 
 				auto tex_path = mesh_data.texture_paths[i];
 
-				// 發起異步加載
 				asset_manager->load_image_async(tex_path,
 					[queue_weak, rhi_ptr, current_slot, tex_path](bud::io::Image img) {
 						auto img_ptr = std::make_shared<bud::io::Image>(std::move(img));
@@ -432,7 +431,7 @@ namespace bud::graphics {
 				if (!mesh_data_copy->subsets.empty()) {
 					//bud::print("[upload_mesh] Mesh[{}]: Processing {} subsets", assigned_mesh_id, mesh_data_copy->subsets.size());
 
-			// Map materials to texture slots (materials refer to texture indices)
+					// Map materials to texture slots (materials refer to texture indices)
 					std::vector<uint32_t> material_to_slot;
 					material_to_slot.resize(mesh_data_copy->materials.size(), 0);
 					for (size_t mi = 0; mi < mesh_data_copy->materials.size(); ++mi) {
@@ -483,7 +482,7 @@ namespace bud::graphics {
 
 				meshes.push_back(std::move(new_mesh));
 
-				bud::print("[Renderer] Mesh uploaded. Count: {}", meshes.size());
+				//bud::print("[Renderer] Mesh uploaded. Count: {}", meshes.size());
 				});
 		}
 
@@ -539,7 +538,7 @@ namespace bud::graphics {
 		rhi->get_render_stats() = {};
 
 		size_t instance_count = render_scene.instance_count.load(std::memory_order_relaxed);
-		bud::print("[Renderer] render() instance_count={}", instance_count);
+		//bud::print("[Renderer] render() instance_count={}", instance_count);
 		const uint32_t cascade_count = std::min(render_config.cascade_count, (uint32_t)MAX_CASCADES);
 		uint32_t total_shadow_casters = 0;
 		uint32_t total_shadow_caster_submeshes = 0;
@@ -557,7 +556,7 @@ namespace bud::graphics {
 			auto& main_visible_instances = culled_results[0];
 			main_visible_instances.clear();
 			render_scene.cull_frustum(view_frustums[0], main_visible_instances);
-			bud::print("[Renderer] cull_frustum visible_instances={}", main_visible_instances.size());
+			//bud::print("[Renderer] MainPass: cull_frustum visible_instances={}", main_visible_instances.size());
 
 			if (cascade_count == 0) {
 				total_shadow_casters = static_cast<uint32_t>(main_visible_instances.size());
@@ -1050,7 +1049,7 @@ namespace bud::graphics {
 					csm_visible_instances[i] = std::move(culled_results[i + 1]);
 
 				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
-				bud::print("[Renderer] csm_shadow_map.is_valid()={}", shadow_map.is_valid());
+				//bud::print("[Renderer] MainPass: csm_shadow_map.is_valid()={}", shadow_map.is_valid());
 
 				const bool use_gpu_occluder_selection = render_config.enable_gpu_driven
 					&& render_config.enable_meshlets
@@ -1157,7 +1156,7 @@ namespace bud::graphics {
 					}
 
 					if (shadow_map.is_valid()) {
-						bud::print("[Renderer] MainPass adding: shadow_map valid, visible_count={}", visible_count);
+						//bud::print("[Renderer] MainPass adding: shadow_map valid, visible_count={}", visible_count);
 						if (render_config.enable_cluster_visualization) {
 							cluster_viz_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
 						}
@@ -1170,7 +1169,7 @@ namespace bud::graphics {
 			}
 
 			if (!has_main_pass) {
-				bud::print("[Renderer] MainPass SKIPPED! has_main_pass=false");
+				//bud::print("[Renderer] MainPass SKIPPED! has_main_pass=false");
 				render_graph.add_pass("UI Clear Pass",
 					[=](RGBuilder& builder) { builder.write(back_buffer, ResourceState::RenderTarget); },
 					[this, back_buffer](RHI* rhi, CommandHandle cmd) {

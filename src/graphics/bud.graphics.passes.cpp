@@ -1,4 +1,4 @@
-#include <vector>
+﻿#include <vector>
 #include <iostream>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -1653,8 +1653,8 @@ void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManage
 		// max_scene_count guards accessing render_scene arrays, but entity_index in
 		// sort_list items are already validated — do NOT clamp draw_count by it.
 		const size_t draw_count = std::min(instance_count, sort_list.size());
-		bud::print("[MainPass] draw_count={} instance_count={} sort_list={} gpu_driven={}",
-			draw_count, instance_count, sort_list.size(), config.enable_gpu_driven);
+		//bud::print("[MainPass] draw_count={} instance_count={} sort_list={} gpu_driven={}",
+			//draw_count, instance_count, sort_list.size(), config.enable_gpu_driven);
 
 		uint32_t target_width = backbuffer_tex->width;
 		uint32_t target_height = backbuffer_tex->height;
@@ -1767,8 +1767,8 @@ void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManage
 						}
 						if (page_backed_draws > 0) {
 							const auto& first_mesh_geom = gpu_scene.mesh_geometry(0);
-							bud::print("[MainPass] page_backed_draws={} first_index={} vertex_offset={} pp_buf_valid={}",
-								page_backed_draws, first_mesh_geom.first_index, first_mesh_geom.vertex_offset, pp_buf.is_valid());
+							//bud::print("[MainPass] page_backed_draws={} first_index={} vertex_offset={} pp_buf_valid={}",
+							//	page_backed_draws, first_mesh_geom.first_index, first_mesh_geom.vertex_offset, pp_buf.is_valid());
 						}
 					}
 

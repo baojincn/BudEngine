@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <vector>
@@ -245,9 +245,9 @@ namespace bud::graphics {
 	};
 	// POD, end
 
-    // BufferHandle replaces the old 'MemoryBlock' to avoid API leakage
-    // Keep a raw pointer for fast access (`internal_state`) and an optional owning
-    // shared_ptr (`owner`) that controls lifetime when this handle represents ownership.
+	// BufferHandle replaces the old "MemoryBlock" to avoid API leakage
+	// Keep a raw pointer for fast access ( "internal_state" ) and an optional owning
+    // shared_ptr ("owner") that controls lifetime when this handle represents ownership.
     struct BufferHandle {
         void* internal_state = nullptr; // e.g. VulkanBuffer*
         std::shared_ptr<void> owner;    // optional owning reference with custom deleter
