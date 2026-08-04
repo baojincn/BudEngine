@@ -88,7 +88,7 @@ namespace bud::ui {
 				update_timer += delta_time;
 				if (update_timer >= 0.5f) {
 					display_draw_calls = stats.draw_calls;
-					display_drawn_tris = stats.drawn_triangles;
+					display_drawn_tris = current_gpu_driven_enable ? stats.gpu_visible_triangles : stats.drawn_triangles;
 					display_pipeline_binds = stats.pipeline_binds;
 
 					cpu_display_total_tris = stats.cpu_total_triangles;

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <memory>
 #include <atomic>
@@ -109,7 +109,7 @@ namespace bud::graphics {
 		std::vector<RenderMesh> meshes;
 		std::vector<bud::math::AABB> mesh_bounds;
 		mutable std::mutex mesh_bounds_mutex;
-		std::mutex mesh_mutex;
+		mutable std::mutex mesh_mutex;
 
 		std::vector<SortItem> sort_list;
 

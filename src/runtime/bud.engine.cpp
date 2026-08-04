@@ -59,7 +59,7 @@ namespace bud::engine {
 		rhi = bud::graphics::create_rhi(engine_config.backend);
 
 		auto enable_validation = engine_config.enable_validation;
-#if not defined(BUD_BUILD_DEBUG)
+#if not defined(_DEBUG) && not defined(BUD_BUILD_DEBUG)
 		enable_validation = false;
 #endif
 		rhi->init(window.get(), task_scheduler.get(), enable_validation, engine_config.inflight_frame_count, engine_config.is_headless);

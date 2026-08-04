@@ -10,9 +10,11 @@ struct DrawData {
     vec3 min;
     uint meshId;
     vec3 max;
-    uint padding1;
+    uint meshletStart;
     uint meshletCount;
-    uint padding2[3];
+    uint pageBacked;
+    uint pageIndex;
+    uint visibilityOffset;
 };
 
 struct MeshletDescriptor {
@@ -80,30 +82,28 @@ layout(std430, set = 0, binding = 6) readonly buffer PagePoolBuffer {
 } page_pool;
 
 layout(push_constant) uniform PushConstants {
-    uint drawIndex;
-    uint meshletStart;
-    uint meshletCount;
-    uint meshId;
+    uint drawCount;
 } pc;
 
 void main()
 {
-    if (gl_WorkGroupID.x != 0u || gl_LocalInvocationIndex != 0u) {
+    uint drawIndex = gl_GlobalInvocationID.x;
+    if (drawIndex >= pc.drawCount) {
         return;
     }
 
-    DrawData draw = instance_data.data[pc.drawIndex];
+    DrawData draw = instance_data.data[drawIndex];
 
     atomicAdd(stats.totalInstances, 1u);
     atomicAdd(stats.totalTriangles, draw.indexCount / 3u);
-    atomicAdd(stats.totalMeshlets, pc.meshletCount);
+    atomicAdd(stats.totalMeshlets, draw.meshletCount);
 
     uint visible_meshlets = 0u;
     uint visible_triangles = 0u;
 
-    for (uint i = 0u; i < pc.meshletCount; ++i) {
-        uint meshlet_index = pc.meshletStart + i;
-        if (meshlet_visibility.data[meshlet_index] != 0u) {
+    for (uint i = 0u; i < draw.meshletCount; ++i) {
+        uint visibility_index = draw.visibilityOffset + i;
+        if (meshlet_visibility.data[visibility_index] != 0u) {
             ++visible_meshlets;
             visible_triangles += 1u;
         }
@@ -114,9 +114,9 @@ void main()
     cmd.instance_count = visible_meshlets > 0u ? 1u : 0u;
     cmd.first_index = draw.firstIndex;
     cmd.vertex_offset = draw.vertexOffset;
-    cmd.first_instance = pc.drawIndex;
+    cmd.first_instance = drawIndex;
 
-    indirect_draw.data[pc.drawIndex] = cmd;
+    indirect_draw.data[drawIndex] = cmd;
 
     if (visible_meshlets > 0u) {
         atomicAdd(stats.visibleInstances, 1u);

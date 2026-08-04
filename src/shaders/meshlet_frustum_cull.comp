@@ -10,9 +10,11 @@ struct draw_data {
 	vec3 min;
 	uint mesh_id;
 	vec3 max;
-	uint padding_0;
+	uint meshlet_start;
 	uint meshlet_count;
-	uint padding_1[3];
+	uint page_backed;
+	uint page_index;
+	uint visibility_offset;
 };
 
 struct meshlet_descriptor {
@@ -84,19 +86,14 @@ layout(std430, set = 0, binding = 11) readonly buffer PagePoolBuffer {
 } page_pool;
 
 layout(push_constant) uniform PushConstants {
-	uint draw_index;
-	uint meshlet_start;
-	uint meshlet_count;
-	uint mesh_id;
-	uint page_backed;
-	uint page_index;
+	uint draw_count;
 } pc;
 
 const uint MESHLET_DESC_DWORDS = 4u;
 const uint PAGE_HEADER_DWORDS = 16u; // 64-byte PageBinaryHeader
 
-uint get_triangle_count_from_pool(uint meshlet_idx) {
-	uint base = page_table.data[pc.page_index].pool_offset / 4u + PAGE_HEADER_DWORDS + meshlet_idx * MESHLET_DESC_DWORDS;
+uint get_triangle_count_from_pool(uint page_index, uint meshlet_idx) {
+	uint base = page_table.data[page_index].pool_offset / 4u + PAGE_HEADER_DWORDS + meshlet_idx * MESHLET_DESC_DWORDS;
 	return page_pool.data[base + 3u]; // triangle_count is 4th field
 }
 
@@ -137,41 +134,38 @@ bool aabb_visible(vec3 bmin, vec3 bmax)
 
 void main()
 {
-	if (gl_WorkGroupID.x == 0u && gl_LocalInvocationIndex == 0u) {
-		atomicAdd(stats.total_instances, 1u);
-		atomicAdd(stats.total_meshlets, pc.meshlet_count);
-
-		uint total_triangles = 0u;
-		for (uint i = 0u; i < pc.meshlet_count; ++i) {
-			uint tri_cnt = (pc.page_backed != 0u)
-				? get_triangle_count_from_pool(pc.meshlet_start + i)
-				: meshlet_data.data[pc.meshlet_start + i].triangle_count;
-			total_triangles += tri_cnt;
-		}
-		atomicAdd(stats.total_triangles, total_triangles);
-	}
-
-	if (pc.meshlet_count == 0u) {
+	uint draw_index = gl_GlobalInvocationID.x;
+	if (draw_index >= pc.draw_count) {
 		return;
 	}
 
-	draw_data draw = instance_data.data[pc.draw_index];
+	draw_data draw = instance_data.data[draw_index];
+	if (draw.meshlet_count == 0u) {
+		return;
+	}
+
+	atomicAdd(stats.total_instances, 1u);
+	atomicAdd(stats.total_meshlets, draw.meshlet_count);
+
+	uint total_triangles = 0u;
+	for (uint i = 0u; i < draw.meshlet_count; ++i) {
+		uint tri_cnt = (draw.page_backed != 0u)
+			? get_triangle_count_from_pool(draw.page_index, draw.meshlet_start + i)
+			: meshlet_data.data[draw.meshlet_start + i].triangle_count;
+		total_triangles += tri_cnt;
+	}
+	atomicAdd(stats.total_triangles, total_triangles);
+
 	bool visible = aabb_visible(draw.min, draw.max);
+	uint visibility_value = visible ? 1u : 0u;
 
-	uint local_index = gl_GlobalInvocationID.x;
-	if (local_index >= pc.meshlet_count) {
-		return;
+	for (uint j = 0u; j < draw.meshlet_count; ++j) {
+		meshlet_visibility.data[draw.visibility_offset + j] = visibility_value;
 	}
 
-	uint visibility_value = visible ? 1u : 0u;
-	meshlet_visibility.data[pc.meshlet_start + local_index] = visibility_value;
-
-	if (gl_WorkGroupID.x == 0u && gl_LocalInvocationIndex == 0u) {
-		meshlet_visibility.data[pc.draw_index] = visibility_value;
-		if (visible) {
-			atomicAdd(stats.visible_instances, 1u);
-			atomicAdd(stats.visible_triangles, draw.index_count / 3u);
-			atomicAdd(stats.visible_meshlets, pc.meshlet_count);
-		}
+	if (visible) {
+		atomicAdd(stats.visible_instances, 1u);
+		atomicAdd(stats.visible_triangles, draw.index_count / 3u);
+		atomicAdd(stats.visible_meshlets, draw.meshlet_count);
 	}
 }

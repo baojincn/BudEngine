@@ -1,4 +1,4 @@
-﻿#include <vector>
+#include <vector>
 #include <string>
 #include <iostream>
 #include <optional>
@@ -196,6 +196,8 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
 		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
 	};
 
@@ -377,8 +379,10 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
         uint32_t color = 0xFF0000FF; // R=FF, G=00, B=00, A=FF (Little Endian)
         // Use managed texture API to ensure ownership
         fallback_texture_ptr = resource_pool->acquire_texture_shared(desc);
-        // Initialize fallback image content if needed (not implemented: upload color)
-        update_bindless_texture(0, fallback_texture_ptr.get());
+        // Initialize all bindless texture slots (0 to 999) to fallback texture to avoid unwritten descriptor crashes during async streaming
+        for (uint32_t i = 0; i < 1000; ++i) {
+            update_bindless_texture(i, fallback_texture_ptr.get());
+        }
 	}
 
 	bud::print("[Vulkan] RHI Initialized successfully (Clean Architecture).");
@@ -1532,7 +1536,7 @@ void VulkanRHI::cmd_draw_indexed_indirect(CommandHandle cmd, bud::graphics::Buff
     }
     auto* vk_buf = static_cast<bud::graphics::vulkan::VulkanBuffer*>(buffer.internal_state);
 	vkCmdDrawIndexedIndirect(static_cast<VkCommandBuffer>(cmd), vk_buf->buffer, offset, draw_count, stride);
-	current_stats.draw_calls += draw_count; 
+	current_stats.draw_calls += 1; 
 }
 
 void VulkanRHI::cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) {

@@ -20,12 +20,15 @@ A full fiber-based task driven lightweight 3D Game Engine.
 * **RHI (Render Hardware Interface)**: Backend-agnostic graphics abstraction layer using the Factory Pattern, currently supporting **Vulkan**.
 * **GPU-Driven Rendering & Multi-Stage Culling**:
     * **Two-Stage Hierarchical Culling**: CPU LBVH broad-phase culling with screen-space occluder heuristic extraction (`Occluder List` vs. `Detail List`), combined with GPU compute fine-grained meshlet frustum, normal-cone, and Hi-Z occlusion culling.
-    * **Indirect Draw Emission**: Fully GPU-driven draw command generation (`MeshletIndirectEmissionPass`) executing via `vkCmdDrawIndexedIndirect` with zero CPU draw-loop overhead.
+    * **RL-Driven Concurrent Hi-Z Occlusion Culling**: Reinforcement learning (`ml_perception`) occluder selection for zero-latency current-frame Z-Prepass and Hi-Z pyramid generation.
+    * **Indirect Draw Emission**: Fully GPU-driven draw command generation (`MeshletIndirectEmissionPass`) executing via `vkCmdDrawIndexedIndirect`, condensing main camera and depth prepass rendering into a single indirect draw call per pass.
 * **Virtual Geometry & Page Streaming**:
     * **Virtual Memory Paging for GPU Geometry**: Large scenes are sliced into uniform 128KB memory pages (`kPageSize = 131,040 Bytes`) and streamed asynchronously (`StreamingManager`) via non-blocking `bud::io` operations.
-    * **Slot-Based Page Pool & Page Table**: Global GPU storage buffer partitioned into 128KB slots with an indirect SSBO Page Table (`valid` / `pool_offset`), allowing bindless-style single-buffer rendering across disjoint pages.
-* **Offline Asset Pipeline (`BudAssetTool`)**:
+    * **Bindless Slot-Based Page Pool & Page Table**: Global GPU storage buffer partitioned into 128KB slots with an indirect SSBO Page Table (`valid` / `pool_offset`), allowing zero-rebind single-buffer rendering across disjoint pages.
+    * **Per-Draw Visibility Offsets**: Safe multi-instance and multi-page culling inside shared compute pipelines (`meshlet_frustum_cull.comp` / `meshlet_hiz_cull.comp`).
+* **Offline Asset Pipeline & Blender DCC Integration (`BudAssetTool` & `pybind11`)**:
     * Dedicated CLI toolchain for meshletization (`meshoptimizer`), 48-byte aligned vertex layout formatting, page-level binary slicing (`.budmesh.json` + `.bin`), and binary scene baking (`.budmapb`).
+    * Native Blender Python bindings (`pybind11`) to trigger offline mesh processing and visualize meshlet/LOD boundaries directly in the artist viewport.
 * **Advanced Shadowing**: **Cascaded Shadow Maps (CSM)** with PCF (Percentage-Closer Filtering), customized partition logic (Log-Linear Split), and distance-based culling for large-scale scenes.
 * **Render Graph**: Automatic resource barrier management, pass reordering, and transient memory aliasing.
 * **Texture Management**: 

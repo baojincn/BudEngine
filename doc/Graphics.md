@@ -212,3 +212,20 @@ Using **Pybind11**, the engine's core slicing and asset logic is exposed as a Py
 *   Trigger `BudAssetTool` logic natively within the DCC environment.
 *   Visualize meshlet boundaries, LOD transitions, and culling data directly on the artistic viewport for verification.
 
+### 5. GPU-Driven Page-Backed Virtual Geometry Pipeline & Performance Analysis
+
+#### Implementation Principles (Virtual Geometry & Bindless Page Pool)
+*   **Page-Backed Virtual Addressing**: Instead of binding individual static vertex/index buffers per mesh, geometry is sliced offline into 128KB pages (`kPageSize = 131,040 Bytes`). At runtime, visible pages are loaded into a global slot-based GPU storage buffer (`PagePoolBuffer`), addressed indirectly via a virtual-to-physical translation table (`PageTableBuffer`).
+*   **Per-Draw Visibility Offset**: To avoid visibility buffer collisions when multiple instances or pages share the same meshlet pipeline, each draw call carries a unique `visibility_offset` inside `DrawData`. Compute shaders (`meshlet_frustum_cull.comp` and `meshlet_hiz_cull.comp`) use this offset to write culling decisions into distinct slices of the visibility buffer.
+*   **GPU-Driven Command Emission**: `MeshletIndirectEmitPass` scans surviving visible meshlets and compacts them into an indirect draw buffer (`vkCmdDrawIndexedIndirect`). When executing the main pass (`MainPass`) or depth prepass (`DepthOnlyPass`), the `PagePoolBuffer` is bound directly as both the vertex and index buffer (`rhi->cmd_bind_vertex_buffer(cmd, pp_buf); rhi->cmd_bind_index_buffer(cmd, pp_buf);`).
+
+#### Why Drawcall Statistics Still Show 400+ in GPU-Driven Mode
+*   **Single Drawcall for Main Scene**: When `render_config.enable_gpu_driven` is active, the entire page-backed scene in `MainPass` and `DepthOnlyPass` is submitted with **exactly 1 indirect draw call each** (`vkCmdDrawIndexedIndirect`).
+*   **Cascaded Shadow Map (CSM) Overhead**: The UI statistic (`stats.draw_calls`) aggregates all draw calls across the entire frame. Currently, `CascadedShadowMapPass` iterates over 4 shadow cascades on the CPU. For a scene like Sponza (~115 visible submeshes), 4 cascades result in `115 * 4 ≈ 460` CPU-submitted draw calls (`vkCmdDrawIndexed`).
+*   **Conclusion**: The 400+ drawcall count originates entirely from the shadow map passes and ImGui rendering; the main camera pass is successfully condensed into a single GPU-driven indirect draw.
+
+#### Why GPU-Driven Frame Rate Does Not Improve on Small Scenes (e.g., Sponza)
+*   **CPU Draw Submission Overhead is Negligible for <1,000 Draws**: Modern CPUs can submit 115 draw calls in under 0.05ms. Eliminating 115 CPU draw calls yields minimal frame-time savings.
+*   **Compute Dispatch & Synchronization Latency**: The GPU-driven meshlet pipeline introduces 3 compute dispatches (`MeshletFrustumCullingPass`, `MeshletHiZCullPass`, `MeshletIndirectEmissionPass`), Hi-Z mipmap generation (`HiZMipPass`), and several pipeline execution barriers (`vkCmdPipelineBarrier`). On small scenes, the fixed GPU compute and synchronization overhead outweighs the CPU overhead saved by consolidating ~100 draw calls.
+*   **Scaling Characteristics**: GPU-Driven Virtual Geometry is designed for massive, high-density environments (10,000+ instances and millions of meshlets), where CPU draw-call bottlenecking and VRAM limits become critical.
+

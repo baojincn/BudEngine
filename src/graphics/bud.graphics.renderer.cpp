@@ -1,4 +1,4 @@
-﻿#include <memory>
+#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -95,7 +95,7 @@ namespace bud::graphics {
 	}
 
 	std::vector<std::vector<bud::math::AABB>> Renderer::get_submesh_bounds_snapshot() const {
-		std::lock_guard lock(mesh_bounds_mutex);
+		std::scoped_lock lock(mesh_mutex, mesh_bounds_mutex);
 		std::vector<std::vector<bud::math::AABB>> result;
 		result.reserve(meshes.size());
 		for (const auto& mesh : meshes) {
@@ -150,12 +150,24 @@ namespace bud::graphics {
 			mesh.submeshes.push_back(fallback_sub);
 		}
 		else {
-			for (const auto& ps : page_submeshes) {
+			uint32_t allocated_meshlets = 0;
+			for (size_t i = 0; i < page_submeshes.size(); ++i) {
+				const auto& ps = page_submeshes[i];
 				SubMesh sub{};
 				sub.index_start = ps.index_start;
 				sub.index_count = ps.index_count;
-				sub.meshlet_start = 0;
-				sub.meshlet_count = 0;
+				sub.meshlet_start = allocated_meshlets;
+				if (i + 1 == page_submeshes.size()) {
+					sub.meshlet_count = (meshlet_count > allocated_meshlets) ? (meshlet_count - allocated_meshlets) : 0;
+				}
+				else {
+					uint32_t count = (index_count > 0) ? static_cast<uint32_t>((static_cast<uint64_t>(ps.index_count) * meshlet_count) / index_count) : 0;
+					if (count == 0 && meshlet_count > allocated_meshlets + (page_submeshes.size() - 1 - i)) {
+						count = 1;
+					}
+					sub.meshlet_count = count;
+				}
+				allocated_meshlets += sub.meshlet_count;
 				sub.material_id = ps.material_id;
 				sub.aabb = aabb; // conservative page AABB
 				sub.sphere = mesh.sphere;
@@ -530,6 +542,8 @@ namespace bud::graphics {
 		// 先处理所有挂起的上传任务
 		flush_upload_queue();
 
+		std::scoped_lock lock(mesh_mutex, mesh_bounds_mutex);
+
 		if (meshlet_rendering_toggle_pending.exchange(false, std::memory_order_acq_rel)) {
 			meshlet_rendering_enabled.store(meshlet_rendering_toggle_value.load(std::memory_order_relaxed), std::memory_order_release);
 		}
@@ -774,9 +788,11 @@ namespace bud::graphics {
 			bud::math::vec3 min;
 			uint32_t meshId;
 			bud::math::vec3 max;
-			uint32_t padding1;
+			uint32_t meshletStart;
 			uint32_t meshletCount;
-			uint32_t padding2[3];
+			uint32_t pageBacked;
+			uint32_t pageIndex;
+			uint32_t visibilityOffset;
 		};
 
 		if (instance_count > 0) {
@@ -858,6 +874,7 @@ namespace bud::graphics {
 
 					auto staging = rhi->get_allocator()->alloc_staging(visible_count * sizeof(DrawData));
 					DrawData* mapped = static_cast<DrawData*>(staging.mapped_ptr);
+					uint32_t current_visibility_offset = 0;
 					for (size_t i = 0; i < visible_count; ++i) {
 						const auto& item = sort_list[i];
 						uint32_t entity_idx = item.entity_index;
@@ -876,7 +893,12 @@ namespace bud::graphics {
 							auto world_aabb = sub.aabb.transform(render_scene.world_matrices[entity_idx]);
 							mapped[i].min = world_aabb.min;
 							mapped[i].max = world_aabb.max;
+							mapped[i].meshletStart = sub.meshlet_start;
 							mapped[i].meshletCount = sub.meshlet_count;
+							mapped[i].pageBacked = mesh.is_page_backed ? 1u : 0u;
+							mapped[i].pageIndex = mesh.page_index;
+							mapped[i].visibilityOffset = current_visibility_offset;
+							current_visibility_offset += mapped[i].meshletCount;
 						}
 						else {
 							mapped[i].indexCount = mesh.index_count;
@@ -888,7 +910,12 @@ namespace bud::graphics {
 							auto world_aabb = mesh.aabb.transform(render_scene.world_matrices[entity_idx]);
 							mapped[i].min = world_aabb.min;
 							mapped[i].max = world_aabb.max;
+							mapped[i].meshletStart = 0;
 							mapped[i].meshletCount = mesh.meshlet_count;
+							mapped[i].pageBacked = mesh.is_page_backed ? 1u : 0u;
+							mapped[i].pageIndex = mesh.page_index;
+							mapped[i].visibilityOffset = current_visibility_offset;
+							current_visibility_offset += mapped[i].meshletCount;
 						}
 					}
 					rhi->copy_buffer_immediate(staging, current_inst_buf, visible_count * sizeof(DrawData));

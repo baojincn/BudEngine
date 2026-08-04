@@ -1,4 +1,4 @@
-﻿#include <vector>
+#include <vector>
 #include <iostream>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -603,59 +603,14 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 					rhi->cmd_bind_storage_buffer(cmd, pipeline, 11, pp_buf);
 
 				const size_t dispatch_count = std::min(visible_count, sort_list.size());
-				for (size_t i = 0; i < dispatch_count; ++i) {
-					const auto& item = sort_list[i];
-					if (item.entity_index >= render_scene.mesh_indices.size()) {
-						continue;
-					}
-
-					uint32_t mesh_id = render_scene.mesh_indices[item.entity_index];
-					if (mesh_id >= meshes.size()) {
-						continue;
-					}
-
-					const auto& mesh = meshes[mesh_id];
-					if (!mesh.has_meshlet_data()) {
-						continue;
-					}
-
-					uint32_t meshlet_start = 0;
-					uint32_t meshlet_count = mesh.meshlet_count;
-					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
-						const auto& submesh = mesh.submeshes[item.submesh_index];
-						meshlet_start = submesh.meshlet_start;
-						meshlet_count = submesh.meshlet_count;
-					}
-
-					if (meshlet_count == 0) {
-						continue;
-					}
-
-					if (!mesh.is_page_backed) {
-						rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, mesh.meshlet_buffer);
-						rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, mesh.vertex_index_buffer);
-						rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, mesh.meshlet_index_buffer);
-						rhi->cmd_bind_storage_buffer(cmd, pipeline, 4, mesh.cull_data_buffer);
-					}
-
+				if (dispatch_count > 0) {
 					struct PushConsts {
-						uint32_t drawIndex;
-						uint32_t meshletStart;
-						uint32_t meshletCount;
-						uint32_t meshId;
-						uint32_t pageBacked;
-						uint32_t pageIndex;
+						uint32_t draw_count;
 					} pc;
-					pc.drawIndex = static_cast<uint32_t>(i);
-					pc.meshletStart = meshlet_start;
-					pc.meshletCount = meshlet_count;
-					pc.meshId = mesh_id;
-					pc.pageBacked = mesh.is_page_backed ? 1u : 0u;
-					pc.pageIndex = mesh.page_index;
-
+					pc.draw_count = static_cast<uint32_t>(dispatch_count);
 					rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
 
-					uint32_t group_x = (meshlet_count + 255) / 256;
+					uint32_t group_x = (static_cast<uint32_t>(dispatch_count) + 255u) / 256u;
 					rhi->cmd_dispatch(cmd, group_x, 1, 1);
 				}
 			}
@@ -981,61 +936,16 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 						rhi->cmd_bind_storage_buffer(cmd, pipeline, 11, pp_buf);
 
 					const size_t dispatch_count = std::min(visible_count, sort_list.size());
-				for (size_t i = 0; i < dispatch_count; ++i) {
-					const auto& item = sort_list[i];
-					if (item.entity_index >= render_scene.mesh_indices.size()) {
-						continue;
+					if (dispatch_count > 0) {
+						struct PushConsts {
+							uint32_t drawCount;
+						} pc;
+						pc.drawCount = static_cast<uint32_t>(dispatch_count);
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
+
+						uint32_t group_x = (static_cast<uint32_t>(dispatch_count) + 255u) / 256u;
+						rhi->cmd_dispatch(cmd, group_x, 1, 1);
 					}
-
-					uint32_t mesh_id = render_scene.mesh_indices[item.entity_index];
-					if (mesh_id >= meshes.size()) {
-						continue;
-					}
-
-					const auto& mesh = meshes[mesh_id];
-					if (!mesh.has_meshlet_data()) {
-						continue;
-					}
-
-					uint32_t meshlet_start = 0;
-					uint32_t meshlet_count = mesh.meshlet_count;
-					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
-						const auto& submesh = mesh.submeshes[item.submesh_index];
-						meshlet_start = submesh.meshlet_start;
-						meshlet_count = submesh.meshlet_count;
-					}
-
-					if (meshlet_count == 0) {
-						continue;
-					}
-
-					if (!mesh.is_page_backed) {
-						rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, mesh.meshlet_buffer);
-						rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, mesh.vertex_index_buffer);
-						rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, mesh.meshlet_index_buffer);
-						rhi->cmd_bind_storage_buffer(cmd, pipeline, 4, mesh.cull_data_buffer);
-					}
-
-					struct PushConsts {
-						uint32_t drawIndex;
-						uint32_t meshletStart;
-						uint32_t meshletCount;
-						uint32_t meshId;		
-						uint32_t pageBacked;
-						uint32_t pageIndex;
-					} pc;
-					pc.drawIndex = static_cast<uint32_t>(i);
-					pc.meshletStart = meshlet_start;
-					pc.meshletCount = meshlet_count;
-					pc.meshId = mesh_id;
-					pc.pageBacked = mesh.is_page_backed ? 1u : 0u;
-					pc.pageIndex = mesh.page_index;
-
-					rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
-
-					uint32_t group_x = (meshlet_count + 255) / 256;
-					rhi->cmd_dispatch(cmd, group_x, 1, 1);
-				}
 			}
 		);
 	}
@@ -1124,54 +1034,16 @@ void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetMa
 						rhi->cmd_bind_storage_buffer(cmd, pipeline, 6, pp_buf);
 
 					const size_t dispatch_count = std::min(visible_count, sort_list.size());
-				for (size_t i = 0; i < dispatch_count; ++i) {
-					const auto& item = sort_list[i];
-					if (item.entity_index >= render_scene.mesh_indices.size()) {
-						continue;
+					if (dispatch_count > 0) {
+						struct PushConsts {
+							uint32_t drawCount;
+						} pc;
+						pc.drawCount = static_cast<uint32_t>(dispatch_count);
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
+
+						uint32_t group_x = (static_cast<uint32_t>(dispatch_count) + 255u) / 256u;
+						rhi->cmd_dispatch(cmd, group_x, 1, 1);
 					}
-
-					uint32_t mesh_id = render_scene.mesh_indices[item.entity_index];
-					if (mesh_id >= meshes.size()) {
-						continue;
-					}
-
-					const auto& mesh = meshes[mesh_id];
-					if (!mesh.has_meshlet_data()) {
-						continue;
-					}
-
-					uint32_t meshlet_start = 0;
-					uint32_t meshlet_count = mesh.meshlet_count;
-					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
-						const auto& submesh = mesh.submeshes[item.submesh_index];
-						meshlet_start = submesh.meshlet_start;
-						meshlet_count = submesh.meshlet_count;
-					}
-
-					if (meshlet_count == 0) {
-						continue;
-					}
-
-					struct PushConsts {
-						uint32_t drawIndex;
-						uint32_t meshletStart;
-						uint32_t meshletCount;
-						uint32_t meshId;		   
-						uint32_t pageBacked;
-						uint32_t pageIndex;
-					} pc;
-					pc.drawIndex = static_cast<uint32_t>(i);
-					pc.meshletStart = meshlet_start;
-					pc.meshletCount = meshlet_count;
-					pc.meshId = mesh_id;
-					pc.pageBacked = mesh.is_page_backed ? 1u : 0u;
-					pc.pageIndex = mesh.page_index;
-
-					rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
-
-					uint32_t group_x = (meshlet_count + 255) / 256;
-					rhi->cmd_dispatch(cmd, group_x, 1, 1);
-				}
 			}
 		);
 	}
