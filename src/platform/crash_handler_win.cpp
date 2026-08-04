@@ -1,74 +1,109 @@
 ﻿#ifdef _WIN32
 
 #include "src/platform/crash_handler.hpp"
-#include "src/io/bud.io.hpp"
 #include <windows.h>
 #include <DbgHelp.h>
-#include <filesystem>
-#include <string>
-#include <chrono>
-#include <format>
-#include <sstream>
-#include "src/core/bud.logger.hpp"
+#include <cstdio>
+#include <cstring>
+#include <exception>
 
 #pragma comment(lib, "Dbghelp.lib")
 
 namespace bud::platform {
+// Shared state for configured root path.
+static CHAR g_crash_root[MAX_PATH] = {0};
+static bool g_has_crash_root = false;
 
-static std::string make_dump_filename() {
-    using namespace std::chrono;
-    auto now = system_clock::now();
-    auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
-    std::time_t t = system_clock::to_time_t(now);
-    std::tm tm_info{};
-    localtime_s(&tm_info, &t);
-    std::ostringstream ss;
-    ss << std::put_time(&tm_info, "%Y%m%d_%H%M%S") << "_" << GetCurrentProcessId() << ".dmp";
-    return ss.str();
+// Set the root path used for crash dumps. Call during initialization when
+// the VFS is available. The string is copied into an internal buffer to
+// avoid allocations during crash handling.
+void set_crash_dump_root(const char* root_path) {
+    if (!root_path) return;
+    strncpy_s(g_crash_root, root_path, MAX_PATH - 1);
+    g_has_crash_root = true;
+    // Ensure the 'tmp' directory exists under the provided root.
+    CHAR tmpdir[MAX_PATH];
+    size_t len = strlen(g_crash_root);
+    if (len > 0 && (g_crash_root[len - 1] == '\\' || g_crash_root[len - 1] == '/'))
+        sprintf_s(tmpdir, "%s%s", g_crash_root, "tmp");
+    else
+        sprintf_s(tmpdir, "%s\\%s", g_crash_root, "tmp");
+    CreateDirectoryA(tmpdir, nullptr);
 }
 
+// Minimal, allocator-free minidump writer. Avoids STL and project logger to
+// reduce the chance of deadlocks when called from an unstable state.
 static void write_minidump(EXCEPTION_POINTERS* exinfo) {
-    try {
-        namespace fs = std::filesystem;
-        fs::path tmp = fs::current_path() / "tmp";
-        std::error_code ec;
-        fs::create_directories(tmp, ec);
-        auto name = make_dump_filename();
-        fs::path dump_path = tmp / name;
-
-        HANDLE hFile = CreateFileA(dump_path.string().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hFile == INVALID_HANDLE_VALUE) {
-            // Use async logger to record the failure.
-            DWORD createErr = GetLastError();
-            std::string err = "Failed to create dump file: " + dump_path.string() +
-                " (GetLastError=" + std::to_string(createErr) + ")\n";
-            bud::get_global_logger()->log(err);
-            return;
+    CHAR tempPath[MAX_PATH] = {0};
+    if (g_has_crash_root) {
+        // Use configured root/tmp
+        size_t len = strlen(g_crash_root);
+        if (len > 0 && (g_crash_root[len - 1] == '\\' || g_crash_root[len - 1] == '/'))
+            sprintf_s(tempPath, "%s%s", g_crash_root, "tmp");
+        else
+            sprintf_s(tempPath, "%s\\%s", g_crash_root, "tmp");
+    } else {
+        DWORD tpLen = GetTempPathA(MAX_PATH, tempPath);
+        if (tpLen == 0 || tpLen > MAX_PATH) {
+            // fallback to current directory
+            strcpy_s(tempPath, ".\\");
         }
+    }
 
-        MINIDUMP_EXCEPTION_INFORMATION mei{};
-        if (exinfo) {
-            mei.ThreadId = GetCurrentThreadId();
-            mei.ExceptionPointers = exinfo;
-            mei.ClientPointers = FALSE;
-        }
+    SYSTEMTIME st;
+    GetLocalTime(&st);
 
-        DWORD dumpType = MiniDumpWithDataSegs | MiniDumpWithHandleData | MiniDumpWithFullMemory;
-        BOOL ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile, (MINIDUMP_TYPE)dumpType, exinfo ? &mei : nullptr, nullptr, nullptr);
+    DWORD pid = GetCurrentProcessId();
 
-        CloseHandle(hFile);
+    CHAR filename[MAX_PATH];
+    sprintf_s(filename, "%04u%02u%02u_%02u%02u%02u_%03u_%u.dmp",
+              (unsigned)st.wYear, (unsigned)st.wMonth, (unsigned)st.wDay,
+              (unsigned)st.wHour, (unsigned)st.wMinute, (unsigned)st.wSecond,
+              (unsigned)st.wMilliseconds, (unsigned)pid);
 
-        if (ok) {
-            std::string msg = "Crash dump written to " + dump_path.string() + "\n";
-            bud::get_global_logger()->log(msg);
-        } else {
-            std::string msg = "MiniDumpWriteDump failed (GetLastError=" + std::to_string(GetLastError()) + "): " + dump_path.string() + "\n";
-            bud::get_global_logger()->log(msg);
-        }
-    } catch (const std::exception& e) {
-        bud::eprint("Exception while writing minidump: {}", e.what());
-    } catch (...) {
-        // best-effort only
+    CHAR fullpath[MAX_PATH];
+    size_t tlen = strlen(tempPath);
+    if (tlen > 0 && (tempPath[tlen - 1] == '\\' || tempPath[tlen - 1] == '/')) {
+        sprintf_s(fullpath, "%s%s", tempPath, filename);
+    } else {
+        sprintf_s(fullpath, "%s\\%s", tempPath, filename);
+    }
+
+    // Ensure the directory exists in case it wasn't created earlier
+    CHAR dirpath[MAX_PATH];
+    strncpy_s(dirpath, tempPath, MAX_PATH - 1);
+    CreateDirectoryA(dirpath, nullptr);
+
+    HANDLE hFile = CreateFileA(fullpath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        CHAR msg[512];
+        sprintf_s(msg, "Failed to create dump file: %s (GetLastError=%lu)\n", fullpath, GetLastError());
+        OutputDebugStringA(msg);
+        return;
+    }
+
+    MINIDUMP_EXCEPTION_INFORMATION mei{};
+    MINIDUMP_EXCEPTION_INFORMATION* pmei = nullptr;
+    if (exinfo) {
+        mei.ThreadId = GetCurrentThreadId();
+        mei.ExceptionPointers = exinfo;
+        mei.ClientPointers = FALSE;
+        pmei = &mei;
+    }
+
+    DWORD dumpType = MiniDumpWithDataSegs | MiniDumpWithHandleData | MiniDumpWithFullMemory;
+    BOOL ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile, (MINIDUMP_TYPE)dumpType, pmei, nullptr, nullptr);
+
+    CloseHandle(hFile);
+
+    if (ok) {
+        CHAR msg[512];
+        sprintf_s(msg, "Crash dump written to %s\n", fullpath);
+        OutputDebugStringA(msg);
+    } else {
+        CHAR msg[512];
+        sprintf_s(msg, "MiniDumpWriteDump failed (GetLastError=%lu): %s\n", GetLastError(), fullpath);
+        OutputDebugStringA(msg);
     }
 }
 
@@ -79,12 +114,13 @@ static LONG WINAPI UnhandledExceptionFilterImpl(EXCEPTION_POINTERS* exinfo) {
 }
 
 static void terminate_handler() {
-    // Attempt to capture a dump on std::terminate()
-    // Use async logger to record termination; keep it asynchronous per project policy
-    const char term_msg[] = "std::terminate called - attempting to write minidump\n";
-    bud::get_global_logger()->log(std::string(term_msg, sizeof(term_msg) - 1));
+    // Attempt to capture a dump on std::terminate(). Avoid allocator use and
+    // project logger because the C++ runtime may be in an invalid state.
+    const CHAR term_msg[] = "std::terminate called - attempting to write minidump\n";
+    OutputDebugStringA(term_msg);
     write_minidump(nullptr);
-    std::abort();
+    // Ensure termination
+    abort();
 }
 
 void install_crash_handler() {

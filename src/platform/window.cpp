@@ -27,6 +27,14 @@ namespace bud::platform {
 		case SDLK_R:      return bud::input::Key::R;
 		case SDLK_F3:     return bud::input::Key::F3;
 		case SDLK_F4:     return bud::input::Key::F4;
+		case SDLK_F8:     return bud::input::Key::F8;
+		case SDLK_F9:     return bud::input::Key::F9;
+		case SDLK_LCTRL:  return bud::input::Key::LCtrl;
+        // Main "+" on many layouts is produced by Shift+'=' -> SDLK_EQUALS
+        case SDLK_EQUALS: return bud::input::Key::Plus;
+        case SDLK_KP_PLUS:return bud::input::Key::Plus;
+        case SDLK_MINUS:  return bud::input::Key::Minus;
+        case SDLK_KP_MINUS:return bud::input::Key::Minus;
 
 		default:          return bud::input::Key::Unknown;
 		}
@@ -71,7 +79,7 @@ namespace bud::platform {
 
 	class WindowWin : public Window {
 	public:
-		WindowWin(const std::string& title, int width, int height)
+		WindowWin(const std::string& title, int width, int height, WindowFlags flags)
 			: width(width), height(height)
 		{
 			if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
@@ -94,9 +102,13 @@ namespace bud::platform {
 				throw std::runtime_error("Failed to create SDL window");
 			}
 
-			SDL_ShowWindow(window);
+			if ((static_cast<uint32_t>(flags) & static_cast<uint32_t>(WindowFlags::Hidden)) == 0) {
+				SDL_ShowWindow(window);
+			}
+
 			update_window_size();
-			bud::print("Created window: {} ({}x{})", title, width, height);
+			bud::print("Created window: {} ({}x{}){}", title, width, height, 
+				(static_cast<uint32_t>(flags) & static_cast<uint32_t>(WindowFlags::Hidden)) ? " [HIDDEN]" : "");
 		}
 
 		~WindowWin() override {
@@ -268,9 +280,9 @@ namespace bud::platform {
 		return get_display_resolution(display);
 	}
 
-	std::unique_ptr<Window> create_window(const std::string& title, int width, int height) {
+	std::unique_ptr<Window> create_window(const std::string& title, int width, int height, WindowFlags flags) {
 #ifdef _WIN32
-		return std::make_unique<WindowWin>(title, width, height);
+		return std::make_unique<WindowWin>(title, width, height, flags);
 #else
 		throw std::runtime_error("Platform not supported");
 #endif

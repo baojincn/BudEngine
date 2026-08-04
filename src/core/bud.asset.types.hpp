@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <vector>
@@ -7,7 +7,8 @@ namespace bud::asset {
 
     // 0x4255444D ("BUDM")
     constexpr uint32_t MESH_MAGIC = 0x4255444D;
-    constexpr uint32_t MESH_VERSION = 1;
+    // bump when header layout changes
+    constexpr uint32_t MESH_VERSION = 4;
 
 #pragma pack(push, 1)
 
@@ -30,6 +31,7 @@ namespace bud::asset {
         uint32_t meshlet_count;
         uint32_t submesh_count;
         uint32_t texture_count;    // Total unique textures
+        uint32_t material_count;   // Total unique materials
 
         float aabb_min[3];
         float aabb_max[3];
@@ -43,6 +45,7 @@ namespace bud::asset {
         uint64_t meshlet_index_offset;
         uint64_t cull_data_offset;
         uint64_t submesh_offset;
+        uint64_t material_offset;  // Offset to material table
         uint64_t texture_offset;   // Offset to the texture path list (null-terminated strings or similar)
     };
 
@@ -59,6 +62,33 @@ namespace bud::asset {
         int8_t cone_cutoff;        // cos(angle/2) for backface culling
     };
 
+    // UE5-style Unified Terminology (Page-first)
+    struct ClusterDescriptor {
+        uint32_t vertex_offset;
+        uint32_t vertex_count;
+        uint32_t triangle_offset;
+        uint32_t triangle_count;
+        uint32_t lod_level;
+        float cluster_error;
+        float parent_error;
+    };
+
+    struct ClusterCullData {
+        float bounding_sphere[4];
+        int8_t cone_axis[3];
+        int8_t cone_cutoff;
+    };
+
+    struct PageTableEntry {
+        uint32_t page_id;
+        uint32_t cluster_start;
+        uint32_t cluster_count;
+        uint64_t data_size;
+        uint32_t dependency_page_id;
+        uint64_t file_offset;
+        uint64_t capacity;
+    };
+
     // Vertex structure for BudEngine (Must match what is written in BudAssetTool)
     struct Vertex {
         float position[3];
@@ -67,13 +97,49 @@ namespace bud::asset {
         float tangent[4]; // Optional, but good to have
     };
 
+    // Material serialization that mirrors glTF semantic choices
+    enum class AlphaMode : uint8_t {
+		Opaque = 0,
+		Mask = 1,
+		Blend = 2
+    };
+
+    struct MaterialDescriptor {
+        uint32_t base_color_texture; // Index into texture table or INVALID_INDEX
+        uint8_t alpha_mode;          // AlphaMode as uint8_t
+        uint8_t double_sided;        // boolean (0/1)
+        uint8_t padding[2];          // reserved for alignment
+        float alpha_cutoff;          // used when alpha_mode == MASK
+    };
+
 #pragma pack(pop)
+
+	// Virtual Geometry Page Binary Layout
+	// Each page in the GPU Page Pool: 64-byte header + data sections
+	struct PageBinaryHeader {
+		static constexpr uint32_t MAGIC = 0x50414745;
+		static constexpr uint32_t VERSION = 1;
+		uint32_t magic;
+		uint32_t version;
+		uint32_t meshlet_count;
+		uint32_t vertex_count;
+		uint32_t index_count;
+		float aabb_min[3];
+		float aabb_max[3];
+		uint32_t vertex_data_offset;
+		uint32_t index_data_offset;
+		uint32_t padding[3];
+	};
+	static constexpr uint32_t PAGE_HEADER_SIZE = 64;
+	static constexpr uint32_t PAGE_MESHLET_DESC_STRIDE = 24;
+	static constexpr uint32_t PAGE_CULL_DATA_STRIDE = 16;
+	static constexpr uint32_t PAGE_VERTEX_STRIDE = 48;
 
 	constexpr uint32_t INVALID_INDEX = 0xFFFFFFFFu;
 
     // Structural constants for verification
-    constexpr uint32_t MESH_HEADER_SIZE = 124;
-    constexpr uint32_t MESH_HEADER_VERTEX_OFFSET = 60;
+    constexpr uint32_t MESH_HEADER_SIZE = 136;
+    constexpr uint32_t MESH_HEADER_VERTEX_OFFSET = 64;
     constexpr uint32_t MESH_HEADER_SUBMESH_COUNT_OFFSET = 20;
     constexpr uint32_t SUBMESH_DESCRIPTOR_SIZE = 44;
 

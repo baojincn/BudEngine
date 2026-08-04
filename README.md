@@ -1,4 +1,4 @@
-﻿# Bud Engine
+# Bud Engine
 A full fiber-based task driven lightweight 3D Game Engine.
 
 ## Key Features
@@ -18,6 +18,17 @@ A full fiber-based task driven lightweight 3D Game Engine.
 ### Rendering & Vulkan Backend
 * **Physically Based Rendering (PBR)**: Implemented standard Cook-Torrance BRDF lighting model for realistic material rendering.
 * **RHI (Render Hardware Interface)**: Backend-agnostic graphics abstraction layer using the Factory Pattern, currently supporting **Vulkan**.
+* **GPU-Driven Rendering & Multi-Stage Culling**:
+    * **Two-Stage Hierarchical Culling**: CPU LBVH broad-phase culling with screen-space occluder heuristic extraction (`Occluder List` vs. `Detail List`), combined with GPU compute fine-grained meshlet frustum, normal-cone, and Hi-Z occlusion culling.
+    * **RL-Driven Concurrent Hi-Z Occlusion Culling**: Reinforcement learning (`ml_perception`) occluder selection for zero-latency current-frame Z-Prepass and Hi-Z pyramid generation.
+    * **Indirect Draw Emission**: Fully GPU-driven draw command generation (`MeshletIndirectEmissionPass`) executing via `vkCmdDrawIndexedIndirect`, condensing main camera and depth prepass rendering into a single indirect draw call per pass.
+* **Virtual Geometry & Page Streaming**:
+    * **Virtual Memory Paging for GPU Geometry**: Large scenes are sliced into uniform 128KB memory pages (`kPageSize = 131,040 Bytes`) and streamed asynchronously (`StreamingManager`) via non-blocking `bud::io` operations.
+    * **Bindless Slot-Based Page Pool & Page Table**: Global GPU storage buffer partitioned into 128KB slots with an indirect SSBO Page Table (`valid` / `pool_offset`), allowing zero-rebind single-buffer rendering across disjoint pages.
+    * **Per-Draw Visibility Offsets**: Safe multi-instance and multi-page culling inside shared compute pipelines (`meshlet_frustum_cull.comp` / `meshlet_hiz_cull.comp`).
+* **Offline Asset Pipeline & Blender DCC Integration (`BudAssetTool` & `pybind11`)**:
+    * Dedicated CLI toolchain for meshletization (`meshoptimizer`), 48-byte aligned vertex layout formatting, page-level binary slicing (`.budmesh.json` + `.bin`), and binary scene baking (`.budmapb`).
+    * Native Blender Python bindings (`pybind11`) to trigger offline mesh processing and visualize meshlet/LOD boundaries directly in the artist viewport.
 * **Advanced Shadowing**: **Cascaded Shadow Maps (CSM)** with PCF (Percentage-Closer Filtering), customized partition logic (Log-Linear Split), and distance-based culling for large-scale scenes.
 * **Render Graph**: Automatic resource barrier management, pass reordering, and transient memory aliasing.
 * **Texture Management**: 
@@ -25,27 +36,23 @@ A full fiber-based task driven lightweight 3D Game Engine.
     * **Descriptor Indexing**: Bindless-style texture management using partially bound descriptor arrays (`runtimeDescriptorArray`).
 * **Parallel Command Recording**: Multithreaded generation of secondary command buffers for high-efficiency draw calls.
 * **Double-Buffered Rendering**: Robust CPU-GPU synchronization (`MAX_FRAMES_IN_FLIGHT = 2`) using Fences and Semaphores.
-* **Asynchronous Asset Loading**: Non-blocking loading pipelines for Meshes (OBJ) and Textures to prevent frame stalls.
+* **Asynchronous Asset Loading**: Non-blocking loading pipelines for Meshes (OBJ), glTF scenes, and Textures to prevent frame stalls.
 * **Hot-Reloading**: Runtime shader recompilation and pipeline state reconstruction.
 
 ### Memory Management
 * **Staging Ring Buffer**: Persistent mapped memory for high-frequency dynamic data uploads (Double Buffering).
 * **Fine-grained Sub-allocation**: Page-based GPU memory allocator supporting both Linear (Transient) and FreeList (Static) strategies.
 * **Resource Pooling**: Logical pooling of Vulkan objects (Images/Buffers) to minimize driver overhead during Render Graph execution.
+* **Virtual Geometry Page Pool**: Slot-based 128KB GPU Page Pool buffer with indirect page-table addressing (`PageTableBuffer`) for scalable geometry streaming.
 
 ## Planned Features
 
-* **Scene Management & Acceleration**:
-    * **Spatial Partitioning**: Implement dynamic **BVH** construction on CPU for efficient scene queries.
-    * **Data-Oriented Design (DOD)**: ECS-based scene memory layout for cache coherence.
-
 * **Pipeline & Rendering**:
-    * **GPU-Driven Rendering**: 
-         * **Spatial Partitioning**: Implement dynamic **HLBVH (Hierarchical Linear BVH)** construction on CPU for efficient scene queries.
-        * **Dual-Pipeline Support**: Designed to support both standard **Compute Shader** (Indirect Draw) and modern **Mesh Shader** (Task Shader amplification) workflows.
+    * **Modern Mesh Shader Pipeline**: Native Vulkan Task / Mesh Shader amplification workflow.
     * **Advanced Shading**: Forward+ or Deferred Shading.
+    * **Neural Rendering (In Progress)**: AI denoise pass and neural super-resolution from low-res `color/depth/motion vectors` running via compute inference.
 
-* **Memory Management**: 
+* **Memory & Streaming**: 
     * **Virtual Texture Streaming**: Sparse binding support for massive textures.
 
 Meshlet Visualization
@@ -67,3 +74,21 @@ Performance tracing
 ```  json
 "currentDir": "${workspaceRoot}"  
 ```
+
+## Quick .budmesh Validation
+
+A small helper script is included to quickly inspect `.budmesh` files produced by `BudAssetTool`.
+
+- `check_budmesh.py` (project root): prints header fields, material table, texture list and the first N meshlets.
+
+Usage:
+
+- From the project root with Python 3:
+  - `python check_budmesh.py data/meshlets/Cube.budmesh`
+  - `python check_budmesh.py data/meshlets/sponza.budmesh 10`  (prints first 10 meshlets)
+
+Notes:
+
+- The script is intended for quick validation during asset processing and testing. It is not a full verifier.
+- If the `BudMeshHeader` layout changes, update the script's unpack format and bump `MESH_VERSION` in `src/core/bud.asset.types.hpp`.
+

@@ -1,4 +1,4 @@
-﻿
+
 #include <cstdint>
 
 #pragma once
@@ -35,11 +35,16 @@ namespace bud::graphics {
 		// 用途：MDI Instance Data, Indirect Commands
 		virtual BufferHandle alloc_persistent(uint64_t size, ResourceState usage) = 0;
 
-		// 5. 纹理分配
+		// 5. Readback Buffer
+		// 策略：Host Visible & Coherent, Device To Host copy destinations
+		virtual BufferHandle alloc_read_back(uint64_t size) = 0;
+
+		// 6. 纹理分配
 		virtual Texture* create_texture(const TextureDesc& desc) = 0;
 
-		// 延迟释放：将资源标记为在给定帧安全释放（由后台实现基于 fence 或保留帧数回收）
-		virtual void defer_free(const BufferHandle& handle, uint32_t frame_index) = 0;
+        // 延迟释放：将资源标记为在给定帧安全释放（由后台实现基于 fence 或保留帧数回收）
+        // Take by value so ownership can be transferred into the allocator's deferred list.
+        virtual void defer_free(BufferHandle handle, uint32_t frame_index) = 0;
 
 		// 可选：延迟释放纹理句柄
 		virtual void defer_free(Texture* texture, uint32_t frame_index) = 0;

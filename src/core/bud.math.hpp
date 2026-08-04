@@ -14,6 +14,11 @@
 #include <algorithm>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+#ifndef GLM_ENABLE_EXPERIMENTAL
+#define GLM_ENABLE_EXPERIMENTAL
+#endif
+#include <glm/gtx/quaternion.hpp>
 
 namespace bud::math {
 	// 导出 GLM 类型，方便其他模块使用
@@ -25,8 +30,11 @@ namespace bud::math {
 	using mat3 = glm::mat3;
 	using mat4 = glm::mat4;
 
+	using quaternion = glm::quat;
+
 
 	using glm::radians;
+	using glm::degrees;
 	using glm::lookAt;
 	using glm::perspective;
 	using glm::normalize;
@@ -68,6 +76,14 @@ namespace bud::math {
 	inline float distance2(const vec3& a, const vec3& b) {
 		vec3 diff = a - b;
 		return glm::dot(diff, diff);
+	}
+
+	inline vec3 lerp(const vec3& a, const vec3& b, float t) {
+		return glm::mix(a, b, t);
+	}
+
+	inline quaternion slerp(const quaternion& a, const quaternion& b, float t) {
+		return glm::slerp(a, b, t);
 	}
 
 	inline mat4 ortho_vk(float left, float right, float bottom, float top, float cam_near, float cam_far) {

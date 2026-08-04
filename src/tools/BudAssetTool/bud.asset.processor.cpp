@@ -2,8 +2,10 @@
 #include <iostream>
 #include <fstream>
 #include <algorithm>
+#include <cfloat>
 #include <limits>
 #include <map>
+#include <unordered_map>
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
@@ -67,7 +69,9 @@ static bool reflect_and_validate_spv(const std::filesystem::path& spv_path) {
 
 namespace bud::tool {
 
-    bool AssetProcessor::process_gltf_to_budmesh(const std::string& input_path, const std::string& output_path) {
+    bool AssetProcessor::process_gltf_to_budmesh(const std::string& input_path, const std::string& output_path,
+                                                 size_t max_vertices, size_t max_triangles, float cone_weight,
+                                                 size_t page_size) {
         Assimp::Importer importer;
         const aiScene* scene = importer.ReadFile(input_path, 
             aiProcess_Triangulate | 
@@ -97,9 +101,6 @@ namespace bud::tool {
         std::vector<uint32_t> all_meshlet_triangles;
         std::vector<asset::SubMeshDescriptor> submeshes;
 
-        const size_t max_vertices = 64;
-        const size_t max_triangles = 128;
-        const float cone_weight = 0.5f;
 
         std::string input_path_str = std::string(input_path);
         std::string base_dir = "";
@@ -110,23 +111,58 @@ namespace bud::tool {
 
         std::vector<std::string> texture_paths;
         std::map<unsigned int, uint32_t> mat_to_tex_idx;
-        
+        std::map<unsigned int, uint32_t> mat_to_mat_idx;
+        std::vector<asset::MaterialDescriptor> materials;
+
         uint32_t default_tex_idx = 0;
         texture_paths.push_back("data/textures/default.png");
 
         for (unsigned int i = 0; i < scene->mNumMaterials; ++i) {
             aiMaterial* mat = scene->mMaterials[i];
             aiString tex_path;
+
+            uint32_t base_tex = default_tex_idx;
             if (mat->GetTexture(aiTextureType_DIFFUSE, 0, &tex_path) == AI_SUCCESS) {
                 std::string p = tex_path.C_Str();
                 if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) {
                     p = base_dir + p;
                 }
-                mat_to_tex_idx[i] = (uint32_t)texture_paths.size();
+                base_tex = (uint32_t)texture_paths.size();
                 texture_paths.push_back(p);
-            } else {
-                mat_to_tex_idx[i] = default_tex_idx;
             }
+
+            // Default material descriptor
+            asset::MaterialDescriptor md = {};
+            md.base_color_texture = base_tex;
+			md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::Opaque);
+            md.double_sided = 0;
+            md.alpha_cutoff = 0.5f;
+
+            // Try to query two-sided and opacity from Assimp material (best-effort)
+            int two_sided = 0;
+            float opacity = 1.0f;
+            if (mat->Get(AI_MATKEY_TWOSIDED, two_sided) == AI_SUCCESS) {
+                md.double_sided = two_sided ? 1 : 0;
+            }
+            if (mat->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS) {
+                if (opacity < 1.0f) {
+                    // If an explicit opacity map exists, treat as MASK; otherwise BLEND
+                    aiString op_tex;
+                    if (mat->GetTexture(aiTextureType_OPACITY, 0, &op_tex) == AI_SUCCESS) {
+						md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::Mask);
+                    } else {
+						md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::Blend);
+                    }
+                    md.alpha_cutoff = 0.5f;
+                }
+            }
+
+            uint32_t mat_out_idx = (uint32_t)materials.size();
+            materials.push_back(md);
+            mat_to_mat_idx[i] = mat_out_idx;
+
+            // Keep a mapping for diffuse texture for backwards compat if needed
+            mat_to_tex_idx[i] = base_tex;
         }
 
         struct MeshInstance {
@@ -154,7 +190,7 @@ namespace bud::tool {
             const auto& instance = instances[i];
             const aiMesh* mesh = scene->mMeshes[instance.mesh_index];
             unsigned int mat_idx = mesh->mMaterialIndex;
-            uint32_t mapped_tex_idx = mat_to_tex_idx[mat_idx];
+            uint32_t mapped_mat_idx = mat_to_mat_idx[mat_idx];
 
             std::vector<asset::Vertex> group_vertices;
             std::vector<uint32_t> group_indices;
@@ -221,7 +257,7 @@ namespace bud::tool {
             sub_desc.index_count = (uint32_t)group_indices.size();
             sub_desc.meshlet_start = group_base_meshlet;
             sub_desc.meshlet_count = (uint32_t)meshlet_count;
-            sub_desc.material_id = mapped_tex_idx;
+            sub_desc.material_id = mapped_mat_idx;
             
             // Compute SubMesh AABB
             sub_desc.aabb_min[0] = sub_desc.aabb_min[1] = sub_desc.aabb_min[2] = std::numeric_limits<float>::max();
@@ -280,7 +316,7 @@ namespace bud::tool {
 
         asset::BudMeshHeader header = {};
         header.magic = asset::MESH_MAGIC;
-        header.version = 3;
+        header.version = asset::MESH_VERSION;
         header.total_vertices = (uint32_t)all_vertices.size();
         header.total_indices = (uint32_t)all_indices.size();
         header.meshlet_count = (uint32_t)all_meshlets.size();
@@ -288,6 +324,7 @@ namespace bud::tool {
 
         // Textures already processed at the start
         header.texture_count = (uint32_t)texture_paths.size();
+        header.material_count = (uint32_t)materials.size();
 
         header.aabb_min[0] = header.aabb_min[1] = header.aabb_min[2] = std::numeric_limits<float>::max();
         header.aabb_max[0] = header.aabb_max[1] = header.aabb_max[2] = -std::numeric_limits<float>::max();
@@ -315,6 +352,8 @@ namespace bud::tool {
         current_offset += all_cull_data.size() * sizeof(asset::MeshletCullData);
         header.submesh_offset = current_offset;
         current_offset += submeshes.size() * sizeof(asset::SubMeshDescriptor);
+        header.material_offset = current_offset;
+        current_offset += materials.size() * sizeof(asset::MaterialDescriptor);
         header.texture_offset = current_offset;
         // Total size of all strings including null terminators
         for (const auto& path : texture_paths) {
@@ -329,12 +368,166 @@ namespace bud::tool {
         out.write(reinterpret_cast<const char*>(all_meshlet_triangles.data()), all_meshlet_triangles.size() * sizeof(uint32_t));
         out.write(reinterpret_cast<const char*>(all_cull_data.data()), all_cull_data.size() * sizeof(asset::MeshletCullData));
         out.write(reinterpret_cast<const char*>(submeshes.data()), submeshes.size() * sizeof(asset::SubMeshDescriptor));
-        
+        // Write material table
+        if (!materials.empty()) {
+            out.write(reinterpret_cast<const char*>(materials.data()), materials.size() * sizeof(asset::MaterialDescriptor));
+        }
+
         for (const auto& path : texture_paths) {
             out.write(path.c_str(), path.length() + 1);
         }
 
-        std::cout << "[BudAssetTool] Successfully exported " << header.submesh_count << " submeshes, " << header.meshlet_count << " meshlets, and " << header.texture_count << " textures to " << output_path << std::endl;
+        if (page_size > 0) {
+            out.close();
+
+            std::string json_path = output_path;
+            std::string bin_path = output_path;
+            if (json_path.find(".budmesh") != std::string::npos) {
+                json_path = json_path.substr(0, json_path.rfind('.')) + ".budmesh.json";
+                bin_path  = bin_path.substr(0, bin_path.rfind('.')) + ".budmesh.bin";
+            }
+
+            // Build page table
+            // Reserve 64B header + up to 47B alignment + 1 vertex margin per page
+            constexpr uint64_t page_reserve = 64 + 47 + 48;
+            std::vector<uint32_t> page_starts, page_counts;
+            uint64_t cur_sz = 0;
+            uint32_t cur_st = 0;
+            for (uint32_t m = 0; m < (uint32_t)all_meshlets.size(); ++m) {
+                uint64_t ms = all_meshlets[m].vertex_count * sizeof(asset::Vertex)
+                            + all_meshlets[m].triangle_count * 3 * sizeof(uint32_t)
+                            + sizeof(asset::MeshletDescriptor) + sizeof(asset::MeshletCullData);
+                if (cur_sz + ms > page_size - page_reserve && cur_sz > 0) {
+                    page_starts.push_back(cur_st);
+                    page_counts.push_back(m - cur_st);
+                    cur_st = m; cur_sz = 0;
+                }
+                cur_sz += ms;
+            }
+            if (cur_sz > 0) { page_starts.push_back(cur_st); page_counts.push_back((uint32_t)all_meshlets.size() - cur_st); }
+
+            // Per-meshlet base color texture index (from the owning submesh's material)
+            std::vector<uint32_t> meshlet_tex_index(all_meshlets.size(), 0);
+            for (const auto& sub : submeshes) {
+                uint32_t tex = materials[sub.material_id].base_color_texture;
+                for (uint32_t m = sub.meshlet_start; m < sub.meshlet_start + sub.meshlet_count; ++m)
+                    meshlet_tex_index[m] = tex;
+            }
+
+            // JSON
+            nlohmann::json j;
+            j["magic"] = "BUDM"; j["version"] = asset::MESH_VERSION;
+            j["data_uri"] = std::filesystem::path(bin_path).filename().string();
+            j["pages"] = nlohmann::json::array();
+            for (uint32_t i = 0; i < (uint32_t)page_starts.size(); ++i) {
+                // Split the page into contiguous per-material (per-texture) submeshes
+                nlohmann::json subs = nlohmann::json::array();
+                uint32_t cum_idx = 0;
+                uint32_t cur_tex = meshlet_tex_index[page_starts[i]];
+                uint32_t run_count = 0;
+                for (uint32_t k = 0; k < page_counts[i]; ++k) {
+                    uint32_t m = page_starts[i] + k;
+                    uint32_t tex = meshlet_tex_index[m];
+                    uint32_t tris = all_meshlets[m].triangle_count * 3;
+                    if (tex != cur_tex && run_count > 0) {
+                        subs.push_back({{"index_start", cum_idx - run_count}, {"index_count", run_count}, {"material_id", cur_tex}});
+                        cur_tex = tex;
+                        run_count = 0;
+                    }
+                    run_count += tris;
+                    cum_idx += tris;
+                }
+                if (run_count > 0)
+                    subs.push_back({{"index_start", cum_idx - run_count}, {"index_count", run_count}, {"material_id", cur_tex}});
+
+                j["pages"].push_back({{"page_id",i},{"file_offset",(uint64_t)i*page_size},{"capacity",page_size},{"cluster_start",page_starts[i]},{"cluster_count",page_counts[i]},{"material_id",meshlet_tex_index[page_starts[i]]},{"submeshes",subs}});
+            }
+            j["textures"] = nlohmann::json(texture_paths);
+            std::ofstream jf(json_path); if (jf.is_open()) jf << j.dump(4);
+
+            // Binary
+            std::ofstream bf(bin_path, std::ios::binary);
+            if (bf.is_open()) {
+                for (uint32_t pi = 0; pi < (uint32_t)page_starts.size(); ++pi) {
+                    uint32_t ms = page_starts[pi], mc = page_counts[pi];
+                    uint64_t pg_start = bf.tellp();
+
+                    float amin[3]={FLT_MAX,FLT_MAX,FLT_MAX}, amax[3]={-FLT_MAX,-FLT_MAX,-FLT_MAX};
+                    uint32_t vcnt = 0;
+                    for (uint32_t m = 0; m < mc; ++m) {
+                        const auto& md = all_meshlets[ms+m];
+                        vcnt += md.vertex_count;
+                        for (uint32_t v=0; v<md.vertex_count; ++v) {
+                            const auto& vt = all_vertices[all_meshlet_vertices[md.vertex_offset+v]];
+                            for (int k=0;k<3;++k){amin[k]=std::min(amin[k],vt.position[k]);amax[k]=std::max(amax[k],vt.position[k]);}
+                        }
+                    }
+                    uint32_t ce = asset::PAGE_HEADER_SIZE + mc*asset::PAGE_MESHLET_DESC_STRIDE + mc*asset::PAGE_CULL_DATA_STRIDE;
+                    uint32_t vo = ce, io = vo + vcnt*asset::PAGE_VERTEX_STRIDE;
+
+                    // Build page-local vertex remap: global vertex id -> page-local vertex id
+                    std::unordered_map<uint32_t,uint32_t> page_remap;
+                    std::vector<uint32_t> page_vertex_ids; // page-local vertex id -> global vertex id
+                    std::vector<uint32_t> meshlet_local_vert_off; // per meshlet: page-local vertex offset
+                    std::vector<uint32_t> meshlet_local_tri_off;  // per meshlet: page-local triangle offset
+
+                    uint32_t tri_total = 0;
+                    for (uint32_t m=0;m<mc;++m) {
+                        const auto& md = all_meshlets[ms+m];
+                        meshlet_local_vert_off.push_back((uint32_t)page_vertex_ids.size());
+                        for(uint32_t v=0;v<md.vertex_count;++v) {
+                            uint32_t gvid = all_meshlet_vertices[md.vertex_offset+v];
+                            if (page_remap.find(gvid) == page_remap.end()) {
+                                page_remap[gvid] = (uint32_t)page_vertex_ids.size();
+                                page_vertex_ids.push_back(gvid);
+                            }
+                        }
+                        meshlet_local_tri_off.push_back(tri_total);
+                        tri_total += md.triangle_count*3;
+                    }
+
+                    asset::PageBinaryHeader h={};
+                    h.magic=asset::PageBinaryHeader::MAGIC; h.version=1; h.meshlet_count=mc;
+                    h.vertex_count=(uint32_t)page_vertex_ids.size(); h.index_count=tri_total;
+                    std::memcpy(h.aabb_min,amin,sizeof(amin)); std::memcpy(h.aabb_max,amax,sizeof(amax));
+                    // Align vertex data offset to 48-byte stride so draw vertexOffset stays integer-exact
+                    uint32_t vo2 = (ce + asset::PAGE_VERTEX_STRIDE - 1) / asset::PAGE_VERTEX_STRIDE * asset::PAGE_VERTEX_STRIDE;
+                    uint32_t io2 = vo2 + (uint32_t)page_vertex_ids.size()*asset::PAGE_VERTEX_STRIDE;
+                    h.vertex_data_offset=vo2; h.index_data_offset=io2;
+                    h.padding[0] = meshlet_tex_index[ms]; // base color texture index for this page
+                    bf.write((const char*)&h,sizeof(h));
+
+                    for (uint32_t m=0;m<mc;++m) {
+                        asset::MeshletDescriptor pd = all_meshlets[ms+m];
+                        pd.vertex_offset = meshlet_local_vert_off[m];
+                        pd.triangle_offset = meshlet_local_tri_off[m];
+                        bf.write((const char*)&pd,sizeof(pd));
+                    }
+                    for (uint32_t m=0;m<mc;++m) bf.write((const char*)&all_cull_data[ms+m],sizeof(asset::MeshletCullData));
+                    // Pad to aligned vertex_data_offset
+                    {
+                        uint64_t cur = (uint64_t)bf.tellp() - pg_start;
+                        if (cur < vo2) { std::vector<char> pad((size_t)(vo2-cur),0); bf.write(pad.data(),pad.size()); }
+                    }
+                    for (uint32_t gvid : page_vertex_ids) bf.write((const char*)&all_vertices[gvid],sizeof(asset::Vertex));
+                    for (uint32_t m=0;m<mc;++m){
+                        const auto& md = all_meshlets[ms+m];
+                        for(uint32_t t=0;t<md.triangle_count*3;++t) {
+                            uint32_t local_vi = all_meshlet_triangles[md.triangle_offset+t];
+                            uint32_t gvid = all_meshlet_vertices[md.vertex_offset+local_vi];
+                            uint32_t pvid = page_remap[gvid];
+                            bf.write((const char*)&pvid,sizeof(uint32_t));
+                        }
+                    }
+                    uint64_t wr = (uint64_t)bf.tellp()-pg_start;
+                    if (wr < page_size) { std::vector<char> pad((size_t)(page_size-wr),0); bf.write(pad.data(),pad.size()); }
+                }
+            }
+            std::cout << "[BudAssetTool] Exported " << all_meshlets.size() << " meshlets in " << page_starts.size() << " pages to " << json_path << std::endl;
+            return true;
+        }
+
+        std::cout << "[BudAssetTool] Successfully exported " << header.submesh_count << " submeshes, " << header.meshlet_count << " meshlets, " << header.material_count << " materials and " << header.texture_count << " textures to " << output_path << std::endl;
         return true;
     }
 
@@ -566,4 +759,5 @@ bool bud::tool::AssetProcessor::validate_shaders_in_directory(const std::string&
 
 
 // end of file
+
 

@@ -54,6 +54,28 @@ namespace bud::scene {
         if (zoom > 45.0f) zoom = 45.0f;
     }
 
+    bud::math::quaternion Camera::get_rotation() const {
+        // Build quaternion from yaw (Y-axis) and pitch (X-axis), no roll
+        bud::math::quaternion q_yaw   = glm::angleAxis(bud::math::radians(yaw),   bud::math::vec3(0.0f, 1.0f, 0.0f));
+        bud::math::quaternion q_pitch = glm::angleAxis(bud::math::radians(pitch), bud::math::vec3(1.0f, 0.0f, 0.0f));
+        return glm::normalize(q_yaw * q_pitch);
+    }
+
+    void Camera::set_rotation(const bud::math::quaternion& rot) {
+        // Rotate the camera-space forward (0,0,-1) by the quaternion to get the world-space
+        // forward vector, then invert the same formula used in update_camera_vectors:
+        //   f = (cos(yaw)*cos(pitch), sin(pitch), sin(yaw)*cos(pitch))
+        // get_rotation builds q = q_yaw(Y) * q_pitch(X), so rotating (0,0,-1) gives:
+        //   f.world = (-sin(yaw)*cos(pitch),  sin(pitch),  -cos(yaw)*cos(pitch))
+        // Therefore:
+        //   pitch = asin(f.y)
+        //   yaw   = atan2(-f.x, -f.z)   <-- correct inverse of (-sin, -cos) pair
+        bud::math::vec3 f = glm::normalize(rot * bud::math::vec3(0.0f, 0.0f, -1.0f));
+        pitch = bud::math::degrees(std::asin(std::clamp(f.y, -1.0f, 1.0f)));
+        yaw   = bud::math::degrees(std::atan2(-f.x, -f.z));
+        update_camera_vectors();
+    }
+
     void Camera::update_camera_vectors() {
         bud::math::vec3 f;
         f.x = cos(bud::math::radians(yaw)) * cos(bud::math::radians(pitch));

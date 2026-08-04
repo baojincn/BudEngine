@@ -18,11 +18,11 @@ struct DrawData {
     vec3 min;
     uint meshId;
     vec3 max;
-    uint unused1;
+    uint meshletStart;
     uint meshletCount;
-    uint unused2;
-    uint unused3;
-    uint unused4;
+    uint pageBacked;
+    uint pageIndex;
+    uint visibilityOffset;
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer InstanceBuffer {

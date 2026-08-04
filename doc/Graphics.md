@@ -95,18 +95,19 @@ A traditional heuristic approach used as a fallback for platforms where RL infer
 2.  **Temporal Hi-Z**: Tests instances against the Hi-Z pyramid generated from the *previous frame's* complete depth buffer.
 3.  **Benefit**: Low CPU overhead; standard industry behavior; useful for comparison with RL-driven results.
 
-### Stage 3: GPU Meshlet/Micro-Culling (Planned, high-end profile)
-**Status:** Planned
+### Stage 3: GPU Meshlet/Micro-Culling (Implemented)
+**Status:** Implemented
 
 - Instance-to-meshlet expansion with LOD-aware dispatch.
 - Meshlet frustum + normal-cone/backface + Hi-Z occlusion culling.
+- Support for both static meshlet buffers and page-streamed GPU Page Pool lookups (`get_triangle_count_from_pool`).
 
-### Stage 4: Raster Dispatch (Planned)
-**Status:** Planned
+### Stage 4: Raster Dispatch (Implemented)
+**Status:** Implemented
 
-- Build indirect draw commands from survived buffers.
-- Execute through `vkCmdDrawIndexedIndirect`.
-- Optional visibility buffer route.
+- Build indirect draw commands from survived buffers via GPU Compute (`MeshletIndirectEmissionPass`).
+- Execute through `vkCmdDrawIndexedIndirect` with dynamic indirect draw buffer binding.
+- Unified page pool buffer binding (`PagePoolBuffer`) as both vertex and index buffer for page-backed meshes.
 
 ### Stage 5: Neural Rendering (In Progress)
 **Status:** In Progress
@@ -119,6 +120,51 @@ A traditional heuristic approach used as a fallback for platforms where RL infer
 - **Mobile/TBDR:** CPU-heavy conservative path (Stage 1 -> Direct Draw). Strict bandwidth and thermal control, skipping heavy GPU compute culling.
 - **Mainstream PC/Console:** GPU instance-culling (Stage 1 -> Stage 2 -> Stage 4) as the default path.
 - **High-end:** Meshlet path + neural rendering path (Stage 1 -> 5 full chain) enabled.
+
+## Virtual Geometry & Page Streaming Architecture
+
+BudEngine implements a GPU-driven **Virtual Geometry** pipeline modeled after operating system **Virtual Memory Paging**. Instead of binding individual static vertex and index buffers per mesh, complex geometry is sliced into uniform-sized GPU memory pages (`kPageSize = 131,040 Bytes`, ~128KB) and managed through a unified GPU memory pool with indirect page-table addressing.
+
+### 1. Architectural Motivation
+* **Decoupling VRAM from Scene Complexity:** Traditional engines load entire static meshes into GPU memory. In open-world or high-fidelity scenes, this quickly exhausts VRAM. Virtual Geometry streams individual 128KB pages on demand, keeping only visible or camera-adjacent geometry resident in GPU memory.
+* **Eliminating Bind-Loop Bottlenecks:** By storing all page-streamed meshes inside a single global GPU Page Pool Buffer, the rendering pipeline executes zero per-mesh vertex/index buffer rebinds. All geometry is addressed indirectly by the GPU.
+
+### 2. Offline Page Slicing and Layout (`BudAssetTool`)
+During asset processing, static meshes are sliced into 128KB page blocks (.bin files) and accompanied by metadata (.budmesh.json). To satisfy Vulkan buffer alignment (e.g., 48-byte vertex stride alignment and std140/std430 SSBO rules), each binary page adheres to a strict internal layout:
+1. **PageBinaryHeader (64 Bytes):** Fixed-size header storing metadata (`page_id`, `vertex_count`, `triangle_count`, `meshlet_count`, `data_size`, and local bounding box).
+2. **Meshlet Descriptors Array:** 16-byte descriptors per meshlet within the page.
+3. **Vertex Data Array:** 48-byte aligned vertex structures (`asset::Vertex`).
+4. **Index Data Array:** 32-bit unsigned integers.
+
+### 3. Runtime Page Pool and Table (`StreamingManager` & `GPUScene`)
+* **Slot-Based Page Pool (`GPUScene::PagePool`):** A large, fixed-size GPU Storage/Vertex/Index buffer divided into 128KB slots. Newly streamed `.bin` pages occupy available slots in this pool.
+* **GPU Page Table Buffer:** An SSBO array indexed by logical `page_id`. Each entry contains:
+  * `valid`: Whether the page is currently resident in the Page Pool (1 = valid, 0 = evicted).
+  * `pool_offset`: The absolute byte offset of the page's data slot within the GPU Page Pool Buffer.
+* **Asynchronous Streaming (`StreamingManager`):** The engine uses `bud::io` to asynchronously load page binaries from disk without blocking the main or render threads, copying them into the GPU Page Pool and updating the Page Table entries on completion.
+
+### 4. GPU-Driven Culling & Indirect Draw Execution
+When GPU-driven rendering (`render_config.enable_gpu_driven = true`) is active, the entire culling and draw dispatch pipeline executes autonomously on the GPU:
+1. **Compute Culling (`meshlet_frustum_cull.comp` / `meshlet_hiz_cull.comp`):**
+   * Shaders bind `page_table` (Binding 10) and `page_pool` (Binding 11).
+   * For page-backed meshes (`page_backed == 1`), the compute shader resolves the meshlet triangle count directly from the GPU Page Pool header:
+     ```glsl
+     uint get_triangle_count_from_pool(uint meshlet_idx) {
+         uint base = page_table.data[pc.page_index].pool_offset / 4u + PAGE_HEADER_DWORDS + meshlet_idx * MESHLET_DESC_DWORDS;
+         return page_pool.data[base + 3u];
+     }
+     ```
+   * Frustum and Hi-Z occlusion culling test each meshlet and output visible candidates to a compacted visibility buffer.
+2. **Indirect Command Emission (`MeshletIndirectEmissionPass`):**
+   * A compute pass (`meshlet_indirect_emit.comp`) translates surviving visibility entries into standard `VkDrawIndexedIndirectCommand` buffers on the GPU, calculating appropriate `firstIndex` and `vertexOffset` values pointing into the Page Pool.
+3. **Unified Buffer Execution (`DepthOnlyPass` / `MainPass` / `CSMShadowPass`):**
+   * When drawing page-backed geometry, the render passes bind `gpu_scene.get_page_pool_buffer()` simultaneously as the Vertex Buffer and Index Buffer:
+     ```cpp
+     rhi->cmd_bind_vertex_buffer(cmd, gpu_scene.get_page_pool_buffer());
+     rhi->cmd_bind_index_buffer(cmd, gpu_scene.get_page_pool_buffer());
+     rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, draw_count, sizeof(IndirectCommand));
+     ```
+   * A single indirect draw call renders all page-backed geometry across disjoint pages without CPU intervention.
 
 ## Development Environment
 The engine uses **Visual Studio 2026 (Professional)** as the primary toolchain. For Visual Studio Code, use the `Visual Studio 18 2026` generator in `CMakePresets.json` to ensure robust automatic discovery of the MSVC environment and Vulkan SDK, providing a "one-click" build experience.
@@ -165,4 +211,21 @@ Level layouts and entity metadata are stored in a human-readable format to facil
 Using **Pybind11**, the engine's core slicing and asset logic is exposed as a Python module. This allows a Blender plugin to:
 *   Trigger `BudAssetTool` logic natively within the DCC environment.
 *   Visualize meshlet boundaries, LOD transitions, and culling data directly on the artistic viewport for verification.
+
+### 5. GPU-Driven Page-Backed Virtual Geometry Pipeline & Performance Analysis
+
+#### Implementation Principles (Virtual Geometry & Bindless Page Pool)
+*   **Page-Backed Virtual Addressing**: Instead of binding individual static vertex/index buffers per mesh, geometry is sliced offline into 128KB pages (`kPageSize = 131,040 Bytes`). At runtime, visible pages are loaded into a global slot-based GPU storage buffer (`PagePoolBuffer`), addressed indirectly via a virtual-to-physical translation table (`PageTableBuffer`).
+*   **Per-Draw Visibility Offset**: To avoid visibility buffer collisions when multiple instances or pages share the same meshlet pipeline, each draw call carries a unique `visibility_offset` inside `DrawData`. Compute shaders (`meshlet_frustum_cull.comp` and `meshlet_hiz_cull.comp`) use this offset to write culling decisions into distinct slices of the visibility buffer.
+*   **GPU-Driven Command Emission**: `MeshletIndirectEmitPass` scans surviving visible meshlets and compacts them into an indirect draw buffer (`vkCmdDrawIndexedIndirect`). When executing the main pass (`MainPass`) or depth prepass (`DepthOnlyPass`), the `PagePoolBuffer` is bound directly as both the vertex and index buffer (`rhi->cmd_bind_vertex_buffer(cmd, pp_buf); rhi->cmd_bind_index_buffer(cmd, pp_buf);`).
+
+#### Why Drawcall Statistics Still Show 400+ in GPU-Driven Mode
+*   **Single Drawcall for Main Scene**: When `render_config.enable_gpu_driven` is active, the entire page-backed scene in `MainPass` and `DepthOnlyPass` is submitted with **exactly 1 indirect draw call each** (`vkCmdDrawIndexedIndirect`).
+*   **Cascaded Shadow Map (CSM) Overhead**: The UI statistic (`stats.draw_calls`) aggregates all draw calls across the entire frame. Currently, `CascadedShadowMapPass` iterates over 4 shadow cascades on the CPU. For a scene like Sponza (~115 visible submeshes), 4 cascades result in `115 * 4 ≈ 460` CPU-submitted draw calls (`vkCmdDrawIndexed`).
+*   **Conclusion**: The 400+ drawcall count originates entirely from the shadow map passes and ImGui rendering; the main camera pass is successfully condensed into a single GPU-driven indirect draw.
+
+#### Why GPU-Driven Frame Rate Does Not Improve on Small Scenes (e.g., Sponza)
+*   **CPU Draw Submission Overhead is Negligible for <1,000 Draws**: Modern CPUs can submit 115 draw calls in under 0.05ms. Eliminating 115 CPU draw calls yields minimal frame-time savings.
+*   **Compute Dispatch & Synchronization Latency**: The GPU-driven meshlet pipeline introduces 3 compute dispatches (`MeshletFrustumCullingPass`, `MeshletHiZCullPass`, `MeshletIndirectEmissionPass`), Hi-Z mipmap generation (`HiZMipPass`), and several pipeline execution barriers (`vkCmdPipelineBarrier`). On small scenes, the fixed GPU compute and synchronization overhead outweighs the CPU overhead saved by consolidating ~100 draw calls.
+*   **Scaling Characteristics**: GPU-Driven Virtual Geometry is designed for massive, high-density environments (10,000+ instances and millions of meshlets), where CPU draw-call bottlenecking and VRAM limits become critical.
 

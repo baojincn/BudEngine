@@ -51,13 +51,17 @@ namespace bud::graphics::vulkan {
 	public:
 		~VulkanRHI() = default;
 
-		void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count) override;
+		void init(bud::platform::Window* window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count, bool is_headless = false) override;
 		void cleanup() override;
 		void wait_idle() override;
 		uint32_t get_inflight_frame_count() const override { return max_frames_in_flight; }
 
 		void resize_swapchain(uint32_t width, uint32_t height) override;
 		bool is_swapchain_out_of_date() const override { return swapchain_out_of_date.load(std::memory_order_acquire); }
+		bool is_headless() const override { return this->headless_mode; }
+
+		uint32_t get_width() const override;
+		uint32_t get_height() const override;
 
 		bud::graphics::BufferHandle create_gpu_buffer(uint64_t size, bud::graphics::ResourceState usage_state) override;
 		bud::graphics::BufferHandle create_upload_buffer(uint64_t size) override;
@@ -93,6 +97,8 @@ namespace bud::graphics::vulkan {
 		void cmd_set_depth_bias(CommandHandle cmd, float constant, float clamp, float slope) override;
 		void update_global_shadow_map(Texture* texture) override;
 		void update_global_instance_data(bud::graphics::BufferHandle buffer) override;
+			void update_global_page_table(bud::graphics::BufferHandle buffer) override;
+			void update_global_page_pool(bud::graphics::BufferHandle buffer) override;
 		void cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) override;
 		void cmd_blit_image(CommandHandle cmd, Texture* src, Texture* dst) override;
 
@@ -141,7 +147,7 @@ namespace bud::graphics::vulkan {
 
 		void cmd_copy_buffer(CommandHandle cmd, bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size) override;
 		void cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) override;
-
+		void cmd_copy_image_to_buffer(CommandHandle cmd, bud::graphics::Texture* src, bud::graphics::BufferHandle dst) override;
 
 	private:
 		void create_instance(VkInstance& vk_instance, bool enable_validation);
@@ -184,9 +190,10 @@ namespace bud::graphics::vulkan {
 			VkFence in_flight_fence = nullptr;
 			VkCommandPool main_command_pool = nullptr;
 			VkCommandBuffer main_command_buffer = nullptr;
-			VkBuffer uniform_buffer = nullptr;       // Per-frame UBO
-			VkDeviceMemory uniform_memory = nullptr;
-			void* uniform_mapped = nullptr;          // Persistently mapped
+			VkBuffer uniform_buffer = nullptr;       // Per-frame UBO (allocated via VMA when available)
+			VmaAllocation uniform_allocation = VK_NULL_HANDLE; // VMA allocation for the UBO (if used)
+			VmaAllocationInfo uniform_alloc_info = {}; // allocation info containing mapped ptr
+			void* uniform_mapped = nullptr;          // Persistently mapped (points to alloc_info.pMappedData when VMA is used)
 			VkDescriptorSet global_descriptor_set = VK_NULL_HANDLE;
 		};
 
@@ -196,12 +203,15 @@ namespace bud::graphics::vulkan {
 		VkInstance instance = nullptr;
 		VkPhysicalDevice physical_device = nullptr;
 		VkDevice device = nullptr;
+		uint32_t instance_api_version = VK_API_VERSION_1_1;
+		uint32_t device_api_version = VK_API_VERSION_1_1;
 		VkSurfaceKHR surface = nullptr;
 		VkQueue graphics_queue = nullptr;
 		VkQueue present_queue = nullptr;
 		VkDebugUtilsMessengerEXT debug_messenger = nullptr;
 		bool enable_validation_layers = false;
 		bool aftermath_initialized = false;
+		bool headless_mode = false;
 
 		const std::vector<const char*> validation_layers = { "VK_LAYER_KHRONOS_validation" };
 		std::vector<const char*> device_extensions = {
@@ -239,7 +249,13 @@ namespace bud::graphics::vulkan {
 
 		// UBO
 		VkDescriptorSetLayout global_set_layout = VK_NULL_HANDLE;
-		VkDescriptorSetLayout compute_set_layout = VK_NULL_HANDLE; // Used for per-dispatch storage buffer binding
+		VkDescriptorSetLayout compute_hiz_cull_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_hiz_mip_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_ml_identity_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_heuristic_occluder_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_meshlet_frustum_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_meshlet_indirect_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_meshlet_hiz_set_layout = VK_NULL_HANDLE;
 		VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
 		VkSampler default_sampler = VK_NULL_HANDLE;
 		VkSampler shadow_sampler = VK_NULL_HANDLE;
@@ -247,13 +263,15 @@ namespace bud::graphics::vulkan {
 
 		std::unordered_map<bud::graphics::Texture*, VulkanTexture> textures;
 		std::vector<std::unique_ptr<bud::graphics::Texture>> texture_objects;
+
+
 	
 
 		// Compute Binding state
 		std::unordered_map<uint32_t, ComputeResource> current_compute_bindings;
 		void* current_compute_pipeline = nullptr;
 
-		VulkanTexture* fallback_texture_ptr = nullptr;
+        std::shared_ptr<bud::graphics::Texture> fallback_texture_ptr;
 		std::atomic<bool> swapchain_out_of_date{false};
 
 		RenderStats current_stats;

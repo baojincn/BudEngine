@@ -24,30 +24,37 @@ namespace bud::graphics::vulkan {
 
     void VulkanResourcePool::cleanup() {
         // [FIX] Clean up any acquired textures that weren't released
-        for (auto* tex : acquired_textures) {
-            destroy_vulkan_objects(tex);
-            delete tex;
+        for (auto& sp : acquired_textures_shared) {
+            if (sp) {
+                destroy_vulkan_objects(static_cast<VulkanTexture*>(sp.get()));
+            }
         }
-        acquired_textures.clear();
+        acquired_textures_shared.clear();
 
         for (auto& [hash, list] : image_pool) {
-            // list 是 vector<unique_ptr<VulkanTexture>>
-            // unique_ptr 会自动 delete 对象，但我们需要先手动销毁 Vulkan 句柄
+            // list 是 vector<shared_ptr<VulkanTexture>>
             for (auto& tex : list) {
-                destroy_vulkan_objects(tex.get());
+                if (tex) destroy_vulkan_objects(tex.get());
             }
             list.clear();
         }
     }
 
     Texture* VulkanResourcePool::acquire_texture(const TextureDesc& desc) {
+        // Backward-compatible raw API that returns a raw pointer but keeps a
+        // managed shared_ptr internally. Prefer using acquire_texture_shared.
+        auto sp = acquire_texture_shared(desc);
+        return sp.get();
+    }
+
+    std::shared_ptr<Texture> VulkanResourcePool::acquire_texture_shared(const TextureDesc& desc) {
         size_t hash = hash_desc(desc);
 
-        std::unique_ptr<VulkanTexture> tex;
+        std::shared_ptr<VulkanTexture> tex;
 
         // 1. 尝试复用
         if (!image_pool[hash].empty()) {
-            tex = std::move(image_pool[hash].back());
+            tex = image_pool[hash].back();
             image_pool[hash].pop_back();
         }
         else {
@@ -55,42 +62,48 @@ namespace bud::graphics::vulkan {
             tex = create_texture_smart(desc);
         }
 
-        // 将所有权暂时交给 raw pointer 返回给 RenderGraph
-        // RenderGraph 必须保证调用 release_texture
-        VulkanTexture* raw_ptr = tex.release();
+        // Track acquired textures
+        acquired_textures_shared.push_back(tex);
 
-        // [FIX] Track acquired textures for cleanup
-        acquired_textures.insert(raw_ptr);
-
-        return raw_ptr;
+        return tex;
     }
 
     void VulkanResourcePool::release_texture(Texture* texture) {
-        if (!texture) {
-            std::string err = std::format("VulkanResourcePool::release_texture called with null texture");
-            bud::eprint("{}", err);
-#if defined(_DEBUG)
-            throw std::runtime_error(err);
-#else
-            return;
-#endif
+        // Keep backward compat: convert to shared_ptr release
+        if (!texture) return;
+        // Find shared_ptr in acquired_textures_shared
+        for (auto it = acquired_textures_shared.begin(); it != acquired_textures_shared.end(); ++it) {
+            if (it->get() == texture) {
+                // Move ownership back into pool or destroy
+                auto sp = *it;
+                acquired_textures_shared.erase(it);
+                // recycle into pool
+                size_t hash = sp->desc_hash;
+                if (hash != 0) {
+                    image_pool[hash].push_back(sp);
+                } else {
+                    destroy_vulkan_objects(static_cast<VulkanTexture*>(sp.get()));
+                }
+                return;
+            }
         }
+    }
 
-        auto vk_tex = static_cast<VulkanTexture*>(texture);
-
-        // [FIX] Remove from acquired tracking
-        acquired_textures.erase(vk_tex);
-
-        // Use the stored hash to recycle
-        size_t hash = vk_tex->desc_hash;
-        if (hash != 0) {
-            // Recycle
-            image_pool[hash].push_back(std::unique_ptr<VulkanTexture>(vk_tex));
-        }
-        else {
-            // Fallback if hash missing
-            destroy_vulkan_objects(vk_tex);
-            delete vk_tex;
+    void VulkanResourcePool::release_texture_shared(std::shared_ptr<Texture> texture) {
+        if (!texture) return;
+        // Find and remove from acquired list
+        for (auto it = acquired_textures_shared.begin(); it != acquired_textures_shared.end(); ++it) {
+            if (it->get() == texture.get()) {
+                auto sp = *it;
+                acquired_textures_shared.erase(it);
+                size_t hash = sp->desc_hash;
+                if (hash != 0) {
+                    image_pool[hash].push_back(sp);
+                } else {
+                    destroy_vulkan_objects(static_cast<VulkanTexture*>(sp.get()));
+                }
+                return;
+            }
         }
     }
 
@@ -99,7 +112,7 @@ namespace bud::graphics::vulkan {
     }
 
     size_t VulkanResourcePool::hash_desc(const TextureDesc& desc) {
-        size_t h = desc.width ^ (desc.height << 1) ^ ((uint32_t)desc.format << 2) ^ (desc.mips << 3) ^ (desc.array_layers << 4) ^ ((uint32_t)desc.type << 5);
+        size_t h = desc.width ^ (desc.height << 1) ^ ((uint32_t)desc.format << 2) ^ (desc.mips << 3) ^ (desc.array_layers << 4) ^ ((uint32_t)desc.type << 5) ^ (desc.is_transfer_src ? 1 : 0 << 6);
         return h;
     }
 
@@ -119,12 +132,15 @@ namespace bud::graphics::vulkan {
         
         if (tex->image) {
             // bud::print("[Pool] Destroying VkImage {} ({}x{} fmt={})", (void*)tex->image, tex->width, tex->height, (int)tex->format);
+            // Unregister from allocator tracking then destroy
+            // Unregister wrapper (if tracked) and destroy image
+            allocator->unregister_allocation_image(tex);
             vmaDestroyImage(allocator->get_vma_allocator(), tex->image, tex->allocation);
         }
     }
 
-    std::unique_ptr<VulkanTexture> VulkanResourcePool::create_texture_smart(const TextureDesc& desc) {
-        auto tex = std::make_unique<VulkanTexture>();
+    std::shared_ptr<VulkanTexture> VulkanResourcePool::create_texture_smart(const TextureDesc& desc) {
+        auto tex = std::make_shared<VulkanTexture>();
 
         // 1. 填充基础信息
         tex->width = desc.width;
@@ -137,6 +153,9 @@ namespace bud::graphics::vulkan {
         // 2. 使用 Utils 转换参数
         auto vk_format = to_vk_format(desc.format);
         auto usage = get_image_usage(vk_format, desc.is_storage);
+        if (desc.is_transfer_src) {
+        	usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        }
 
         VkImageCreateInfo image_info{};
         image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -164,6 +183,11 @@ namespace bud::graphics::vulkan {
 #endif
         }
         // bud::print("[Pool] Created VkImage {} ({}x{} fmt={} layers={})", (void*)tex->image, desc.width, desc.height, (int)desc.format, desc.array_layers);
+
+        // Register texture wrapper so allocator can free any leaked images at shutdown
+        // We'll register the raw wrapper pointer; the allocator tracking stores
+        // weak references to shared_ptr owners elsewhere.
+        allocator->register_allocation_image(tex.get());
 
         // 5. Create View
         VkImageViewCreateInfo view_info{};

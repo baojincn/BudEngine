@@ -1,6 +1,7 @@
-﻿#pragma once
+#pragma once
 
 #include <memory>
+#include <atomic>
 #include <vector>
 #include <mutex>
 #include <limits>
@@ -8,6 +9,7 @@
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.math.hpp"
 #include "src/graphics/bud.graphics.scene.hpp"
+#include "src/graphics/bud.graphics.gpu_scene.hpp"
 #include "src/graphics/bud.graphics.sortkey.hpp"
 
 #include "src/graphics/bud.graphics.types.hpp"
@@ -46,32 +48,37 @@ namespace bud::graphics {
 
 		void set_config(const RenderConfig& config);
 		const RenderConfig& get_config() const;
+		void request_meshlet_rendering_enabled(bool enabled);
+		bool is_meshlet_rendering_enabled() const;
+
+		const void* get_readback_pixels() const;
 
 		// Game-thread safe snapshot (CPU-side bounds only)
 		std::vector<bud::math::AABB> get_mesh_bounds_snapshot() const;
 		std::vector<std::vector<bud::math::AABB>> get_submesh_bounds_snapshot() const;
 
-	private:
+			GPUScene& get_gpu_scene() { return gpu_scene; }
+			RHI* get_rhi() { return rhi; }
+			uint32_t register_page_backed_mesh(uint32_t page_index, uint32_t meshlet_count,
+				uint32_t index_count, const bud::math::AABB& aabb,
+				uint32_t vertex_data_offset = 0, uint32_t index_data_offset = 0,
+				const std::vector<PageSubMesh>& submeshes = {});
+
+			// Reserves a bindless texture slot, binds the fallback immediately, and
+			// queues an async texture upload. Returns the bindless slot (>= 1) to use
+			// as the material id for page-backed meshes.
+			uint32_t bind_texture_async(const std::string& path);
+
+		private:
 		struct UploadQueue {
 			std::mutex mutex;
 			std::vector<std::function<void()>> commands;
 		};
 
-		// Global Geometry Pool (Mega-Buffer) that all meshes are packed into
-		struct GeometryPool {
-			static constexpr uint64_t kVertexPoolSize = 256ull * 1024 * 1024; // 256 MB
-			static constexpr uint64_t kIndexPoolSize  = 128ull * 1024 * 1024; // 128 MB
-
-			bud::graphics::BufferHandle vertex_buffer;
-			bud::graphics::BufferHandle index_buffer;
-
-			std::atomic<uint32_t> next_vertex{ 0 }; // in vertices
-			std::atomic<uint32_t> next_index{ 0 };  // in indices
-
-			bool initialized = false;
-		};
-
 		void update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb);
+
+		// CPU heuristic occluder selection (prototype)
+		void select_occluders_cpu(const RenderScene& render_scene, const SceneView& view, const std::vector<SortItem>& source_list, size_t source_count, std::vector<SortItem>& out_occluders, size_t out_count);
 
 		RHI* rhi;
 		RenderGraph render_graph;
@@ -79,30 +86,36 @@ namespace bud::graphics {
 		bud::io::AssetManager* asset_manager;
 		bud::threading::TaskScheduler* task_scheduler;
 
-		std::unique_ptr<CSMShadowPass> csm_pass;
-		std::unique_ptr<ZPrepass> z_prepass;
+        std::unique_ptr<CSMShadowPass> csm_pass;
+        std::unique_ptr<DepthOnlyPass> depth_only_pass;
 		std::unique_ptr<HiZMipPass> hiz_mip_pass;
 		std::unique_ptr<HiZCullingPass> hiz_pass;
+		std::unique_ptr<MeshletFrustumCullingPass> meshlet_frustum_pass;
+		std::unique_ptr<HeuristicOccluderSelectionPass> heuristic_occluder_pass;
+		std::unique_ptr<MeshletHiZCullingPass> meshlet_hiz_pass;
+		std::unique_ptr<MeshletIndirectEmissionPass> meshlet_indirect_pass;
 		std::unique_ptr<HiZDebugPass> hiz_debug_pass;
 		std::unique_ptr<MainPass> main_pass;
 		std::unique_ptr<ClusterVisualizationPass> cluster_viz_pass;
 		std::unique_ptr<UIPass> ui_pass;
 
-		// GPU-Driven specific (Per-frame)
-		uint32_t current_indirect_capacity = 0;
-		std::vector<bud::graphics::BufferHandle> indirect_instance_buffers;
-		std::vector<bud::graphics::BufferHandle> indirect_draw_buffers;
-		std::vector<bud::graphics::BufferHandle> stats_readback_buffers;
+		std::atomic<bool> meshlet_rendering_enabled{ true };
+		std::atomic<bool> meshlet_rendering_toggle_pending{ false };
+		std::atomic<bool> meshlet_rendering_toggle_value{ true };
 
 		GPUStats last_gpu_stats{};
-
-		GeometryPool geometry_pool;
+		GPUScene gpu_scene;
 
 		std::vector<RenderMesh> meshes;
 		std::vector<bud::math::AABB> mesh_bounds;
 		mutable std::mutex mesh_bounds_mutex;
+		mutable std::mutex mesh_mutex;
 
 		std::vector<SortItem> sort_list;
+
+		// Persistent storage for temporary per-frame occluder lists to ensure lifetime
+		// when render passes capture references to the list.
+		std::vector<SortItem> persistent_occluder_list;
 
 		std::atomic<uint32_t> next_bindless_slot{ 1 };
 		std::atomic<uint32_t> next_mesh_id{ 0 };
@@ -113,9 +126,10 @@ namespace bud::graphics {
 			uint32_t padding[3];
 		};
 
-		std::vector<bud::graphics::BufferHandle> instance_data_ssbos;
-		uint32_t instance_data_capacity = 0;
-
 		std::shared_ptr<UploadQueue> upload_queue;
+
+        // Headless Offscreen Rendering
+        bud::graphics::Texture* offscreen_target = nullptr;
+        std::vector<bud::graphics::BufferHandle> readback_buffers;
 	};
 }

@@ -1,4 +1,4 @@
-﻿#include <vector>
+#include <vector>
 #include <iostream>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -9,12 +9,14 @@
 #include <imgui.h>
 #include <format>
 #include <atomic>
+#include <chrono>
 #include "src/graphics/bud.graphics.passes.hpp"
 
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.math.hpp"
 #include "src/graphics/bud.graphics.rhi.hpp"
 #include "src/graphics/bud.graphics.types.hpp"
+#include "src/graphics/bud.graphics.gpu_scene.hpp"
 #include "src/graphics/bud.graphics.graph.hpp"
 
 #include "src/graphics/bud.graphics.scene.hpp"
@@ -74,7 +76,349 @@ namespace bud::graphics {
 		}
 	}
 
-    void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+	RGHandle CSMShadowPass::add_to_graph(RenderGraph& render_graph, const SceneView& view, const RenderConfig& config,
+		const RenderScene& render_scene,
+		const std::vector<RenderMesh>& meshes,
+		std::vector<std::vector<uint32_t>> csm_visible_instances,
+		const GPUScene& gpu_scene,
+		bud::graphics::BufferHandle mega_vertex_buffer,
+		bud::graphics::BufferHandle mega_index_buffer)
+	{
+		if (config.shadow_map_size == 0 || config.cascade_count == 0) {
+			bud::eprint("[CSMShadowPass] ERROR: Invalid shadow config (size={}, cascades={}).",
+				config.shadow_map_size, config.cascade_count);
+			return {};
+		}
+
+		const uint32_t cascade_count = std::min(config.cascade_count, MAX_CASCADES);
+		if (cascade_count != config.cascade_count) {
+			bud::eprint("[CSMShadowPass] WARNING: cascade_count clamped to MAX_CASCADES ({})", MAX_CASCADES);
+		}
+
+		const size_t max_scene_count = std::min({
+			render_scene.world_matrices.size(),
+			render_scene.world_aabbs.size(),
+			render_scene.mesh_indices.size(),
+			render_scene.material_indices.size(),
+			render_scene.flags.size()
+		});
+
+		if (max_scene_count == 0) {
+			bud::eprint("[CSMShadowPass] ERROR: RenderScene arrays are empty.");
+			return {};
+		}
+
+		TextureDesc desc;
+		desc.width = config.shadow_map_size;
+		desc.height = config.shadow_map_size;
+		desc.format = bud::graphics::TextureFormat::D32_FLOAT;
+		desc.type = TextureType::Texture2DArray;
+		desc.array_layers = cascade_count;
+
+		if (!config.cache_shadows && static_cache_texture) {
+			shutdown(stored_rhi);
+		}
+
+		bool light_changed = bud::math::length(view.light_dir - last_light_dir) > 0.001f;
+		bool view_changed = !has_last_view_proj || !mat4_nearly_equal(view.view_proj_matrix, last_view_proj);
+		bool config_changed = !has_last_config || !shadow_config_equal(config, last_config);
+		bool need_update = !cache_initialized || light_changed || view_changed || config_changed || !config.cache_shadows;
+
+		if (config.cache_shadows) {
+			if (light_changed) last_light_dir = view.light_dir;
+
+			if (need_update) {
+				last_view_proj = view.view_proj_matrix;
+				last_config = config;
+				has_last_view_proj = true;
+				has_last_config = true;
+			}
+
+			bool needs_recreate = !static_cache_texture
+				|| static_cache_texture->width != desc.width
+				|| static_cache_texture->height != desc.height
+				|| static_cache_texture->format != desc.format
+				|| static_cache_texture->type != desc.type
+				|| static_cache_texture->array_layers != desc.array_layers;
+
+			if (stored_rhi && needs_recreate) {
+				if (static_cache_texture) {
+					auto* pool = stored_rhi->get_resource_pool();
+					if (pool) {
+						pool->release_texture(static_cache_texture);
+					}
+				}
+				static_cache_texture = stored_rhi->create_texture(desc, nullptr, 0);
+				need_update = true;
+			}
+		}
+
+		auto shadow_map_h = std::make_shared<RGHandle>();
+
+		// [CSM] 2. Static Cache Update Pass
+		RGHandle static_cache_h;
+		bool valid_cache = config.cache_shadows && static_cache_texture;
+
+                if (valid_cache) {
+                    static_cache_h = render_graph.import_texture("StaticShadowCache", static_cache_texture, ResourceState::Undefined);
+
+                    if (need_update) {
+                        render_graph.add_pass("CSM Static Update",
+                            [&](RGBuilder& builder) {
+                                builder.write(static_cache_h, ResourceState::DepthWrite);
+                                return static_cache_h;
+                            },
+							[=, csm_vis = csm_visible_instances, &render_graph, &render_scene, &meshes, &view, &gpu_scene](RHI* rhi, CommandHandle cmd) {
+                                if (!pipeline) return;
+
+                                for (uint32_t i = 0; i < cascade_count; ++i) {
+                                    auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
+                                    bud::math::Frustum cascade_view_frustum_dbg;
+                                    cascade_view_frustum_dbg.update(cascade_light_view_proj);
+
+                                    RenderPassBeginInfo info;
+                                    Texture* static_tex = nullptr;
+                                    try {
+                                        static_tex = render_graph.get_texture(static_cache_h);
+                                    } catch (const std::exception& e) {
+                                        bud::eprint("[CSMShadowPass] failed to get static cache texture: {}", e.what());
+                                        return;
+                                    }
+                                    info.depth_attachment = static_tex;
+                                    info.clear_depth = true;
+                                    info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
+                                    info.base_array_layer = i;
+                                    info.layer_count = 1;
+
+                                    rhi->cmd_begin_render_pass(cmd, info);
+							rhi->cmd_bind_pipeline(cmd, pipeline);
+							rhi->cmd_set_viewport(cmd, (float)config.shadow_map_size, (float)config.shadow_map_size);
+							rhi->cmd_set_scissor(cmd, config.shadow_map_size, config.shadow_map_size);
+
+							rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, 0.0f, config.shadow_bias_slope);
+							rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
+
+							// Bind global Mega-Buffer once per cascade
+							// NOTE: For diagnostics we support an alternative binding scheme where we bind
+							// the vertex buffer with a byte-offset per-mesh and issue draw calls with
+							// vertexOffset=0. This helps detect whether vertexOffset is being
+							// interpreted in vertices vs bytes by the driver/pipeline.
+							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+							static constexpr bool kUseBindVertexByteOffset = true; // A/B test toggle
+
+							struct PushConsts {
+								bud::math::mat4 light_view_proj;
+								bud::math::mat4 model;
+								bud::math::vec4 light_dir;
+								uint32_t material_id;
+								uint32_t padding[3];
+							} push_consts;
+
+							push_consts.light_view_proj = cascade_light_view_proj;
+							push_consts.light_dir = bud::math::vec4(bud::math::normalize(view.light_dir), 0.0f);
+
+							const auto& visible_instances = csm_vis[i];
+
+							size_t _max_count = std::min(visible_instances.size(), max_scene_count);
+
+							for (size_t i = 0; i < _max_count; ++i) {
+								size_t idx = visible_instances[i];
+
+								// 1. 检查是否是静态物体, 利用flags
+								auto is_static = (render_scene.flags[idx] & 1) != 0;
+								if (!is_static) continue; // ONLY STATIC for cache
+
+								auto mesh_id = render_scene.mesh_indices[idx];
+
+								if (mesh_id >= meshes.size()) continue;
+								const auto& mesh = meshes[mesh_id];
+								if (!mesh.is_valid()) continue;
+								const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+
+
+								// 2. Culling
+								// 使用 RenderScene 里的 World Matrix 变换包围体
+								const auto& model_matrix = render_scene.world_matrices[idx];
+								bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
+								if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) continue;
+
+								// 3. Draw
+								push_consts.model = model_matrix;
+
+								const auto pp_buf = gpu_scene.get_page_pool_buffer();
+								const bool is_paged = mesh.is_page_backed && pp_buf.is_valid();
+
+								uint32_t sub_idx = render_scene.submesh_indices[idx];
+								if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
+									const auto& sub = mesh.submeshes[sub_idx];
+									push_consts.material_id = sub.material_id;
+									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+									if (is_paged) {
+										rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+										rhi->cmd_bind_index_buffer(cmd, pp_buf);
+										rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+									}
+									else {
+										rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+										rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+										rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+									}
+								}
+								else {
+									push_consts.material_id = render_scene.material_indices[idx];
+									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+									if (is_paged) {
+										rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+										rhi->cmd_bind_index_buffer(cmd, pp_buf);
+										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, 0);
+									}
+									else if (kUseBindVertexByteOffset) {
+										auto vb = mega_vertex_buffer;
+										vb.offset = static_cast<uint64_t>(mesh_geometry.vertex_offset) * sizeof(bud::io::MeshData::Vertex);
+										rhi->cmd_bind_vertex_buffer(cmd, vb);
+										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, 0, 0);
+									}
+									else {
+										rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, 0);
+									}
+								}
+							}
+							rhi->cmd_end_render_pass(cmd);
+						}
+					}
+				);
+				cache_initialized = true;
+			}
+		}
+
+		// Main Shadow Pass (Dynamic + Copy) TODO: dynamic shadows cover everything
+		return render_graph.add_pass("CSM Shadow",
+			[&, shadow_map_h](RGBuilder& builder) {
+				*shadow_map_h = builder.create("CSM ShadowMap", desc);
+				builder.write(*shadow_map_h, ResourceState::DepthWrite);
+				if (valid_cache)
+					builder.read(static_cache_h, ResourceState::DepthRead);
+
+				return *shadow_map_h;
+			},
+			[=, csm_vis = std::move(csm_visible_instances), &render_graph, &render_scene, &meshes, &view, &gpu_scene](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				auto active_map = render_graph.get_texture(*shadow_map_h);
+				bool did_copy = false;
+
+                if (valid_cache && cache_initialized) {
+                    Texture* static_map = nullptr;
+                    try {
+                        static_map = render_graph.get_texture(static_cache_h);
+                    } catch (const std::exception& e) {
+                        bud::eprint("[CSMShadowPass] failed to get static cache texture for copy: {}", e.what());
+                        static_map = nullptr;
+                    }
+                    if (static_map) {
+                        rhi->resource_barrier(cmd, static_map, ResourceState::DepthRead, ResourceState::TransferSrc);
+                        rhi->resource_barrier(cmd, active_map, ResourceState::DepthWrite, ResourceState::TransferDst);
+                        rhi->cmd_copy_image(cmd, static_map, active_map);
+                        rhi->resource_barrier(cmd, active_map, ResourceState::TransferDst, ResourceState::DepthWrite);
+                        rhi->resource_barrier(cmd, static_map, ResourceState::TransferSrc, ResourceState::DepthRead);
+                        did_copy = true;
+                    }
+                }
+
+				for (uint32_t i = 0; i < config.cascade_count; ++i) {
+					auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
+					bud::math::Frustum cascade_view_frustum_dbg;
+					cascade_view_frustum_dbg.update(cascade_light_view_proj);
+
+					RenderPassBeginInfo info;
+					info.depth_attachment = active_map;
+					info.clear_depth = !did_copy;
+					info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
+					info.base_array_layer = i;
+					info.layer_count = 1;
+
+					rhi->cmd_begin_render_pass(cmd, info);
+					rhi->cmd_bind_pipeline(cmd, pipeline);
+					rhi->cmd_set_viewport(cmd, (float)config.shadow_map_size, (float)config.shadow_map_size);
+					rhi->cmd_set_scissor(cmd, config.shadow_map_size, config.shadow_map_size);
+
+					rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, 0.0f, config.shadow_bias_slope);
+					rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
+
+					// Bind global Mega-Buffer once per cascade
+					rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+
+					struct PushConsts {
+						bud::math::mat4 light_view_proj;
+						bud::math::mat4 model;
+						bud::math::vec4 light_dir;
+						uint32_t material_id;
+						uint32_t padding[3];
+					} push_consts;
+
+					push_consts.light_view_proj = cascade_light_view_proj;
+					push_consts.light_dir = bud::math::vec4(bud::math::normalize(view.light_dir), 0.0f);
+
+					const auto& visible_instances = csm_vis[i];
+					size_t count = visible_instances.size();
+
+					for (size_t i = 0; i < count; ++i) {
+						size_t idx = visible_instances[i];
+
+						bool is_static = (render_scene.flags[idx] & 1) != 0;
+						if (did_copy && is_static) continue;
+
+						uint32_t mesh_id = render_scene.mesh_indices[idx];
+						if (mesh_id >= meshes.size()) continue;
+						const auto& mesh = meshes[mesh_id];
+						if (!mesh.is_valid()) continue;
+
+
+						// Culling
+						const auto& model_matrix = render_scene.world_matrices[idx];
+						bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
+						if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) continue;
+						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+
+						// Page-backed meshes live in the GPU page pool, not the mega
+						// geometry pool, so rebind the buffers before issuing the draw.
+						const auto pp_buf = gpu_scene.get_page_pool_buffer();
+						if (mesh.is_page_backed && pp_buf.is_valid()) {
+							rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+							rhi->cmd_bind_index_buffer(cmd, pp_buf);
+						}
+						else {
+							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+						}
+
+						// Draw
+						push_consts.model = model_matrix;
+
+						uint32_t sub_idx = render_scene.submesh_indices[idx];
+						if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
+							const auto& sub = mesh.submeshes[sub_idx];
+							push_consts.material_id = sub.material_id;
+							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+						}
+						else {
+							push_consts.material_id = render_scene.material_indices[idx];
+							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, 0);
+						}
+					}
+					rhi->cmd_end_render_pass(cmd);
+				}
+			}
+		);
+	}
+	
+	
+
+void HiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
         if (!rhi || !asset_manager) {
             std::string err = std::format("HiZCullingPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
             bud::eprint("{}", err);
@@ -150,9 +494,9 @@ namespace bud::graphics {
 				}
 
 				// Clear stats buffer (all counters = 0)
-				GPUStats zero_stats{};
+				bud::graphics::GPUStats zero_stats{};
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(GPUStats), &zero_stats);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, 24, &zero_stats);
 
 				// Barrier: ensure the UpdateBuffer write is visible to the compute shader
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
@@ -179,7 +523,728 @@ namespace bud::graphics {
 		);
 	}
 
-    void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+	void MeshletFrustumCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) {
+			std::string err = std::format("MeshletFrustumCullingPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+			bud::eprint("{}", err);
+#if defined(_DEBUG)
+			throw std::runtime_error(err);
+#else
+			return;
+#endif
+		}
+
+		load_shaders_async(asset_manager, { "src/shaders/meshlet_frustum_cull.comp.spv" }, [this, rhi](const auto& shaders) {
+			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::MeshletFrustum;
+			desc.cs.code = shaders[0];
+			pipeline = rhi->create_compute_pipeline(desc);
+			if (pipeline) {
+				bud::print("[MeshletFrustumCullingPass] Shader loaded and pipeline created.");
+			}
+		});
+	}
+
+	RGHandle MeshletFrustumCullingPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, const GPUScene& gpu_scene) {
+		if (!pipeline) {
+			bud::eprint("[MeshletFrustumCullingPass] Skipping pass because pipeline is not ready yet.");
+			return {};
+		}
+
+		return render_graph.add_pass("Meshlet Frustum Culling Pass",
+			[=](RGBuilder& builder) {
+				builder.set_side_effect();
+				builder.read(instance_buffer, ResourceState::ShaderResource);
+				builder.write(meshlet_visibility_buffer, ResourceState::UnorderedAccess);
+				builder.write(stats_buffer, ResourceState::UnorderedAccess);
+				return RGHandle{};
+			},
+		    [=, &render_graph, &render_scene, &meshes, &sort_list, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				bud::graphics::BufferHandle inst_buf{};
+				bud::graphics::BufferHandle vis_buf{};
+				bud::graphics::BufferHandle stat_buf{};
+				try {
+					inst_buf = render_graph.get_buffer(instance_buffer);
+					vis_buf = render_graph.get_buffer(meshlet_visibility_buffer);
+					stat_buf = render_graph.get_buffer(stats_buffer);
+				} catch (const std::exception& e) {
+					bud::eprint("[MeshletFrustumCullingPass] Resource lookup failed: {}", e.what());
+					return;
+				}
+
+				if (!inst_buf.is_valid() || !vis_buf.is_valid() || !stat_buf.is_valid()) {
+					std::string err = std::format("MeshletFrustumCullingPass missing resources: inst={} vis={} stat={}", inst_buf.is_valid(), vis_buf.is_valid(), stat_buf.is_valid());
+					bud::eprint("{}", err);
+#if defined(_DEBUG)
+					throw std::runtime_error(err);
+#else
+					return;
+#endif
+				}
+
+				bud::graphics::GPUStats zero_stats{};
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, 24, &zero_stats);
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 5, vis_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 6, stat_buf);
+				rhi->cmd_bind_compute_ubo(cmd, pipeline, 7);
+
+				auto pt_buf = gpu_scene.get_page_table_buffer();
+				auto pp_buf = gpu_scene.get_page_pool_buffer();
+				if (pt_buf.is_valid())
+					rhi->cmd_bind_storage_buffer(cmd, pipeline, 10, pt_buf);
+				if (pp_buf.is_valid())
+					rhi->cmd_bind_storage_buffer(cmd, pipeline, 11, pp_buf);
+
+				const size_t dispatch_count = std::min(visible_count, sort_list.size());
+				if (dispatch_count > 0) {
+					struct PushConsts {
+						uint32_t draw_count;
+					} pc;
+					pc.draw_count = static_cast<uint32_t>(dispatch_count);
+					rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
+
+					uint32_t group_x = (static_cast<uint32_t>(dispatch_count) + 255u) / 256u;
+					rhi->cmd_dispatch(cmd, group_x, 1, 1);
+				}
+			}
+		);
+	}
+
+	void HeuristicOccluderSelectionPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) {
+			std::string err = std::format("HeuristicOccluderSelectionPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+			bud::eprint("{}", err);
+#if defined(_DEBUG)
+			throw std::runtime_error(err);
+#else
+			return;
+#endif
+		}
+
+		load_shaders_async(asset_manager, { 
+            "src/shaders/heuristic_histogram.comp.spv",
+            "src/shaders/heuristic_prefix_sum.comp.spv",
+            "src/shaders/heuristic_occluder_select.comp.spv"
+        }, [this, rhi](const auto& shaders) {
+			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::HeuristicOccluder;
+            
+			desc.cs.code = shaders[0];
+			histogram_pipeline = rhi->create_compute_pipeline(desc);
+
+            desc.cs.code = shaders[1];
+            prefix_sum_pipeline = rhi->create_compute_pipeline(desc);
+
+            desc.cs.code = shaders[2];
+            pipeline = rhi->create_compute_pipeline(desc);
+
+			if (histogram_pipeline && prefix_sum_pipeline && pipeline) {
+				bud::print("[HeuristicOccluderSelectionPass] Shaders loaded and 3 pipelines created.");
+			}
+		});
+
+		config_ubo = rhi->create_gpu_buffer(sizeof(float) * 4, bud::graphics::ResourceState::UnorderedAccess);
+        histogram_buffer = rhi->create_gpu_buffer(sizeof(uint32_t) * 2048, bud::graphics::ResourceState::UnorderedAccess);
+	}
+
+	void HeuristicOccluderSelectionPass::shutdown(RHI* rhi) {
+        if (histogram_pipeline) { rhi->destroy_pipeline(histogram_pipeline); histogram_pipeline = nullptr; }
+        if (prefix_sum_pipeline) { rhi->destroy_pipeline(prefix_sum_pipeline); prefix_sum_pipeline = nullptr; }
+        if (pipeline) { rhi->destroy_pipeline(pipeline); pipeline = nullptr; }
+
+		if (config_ubo.is_valid()) { rhi->destroy_buffer(config_ubo); config_ubo = {}; }
+        if (histogram_buffer.is_valid()) { rhi->destroy_buffer(histogram_buffer); histogram_buffer = {}; }
+	}
+
+	struct HeuristicConfigLayout {
+		float fraction;
+		uint32_t cutoff_bucket;
+		uint32_t remaining;
+		uint32_t counter;
+	};
+
+	RGHandle HeuristicOccluderSelectionPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, float occluder_fraction) {
+		if (!pipeline) {
+			bud::eprint("[HeuristicOccluderSelectionPass] Skipping pass because pipeline is not ready yet.");
+			return {};
+		}
+
+		return render_graph.add_pass("Heuristic Occluder Selection Pass",
+			[=](RGBuilder& builder) {
+				builder.set_side_effect();
+				builder.read(instance_buffer, ResourceState::ShaderResource);
+				builder.read(meshlet_visibility_buffer, ResourceState::ShaderResource);
+				builder.write(indirect_draw_buffer, ResourceState::UnorderedAccess);
+				builder.write(stats_buffer, ResourceState::UnorderedAccess);
+				return RGHandle{};
+			},
+			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				bud::graphics::BufferHandle inst_buf{};
+				bud::graphics::BufferHandle vis_buf{};
+				bud::graphics::BufferHandle ind_buf{};
+				bud::graphics::BufferHandle stat_buf{};
+				try {
+					inst_buf = render_graph.get_buffer(instance_buffer);
+					vis_buf = render_graph.get_buffer(meshlet_visibility_buffer);
+					ind_buf = render_graph.get_buffer(indirect_draw_buffer);
+					stat_buf = render_graph.get_buffer(stats_buffer);
+				} catch (const std::exception& e) {
+					bud::eprint("[HeuristicOccluderSelectionPass] Resource lookup failed: {}", e.what());
+					return;
+				}
+
+				if (!inst_buf.is_valid() || !vis_buf.is_valid() || !ind_buf.is_valid() || !stat_buf.is_valid()) {
+					std::string err = std::format("HeuristicOccluderSelectionPass missing resources: inst={} vis={} ind={} stat={}", inst_buf.is_valid(), vis_buf.is_valid(), ind_buf.is_valid(), stat_buf.is_valid());
+					bud::eprint("{}", err);
+#if defined(_DEBUG)
+					throw std::runtime_error(err);
+#else
+					return;
+#endif
+				}
+
+				// --- Async Debug Logging (Previous Frame Results) ---
+				frame_counter++;
+				if (frame_counter % 240 == 0) {
+					// 1. Histogram Summary
+					uint32_t* host_histogram = static_cast<uint32_t*>(histogram_buffer.mapped_ptr);
+					uint32_t histogram_sum = 0;
+					uint32_t max_bucket_val = 0;
+					uint32_t max_bucket_idx = 0;
+					if (host_histogram) {
+						for (int i = 0; i < 2048; ++i) {
+							histogram_sum += host_histogram[i];
+							if (host_histogram[i] > max_bucket_val) {
+								max_bucket_val = host_histogram[i];
+								max_bucket_idx = i;
+							}
+						}
+					}
+					
+					// 2. Cutoff results from config_ubo
+					HeuristicConfigLayout* host_config = static_cast<HeuristicConfigLayout*>(config_ubo.mapped_ptr);
+
+					// 4. Stats Buffer
+					bud::graphics::GPUStats* host_stats = static_cast<bud::graphics::GPUStats*>(stat_buf.mapped_ptr);
+
+					// 5. Indirect Buffer Emit
+					IndirectCommand* host_ind = static_cast<IndirectCommand*>(ind_buf.mapped_ptr);
+					uint32_t total_emitted_instances = 0;
+					if (host_ind && host_stats) {
+						// Note: host_stats->visibleInstances is the number of indirect commands emitted
+						for (uint32_t i = 0; i < host_stats->visibleInstances; ++i) {
+							total_emitted_instances += host_ind[i].instance_count;
+						}
+					}
+					else if (!host_ind) {
+						bud::eprint("[HeuStats][Warning] IndirectDrawBuffer is NOT host-mapped! Cannot verify emitted count.");
+					}
+
+					bud::print("[HeuStats][Histogram] total={} buckets=2048 dispatched={}", histogram_sum, static_cast<uint32_t>(visible_count));
+					if (host_config) {
+						bud::print("[HeuStats][Cutoff] frac={:.3f} bucket={} remaining={} counter={}", host_config->fraction, host_config->cutoff_bucket, host_config->remaining, host_config->counter);
+						bud::print("[HeuStats][CutoffCounter] final={} expected_remaining={}", host_config->counter, host_config->remaining);
+					}
+					if (host_stats) {
+						bud::print("[HeuStats][Stats] total={} vis={} tri_total={} tri_vis={} meshlet_total={} meshlet_vis={}", host_stats->totalInstances, host_stats->visibleInstances, host_stats->totalTriangles, host_stats->visibleTriangles, host_stats->totalMeshlets, host_stats->visibleMeshlets);
+						bud::print("[HeuStats][Heuristics] heu_total={} heu_cutoff_bucket={} heu_remaining={}", host_stats->heuristicTotalCount, host_stats->heuristicCutoffBucket, host_stats->heuristicRemaining);
+					}
+					bud::print("[HeuStats][Indirect] emitted={} expected_vis={}", total_emitted_instances, (host_stats ? host_stats->visibleInstances : 0));
+					if (host_ind && host_stats && host_stats->visibleInstances > 0) {
+						bud::print("[HeuStats][Sample] sample0=(inst={} first_inst={})", host_ind[0].instance_count, host_ind[0].first_instance);
+					}
+					if (host_stats && host_stats->visibleInstances > 0 && total_emitted_instances == 0) {
+						bud::eprint("[HeuStats][Error] Discrepancy: Stats show {} visible instances, but IndirectBuffer emitted 0!", host_stats->visibleInstances);
+					}
+					bud::print("[HeuStats][Hotspot] max_count={} bucket={}", max_bucket_val, max_bucket_idx);
+				}
+
+				bud::graphics::GPUStats zero_stats{};
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, sizeof(bud::graphics::GPUStats), &zero_stats);
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				// Upload occluder fraction to per-pass storage buffer and bind at binding = 5
+				rhi->resource_barrier(cmd, config_ubo, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, config_ubo, 0, sizeof(float), &occluder_fraction);
+				rhi->resource_barrier(cmd, config_ubo, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				// Zero out Histogram and Cutoff part of config_ubo
+				uint32_t zero_histogram[2048] = {0};
+				uint32_t zero_cutoff_data[3] = {0}; // cutoff_bucket, remaining, counter
+				
+				rhi->resource_barrier(cmd, histogram_buffer, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, histogram_buffer, 0, sizeof(uint32_t) * 2048, zero_histogram);
+				rhi->resource_barrier(cmd, histogram_buffer, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				rhi->resource_barrier(cmd, config_ubo, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, config_ubo, sizeof(float), sizeof(uint32_t) * 3, zero_cutoff_data);
+				rhi->resource_barrier(cmd, config_ubo, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				uint32_t dispatch_instances = static_cast<uint32_t>(visible_count);
+				uint32_t push_constant = dispatch_instances;
+
+				auto start_time = std::chrono::high_resolution_clock::now();
+
+				// --- Pass 0: Histogram ---
+				rhi->cmd_bind_pipeline(cmd, histogram_pipeline);
+				rhi->cmd_push_constants(cmd, histogram_pipeline, sizeof(uint32_t), &push_constant);
+				rhi->cmd_bind_storage_buffer(cmd, histogram_pipeline, 0, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, histogram_pipeline, 1, vis_buf);
+				rhi->cmd_bind_storage_buffer(cmd, histogram_pipeline, 2, histogram_buffer);
+				rhi->cmd_bind_storage_buffer(cmd, histogram_pipeline, 3, stat_buf);
+				rhi->cmd_bind_compute_ubo(cmd, histogram_pipeline, 4);
+				uint32_t group_x = (dispatch_instances + 255) / 256;
+				rhi->cmd_dispatch(cmd, group_x, 1, 1);
+
+				// Memory Barrier before Pass 1 so histogram is written
+				rhi->resource_barrier(cmd, histogram_buffer, ResourceState::UnorderedAccess, ResourceState::UnorderedAccess);
+
+				auto t1 = std::chrono::high_resolution_clock::now();
+
+				// --- Pass 1: Prefix Sum ---
+				rhi->cmd_bind_pipeline(cmd, prefix_sum_pipeline);
+				rhi->cmd_bind_storage_buffer(cmd, prefix_sum_pipeline, 0, histogram_buffer);
+				rhi->cmd_bind_storage_buffer(cmd, prefix_sum_pipeline, 3, stat_buf); // Pass 1 sets summary GPU stats
+				rhi->cmd_bind_compute_ubo(cmd, prefix_sum_pipeline, 4); // Added missing UBO binding for complete descriptor set
+				rhi->cmd_bind_storage_buffer(cmd, prefix_sum_pipeline, 5, config_ubo);
+				rhi->cmd_dispatch(cmd, 1, 1, 1);
+
+				// Memory Barrier before Pass 2 so cutoff data and stats summary are written
+				rhi->resource_barrier(cmd, config_ubo, ResourceState::UnorderedAccess, ResourceState::UnorderedAccess);
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::UnorderedAccess);
+
+				auto t2 = std::chrono::high_resolution_clock::now();
+
+				// --- Pass 2: Selection & Emit ---
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_push_constants(cmd, pipeline, sizeof(uint32_t), &push_constant);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, vis_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, ind_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, stat_buf);
+				rhi->cmd_bind_compute_ubo(cmd, pipeline, 4);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 5, config_ubo);
+				rhi->cmd_dispatch(cmd, group_x, 1, 1);
+
+				auto end_time = std::chrono::high_resolution_clock::now();
+
+				if (frame_counter % 240 == 0) {
+					std::chrono::duration<float, std::milli> p0 = t1 - start_time;
+					std::chrono::duration<float, std::milli> p1 = t2 - t1;
+					std::chrono::duration<float, std::milli> p2 = end_time - t2;
+					bud::print("[HeuStats][Timing] pass0={:.3f}ms pass1={:.3f}ms pass2={:.3f}ms total={:.3f}ms", p0.count(), p1.count(), p2.count(), p0.count() + p1.count() + p2.count());
+				}
+			}
+		);
+	}
+
+	void MeshletHiZCullingPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) {
+			std::string err = std::format("MeshletHiZCullingPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+			bud::eprint("{}", err);
+#if defined(_DEBUG)
+			throw std::runtime_error(err);
+#else
+			return;
+#endif
+		}
+
+		load_shaders_async(asset_manager, { "src/shaders/meshlet_hiz_cull.comp.spv" }, [this, rhi](const auto& shaders) {
+			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::MeshletHiZ;
+			desc.cs.code = shaders[0];
+			pipeline = rhi->create_compute_pipeline(desc);
+			if (pipeline) {
+				bud::print("[MeshletHiZCullingPass] Shader loaded and pipeline created.");
+			}
+		});
+	}
+
+	RGHandle MeshletHiZCullingPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_in, RGHandle meshlet_visibility_out, RGHandle stats_buffer, RGHandle hiz_pyramid, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, const GPUScene& gpu_scene) {
+		if (!pipeline) {
+			bud::eprint("[MeshletHiZCullingPass] Skipping pass because pipeline is not ready yet.");
+			return {};
+		}
+
+		return render_graph.add_pass("Meshlet HiZ Culling Pass",
+			[=](RGBuilder& builder) {
+				builder.set_side_effect();
+				builder.read(instance_buffer, ResourceState::ShaderResource);
+				builder.read(meshlet_visibility_in, ResourceState::ShaderResource);
+				builder.read(hiz_pyramid, ResourceState::UnorderedAccess);
+				builder.write(meshlet_visibility_out, ResourceState::UnorderedAccess);
+				builder.write(stats_buffer, ResourceState::UnorderedAccess);
+				return RGHandle{};
+			},
+			[=, &render_graph, &render_scene, &meshes, &sort_list, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				bud::graphics::BufferHandle inst_buf{};
+				bud::graphics::BufferHandle vis_in_buf{};
+				bud::graphics::BufferHandle vis_out_buf{};
+				bud::graphics::BufferHandle stat_buf{};
+				Texture* hiz_tex = nullptr;
+				try {
+					inst_buf = render_graph.get_buffer(instance_buffer);
+					vis_in_buf = render_graph.get_buffer(meshlet_visibility_in);
+					vis_out_buf = render_graph.get_buffer(meshlet_visibility_out);
+					stat_buf = render_graph.get_buffer(stats_buffer);
+					hiz_tex = render_graph.get_texture(hiz_pyramid);
+				} catch (const std::exception& e) {
+					bud::eprint("[MeshletHiZCullingPass] Resource lookup failed: {}", e.what());
+					return;
+				}
+
+				if (!inst_buf.is_valid() || !vis_in_buf.is_valid() || !vis_out_buf.is_valid() || !stat_buf.is_valid() || !hiz_tex) {
+					std::string err = std::format("MeshletHiZCullingPass missing resources: inst={} vis_in={} vis_out={} stat={} hiz={}", inst_buf.is_valid(), vis_in_buf.is_valid(), vis_out_buf.is_valid(), stat_buf.is_valid(), (bool)hiz_tex);
+					bud::eprint("{}", err);
+#if defined(_DEBUG)
+					throw std::runtime_error(err);
+#else
+					return;
+#endif
+				}
+
+				bud::graphics::GPUStats zero_stats{};
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, 24, &zero_stats);
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 6, vis_in_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 7, vis_out_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 8, stat_buf);
+				rhi->cmd_bind_compute_texture(cmd, pipeline, 5, hiz_tex, ALL_MIPS, false, true);
+				rhi->cmd_bind_compute_ubo(cmd, pipeline, 9);
+
+					auto pt_buf = gpu_scene.get_page_table_buffer();
+					auto pp_buf = gpu_scene.get_page_pool_buffer();
+					if (pt_buf.is_valid())
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 10, pt_buf);
+					if (pp_buf.is_valid())
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 11, pp_buf);
+
+					const size_t dispatch_count = std::min(visible_count, sort_list.size());
+					if (dispatch_count > 0) {
+						struct PushConsts {
+							uint32_t drawCount;
+						} pc;
+						pc.drawCount = static_cast<uint32_t>(dispatch_count);
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
+
+						uint32_t group_x = (static_cast<uint32_t>(dispatch_count) + 255u) / 256u;
+						rhi->cmd_dispatch(cmd, group_x, 1, 1);
+					}
+			}
+		);
+	}
+
+	void MeshletIndirectEmissionPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) {
+			std::string err = std::format("MeshletIndirectEmissionPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+			bud::eprint("{}", err);
+#if defined(_DEBUG)
+			throw std::runtime_error(err);
+#else
+			return;
+#endif
+		}
+
+		load_shaders_async(asset_manager, { "src/shaders/meshlet_indirect_emit.comp.spv" }, [this, rhi](const auto& shaders) {
+			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::MeshletIndirect;
+			desc.cs.code = shaders[0];
+			pipeline = rhi->create_compute_pipeline(desc);
+			if (pipeline) {
+				bud::print("[MeshletIndirectEmissionPass] Shader loaded and pipeline created.");
+			}
+		});
+	}
+
+	RGHandle MeshletIndirectEmissionPass::add_to_graph(RenderGraph& render_graph, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, const GPUScene& gpu_scene) {
+		if (!pipeline) {
+			bud::eprint("[MeshletIndirectEmissionPass] Skipping pass because pipeline is not ready yet.");
+			return {};
+		}
+
+		return render_graph.add_pass("Meshlet Indirect Emission Pass",
+			[=](RGBuilder& builder) {
+				builder.set_side_effect();
+				builder.read(instance_buffer, ResourceState::ShaderResource);
+				builder.read(meshlet_visibility_buffer, ResourceState::ShaderResource);
+				builder.write(indirect_draw_buffer, ResourceState::UnorderedAccess);
+				builder.write(stats_buffer, ResourceState::UnorderedAccess);
+				return RGHandle{};
+			},
+			[=, &render_graph, &render_scene, &meshes, &sort_list, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				bud::graphics::BufferHandle inst_buf{};
+				bud::graphics::BufferHandle vis_buf{};
+				bud::graphics::BufferHandle draw_buf{};
+				bud::graphics::BufferHandle stat_buf{};
+				try {
+					inst_buf = render_graph.get_buffer(instance_buffer);
+					vis_buf = render_graph.get_buffer(meshlet_visibility_buffer);
+					draw_buf = render_graph.get_buffer(indirect_draw_buffer);
+					stat_buf = render_graph.get_buffer(stats_buffer);
+				} catch (const std::exception& e) {
+					bud::eprint("[MeshletIndirectEmissionPass] Resource lookup failed: {}", e.what());
+					return;
+				}
+
+				if (!inst_buf.is_valid() || !vis_buf.is_valid() || !draw_buf.is_valid() || !stat_buf.is_valid()) {
+					std::string err = std::format("MeshletIndirectEmissionPass missing resources: inst={} vis={} draw={} stat={}", inst_buf.is_valid(), vis_buf.is_valid(), draw_buf.is_valid(), stat_buf.is_valid());
+					bud::eprint("{}", err);
+#if defined(_DEBUG)
+					throw std::runtime_error(err);
+#else
+					return;
+#endif
+				}
+
+				bud::graphics::GPUStats zero_stats{};
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, 24, &zero_stats);
+				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, vis_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, draw_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, stat_buf);
+				rhi->cmd_bind_compute_ubo(cmd, pipeline, 4);
+
+					auto pt_buf = gpu_scene.get_page_table_buffer();
+					auto pp_buf = gpu_scene.get_page_pool_buffer();
+					if (pt_buf.is_valid())
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 5, pt_buf);
+					if (pp_buf.is_valid())
+						rhi->cmd_bind_storage_buffer(cmd, pipeline, 6, pp_buf);
+
+					const size_t dispatch_count = std::min(visible_count, sort_list.size());
+					if (dispatch_count > 0) {
+						struct PushConsts {
+							uint32_t drawCount;
+						} pc;
+						pc.drawCount = static_cast<uint32_t>(dispatch_count);
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
+
+						uint32_t group_x = (static_cast<uint32_t>(dispatch_count) + 255u) / 256u;
+						rhi->cmd_dispatch(cmd, group_x, 1, 1);
+					}
+			}
+		);
+	}
+
+	RGHandle DepthOnlyPass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer,
+        const RenderScene& render_scene,
+        const SceneView& view,
+        const RenderConfig& config,
+        const std::vector<RenderMesh>& meshes,
+        const std::vector<SortItem>& sort_list,
+        size_t instance_count,
+		RGHandle indirect_draw_buffer,
+		const GPUScene& gpu_scene,
+        bud::graphics::BufferHandle mega_vertex_buffer,
+        bud::graphics::BufferHandle mega_index_buffer) {
+        if (!pipeline) {
+            std::string err = "DepthOnlyPass::add_to_graph pipeline is null";
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return {};
+#endif
+        }
+
+		const size_t max_scene_count = std::min({
+			render_scene.world_matrices.size(),
+			render_scene.world_aabbs.size(),
+			render_scene.mesh_indices.size(),
+			render_scene.material_indices.size(),
+			render_scene.flags.size()
+		});
+
+		const bool use_indirect_draw = indirect_draw_buffer.is_valid();
+		if (max_scene_count == 0 || (!use_indirect_draw && sort_list.empty())) {
+            std::string err = "ZPrepass::add_to_graph empty scene or sort list";
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return {};
+#endif
+        }
+
+		Texture* backbuffer_tex = nullptr;
+		try {
+			backbuffer_tex = render_graph.get_texture(backbuffer);
+		} catch (const std::exception& e) {
+			bud::eprint("ZPrepass::add_to_graph: failed to get backbuffer texture: {}", e.what());
+#if defined(_DEBUG)
+			throw;
+#else
+			return {};
+#endif
+		}
+		if (!backbuffer_tex || backbuffer_tex->width == 0 || backbuffer_tex->height == 0) {
+			bud::eprint("ZPrepass::add_to_graph invalid backbuffer: tex={} w={} h={}", (void*)backbuffer_tex, backbuffer_tex ? backbuffer_tex->width : 0, backbuffer_tex ? backbuffer_tex->height : 0);
+#if defined(_DEBUG)
+			throw std::runtime_error("ZPrepass::add_to_graph invalid backbuffer");
+#else
+			return {};
+#endif
+		}
+
+		// instance_count = exploded submesh draw count; sort_list is sized to match.
+		// max_scene_count guards accessing render_scene arrays, but entity_index in
+		// sort_list items are already validated — do NOT clamp draw_count by it.
+		const size_t draw_count = std::min(instance_count, sort_list.size());
+		uint32_t target_width = backbuffer_tex->width;
+		uint32_t target_height = backbuffer_tex->height;
+
+		TextureDesc depth_desc;
+		depth_desc.width = target_width;
+		depth_desc.height = target_height;
+		depth_desc.format = bud::graphics::TextureFormat::D32_FLOAT;
+
+		auto depth_h = std::make_shared<RGHandle>();
+
+        return render_graph.add_pass("Depth Only Pass",
+            [=](RGBuilder& builder) {
+                *depth_h = builder.create("MainDepth", depth_desc);
+                builder.write(*depth_h, ResourceState::DepthWrite);
+                if (use_indirect_draw && indirect_draw_buffer.is_valid()) {
+                    builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
+                }
+                return *depth_h;
+            },
+            // Capture `sort_list` by reference (owned by caller) - caller must ensure lifetime
+			[=, &render_graph, &render_scene, &meshes, &sort_list, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) {
+                    bud::eprint("[DepthOnlyPass] ERROR: Pipeline is null.");
+					return;
+				}
+
+
+				RenderPassBeginInfo info;
+				info.depth_attachment = render_graph.get_texture(*depth_h);
+				info.clear_depth = true;
+				info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
+
+				rhi->cmd_begin_render_pass(cmd, info);
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_set_viewport(cmd, (float)target_width, (float)target_height);
+				rhi->cmd_set_scissor(cmd, target_width, target_height);
+
+				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
+				rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
+
+				// Bind global Mega-Buffer once for the entire pass
+				rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+
+				const auto pp_buf = gpu_scene.get_page_pool_buffer();
+
+				if (use_indirect_draw) {
+					bud::graphics::BufferHandle ind_buf_handle;
+					try {
+						ind_buf_handle = render_graph.get_buffer(indirect_draw_buffer);
+					} catch (const std::exception& e) {
+						bud::eprint("[DepthOnlyPass] failed to get indirect draw buffer: {}", e.what());
+						return;
+					}
+
+					if (!ind_buf_handle.is_valid()) {
+						bud::eprint("[DepthOnlyPass] invalid indirect draw buffer.");
+						return;
+					}
+
+					bool use_page_pool = false;
+					if (draw_count > 0 && sort_list[0].entity_index < render_scene.mesh_indices.size()) {
+						uint32_t mid = render_scene.mesh_indices[sort_list[0].entity_index];
+						if (mid < meshes.size() && meshes[mid].is_page_backed) {
+							use_page_pool = true;
+						}
+					}
+					auto pp_buf = gpu_scene.get_page_pool_buffer();
+					if (use_page_pool && pp_buf.is_valid()) {
+						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+						rhi->cmd_bind_index_buffer(cmd, pp_buf);
+					}
+					else {
+						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+					}
+
+					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
+				}
+				else {
+				for (size_t i = 0; i < draw_count; ++i) {
+					const auto& item = sort_list[i];
+					uint32_t idx = item.entity_index;
+
+					uint32_t mesh_id = render_scene.mesh_indices[idx];
+					uint32_t material_id = render_scene.material_indices[idx];
+					const auto& model_matrix = render_scene.world_matrices[idx];
+
+					if (mesh_id >= meshes.size()) continue;
+					const auto& mesh = meshes[mesh_id];
+					if (!mesh.is_valid()) continue;
+					const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+
+					// Page-backed meshes are backed by the GPU page pool, not the mega
+					// geometry pool, so rebind the buffers before issuing the draw.
+					if (mesh.is_page_backed && pp_buf.is_valid()) {
+						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+						rhi->cmd_bind_index_buffer(cmd, pp_buf);
+					}
+					else {
+						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+					}
+
+					struct PushVars {
+						bud::math::mat4 model;
+						uint32_t material_id;
+						uint32_t padding[3];
+					} push_vars;
+
+					push_vars.model = model_matrix;
+
+					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+						const auto& sub = mesh.submeshes[item.submesh_index];
+						push_vars.material_id = sub.material_id;
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
+						rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+					} else {
+						push_vars.material_id = material_id;
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
+						rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, 0);
+					}
+				}
+				}
+
+				rhi->cmd_end_render_pass(cmd);
+			}
+		);
+	}
+
+	
+
+void HiZMipPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
         if (!rhi || !asset_manager) {
             std::string err = std::format("HiZMipPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
             bud::eprint("{}", err);
@@ -192,6 +1257,7 @@ namespace bud::graphics {
 
 		load_shaders_async(asset_manager, { "src/shaders/hiz_mip.comp.spv" }, [this, rhi](const auto& shaders) {
 			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::HiZMip;
 			desc.cs.code = shaders[0];
 			pipeline = rhi->create_compute_pipeline(desc);
 			if (pipeline) {
@@ -325,9 +1391,9 @@ namespace bud::graphics {
 		);
 	}
 
-    void ZPrepass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+    void DepthOnlyPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
         if (!rhi || !asset_manager) {
-            std::string err = std::format("ZPrepass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
+            std::string err = std::format("DepthOnlyPass::init invalid args: rhi={} asset_manager={}", (void*)rhi, (void*)asset_manager);
             bud::eprint("{}", err);
 #if defined(_DEBUG)
             throw std::runtime_error(err);
@@ -336,162 +1402,24 @@ namespace bud::graphics {
 #endif
         }
 
-		load_shaders_async(asset_manager, { "src/shaders/zprepass.vert.spv", "src/shaders/zprepass.frag.spv" }, [this, rhi, config](const auto& shaders) {
-			GraphicsPipelineDesc desc;
-			desc.vs.code = shaders[0];
-			desc.fs.code = shaders[1];
-			desc.depth_test = true;
-			desc.depth_write = true;
-			desc.cull_mode = CullMode::None;
-			desc.color_attachment_format = bud::graphics::TextureFormat::Undefined;
-			desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
-			desc.enable_depth_bias = false;
-			desc.vertex_layout = VertexLayoutType::PositionUV;
+        load_shaders_async(asset_manager, { "src/shaders/depth_only.vert.spv", "src/shaders/depth_only.frag.spv" }, [this, rhi, config](const auto& shaders) {
+            GraphicsPipelineDesc desc;
+            desc.vs.code = shaders[0];
+            desc.fs.code = shaders[1];
+            desc.depth_test = true;
+            desc.depth_write = true;
+            desc.cull_mode = CullMode::None;
+            desc.color_attachment_format = bud::graphics::TextureFormat::Undefined;
+            desc.depth_compare_op = config.reversed_z ? CompareOp::Greater : CompareOp::Less;
+            desc.enable_depth_bias = false;
+            desc.vertex_layout = VertexLayoutType::PositionUV;
 
-			pipeline = rhi->create_graphics_pipeline(desc);
-			if (pipeline) {
-				bud::print("[ZPrepass] Shaders loaded and pipeline created.");
-			}
-		});
-	}
-
-	RGHandle ZPrepass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer,
-		const RenderScene& render_scene,
-		const SceneView& view,
-		const RenderConfig& config,
-		const std::vector<RenderMesh>& meshes,
-		const std::vector<SortItem>& sort_list,
-		size_t instance_count,
-		bud::graphics::BufferHandle mega_vertex_buffer,
-		bud::graphics::BufferHandle mega_index_buffer) {
-        if (!pipeline) {
-            std::string err = "ZPrepass::add_to_graph pipeline is null";
-            bud::eprint("{}", err);
-#if defined(_DEBUG)
-            throw std::runtime_error(err);
-#else
-            return {};
-#endif
-        }
-
-		const size_t max_scene_count = std::min({
-			render_scene.world_matrices.size(),
-			render_scene.world_aabbs.size(),
-			render_scene.mesh_indices.size(),
-			render_scene.material_indices.size(),
-			render_scene.flags.size()
-		});
-
-        if (max_scene_count == 0 || sort_list.empty()) {
-            std::string err = "ZPrepass::add_to_graph empty scene or sort list";
-            bud::eprint("{}", err);
-#if defined(_DEBUG)
-            throw std::runtime_error(err);
-#else
-            return {};
-#endif
-        }
-
-		Texture* backbuffer_tex = nullptr;
-		try {
-			backbuffer_tex = render_graph.get_texture(backbuffer);
-		} catch (const std::exception& e) {
-			bud::eprint("ZPrepass::add_to_graph: failed to get backbuffer texture: {}", e.what());
-#if defined(_DEBUG)
-			throw;
-#else
-			return {};
-#endif
-		}
-		if (!backbuffer_tex || backbuffer_tex->width == 0 || backbuffer_tex->height == 0) {
-			bud::eprint("ZPrepass::add_to_graph invalid backbuffer: tex={} w={} h={}", (void*)backbuffer_tex, backbuffer_tex ? backbuffer_tex->width : 0, backbuffer_tex ? backbuffer_tex->height : 0);
-#if defined(_DEBUG)
-			throw std::runtime_error("ZPrepass::add_to_graph invalid backbuffer");
-#else
-			return {};
-#endif
-		}
-
-		// instance_count = exploded submesh draw count; sort_list is sized to match.
-		// max_scene_count guards accessing render_scene arrays, but entity_index in
-		// sort_list items are already validated — do NOT clamp draw_count by it.
-		const size_t draw_count = std::min(instance_count, sort_list.size());
-		uint32_t target_width = backbuffer_tex->width;
-		uint32_t target_height = backbuffer_tex->height;
-
-		TextureDesc depth_desc;
-		depth_desc.width = target_width;
-		depth_desc.height = target_height;
-		depth_desc.format = bud::graphics::TextureFormat::D32_FLOAT;
-
-		auto depth_h = std::make_shared<RGHandle>();
-
-		return render_graph.add_pass("Z Prepass",
-			[=](RGBuilder& builder) {
-				*depth_h = builder.create("MainDepth", depth_desc);
-				builder.write(*depth_h, ResourceState::DepthWrite);
-				return *depth_h;
-			},
-			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
-				if (!pipeline) {
-					bud::eprint("[ZPrepass] ERROR: Pipeline is null.");
-					return;
-				}
-
-
-				RenderPassBeginInfo info;
-				info.depth_attachment = render_graph.get_texture(*depth_h);
-				info.clear_depth = true;
-				info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
-
-				rhi->cmd_begin_render_pass(cmd, info);
-				rhi->cmd_bind_pipeline(cmd, pipeline);
-				rhi->cmd_set_viewport(cmd, (float)target_width, (float)target_height);
-				rhi->cmd_set_scissor(cmd, target_width, target_height);
-
-				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
-				rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
-
-				// Bind global Mega-Buffer once for the entire pass
-				rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-
-				for (size_t i = 0; i < draw_count; ++i) {
-					const auto& item = sort_list[i];
-					uint32_t idx = item.entity_index;
-
-					uint32_t mesh_id = render_scene.mesh_indices[idx];
-					uint32_t material_id = render_scene.material_indices[idx];
-					const auto& model_matrix = render_scene.world_matrices[idx];
-
-					if (mesh_id >= meshes.size()) continue;
-					const auto& mesh = meshes[mesh_id];
-					if (!mesh.is_valid()) continue;
-
-					struct PushVars {
-						bud::math::mat4 model;
-						uint32_t material_id;
-						uint32_t padding[3];
-					} push_vars;
-
-					push_vars.model = model_matrix;
-
-					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
-						const auto& sub = mesh.submeshes[item.submesh_index];
-						push_vars.material_id = sub.material_id;
-						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
-						rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh.first_index + sub.index_start, mesh.vertex_offset, 0);
-					} else {
-						push_vars.material_id = material_id;
-						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
-						rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, 0);
-					}
-				}
-
-				rhi->cmd_end_render_pass(cmd);
-			}
-		);
-	}
+            pipeline = rhi->create_graphics_pipeline(desc);
+            if (pipeline) {
+                bud::print("[DepthOnlyPass] Shaders loaded and pipeline created.");
+            }
+        });
+    }
 
 	CSMShadowPass::~CSMShadowPass() {
 	}
@@ -540,314 +1468,6 @@ namespace bud::graphics {
 		});
 	}
 
-	RGHandle CSMShadowPass::add_to_graph(RenderGraph& render_graph, const SceneView& view, const RenderConfig& config,
-		const RenderScene& render_scene,
-		const std::vector<RenderMesh>& meshes,
-		std::vector<std::vector<uint32_t>> csm_visible_instances,
-		bud::graphics::BufferHandle mega_vertex_buffer,
-		bud::graphics::BufferHandle mega_index_buffer)
-	{
-		if (config.shadow_map_size == 0 || config.cascade_count == 0) {
-			bud::eprint("[CSMShadowPass] ERROR: Invalid shadow config (size={}, cascades={}).",
-				config.shadow_map_size, config.cascade_count);
-			return {};
-		}
-
-		const uint32_t cascade_count = std::min(config.cascade_count, MAX_CASCADES);
-		if (cascade_count != config.cascade_count) {
-			bud::eprint("[CSMShadowPass] WARNING: cascade_count clamped to MAX_CASCADES ({})", MAX_CASCADES);
-		}
-
-		const size_t max_scene_count = std::min({
-			render_scene.world_matrices.size(),
-			render_scene.world_aabbs.size(),
-			render_scene.mesh_indices.size(),
-			render_scene.material_indices.size(),
-			render_scene.flags.size()
-		});
-
-		if (max_scene_count == 0) {
-			bud::eprint("[CSMShadowPass] ERROR: RenderScene arrays are empty.");
-			return {};
-		}
-
-		TextureDesc desc;
-		desc.width = config.shadow_map_size;
-		desc.height = config.shadow_map_size;
-		desc.format = bud::graphics::TextureFormat::D32_FLOAT;
-		desc.type = TextureType::Texture2DArray;
-		desc.array_layers = cascade_count;
-
-		if (!config.cache_shadows && static_cache_texture) {
-			shutdown(stored_rhi);
-		}
-
-		bool light_changed = bud::math::length(view.light_dir - last_light_dir) > 0.001f;
-		bool view_changed = !has_last_view_proj || !mat4_nearly_equal(view.view_proj_matrix, last_view_proj);
-		bool config_changed = !has_last_config || !shadow_config_equal(config, last_config);
-		bool need_update = !cache_initialized || light_changed || view_changed || config_changed || !config.cache_shadows;
-
-		if (config.cache_shadows) {
-			if (light_changed) last_light_dir = view.light_dir;
-
-			if (need_update) {
-				last_view_proj = view.view_proj_matrix;
-				last_config = config;
-				has_last_view_proj = true;
-				has_last_config = true;
-			}
-
-			bool needs_recreate = !static_cache_texture
-				|| static_cache_texture->width != desc.width
-				|| static_cache_texture->height != desc.height
-				|| static_cache_texture->format != desc.format
-				|| static_cache_texture->type != desc.type
-				|| static_cache_texture->array_layers != desc.array_layers;
-
-			if (stored_rhi && needs_recreate) {
-				if (static_cache_texture) {
-					auto* pool = stored_rhi->get_resource_pool();
-					if (pool) {
-						pool->release_texture(static_cache_texture);
-					}
-				}
-				static_cache_texture = stored_rhi->create_texture(desc, nullptr, 0);
-				need_update = true;
-			}
-		}
-
-		auto shadow_map_h = std::make_shared<RGHandle>();
-
-		// [CSM] 2. Static Cache Update Pass
-		RGHandle static_cache_h;
-		bool valid_cache = config.cache_shadows && static_cache_texture;
-
-                if (valid_cache) {
-                    static_cache_h = render_graph.import_texture("StaticShadowCache", static_cache_texture, ResourceState::Undefined);
-
-                    if (need_update) {
-                        render_graph.add_pass("CSM Static Update",
-                            [&](RGBuilder& builder) {
-                                builder.write(static_cache_h, ResourceState::DepthWrite);
-                                return static_cache_h;
-                            },
-                            [=, csm_vis = csm_visible_instances, &render_graph, &render_scene, &meshes, &view](RHI* rhi, CommandHandle cmd) {
-                                if (!pipeline) return;
-
-                                for (uint32_t i = 0; i < cascade_count; ++i) {
-                                    auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
-                                    bud::math::Frustum cascade_view_frustum_dbg;
-                                    cascade_view_frustum_dbg.update(cascade_light_view_proj);
-
-                                    RenderPassBeginInfo info;
-                                    Texture* static_tex = nullptr;
-                                    try {
-                                        static_tex = render_graph.get_texture(static_cache_h);
-                                    } catch (const std::exception& e) {
-                                        bud::eprint("[CSMShadowPass] failed to get static cache texture: {}", e.what());
-                                        return;
-                                    }
-                                    info.depth_attachment = static_tex;
-                                    info.clear_depth = true;
-                                    info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
-                                    info.base_array_layer = i;
-                                    info.layer_count = 1;
-
-                                    rhi->cmd_begin_render_pass(cmd, info);
-							rhi->cmd_bind_pipeline(cmd, pipeline);
-							rhi->cmd_set_viewport(cmd, (float)config.shadow_map_size, (float)config.shadow_map_size);
-							rhi->cmd_set_scissor(cmd, config.shadow_map_size, config.shadow_map_size);
-
-							rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, 0.0f, config.shadow_bias_slope);
-							rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
-
-							// Bind global Mega-Buffer once per cascade
-							// NOTE: For diagnostics we support an alternative binding scheme where we bind
-							// the vertex buffer with a byte-offset per-mesh and issue draw calls with
-							// vertexOffset=0. This helps detect whether vertexOffset is being
-							// interpreted in vertices vs bytes by the driver/pipeline.
-							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-							static constexpr bool kUseBindVertexByteOffset = true; // A/B test toggle
-
-							struct PushConsts {
-								bud::math::mat4 light_view_proj;
-								bud::math::mat4 model;
-								bud::math::vec4 light_dir;
-								uint32_t material_id;
-								uint32_t padding[3];
-							} push_consts;
-
-							push_consts.light_view_proj = cascade_light_view_proj;
-							push_consts.light_dir = bud::math::vec4(bud::math::normalize(view.light_dir), 0.0f);
-
-							const auto& visible_instances = csm_vis[i];
-
-							size_t _max_count = std::min(visible_instances.size(), max_scene_count);
-
-							for (size_t i = 0; i < _max_count; ++i) {
-								size_t idx = visible_instances[i];
-
-								// 1. 检查是否是静态物体, 利用flags
-								auto is_static = (render_scene.flags[idx] & 1) != 0;
-								if (!is_static) continue; // ONLY STATIC for cache
-
-								auto mesh_id = render_scene.mesh_indices[idx];
-
-								if (mesh_id >= meshes.size()) continue;
-								const auto& mesh = meshes[mesh_id];
-								if (!mesh.is_valid()) continue;
-
-
-								// 2. Culling
-								// 使用 RenderScene 里的 World Matrix 变换包围体
-								const auto& model_matrix = render_scene.world_matrices[idx];
-								bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
-								if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) continue;
-
-								// 3. Draw
-								push_consts.model = model_matrix;
-
-								uint32_t sub_idx = render_scene.submesh_indices[idx];
-								if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
-									const auto& sub = mesh.submeshes[sub_idx];
-									push_consts.material_id = sub.material_id;
-									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-									rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh.first_index + sub.index_start, mesh.vertex_offset, 0);
-								}
-								else {
-									push_consts.material_id = render_scene.material_indices[idx];
-									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-									if (kUseBindVertexByteOffset) {
-										auto vb = mega_vertex_buffer;
-										vb.offset = static_cast<uint64_t>(mesh.vertex_offset) * sizeof(bud::io::MeshData::Vertex);
-										rhi->cmd_bind_vertex_buffer(cmd, vb);
-										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, 0, 0);
-									}
-									else {
-										rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, 0);
-									}
-								}
-							}
-							rhi->cmd_end_render_pass(cmd);
-						}
-					}
-				);
-				cache_initialized = true;
-			}
-		}
-
-		// Main Shadow Pass (Dynamic + Copy) TODO: dynamic shadows cover everything
-		return render_graph.add_pass("CSM Shadow",
-			[&, shadow_map_h](RGBuilder& builder) {
-				*shadow_map_h = builder.create("CSM ShadowMap", desc);
-				builder.write(*shadow_map_h, ResourceState::DepthWrite);
-				if (valid_cache)
-					builder.read(static_cache_h, ResourceState::DepthRead);
-
-				return *shadow_map_h;
-			},
-			[=, csm_vis = std::move(csm_visible_instances), &render_graph, &render_scene, &meshes, &view](RHI* rhi, CommandHandle cmd) {
-				if (!pipeline) return;
-
-				auto active_map = render_graph.get_texture(*shadow_map_h);
-				bool did_copy = false;
-
-                if (valid_cache && cache_initialized) {
-                    Texture* static_map = nullptr;
-                    try {
-                        static_map = render_graph.get_texture(static_cache_h);
-                    } catch (const std::exception& e) {
-                        bud::eprint("[CSMShadowPass] failed to get static cache texture for copy: {}", e.what());
-                        static_map = nullptr;
-                    }
-                    if (static_map) {
-                        rhi->resource_barrier(cmd, static_map, ResourceState::DepthRead, ResourceState::TransferSrc);
-                        rhi->resource_barrier(cmd, active_map, ResourceState::DepthWrite, ResourceState::TransferDst);
-                        rhi->cmd_copy_image(cmd, static_map, active_map);
-                        rhi->resource_barrier(cmd, active_map, ResourceState::TransferDst, ResourceState::DepthWrite);
-                        rhi->resource_barrier(cmd, static_map, ResourceState::TransferSrc, ResourceState::DepthRead);
-                        did_copy = true;
-                    }
-                }
-
-				for (uint32_t i = 0; i < config.cascade_count; ++i) {
-					auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
-					bud::math::Frustum cascade_view_frustum_dbg;
-					cascade_view_frustum_dbg.update(cascade_light_view_proj);
-
-					RenderPassBeginInfo info;
-					info.depth_attachment = active_map;
-					info.clear_depth = !did_copy;
-					info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
-					info.base_array_layer = i;
-					info.layer_count = 1;
-
-					rhi->cmd_begin_render_pass(cmd, info);
-					rhi->cmd_bind_pipeline(cmd, pipeline);
-					rhi->cmd_set_viewport(cmd, (float)config.shadow_map_size, (float)config.shadow_map_size);
-					rhi->cmd_set_scissor(cmd, config.shadow_map_size, config.shadow_map_size);
-
-					rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, 0.0f, config.shadow_bias_slope);
-					rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
-
-					// Bind global Mega-Buffer once per cascade
-					rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-
-					struct PushConsts {
-						bud::math::mat4 light_view_proj;
-						bud::math::mat4 model;
-						bud::math::vec4 light_dir;
-						uint32_t material_id;
-						uint32_t padding[3];
-					} push_consts;
-
-					push_consts.light_view_proj = cascade_light_view_proj;
-					push_consts.light_dir = bud::math::vec4(bud::math::normalize(view.light_dir), 0.0f);
-
-					const auto& visible_instances = csm_vis[i];
-					size_t count = visible_instances.size();
-
-					for (size_t i = 0; i < count; ++i) {
-						size_t idx = visible_instances[i];
-
-						bool is_static = (render_scene.flags[idx] & 1) != 0;
-						if (did_copy && is_static) continue;
-
-						uint32_t mesh_id = render_scene.mesh_indices[idx];
-						if (mesh_id >= meshes.size()) continue;
-						const auto& mesh = meshes[mesh_id];
-						if (!mesh.is_valid()) continue;
-
-
-						// Culling
-						const auto& model_matrix = render_scene.world_matrices[idx];
-						bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
-						if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) continue;
-
-						// Draw
-						push_consts.model = model_matrix;
-
-						uint32_t sub_idx = render_scene.submesh_indices[idx];
-						if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
-							const auto& sub = mesh.submeshes[sub_idx];
-							push_consts.material_id = sub.material_id;
-							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh.first_index + sub.index_start, mesh.vertex_offset, 0);
-						}
-						else {
-							push_consts.material_id = render_scene.material_indices[idx];
-							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, 0);
-						}
-					}
-					rhi->cmd_end_render_pass(cmd);
-				}
-			}
-		);
-	}
-	
 	void MainPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
 		if (!rhi || !asset_manager) return;
 
@@ -879,6 +1499,7 @@ namespace bud::graphics {
 		size_t instance_count,
 		RGHandle indirect_draw_buffer,
 		RGHandle instance_data,
+		const GPUScene& gpu_scene,
 		bud::graphics::BufferHandle mega_vertex_buffer,
 		bud::graphics::BufferHandle mega_index_buffer)
 	{
@@ -904,6 +1525,8 @@ namespace bud::graphics {
 		// max_scene_count guards accessing render_scene arrays, but entity_index in
 		// sort_list items are already validated — do NOT clamp draw_count by it.
 		const size_t draw_count = std::min(instance_count, sort_list.size());
+		//bud::print("[MainPass] draw_count={} instance_count={} sort_list={} gpu_driven={}",
+			//draw_count, instance_count, sort_list.size(), config.enable_gpu_driven);
 
 		uint32_t target_width = backbuffer_tex->width;
 		uint32_t target_height = backbuffer_tex->height;
@@ -920,7 +1543,7 @@ namespace bud::graphics {
 				return depth_buffer;
 			},
 
-			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+		    [=, &render_graph, &render_scene, &meshes, &sort_list, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) {
 					bud::eprint("[MainPass] ERROR: Pipeline is null.");
 					return;
@@ -937,6 +1560,7 @@ namespace bud::graphics {
 				info.clear_color = true;
 				info.clear_color_value = { 0.5f, 0.5f, 0.5f, 1.0f };
 				info.clear_depth = false;
+				info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
 
 				rhi->cmd_begin_render_pass(cmd, info);
 				rhi->cmd_bind_pipeline(cmd, pipeline);
@@ -954,28 +1578,71 @@ namespace bud::graphics {
 				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 
 				if (config.enable_gpu_driven) {
+					bool use_page_pool = false;
+					if (draw_count > 0 && sort_list[0].entity_index < render_scene.mesh_indices.size()) {
+						uint32_t mid = render_scene.mesh_indices[sort_list[0].entity_index];
+						if (mid < meshes.size() && meshes[mid].is_page_backed) {
+							use_page_pool = true;
+						}
+					}
+					auto pp_buf = gpu_scene.get_page_pool_buffer();
+					if (use_page_pool && pp_buf.is_valid()) {
+						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+						rhi->cmd_bind_index_buffer(cmd, pp_buf);
+					}
+					else {
+						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+					}
+
 					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
 				}
 				else {
-					for (size_t i = 0; i < draw_count; ++i) {
-						const auto& item = sort_list[i];
-						uint32_t idx = item.entity_index;
+						auto pp_buf = gpu_scene.get_page_pool_buffer();
+						size_t page_backed_draws = 0;
+						for (size_t i = 0; i < draw_count; ++i) {
+							const auto& item = sort_list[i];
+							uint32_t idx = item.entity_index;
 
-						uint32_t mesh_id = render_scene.mesh_indices[idx];
-						if (mesh_id >= meshes.size()) continue;
+							uint32_t mesh_id = render_scene.mesh_indices[idx];
+							if (mesh_id >= meshes.size()) continue;
 
-						const auto& mesh = meshes[mesh_id];
-						if (!mesh.is_valid()) continue;
+							const auto& mesh = meshes[mesh_id];
+							if (!mesh.is_valid()) continue;
+							const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
 
-						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
-							const auto& sub = mesh.submeshes[item.submesh_index];
-							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh.first_index + sub.index_start, mesh.vertex_offset, (uint32_t)i);
+							if (mesh.is_page_backed && pp_buf.is_valid()) {
+								rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+								rhi->cmd_bind_index_buffer(cmd, pp_buf);
+								// Multi-material pages carry per-material submeshes; draw the
+								// specific one when the sort item selects it.
+								if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+									const auto& sub = mesh.submeshes[item.submesh_index];
+									rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
+								}
+								else {
+									rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
+								}
+								page_backed_draws++;
+							} else if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+								// Rebind mega buffers: the previous draw may have left the page pool bound.
+								rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+								rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+								const auto& sub = mesh.submeshes[item.submesh_index];
+								rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
+							}
+							else {
+								rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+								rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
+							}
 						}
-						else {
-							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, (uint32_t)i);
+						if (page_backed_draws > 0) {
+							const auto& first_mesh_geom = gpu_scene.mesh_geometry(0);
+							//bud::print("[MainPass] page_backed_draws={} first_index={} vertex_offset={} pp_buf_valid={}",
+							//	page_backed_draws, first_mesh_geom.first_index, first_mesh_geom.vertex_offset, pp_buf.is_valid());
 						}
 					}
-				}
 
 				rhi->cmd_end_render_pass(cmd);
 			}
@@ -999,11 +1666,11 @@ namespace bud::graphics {
 			font_texture = nullptr;
 		}
 		if (current_vertex_buffer_size > 0 && rhi) {
-			rhi->destroy_buffer(vertex_buffer);
+			rhi->destroy_buffer(std::move(vertex_buffer));
 			current_vertex_buffer_size = 0;
 		}
 		if (current_index_buffer_size > 0 && rhi) {
-			rhi->destroy_buffer(index_buffer);
+			rhi->destroy_buffer(std::move(index_buffer));
 			current_index_buffer_size = 0;
 		}
 	}
@@ -1108,24 +1775,61 @@ namespace bud::graphics {
 				if (!pipeline)
 					return;
 
-				// Create or resize buffers
-				uint32_t needed_vb_size = draw_data.total_vtx_count() * sizeof(ImDrawVert);
-				uint32_t needed_ib_size = draw_data.total_idx_count() * sizeof(uint32_t);
+                // Create or resize buffers. Use allocator->alloc_staging (per-frame ring) instead
+                // of ad-hoc upload buffers. Use doubling growth strategy to avoid frequent reallocs.
+                uint32_t needed_vb_size = draw_data.total_vtx_count() * sizeof(ImDrawVert);
+                uint32_t needed_ib_size = draw_data.total_idx_count() * sizeof(uint32_t);
 
-				if (needed_vb_size > current_vertex_buffer_size) {
-					if (current_vertex_buffer_size > 0) rhi->destroy_buffer(vertex_buffer);
-					current_vertex_buffer_size = needed_vb_size + 4096;
-					vertex_buffer = rhi->create_upload_buffer(current_vertex_buffer_size); 
-				}
+                // Vertex buffer growth (double strategy)
+                if (needed_vb_size > current_vertex_buffer_size) {
+                    if (current_vertex_buffer_size > 0) {
+                        rhi->destroy_buffer(vertex_buffer);
+                    }
+                    uint32_t new_size = current_vertex_buffer_size ? std::max<uint32_t>(needed_vb_size, current_vertex_buffer_size * 2u) : std::max<uint32_t>(needed_vb_size, 4096u);
+                    current_vertex_buffer_size = new_size;
+                    auto* alloc = rhi->get_allocator();
+                    if (!alloc) {
+                        bud::eprint("[UIPass] No allocator available for staging vertex buffer");
+                        return;
+                    }
+                    vertex_buffer = alloc->alloc_staging(current_vertex_buffer_size);
+                    if (!vertex_buffer.is_valid() || !vertex_buffer.mapped_ptr) {
+                        bud::eprint("[UIPass] alloc_staging failed for vertex buffer size={}", current_vertex_buffer_size);
+                        return;
+                    }
+                }
 
-				if (needed_ib_size > current_index_buffer_size) {
-					if (current_index_buffer_size > 0) rhi->destroy_buffer(index_buffer);
-					current_index_buffer_size = needed_ib_size + 4096;
-					index_buffer = rhi->create_upload_buffer(current_index_buffer_size);
-				}
+                // Index buffer growth (double strategy)
+                if (needed_ib_size > current_index_buffer_size) {
+                    if (current_index_buffer_size > 0) {
+                        rhi->destroy_buffer(index_buffer);
+                    }
+                    uint32_t new_size = current_index_buffer_size ? std::max<uint32_t>(needed_ib_size, current_index_buffer_size * 2u) : std::max<uint32_t>(needed_ib_size, 4096u);
+                    current_index_buffer_size = new_size;
+                    auto* alloc = rhi->get_allocator();
+                    if (!alloc) {
+                        bud::eprint("[UIPass] No allocator available for staging index buffer");
+                        return;
+                    }
+                    index_buffer = alloc->alloc_staging(current_index_buffer_size);
+                    if (!index_buffer.is_valid() || !index_buffer.mapped_ptr) {
+                        bud::eprint("[UIPass] alloc_staging failed for index buffer size={}", current_index_buffer_size);
+                        return;
+                    }
+                }
 
-				auto* vtx_dst = (ImDrawVert*)vertex_buffer.mapped_ptr;
-				auto* idx_dst = (uint32_t*)index_buffer.mapped_ptr;
+                auto* vtx_dst = (ImDrawVert*)vertex_buffer.mapped_ptr;
+                auto* idx_dst = (uint32_t*)index_buffer.mapped_ptr;
+
+                // Defensive checks
+                if (!vtx_dst) {
+                    bud::eprint("[UIPass] vertex_buffer.mapped_ptr is null (size={})", current_vertex_buffer_size);
+                    return;
+                }
+                if (!idx_dst) {
+                    bud::eprint("[UIPass] index_buffer.mapped_ptr is null (size={})", current_index_buffer_size);
+                    return;
+                }
 
 				for (const auto& cmd_list : draw_data.lists) {
 					std::memcpy(vtx_dst, cmd_list.vertices.data(), cmd_list.vertices.size() * sizeof(ImDrawVert));
@@ -1230,6 +1934,7 @@ namespace bud::graphics {
 		const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list,
 		size_t instance_count, bud::graphics::RGHandle indirect_draw_buffer,
 		bud::graphics::RGHandle instance_data,
+		const GPUScene& gpu_scene,
 		bud::graphics::BufferHandle mega_vertex_buffer,
 		bud::graphics::BufferHandle mega_index_buffer)
 	{
@@ -1252,7 +1957,7 @@ namespace bud::graphics {
 				builder.read(instance_data, ResourceState::ShaderResource);
 				return backbuffer;
 			},
-			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+			[=, &render_graph, &render_scene, &meshes, &sort_list, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) return;
 
 				bud::graphics::BufferHandle ind_buf_handle;
@@ -1278,6 +1983,23 @@ namespace bud::graphics {
 				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 
 				if (config.enable_gpu_driven && ind_buf_handle.is_valid()) {
+					bool use_page_pool = false;
+					if (draw_count > 0 && sort_list[0].entity_index < render_scene.mesh_indices.size()) {
+						uint32_t mid = render_scene.mesh_indices[sort_list[0].entity_index];
+						if (mid < meshes.size() && meshes[mid].is_page_backed) {
+							use_page_pool = true;
+						}
+					}
+					auto pp_buf = gpu_scene.get_page_pool_buffer();
+					if (use_page_pool && pp_buf.is_valid()) {
+						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+						rhi->cmd_bind_index_buffer(cmd, pp_buf);
+					}
+					else {
+						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+					}
+
 					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
 				}
 				else {
@@ -1289,13 +2011,14 @@ namespace bud::graphics {
 						if (mesh_id >= meshes.size()) continue;
 						const auto& mesh = meshes[mesh_id];
 						if (!mesh.is_valid()) continue;
+						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
 
 						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
 							const auto& sub = mesh.submeshes[item.submesh_index];
-							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh.first_index + sub.index_start, mesh.vertex_offset, (uint32_t)i);
+							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
 						}
 						else {
-							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh.first_index, mesh.vertex_offset, (uint32_t)i);
+							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
 						}
 					}
 				}

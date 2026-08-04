@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <string>
 #include <memory>
@@ -11,6 +11,11 @@ using VkInstance = struct VkInstance_T*;
 using VkSurfaceKHR = struct VkSurfaceKHR_T*;
 
 namespace bud::platform {
+
+	enum class WindowFlags : uint32_t {
+		Default = 0,
+		Hidden = 1 << 0
+	};
 
 	struct ScreenResolution {
 		int width = 0;
@@ -52,5 +57,5 @@ namespace bud::platform {
 	ScreenResolution get_current_screen_resolution();
 	ScreenResolution get_window_screen_resolution(const Window& window);
 
-    std::unique_ptr<Window> create_window(const std::string& title, int width, int height);
+    std::unique_ptr<Window> create_window(const std::string& title, int width, int height, WindowFlags flags = WindowFlags::Default);
 }

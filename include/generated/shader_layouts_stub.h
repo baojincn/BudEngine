@@ -69,6 +69,53 @@ namespace HizCullComp {
     inline constexpr size_t PUSHCONST_PC_SIZE = 4;
 }
 
+// ===== shader: meshlet_frustum_cull.comp =====
+namespace MeshletFrustumCullComp {
+    inline constexpr uint32_t SET_0 = 0;
+    inline constexpr uint32_t BINDING_INSTANCE_DATA = 0; // instanceData
+    inline constexpr uint32_t BINDING_MESHLET_DATA = 1; // meshletData
+    inline constexpr uint32_t BINDING_VERTEX_INDEX = 2; // vertexIndex
+    inline constexpr uint32_t BINDING_MESHLET_INDEX = 3; // meshletIndex
+    inline constexpr uint32_t BINDING_CULL_DATA = 4; // cullData
+    inline constexpr uint32_t BINDING_VISIBILITY = 5; // meshletVisibility
+    inline constexpr uint32_t BINDING_STATS = 6; // stats
+    inline constexpr uint32_t BINDING_UBO = 7; // ubo
+
+    // push constants
+    inline constexpr size_t PUSHCONST_PC_SIZE = 16;
+}
+
+// ===== shader: meshlet_hiz_cull.comp =====
+namespace MeshletHiZCullComp {
+    inline constexpr uint32_t SET_0 = 0;
+    inline constexpr uint32_t BINDING_INSTANCE_DATA = 0; // instanceData
+    inline constexpr uint32_t BINDING_MESHLET_DATA = 1; // meshletData
+    inline constexpr uint32_t BINDING_VERTEX_INDEX = 2; // vertexIndex
+    inline constexpr uint32_t BINDING_MESHLET_INDEX = 3; // meshletIndex
+    inline constexpr uint32_t BINDING_CULL_DATA = 4; // cullData
+    inline constexpr uint32_t BINDING_HIZ_PYRAMID = 5; // hizPyramid
+    inline constexpr uint32_t BINDING_VISIBILITY_IN = 6; // meshletVisibilityIn
+    inline constexpr uint32_t BINDING_VISIBILITY_OUT = 7; // meshletVisibilityOut
+    inline constexpr uint32_t BINDING_STATS = 8; // stats
+    inline constexpr uint32_t BINDING_UBO = 9; // ubo
+
+    // push constants
+    inline constexpr size_t PUSHCONST_PC_SIZE = 16;
+}
+
+// ===== shader: meshlet_indirect_emit.comp =====
+namespace MeshletIndirectEmitComp {
+    inline constexpr uint32_t SET_0 = 0;
+    inline constexpr uint32_t BINDING_INSTANCE_DATA = 0; // instanceData
+    inline constexpr uint32_t BINDING_VISIBILITY = 1; // meshletVisibility
+    inline constexpr uint32_t BINDING_INDIRECT_DRAW = 2; // indirectDraw
+    inline constexpr uint32_t BINDING_STATS = 3; // stats
+    inline constexpr uint32_t BINDING_UBO = 4; // ubo
+
+    // push constants
+    inline constexpr size_t PUSHCONST_PC_SIZE = 16;
+}
+
 // ===== shader: hiz_debug.frag =====
 namespace HizDebugFrag {
     inline constexpr uint32_t IN_UV = 0;

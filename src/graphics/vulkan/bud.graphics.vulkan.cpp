@@ -1,4 +1,4 @@
-﻿#include <vector>
+#include <vector>
 #include <string>
 #include <iostream>
 #include <optional>
@@ -48,6 +48,7 @@ struct VulkanPipelineObject {
 	VkPipeline pipeline;
 	VkPipelineLayout layout;
 	VkPipelineBindPoint bind_point;
+	ComputePipelineDesc::LayoutKind compute_layout_kind = ComputePipelineDesc::LayoutKind::HiZCulling;
 };
 
 #ifdef BUD_ENABLE_AFTERMATH
@@ -97,16 +98,12 @@ bool VulkanRHI::init_aftermath() {
 }
 #endif
 
-
-// Old transition helper removed; use sync2::get_transition2 instead where needed.
-
-
-void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count) {
+void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskScheduler* task_scheduler, bool enable_validation, uint32_t inflight_frame_count, bool headless) {
 	this->task_scheduler = task_scheduler;
 	platform_window = plat_window;
 	max_frames_in_flight = inflight_frame_count;
+	this->headless_mode = headless;
 
-	// store runtime validation flag
 	enable_validation_layers = enable_validation;
 
 #ifdef BUD_ENABLE_AFTERMATH
@@ -116,13 +113,18 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	// 基础构建 (Instance, Surface, Device)
 	create_instance(instance, enable_validation);
 	setup_debug_messenger(enable_validation);
-	create_surface(plat_window);
+	if (!headless_mode) {
+		create_surface(plat_window);
+	}
+
 	pick_physical_device();
 	create_logical_device(enable_validation);
 
 	// 交换链与呈现资源
-	create_swapchain(plat_window);
-	create_image_views();
+	if (!headless_mode) {
+		create_swapchain(plat_window);
+		create_image_views();
+	}
 
 	// 命令池与同步对象
 	create_command_pool();
@@ -131,8 +133,8 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 
 	// 初始化基础设施 (Subsystems)
 	// 接管内存、资源池、管线缓存、描述符分配
-	memory_allocator = std::make_unique<VulkanMemoryAllocator>(instance, device, physical_device, max_frames_in_flight);
-	memory_allocator->init();
+    memory_allocator = std::make_unique<VulkanMemoryAllocator>(instance, device, physical_device, max_frames_in_flight, device_api_version);
+    memory_allocator->init();
 
 	resource_pool = std::make_unique<VulkanResourcePool>(device, memory_allocator.get());
 
@@ -155,58 +157,103 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	layout_builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	layout_builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+	layout_builder.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+	layout_builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 
 	global_set_layout = layout_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
 
-	// Compute Pipeline Layout (Unified for Cull & Mip)
-	DescriptorLayoutBuilder compute_builder;
-	compute_builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // Instance / Input
-	compute_builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // Indirect / Output Buffer
-	compute_builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // Stats
-	compute_builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT); // HiZ / Mip In
-	compute_builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // UBO
-	compute_builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT); // HiZ Out
-	compute_set_layout = compute_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	// Compute Pipeline Layouts
+	auto build_small_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+
+	auto build_heuristic_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+
+	auto build_frustum_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+
+	auto build_hiz_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+
+	compute_hiz_cull_set_layout = build_hiz_compute_layout();
+	compute_hiz_mip_set_layout = build_hiz_compute_layout();
+	compute_ml_identity_set_layout = build_small_compute_layout();
+	compute_heuristic_occluder_set_layout = build_heuristic_compute_layout();
+	compute_meshlet_indirect_set_layout = build_small_compute_layout();
+	compute_meshlet_frustum_set_layout = build_frustum_compute_layout();
+	compute_meshlet_hiz_set_layout = build_hiz_compute_layout();
 
 	// 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
 	for (auto& frame : frames) {
+		// Prefer allocating per-frame UBO via VMA (host visible + coherent + persistently mapped)
 		VkBufferCreateInfo buffer_info{};
 		buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 		buffer_info.size = ubo_size;
 		buffer_info.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 		buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-		if (vkCreateBuffer(device, &buffer_info, nullptr, &frame.uniform_buffer) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create uniform buffer!");
+        VmaAllocationCreateInfo vma_alloc_info = {};
+        vma_alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+        // When using VMA_ALLOCATION_CREATE_MAPPED_BIT with VMA_MEMORY_USAGE_AUTO*,
+        // VMA requires specifying either HOST_ACCESS_SEQUENTIAL_WRITE or HOST_ACCESS_RANDOM.
+        // Per-frame UBOs are typically written sequentially each frame, so request
+        // sequential write host access and persistent mapping.
+        vma_alloc_info.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+        vma_alloc_info.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+		VmaAllocationInfo alloc_result_info;
+		VkResult r = vmaCreateBuffer(memory_allocator->get_vma_allocator(), &buffer_info, &vma_alloc_info, &frame.uniform_buffer, &frame.uniform_allocation, &alloc_result_info);
+		if (r != VK_SUCCESS) {
+			std::string err = std::format("VulkanRHI::init vmaCreateBuffer for per-frame UBO failed: {}", (int)r);
+			bud::eprint("{}", err);
+			throw std::runtime_error(err);
 		}
-
-		VkMemoryRequirements mem_reqs;
-		vkGetBufferMemoryRequirements(device, frame.uniform_buffer, &mem_reqs);
-
-		VkPhysicalDeviceMemoryProperties mem_props;
-		vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_props);
-
-		uint32_t memory_type = 0;
-		for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
-			if ((mem_reqs.memoryTypeBits & (1 << i)) &&
-				(mem_props.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-				memory_type = i;
-				break;
-			}
-		}
-
-		VkMemoryAllocateInfo alloc_info{};
-		alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-		alloc_info.allocationSize = mem_reqs.size;
-		alloc_info.memoryTypeIndex = memory_type;
-
-		if (vkAllocateMemory(device, &alloc_info, nullptr, &frame.uniform_memory) != VK_SUCCESS) {
-			throw std::runtime_error("failed to allocate uniform buffer memory!");
-		}
-
-		vkBindBufferMemory(device, frame.uniform_buffer, frame.uniform_memory, 0);
-		vkMapMemory(device, frame.uniform_memory, 0, ubo_size, 0, &frame.uniform_mapped);
+		frame.uniform_alloc_info = alloc_result_info;
+		frame.uniform_mapped = alloc_result_info.pMappedData;
 	}
 
 	// 创建全局 Descriptor Pool (支持 Bindless + UPDATE_AFTER_BIND)
@@ -284,6 +331,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		if (vmaCreateImage(memory_allocator->get_vma_allocator(), &image_info, &alloc_info, &dummy_depth_texture.image, &dummy_depth_texture.allocation, nullptr) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create dummy depth");
 		}
+		
 
 		VkImageViewCreateInfo view_info{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
 		view_info.image = dummy_depth_texture.image;
@@ -328,9 +376,13 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		desc.format = TextureFormat::RGBA8_UNORM;
 
 		// Red Fallback to identify missing textures
-		uint32_t color = 0xFF0000FF; // R=FF, G=00, B=00, A=FF (Little Endian)
-		fallback_texture_ptr = static_cast<VulkanTexture*>(create_texture(desc, &color, 4));
-		update_bindless_texture(0, fallback_texture_ptr);
+        uint32_t color = 0xFF0000FF; // R=FF, G=00, B=00, A=FF (Little Endian)
+        // Use managed texture API to ensure ownership
+        fallback_texture_ptr = resource_pool->acquire_texture_shared(desc);
+        // Initialize all bindless texture slots (0 to 999) to fallback texture to avoid unwritten descriptor crashes during async streaming
+        for (uint32_t i = 0; i < 1000; ++i) {
+            update_bindless_texture(i, fallback_texture_ptr.get());
+        }
 	}
 
 	bud::print("[Vulkan] RHI Initialized successfully (Clean Architecture).");
@@ -344,21 +396,86 @@ void VulkanRHI::cleanup() {
 	if (dummy_depth_texture.image)
 		vmaDestroyImage(memory_allocator->get_vma_allocator(), dummy_depth_texture.image, dummy_depth_texture.allocation);
 
-	if (fallback_texture_ptr) {
-		resource_pool->release_texture(fallback_texture_ptr);
-		fallback_texture_ptr = nullptr;
-	}
+    if (fallback_texture_ptr) {
+        resource_pool->release_texture_shared(fallback_texture_ptr);
+        fallback_texture_ptr.reset();
+    }
 
-	textures.clear();
-	texture_objects.clear();
+    // Destroy any VulkanTexture instances stored in the RHI maps/containers.
+    // These may hold VMA allocations that must be freed before destroying the allocator.
+    if (memory_allocator) {
+        VmaAllocator alloc = memory_allocator->get_vma_allocator();
+
+        // textures: map<bud::graphics::Texture*, VulkanTexture>
+        for (auto &kv : textures) {
+            VulkanTexture &tex = kv.second;
+
+            for (auto v : tex.layer_views) {
+				if (v)
+					vkDestroyImageView(device, v, nullptr);
+			}
+
+            tex.layer_views.clear();
+            for (auto v : tex.mip_views) {
+				if (v)
+					vkDestroyImageView(device, v, nullptr);
+			}
+
+            tex.mip_views.clear();
+            if (tex.view) {
+				vkDestroyImageView(device, tex.view, nullptr);
+				tex.view = VK_NULL_HANDLE;
+			}
+
+            if (tex.image) {
+                if (alloc) vmaDestroyImage(alloc, tex.image, tex.allocation);
+                tex.image = VK_NULL_HANDLE;
+                tex.allocation = VK_NULL_HANDLE;
+            }
+        }
+        textures.clear();
+
+        // texture_objects: vector<unique_ptr<Texture>>
+        for (auto &up : texture_objects) {
+            if (!up) continue;
+
+            auto *tptr = static_cast<VulkanTexture*>(up.get());
+            if (tptr) {
+                for (auto v : tptr->layer_views) {
+					if (v)
+						vkDestroyImageView(device, v, nullptr);
+				}
+
+                for (auto v : tptr->mip_views) {
+					if (v)
+						vkDestroyImageView(device, v, nullptr);
+				}
+
+                if (tptr->view)
+					vkDestroyImageView(device, tptr->view, nullptr);
+
+                if (tptr->image) {
+                    if (alloc)
+						vmaDestroyImage(alloc, tptr->image, tptr->allocation);
+
+					tptr->image = VK_NULL_HANDLE;
+                    tptr->allocation = VK_NULL_HANDLE;
+                }
+            }
+        }
+
+        texture_objects.clear();
+    } else {
+        // No allocator: still clear containers to avoid dangling pointers
+        textures.clear();
+        texture_objects.clear();
+    }
 
 	descriptor_allocators.clear();
 	if (global_descriptor_pool)
 		vkDestroyDescriptorPool(device, global_descriptor_pool, nullptr);
 	if (global_set_layout)
 		vkDestroyDescriptorSetLayout(device, global_set_layout, nullptr);
-	if (compute_set_layout)
-		vkDestroyDescriptorSetLayout(device, compute_set_layout, nullptr);
 
 	if (pipeline_cache)
 		pipeline_cache->cleanup();
@@ -368,28 +485,66 @@ void VulkanRHI::cleanup() {
 	pipeline_cache.reset();
 	resource_pool.reset();
 
-	if (memory_allocator)
-		memory_allocator->cleanup();
+    // Clear any retained BufferHandles in transient RHI state (compute bindings)
+    if (!current_compute_bindings.empty()) {
+        for (auto &kv : current_compute_bindings) {
+            if (std::holds_alternative<bud::graphics::BufferHandle>(kv.second)) {
+                auto &bh = std::get<bud::graphics::BufferHandle>(kv.second);
+                if (bh.owner)
+					bh.owner.reset();
 
-	memory_allocator.reset();
+                bh.internal_state = nullptr;
+            }
+            // ImageBinding / UBOBinding do not own BufferHandle owners here
+        }
+        current_compute_bindings.clear();
+    }
 
-	for (auto semaphore : render_finished_semaphores)
-		vkDestroySemaphore(device, semaphore, nullptr);
+    // Destroy per-frame uniform buffers before tearing down the allocator.
+    for (auto semaphore : render_finished_semaphores)
+        vkDestroySemaphore(device, semaphore, nullptr);
 
-	for (int i = 0; i < max_frames_in_flight; i++) {
-		if (frames[i].uniform_mapped)
-			vkUnmapMemory(device, frames[i].uniform_memory);
-		if (frames[i].uniform_buffer)
-			vkDestroyBuffer(device, frames[i].uniform_buffer, nullptr);
-		if (frames[i].uniform_memory)
-			vkFreeMemory(device, frames[i].uniform_memory, nullptr);
-		if (frames[i].image_available_semaphore)
-			vkDestroySemaphore(device, frames[i].image_available_semaphore, nullptr);
-		if (frames[i].in_flight_fence)
-			vkDestroyFence(device, frames[i].in_flight_fence, nullptr);
-		if (frames[i].main_command_pool)
-			vkDestroyCommandPool(device, frames[i].main_command_pool, nullptr);
-	}
+    for (int i = 0; i < max_frames_in_flight; i++) {
+        if (memory_allocator) {
+            VmaAllocator alloc = memory_allocator->get_vma_allocator();
+            if (frames[i].uniform_allocation != VK_NULL_HANDLE) {
+                // Allocations were created with VMA_ALLOCATION_CREATE_MAPPED_BIT (persistently mapped).
+                // Do NOT call vmaUnmapMemory here because the mapping was automatic (0-th mapping).
+                // Unmapping an allocation not previously explicitly mapped triggers VMA assertion.
+                if (frames[i].uniform_buffer) vmaDestroyBuffer(alloc, frames[i].uniform_buffer, frames[i].uniform_allocation);
+                frames[i].uniform_buffer = VK_NULL_HANDLE;
+                frames[i].uniform_allocation = VK_NULL_HANDLE;
+                frames[i].uniform_alloc_info = {};
+                frames[i].uniform_mapped = nullptr;
+            } else {
+                // fallback to old path if allocation not created with VMA
+                // We only need to destroy the buffer; older raw device memory is not tracked here.
+                if (frames[i].uniform_buffer)
+                    vkDestroyBuffer(device, frames[i].uniform_buffer, nullptr);
+                frames[i].uniform_buffer = VK_NULL_HANDLE;
+                frames[i].uniform_mapped = nullptr;
+            }
+        } else {
+            if (frames[i].uniform_buffer)
+                vkDestroyBuffer(device, frames[i].uniform_buffer, nullptr);
+            frames[i].uniform_buffer = VK_NULL_HANDLE;
+            frames[i].uniform_mapped = nullptr;
+        }
+
+        if (frames[i].image_available_semaphore)
+            vkDestroySemaphore(device, frames[i].image_available_semaphore, nullptr);
+
+        if (frames[i].in_flight_fence)
+            vkDestroyFence(device, frames[i].in_flight_fence, nullptr);
+
+        if (frames[i].main_command_pool)
+            vkDestroyCommandPool(device, frames[i].main_command_pool, nullptr);
+    }
+
+    if (memory_allocator)
+        memory_allocator->cleanup();
+
+    memory_allocator.reset();
 
 	// Swapchain
 	for (auto imageView : swapchain_image_views)
@@ -402,24 +557,44 @@ void VulkanRHI::cleanup() {
 		vkDestroyPipelineLayout(device, layout, nullptr);
 	}
 	created_layouts.clear();
+	if (compute_hiz_cull_set_layout) vkDestroyDescriptorSetLayout(device, compute_hiz_cull_set_layout, nullptr);
+	if (compute_hiz_mip_set_layout) vkDestroyDescriptorSetLayout(device, compute_hiz_mip_set_layout, nullptr);
+	if (compute_ml_identity_set_layout) vkDestroyDescriptorSetLayout(device, compute_ml_identity_set_layout, nullptr);
+	if (compute_heuristic_occluder_set_layout) vkDestroyDescriptorSetLayout(device, compute_heuristic_occluder_set_layout, nullptr);
+	if (compute_meshlet_frustum_set_layout) vkDestroyDescriptorSetLayout(device, compute_meshlet_frustum_set_layout, nullptr);
+	if (compute_meshlet_indirect_set_layout) vkDestroyDescriptorSetLayout(device, compute_meshlet_indirect_set_layout, nullptr);
+	if (compute_meshlet_hiz_set_layout) vkDestroyDescriptorSetLayout(device, compute_meshlet_hiz_set_layout, nullptr);
+	compute_hiz_cull_set_layout = VK_NULL_HANDLE;
+	compute_hiz_mip_set_layout = VK_NULL_HANDLE;
+	compute_ml_identity_set_layout = VK_NULL_HANDLE;
+	compute_heuristic_occluder_set_layout = VK_NULL_HANDLE;
+	compute_meshlet_frustum_set_layout = VK_NULL_HANDLE;
+	compute_meshlet_indirect_set_layout = VK_NULL_HANDLE;
+	compute_meshlet_hiz_set_layout = VK_NULL_HANDLE;
 
 	// Device & Instance
 	if (shadow_sampler)
 		vkDestroySampler(device, shadow_sampler, nullptr);
+
 	if (default_sampler)
 		vkDestroySampler(device, default_sampler, nullptr);
+
 	if (device)
 		vkDestroyDevice(device, nullptr);
+
 	if (enable_validation_layers && debug_messenger)
 		destroy_debug_utils_messenger_ext(instance, debug_messenger, nullptr);
+
 	if (surface)
 		vkDestroySurfaceKHR(instance, surface, nullptr);
+
 	if (instance)
 		vkDestroyInstance(instance, nullptr);
 }
 
 void VulkanRHI::wait_idle() {
-	if (device) vkDeviceWaitIdle(device);
+	if (device)
+		vkDeviceWaitIdle(device);
 }
 
 
@@ -442,6 +617,8 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
 	}
 	if (usage_state == bud::graphics::ResourceState::UnorderedAccess) {
 		buffer_info.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+		// Page pool / general-purpose buffers may be bound as vertex+index buffers too.
+		buffer_info.usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 	}
 	if (usage_state == bud::graphics::ResourceState::ShaderResource) {
 		buffer_info.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -450,19 +627,27 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
 	VmaAllocationCreateInfo alloc_info = {};
 	alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
 	
-	// For UAV/TransferSrc buffers (like our stats counter), ensure host access so we can map it for readback.
-	if (usage_state == bud::graphics::ResourceState::UnorderedAccess || (buffer_info.usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+	// For UAV/TransferSrc/IndirectArgument buffers (like our stats counter), ensure host access so we can map it for readback.
+	if (usage_state == bud::graphics::ResourceState::UnorderedAccess 
+        || usage_state == bud::graphics::ResourceState::IndirectArgument
+        || (buffer_info.usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
 		alloc_info.flags |= VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
 		alloc_info.requiredFlags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 	}
 
-    auto* vk_buf = new bud::graphics::vulkan::VulkanBuffer();
+    auto sp = std::make_shared<bud::graphics::vulkan::VulkanBuffer>();
+    auto* vk_buf = sp.get();
     auto vma_allocator = get_memory_allocator()->get_vma_allocator();
+    auto* mem_alloc = dynamic_cast<bud::graphics::vulkan::VulkanMemoryAllocator*>(get_allocator());
+    if (mem_alloc) {
+#ifdef BUD_VMA_TRACKING
+        mem_alloc->register_allocation_buffer(vk_buf);
+#endif
+    }
 
     VmaAllocationInfo alloc_result_info;
     VkResult create_result = vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info);
     if (create_result != VK_SUCCESS) {
-        delete vk_buf;
         std::string err = std::format("VulkanRHI::create_gpu_buffer vmaCreateBuffer failed: size={} usage={} result={}", size, (int)buffer_info.usage, (int)create_result);
         bud::eprint("{}", err);
 #if defined(_DEBUG)
@@ -471,11 +656,17 @@ bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::gra
         return {};
 #endif
     }
+
     vk_buf->mapped_ptr = alloc_result_info.pMappedData;
     vk_buf->size = size;
     vk_buf->owns_allocation = true;
+    vk_buf->allocator = vma_allocator;
+    vk_buf->owning_allocator = mem_alloc;
+    // Owner deleter will destroy VMA allocation when vk_buf->owns_allocation is true.
     bud::graphics::BufferHandle handle;
     handle.internal_state = vk_buf;
+    // transfer shared ownership of wrapper to handle so RAII destructor runs
+    handle.owner = std::static_pointer_cast<void>(sp);
     handle.size = size;
     handle.mapped_ptr = vk_buf->mapped_ptr;
     return handle;
@@ -496,13 +687,12 @@ void VulkanRHI::destroy_buffer(bud::graphics::BufferHandle block) {
         memory_allocator->defer_free(block, current_frame);
     } else {
         // Fallback: immediate destroy if no allocator
-        auto* vk_buf = static_cast<bud::graphics::vulkan::VulkanBuffer*>(block.internal_state);
+        auto* vk_buf = block.internal_state ? reinterpret_cast<bud::graphics::vulkan::VulkanBuffer*>(block.internal_state) : nullptr;
         if (vk_buf) {
-            auto vma_allocator = get_memory_allocator() ? get_memory_allocator()->get_vma_allocator() : VK_NULL_HANDLE;
-            if (vk_buf->owns_allocation && vma_allocator && vk_buf->buffer) {
-                vmaDestroyBuffer(vma_allocator, vk_buf->buffer, vk_buf->allocation);
-            }
-            delete vk_buf;
+            // Let the owner deleter perform actual VMA destruction. Reset owner to
+            // invoke the deleter immediately in the fallback path.
+            block.owner.reset();
+            block.internal_state = nullptr;
         }
     }
 }
@@ -696,6 +886,17 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 
 	created_layouts.push_back(pipelineLayout);
 
+	// Attach a human-readable debug name to the pipeline so tools like Nsight
+	// and RenderDoc can show something meaningful even when command-buffer
+	// labels are missing (e.g. GPU-driven paths). Use shader module pointers
+	// for a compact but stable identifier.
+    try {
+        std::string dbg = std::format("GraphicsPipeline_vs={}_fs={}", (void*)vertModule, (void*)fragModule);
+        set_object_debug_name(reinterpret_cast<uint64_t>(pipeline), ObjectType::Pipeline, dbg);
+    } catch (...) {
+        // best-effort; don't fail pipeline creation on debug naming issues
+    }
+
 	return pipeObj;
 }
 
@@ -716,10 +917,42 @@ void* VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& desc) {
 	push_constant.size = 256; 
 	push_constant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+	VkDescriptorSetLayout chosen_layout = VK_NULL_HANDLE;
+	switch (desc.layout_kind) {
+	case ComputePipelineDesc::LayoutKind::HiZCulling:
+		chosen_layout = compute_hiz_cull_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::HiZMip:
+		chosen_layout = compute_hiz_mip_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::MlIdentity:
+		chosen_layout = compute_ml_identity_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::HeuristicOccluder:
+		chosen_layout = compute_heuristic_occluder_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::MeshletFrustum:
+		chosen_layout = compute_meshlet_frustum_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::MeshletIndirect:
+		chosen_layout = compute_meshlet_indirect_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::MeshletHiZ:
+		chosen_layout = compute_meshlet_hiz_set_layout;
+		break;
+	default:
+		chosen_layout = compute_hiz_cull_set_layout;
+		break;
+	}
+
+	if (!chosen_layout) {
+		throw std::runtime_error("failed to select compute descriptor set layout!");
+	}
+
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 
-	std::vector<VkDescriptorSetLayout> setLayouts = { compute_set_layout };
+	std::vector<VkDescriptorSetLayout> setLayouts = { chosen_layout };
 	pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
 	pipelineLayoutInfo.pSetLayouts = setLayouts.data();
 	pipelineLayoutInfo.pushConstantRangeCount = 1;
@@ -741,7 +974,27 @@ void* VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& desc) {
     vkDestroyShaderModule(device, computeModule, nullptr);
 
 	VulkanPipelineObject* pipeObj = new VulkanPipelineObject{ pipeline, pipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE };
+	pipeObj->compute_layout_kind = desc.layout_kind;
 	created_layouts.push_back(pipelineLayout);
+
+	// Name compute pipeline for external debuggers (Nsight/RenderDoc) so that
+	// GPU-driven dispatches still show meaningful identifiers.
+	try {
+		auto layout_kind_to_string = [](ComputePipelineDesc::LayoutKind k) {
+			switch (k) {
+			case ComputePipelineDesc::LayoutKind::HiZCulling: return "HiZCulling";
+			case ComputePipelineDesc::LayoutKind::HiZMip: return "HiZMip";
+			case ComputePipelineDesc::LayoutKind::MlIdentity: return "MlIdentity";
+			case ComputePipelineDesc::LayoutKind::HeuristicOccluder: return "HeuristicOccluder";
+			case ComputePipelineDesc::LayoutKind::MeshletFrustum: return "MeshletFrustum";
+			case ComputePipelineDesc::LayoutKind::MeshletIndirect: return "MeshletIndirect";
+			case ComputePipelineDesc::LayoutKind::MeshletHiZ: return "MeshletHiZ";
+			default: return "Compute";
+			}
+		};
+		std::string dbg = std::format("ComputePipeline_{}", layout_kind_to_string(desc.layout_kind));
+		set_object_debug_name(reinterpret_cast<uint64_t>(pipeline), ObjectType::Pipeline, dbg);
+	} catch (...) {}
 
 	return pipeObj;
 }
@@ -749,6 +1002,33 @@ void* VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& desc) {
 void VulkanRHI::cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group_y, uint32_t group_z) {
 	if (current_compute_pipeline) {
 		auto pipeObj = static_cast<VulkanPipelineObject*>(current_compute_pipeline);
+		auto descriptor_type_for_binding = [&](uint32_t binding) -> VkDescriptorType {
+			switch (pipeObj->compute_layout_kind) {
+			case ComputePipelineDesc::LayoutKind::HiZCulling:
+				if (binding == 3) return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				if (binding == 4) return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				if (binding == 5) return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			case ComputePipelineDesc::LayoutKind::HiZMip:
+				if (binding == 3) return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				if (binding == 5) return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			case ComputePipelineDesc::LayoutKind::MlIdentity:
+			case ComputePipelineDesc::LayoutKind::HeuristicOccluder:
+			case ComputePipelineDesc::LayoutKind::MeshletIndirect:
+				if (binding == 4) return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			case ComputePipelineDesc::LayoutKind::MeshletFrustum:
+				if (binding == 7) return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			case ComputePipelineDesc::LayoutKind::MeshletHiZ:
+				if (binding == 5) return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				if (binding == 9) return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			default:
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			}
+		};
 		
 		if (fpCmdPushDescriptorSetKHR && !current_compute_bindings.empty()) {
 			std::vector<VkWriteDescriptorSet> writes;
@@ -777,7 +1057,7 @@ void VulkanRHI::cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group
 					info.range = buffer_handle.size;
 					buffer_infos.push_back(info);
 					
-					write.descriptorType = (binding == 4) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					write.descriptorType = descriptor_type_for_binding(binding);
 					write.pBufferInfo = &buffer_infos.back();
 				} else if (std::holds_alternative<ImageBinding>(res)) {
 					auto& image_binding = std::get<ImageBinding>(res);
@@ -926,6 +1206,24 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	current_frame = (current_frame + 1) % max_frames_in_flight;
 }
 
+
+uint32_t VulkanRHI::get_width() const {
+	if (headless_mode) {
+		int w, h;
+		platform_window->get_size(w, h);
+		return static_cast<uint32_t>(w);
+	}
+	return swapchain_extent.width;
+}
+
+uint32_t VulkanRHI::get_height() const {
+	if (headless_mode) {
+		int w, h;
+		platform_window->get_size(w, h);
+		return static_cast<uint32_t>(h);
+	}
+	return swapchain_extent.height;
+}
 
 void VulkanRHI::resize_swapchain(uint32_t width, uint32_t height) {
 	if (!device || !platform_window)
@@ -1109,8 +1407,27 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle 
 	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 
-	auto* vk_buf = static_cast<bud::graphics::vulkan::VulkanBuffer*>(buffer.internal_state);
-	barrier.buffer = vk_buf->buffer;
+    if (!buffer.is_valid()) {
+        std::string err = std::format("resource_barrier invalid BufferHandle: valid={} offset={} size={}", buffer.is_valid(), buffer.offset, buffer.size);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
+
+    auto* vk_buf = buffer.internal_state ? reinterpret_cast<bud::graphics::vulkan::VulkanBuffer*>(buffer.internal_state) : nullptr;
+    if (!vk_buf) {
+        std::string err = std::format("resource_barrier null internal VulkanBuffer: vk_buf={}", (void*)vk_buf);
+        bud::eprint("{}", err);
+#if defined(_DEBUG)
+        throw std::runtime_error(err);
+#else
+        return;
+#endif
+    }
+    barrier.buffer = vk_buf->buffer;
 	barrier.offset = 0;
 	barrier.size = VK_WHOLE_SIZE;
 
@@ -1124,6 +1441,10 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle 
 
 void VulkanRHI::cmd_bind_pipeline(CommandHandle cmd, void* pipeline) {
 	auto pipeObj = static_cast<VulkanPipelineObject*>(pipeline);
+	if (!pipeObj || !pipeObj->pipeline) {
+		bud::eprint("cmd_bind_pipeline called with invalid pipeline object");
+		return;
+	}
 	if (pipeObj->bind_point == VK_PIPELINE_BIND_POINT_COMPUTE) {
 		current_compute_pipeline = pipeObj;
 		current_compute_bindings.clear();
@@ -1142,7 +1463,7 @@ void VulkanRHI::cmd_bind_vertex_buffer(CommandHandle cmd, bud::graphics::BufferH
         return;
 #endif
     }
-    auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
+    auto* vk_buf = buffer.internal_state ? reinterpret_cast<VulkanBuffer*>(buffer.internal_state) : nullptr;
     if (!vk_buf || !vk_buf->buffer) {
         std::string err = std::format("cmd_bind_vertex_buffer null internal VulkanBuffer or VkBuffer: vk_buf={} vk_buffer={}", (void*)vk_buf, vk_buf ? (void*)vk_buf->buffer : nullptr);
         bud::eprint("{}", err);
@@ -1215,11 +1536,15 @@ void VulkanRHI::cmd_draw_indexed_indirect(CommandHandle cmd, bud::graphics::Buff
     }
     auto* vk_buf = static_cast<bud::graphics::vulkan::VulkanBuffer*>(buffer.internal_state);
 	vkCmdDrawIndexedIndirect(static_cast<VkCommandBuffer>(cmd), vk_buf->buffer, offset, draw_count, stride);
-	current_stats.draw_calls += draw_count; 
+	current_stats.draw_calls += 1; 
 }
 
 void VulkanRHI::cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) {
 	auto pipeObj = static_cast<VulkanPipelineObject*>(pipeline_layout);
+	if (!pipeObj || !pipeObj->layout) {
+		bud::eprint("cmd_push_constants called with invalid pipeline layout");
+		return;
+	}
 	VkShaderStageFlags stage = (pipeObj->bind_point == VK_PIPELINE_BIND_POINT_COMPUTE) 
 		? VK_SHADER_STAGE_COMPUTE_BIT 
 		: (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -1246,6 +1571,10 @@ void VulkanRHI::cmd_set_depth_bias(CommandHandle cmd, float constant, float clam
 
 void VulkanRHI::cmd_bind_descriptor_set(CommandHandle cmd, void* pipeline, uint32_t set_index) {
 	auto pipeObj = static_cast<VulkanPipelineObject*>(pipeline);
+	if (!pipeObj || !pipeObj->layout) {
+		bud::eprint("cmd_bind_descriptor_set called with invalid pipeline object");
+		return;
+	}
 	auto& frame = frames[current_frame];
 
 	vkCmdBindDescriptorSets(
@@ -1325,9 +1654,19 @@ void VulkanRHI::load_model_async(const std::string& filepath) {}
 
 void VulkanRHI::create_instance(VkInstance& vk_instance, bool enable_validation) {
 	enable_validation_layers = enable_validation;
-	VkApplicationInfo app_info{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
-	app_info.pApplicationName = "Bud Engine";
-	app_info.apiVersion = VK_API_VERSION_1_3;
+    VkApplicationInfo app_info{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
+    app_info.pApplicationName = "Bud Engine";
+
+    // Query loader/instance supported version and pick highest supported up to 1.4
+    uint32_t loader_instance_version = VK_API_VERSION_1_1;
+    if (vkEnumerateInstanceVersion(&loader_instance_version) != VK_SUCCESS) {
+        // If not supported, assume 1.1
+        loader_instance_version = VK_API_VERSION_1_1;
+    }
+    uint32_t requested = VK_API_VERSION_1_4;
+    instance_api_version = std::min(loader_instance_version, requested);
+    app_info.apiVersion = instance_api_version;
+    bud::print("[Vulkan] Instance target API version set to {}.{}.{}", VK_VERSION_MAJOR(instance_api_version), VK_VERSION_MINOR(instance_api_version), VK_VERSION_PATCH(instance_api_version));
 
 	VkInstanceCreateInfo create_info{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
 	create_info.pApplicationInfo = &app_info;
@@ -1338,7 +1677,9 @@ void VulkanRHI::create_instance(VkInstance& vk_instance, bool enable_validation)
     if (extensions && count > 0) {
         exts.assign(extensions, extensions + count);
     }
-	if (enable_validation) exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+	// Keep debug utils enabled so Nsight / RenderDoc can see object names and
+	// command buffer labels even when validation layers are disabled.
+	exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 	exts.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 
 	create_info.enabledExtensionCount = static_cast<uint32_t>(exts.size());
@@ -1368,13 +1709,20 @@ void VulkanRHI::pick_physical_device() {
 		vkGetPhysicalDeviceProperties(dev, &props);
 		if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
 			physical_device = dev;
-			bud::print("[Vulkan] Selected Discrete GPU: {}", props.deviceName);
+            bud::print("[Vulkan] Selected Discrete GPU: {}", props.deviceName);
+            // Record device API version (capability). Clamp to 1.4 maximum target.
+            device_api_version = std::min(props.apiVersion, VK_API_VERSION_1_4);
+            bud::print("[Vulkan] Physical device API version: {}.{}.{}", VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion));
 			break;
 		}
 	}
 	if (physical_device == nullptr) {
 		physical_device = devices[0];
-		bud::print("[Vulkan] Warning: Using Integrated/Fallback GPU.");
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(physical_device, &props);
+        device_api_version = std::min(props.apiVersion, VK_API_VERSION_1_4);
+        bud::print("[Vulkan] Warning: Using Integrated/Fallback GPU.");
+        bud::print("[Vulkan] Physical device API version: {}.{}.{}", VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion));
 	}
 }
 
@@ -1391,28 +1739,53 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 		queue_infos.push_back(info);
 	}
 
-	VkPhysicalDeviceVulkan13Features features13{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
-	features13.pNext = nullptr;
-	features13.dynamicRendering = VK_TRUE;
-	features13.synchronization2 = VK_TRUE;
+    // Build feature chain depending on device API version support (fallback to 1.1..1.4)
+    VkPhysicalDeviceVulkan13Features features13{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+    features13.pNext = nullptr;
+    features13.dynamicRendering = VK_FALSE;
+    features13.synchronization2 = VK_FALSE;
 
-	VkPhysicalDeviceVulkan12Features features12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
-	features12.pNext = &features13;
-	features12.descriptorBindingPartiallyBound = VK_TRUE;
-	features12.runtimeDescriptorArray = VK_TRUE;
-	features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
-	features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
-	features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
-	features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    VkPhysicalDeviceVulkan12Features features12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    features12.pNext = nullptr;
+    features12.descriptorBindingPartiallyBound = VK_FALSE;
+    features12.runtimeDescriptorArray = VK_FALSE;
+    features12.descriptorBindingSampledImageUpdateAfterBind = VK_FALSE;
+    features12.descriptorBindingUniformBufferUpdateAfterBind = VK_FALSE;
+    features12.descriptorBindingStorageBufferUpdateAfterBind = VK_FALSE;
+    features12.shaderSampledImageArrayNonUniformIndexing = VK_FALSE;
 
-	VkPhysicalDeviceVulkan11Features features11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
-	features11.pNext = &features12;
+    VkPhysicalDeviceVulkan11Features features11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
+    features11.pNext = nullptr;
 
-	// 使用 VkPhysicalDeviceFeatures2 整合所有 Features
-	VkPhysicalDeviceFeatures2 device_features2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
-	device_features2.pNext = &features11;
-	device_features2.features.samplerAnisotropy = VK_TRUE;
-	device_features2.features.multiDrawIndirect = VK_TRUE;
+    // 使用 VkPhysicalDeviceFeatures2 整合所有 Features
+    VkPhysicalDeviceFeatures2 device_features2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    device_features2.pNext = nullptr;
+    device_features2.features.samplerAnisotropy = VK_TRUE;
+    device_features2.features.multiDrawIndirect = VK_TRUE;
+
+    // Chain feature structs according to supported device_api_version
+    if (device_api_version >= VK_API_VERSION_1_3) {
+        features13.dynamicRendering = VK_TRUE;
+        features13.synchronization2 = VK_TRUE;
+        features12.pNext = &features13;
+        features11.pNext = &features12;
+        device_features2.pNext = &features11;
+    } else if (device_api_version >= VK_API_VERSION_1_2) {
+        features12.descriptorBindingPartiallyBound = VK_TRUE;
+        features12.runtimeDescriptorArray = VK_TRUE;
+        features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+        features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+        features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+        features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        features11.pNext = &features12;
+        device_features2.pNext = &features11;
+    } else if (device_api_version >= VK_API_VERSION_1_1) {
+        // Only 1.1 features available, chain features11 only
+        device_features2.pNext = &features11;
+    } else {
+        // No extended feature structs
+        device_features2.pNext = nullptr;
+    }
 
 #ifdef BUD_ENABLE_AFTERMATH
 	// Enable NV_device_diagnostic_checkpoints extension to be able to
@@ -1779,6 +2152,13 @@ void VulkanRHI::destroy_debug_utils_messenger_ext(VkInstance instance, VkDebugUt
 }
 
 void VulkanRHI::setup_debug_messenger(bool enable) {
+	// Always load the debug-utils entry points so object names / labels work in
+	// capture tools even when validation layers are off. Only create the actual
+	// messenger when validation is enabled.
+	fpCmdBeginDebugUtilsLabelEXT = (PFN_vkCmdBeginDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdBeginDebugUtilsLabelEXT");
+	fpCmdEndDebugUtilsLabelEXT = (PFN_vkCmdEndDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdEndDebugUtilsLabelEXT");
+	fpSetDebugUtilsObjectNameEXT = (PFN_vkSetDebugUtilsObjectNameEXT)vkGetInstanceProcAddr(instance, "vkSetDebugUtilsObjectNameEXT");
+
 	if (!enable) return;
 	VkDebugUtilsMessengerCreateInfoEXT create_info{ VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT };
 	create_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
@@ -1789,11 +2169,6 @@ void VulkanRHI::setup_debug_messenger(bool enable) {
 		throw std::runtime_error("Failed to set up debug messenger!");
 	}
 
-	if (enable) {
-		fpCmdBeginDebugUtilsLabelEXT = (PFN_vkCmdBeginDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdBeginDebugUtilsLabelEXT");
-		fpCmdEndDebugUtilsLabelEXT = (PFN_vkCmdEndDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdEndDebugUtilsLabelEXT");
-		fpSetDebugUtilsObjectNameEXT = (PFN_vkSetDebugUtilsObjectNameEXT)vkGetInstanceProcAddr(instance, "vkSetDebugUtilsObjectNameEXT");
-	}
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanRHI::debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData) {
@@ -2047,6 +2422,39 @@ void VulkanRHI::cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandl
 	vkCmdUpdateBuffer(static_cast<VkCommandBuffer>(cmd), vk_dst->buffer, offset, size, data);
 }
 
+void VulkanRHI::cmd_copy_image_to_buffer(CommandHandle cmd, bud::graphics::Texture* src, bud::graphics::BufferHandle dst) {
+    if (!src || !dst.is_valid()) return;
+
+    auto* vk_src = static_cast<VulkanTexture*>(src);
+    auto* vk_dst = static_cast<VulkanBuffer*>(dst.internal_state);
+
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+
+    region.imageOffset = { 0, 0, 0 };
+    region.imageExtent = {
+        src->width,
+        src->height,
+        1
+    };
+
+    vkCmdCopyImageToBuffer(
+        static_cast<VkCommandBuffer>(cmd),
+        vk_src->image,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        vk_dst->buffer,
+        1,
+        &region
+    );
+}
+
 bud::graphics::BufferHandle VulkanRHI::create_upload_buffer(uint64_t size) {
     // Prefer allocating staging memory from the unified allocator (ring staging). Falls back inside allocator if needed.
     if (memory_allocator) {
@@ -2063,18 +2471,37 @@ bud::graphics::BufferHandle VulkanRHI::create_upload_buffer(uint64_t size) {
     alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
     alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
-    auto* vk_buf = new bud::graphics::vulkan::VulkanBuffer();
+    auto sp = std::make_shared<bud::graphics::vulkan::VulkanBuffer>();
+    auto* vk_buf = sp.get();
     auto vma_allocator = get_memory_allocator()->get_vma_allocator();
+    // If the global VulkanMemoryAllocator is present, register this wrapper so
+    // the allocator can forcibly clean it up on shutdown if leaked.
+    auto* mem_alloc = dynamic_cast<bud::graphics::vulkan::VulkanMemoryAllocator*>(get_allocator());
+    if (mem_alloc) {
+#ifdef BUD_VMA_TRACKING
+        mem_alloc->register_allocation_buffer(vk_buf);
+#endif
+    }
 
     VkResult create_result = vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &vk_buf->alloc_info);
     if (create_result != VK_SUCCESS) {
         delete vk_buf;
         throw std::runtime_error("Failed to create Upload buffer via VMA!");
     }
-
     bud::graphics::BufferHandle handle;
     vk_buf->owns_allocation = true;
     handle.internal_state = vk_buf;
+    // Capture mem_alloc to unregister on deletion if registered above.
+    handle.owner = std::shared_ptr<void>(vk_buf, [mem_alloc, alloc = vma_allocator](void* p) {
+        auto* b = static_cast<bud::graphics::vulkan::VulkanBuffer*>(p);
+        if (mem_alloc) {
+            mem_alloc->unregister_allocation_buffer(b);
+        }
+        if (b->owns_allocation && alloc && b->buffer != VK_NULL_HANDLE && b->allocation != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(alloc, b->buffer, b->allocation);
+        }
+        delete b;
+    });
     handle.offset = 0;
     handle.size = size;
     handle.mapped_ptr = vk_buf->alloc_info.pMappedData;
@@ -2316,15 +2743,37 @@ void VulkanRHI::update_global_instance_data(bud::graphics::BufferHandle buffer) 
 	}
 }
 
+void VulkanRHI::update_global_page_table(bud::graphics::BufferHandle buffer) {
+	if (!buffer.is_valid()) return;
+	auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
+
+	for (int i = 0; i < max_frames_in_flight; i++) {
+		DescriptorWriter writer;
+		writer.write_buffer(4, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+		writer.update_set(device, frames[i].global_descriptor_set);
+	}
+}
+
+void VulkanRHI::update_global_page_pool(bud::graphics::BufferHandle buffer) {
+	if (!buffer.is_valid()) return;
+	auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
+
+	for (int i = 0; i < max_frames_in_flight; i++) {
+		DescriptorWriter writer;
+		writer.write_buffer(5, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+		writer.update_set(device, frames[i].global_descriptor_set);
+	}
+}
+
 bud::graphics::Texture* VulkanRHI::get_fallback_texture() {
-	return fallback_texture_ptr;
+    return fallback_texture_ptr.get();
 }
 
 
 VkVertexInputBindingDescription Vertex::get_binding_description() {
 	VkVertexInputBindingDescription bindingDescription{};
 	bindingDescription.binding = 0;
-	bindingDescription.stride = sizeof(Vertex);
+	bindingDescription.stride = 48; // asset::Vertex layout: pos(12)+normal(12)+uv(8)+tangent(16)
 	bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 	return bindingDescription;
 }
@@ -2336,31 +2785,25 @@ std::vector<VkVertexInputAttributeDescription> attributeDescriptions(4);
 	attributeDescriptions[0].binding = 0;
 	attributeDescriptions[0].location = 0;
 	attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-	attributeDescriptions[0].offset = offsetof(Vertex, pos);
+	attributeDescriptions[0].offset = 0; // asset::Vertex::position
 
-	// Color (Location 1) -> Offset 12 
+	// Normal (Location 1) -> Offset 12
 	attributeDescriptions[1].binding = 0;
 	attributeDescriptions[1].location = 1;
 	attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-	attributeDescriptions[1].offset = offsetof(Vertex, color);
+	attributeDescriptions[1].offset = 12; // asset::Vertex::normal
 
-	// Normal (Location 2) -> Offset 24
+	// UV (Location 2) -> Offset 24
 	attributeDescriptions[2].binding = 0;
 	attributeDescriptions[2].location = 2;
-	attributeDescriptions[2].format = VK_FORMAT_R32G32B32_SFLOAT;
-	attributeDescriptions[2].offset = offsetof(Vertex, normal);
+	attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
+	attributeDescriptions[2].offset = 24; // asset::Vertex::uv
 
-	// UV (Location 3) -> Offset 36
+	// Tangent (Location 3) -> Offset 32
 	attributeDescriptions[3].binding = 0;
 	attributeDescriptions[3].location = 3;
-	attributeDescriptions[3].format = VK_FORMAT_R32G32_SFLOAT;
-	attributeDescriptions[3].offset = offsetof(Vertex, uv);
-
-	// TexIndex (Location 4) -> Offset 44
-	//attributeDescriptions[4].binding = 0;
-	//attributeDescriptions[4].location = 4;
-	//attributeDescriptions[4].format = VK_FORMAT_R32_SFLOAT;
-	//attributeDescriptions[4].offset = offsetof(Vertex, tex_index);
+	attributeDescriptions[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+	attributeDescriptions[3].offset = 32; // asset::Vertex::tangent
 
 	return attributeDescriptions;
 }

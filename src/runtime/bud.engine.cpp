@@ -1,4 +1,4 @@
-﻿#include <string>
+#include <string>
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -34,11 +34,17 @@ namespace bud::engine {
 		logger = std::make_unique<bud::Logger>(virtual_file_system.get()->get_root_path());
 		bud::set_global_logger(logger.get());
 
+		// Inform crash handler of project root so dumps land under <root>/tmp
+		bud::platform::set_crash_dump_root(virtual_file_system.get()->get_root_path().string().c_str());
 		bud::platform::install_crash_handler();
 
-		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height);
+		auto flags = engine_config.is_headless ? bud::platform::WindowFlags::Hidden : bud::platform::WindowFlags::Default;
+		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height, flags);
 
 		task_scheduler = std::make_unique<bud::threading::TaskScheduler>();
+
+		// Input manager for keyboard/mouse action mapping
+		input_manager = std::make_unique<bud::input::InputManager>();
 
 
 
@@ -50,15 +56,13 @@ namespace bud::engine {
 
 		asset_manager = std::make_unique<bud::io::AssetManager>(virtual_file_system.get(), task_scheduler.get());
 
-		// TaskScheduler already injected via logger constructor above.
-
 		rhi = bud::graphics::create_rhi(engine_config.backend);
 
 		auto enable_validation = engine_config.enable_validation;
-#if not defined(BUD_BUILD_DEBUG)
+#if not defined(_DEBUG) && not defined(BUD_BUILD_DEBUG)
 		enable_validation = false;
 #endif
-		rhi->init(window.get(), task_scheduler.get(), enable_validation, engine_config.inflight_frame_count);
+		rhi->init(window.get(), task_scheduler.get(), enable_validation, engine_config.inflight_frame_count, engine_config.is_headless);
 
 		IMGUI_CHECKVERSION();
 		ImGui::CreateContext();
@@ -69,7 +73,7 @@ namespace bud::engine {
 			imgui_ini_path = resolved_imgui_path->string();
 			imgui_io.IniFilename = imgui_ini_path.c_str();
 		} else {
-			imgui_io.IniFilename = nullptr; // Don't save if path is invalid
+			imgui_io.IniFilename = nullptr;
 		}
 
 		imgui_io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -79,9 +83,90 @@ namespace bud::engine {
 		renderer = std::make_unique<bud::graphics::Renderer>(rhi.get(), asset_manager.get(), task_scheduler.get());
 
 		render_scenes.resize(engine_config.inflight_frame_count);
+
+		camera_sequencer = bud::scene::CameraSequencer(asset_manager.get(), virtual_file_system.get());
+
+		camera_sequencer.load_latest();
+
+		// Initialize the main thread as a worker
+		task_scheduler->init_main_thread_worker();
+
+		// Register default action bindings
+		input_manager->bind_key("ToggleDebug", bud::input::Key::F3);
+		input_manager->bind_key("ToggleClusterVis", bud::input::Key::F4);
+		input_manager->bind_key("TogglePause", bud::input::Key::Space);
+		input_manager->bind_key("ToggleRecord", bud::input::Key::F8);
+		input_manager->bind_key("TogglePlayback", bud::input::Key::F9);
+
+		// Occluder adjustment via keyboard +/-
+		input_manager->bind_key("OccluderDecrease", bud::input::Key::Minus);
+		input_manager->bind_key("OccluderIncrease", bud::input::Key::Plus);
+
+		// Register action callbacks (callbacks run on rising edge detected by InputManager::update())
+		input_manager->register_action_callback("ToggleDebug", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				show_debug_stats = !show_debug_stats;
+			}
+		});
+
+            // Adjust heuristic occluder fraction with + / - keys
+		input_manager->register_action_callback("OccluderDecrease", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				auto cfg = renderer->get_config();
+                    cfg.heuristic_occluder_fraction = std::clamp(cfg.heuristic_occluder_fraction - 0.01f, 0.0f, 1.0f);
+				renderer->set_config(cfg);
+			}
+		});
+
+		input_manager->register_action_callback("OccluderIncrease", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				auto cfg = renderer->get_config();
+                    cfg.heuristic_occluder_fraction = std::clamp(cfg.heuristic_occluder_fraction + 0.01f, 0.0f, 1.0f);
+				renderer->set_config(cfg);
+			}
+		});
+
+		input_manager->register_action_callback("ToggleClusterVis", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				auto config = renderer->get_config();
+				config.enable_cluster_visualization = !config.enable_cluster_visualization;
+				renderer->set_config(config);
+			}
+		});
+
+		input_manager->register_action_callback("TogglePause", [this]() {
+			camera_sequencer.toggle_pause();
+		});
+
+		input_manager->register_action_callback("ToggleRecord", [this]() {
+			if (camera_sequencer.get_state() != bud::scene::SequencerState::PLAYING) {
+				if (camera_sequencer.get_state() == bud::scene::SequencerState::RECORDING) {
+					camera_sequencer.stop_recording();
+				} else {
+					camera_sequencer.start_recording(scene.main_camera);
+				}
+			}
+		});
+
+		input_manager->register_action_callback("TogglePlayback", [this]() {
+			bool is_ctrl_down = input_manager->is_key_down(bud::input::Key::LCtrl);
+			if (camera_sequencer.get_state() == bud::scene::SequencerState::PLAYING) {
+				camera_sequencer.stop_playback();
+			} else {
+				const bool loop = is_ctrl_down;
+				camera_sequencer.start_playback(loop);
+			}
+		});
 	}
 
 	BudEngine::~BudEngine() {
+		camera_sequencer.flush();
+
+		if (task_scheduler) {
+			task_scheduler->wait_for_counter(render_task_counter);
+			task_scheduler->pump_main_thread_tasks();
+		}
+
 		asset_manager.reset();
 		renderer.reset();
 
@@ -95,9 +180,6 @@ namespace bud::engine {
 	}
 
 	void BudEngine::run(GameLogic perform_game_logic) {
-		// Initialize the main thread as a worker
-		task_scheduler->init_main_thread_worker();
-
 		const double fixed_dt = renderer->get_config().fixed_logic_timestep;
 
 		using Clock = std::chrono::high_resolution_clock;
@@ -118,13 +200,14 @@ namespace bud::engine {
 
 			accumulator += frame_time;
 
-			// 阶段 A: 逻辑更新
+			// 逻辑更新
 			bool logic_updated = false;
 			while (accumulator >= fixed_dt) {
 				if (perform_game_logic) {
 					bud::threading::Counter logic_counter;
 					task_scheduler->spawn("GameLogic", [&]() {
 						perform_game_logic((float)fixed_dt);
+						camera_sequencer.update((float)fixed_dt, scene.main_camera);
 					}, &logic_counter);
 					task_scheduler->wait_for_counter(logic_counter);
 				}
@@ -144,7 +227,7 @@ namespace bud::engine {
 				last_committed_index.store(current_write_index, std::memory_order_release);
 			}
 
-			// 阶段 B: 渲染
+			// 渲染
 			uint32_t render_idx = last_committed_index.load(std::memory_order_acquire);
 
 			perform_rendering((float)frame_time, render_idx);
@@ -152,29 +235,52 @@ namespace bud::engine {
 			FrameMark;
 		}
 
-		// 等待所有渲染任务完成
 		task_scheduler->wait_for_counter(render_task_counter);
 		rhi->wait_idle();
+	}
+
+	void BudEngine::step(float fixed_dt, GameLogic perform_game_logic) {
+		task_scheduler->pump_main_thread_tasks();
+		handle_events();
+
+		// Update logic once
+		if (perform_game_logic) {
+			bud::threading::Counter logic_counter;
+			task_scheduler->spawn("GameLogic_Step", [&]() {
+				perform_game_logic((float)fixed_dt);
+				camera_sequencer.update((float)fixed_dt, scene.main_camera);
+			}, &logic_counter);
+			task_scheduler->wait_for_counter(logic_counter);
+		}
+
+		// Stage Render Data
+		uint32_t current_write_index = render_inflight_index.load(std::memory_order_acquire);
+		uint32_t next_write_index = (current_write_index + 1) % render_scenes.size();
+		if (next_write_index == render_inflight_index.load(std::memory_order_acquire)) {
+			task_scheduler->wait_for_counter(render_task_counter);
+		}
+
+		current_write_index = next_write_index;
+		prepare_render_scene(current_write_index);
+		last_committed_index.store(current_write_index, std::memory_order_release);
+
+		// Render Frame immediately inline for step() determinism
+		uint32_t render_idx = last_committed_index.load(std::memory_order_acquire);
+		perform_rendering(fixed_dt, render_idx);
+
+		if (engine_config.is_puppet_mode) {
+			task_scheduler->wait_for_counter(render_task_counter);
+			rhi->wait_idle(); // Guarantee pixel copy is mapped to RAM
+		}
 	}
 
 	void BudEngine::handle_events() {
 		window->poll_events();
 
-		static bool was_f3_down = false;
-		bool is_f3_down = bud::input::Input::get().is_key_down(bud::input::Key::F3);
-		if (is_f3_down && !was_f3_down) {
-			show_debug_stats = !show_debug_stats;
-		}
-		was_f3_down = is_f3_down;
+		// Update input manager (sample current frame keys/mouse)
+		if (input_manager) input_manager->update();
 
-		static bool was_f4_down = false;
-		bool is_f4_down = bud::input::Input::get().is_key_down(bud::input::Key::F4);
-		if (is_f4_down && !was_f4_down) {
-			auto config = renderer->get_config();
-			config.enable_cluster_visualization = !config.enable_cluster_visualization;
-			renderer->set_config(config);
-		}
-		was_f4_down = is_f4_down;
+    	// input actions handled via InputManager callbacks registered in the constructor
 
 		int width = 0;
 		int height = 0;
@@ -304,21 +410,46 @@ namespace bud::engine {
 
 		render_inflight_index.store(render_scene_index, std::memory_order_release);
 
-		ImGui_ImplSDL3_NewFrame();
-		ImGui::NewFrame();
+        if (!engine_config.is_puppet_mode) {
+            ImGui_ImplSDL3_NewFrame();
+            ImGui::NewFrame();
 
-		if (show_debug_stats) {
-			auto stats = rhi->get_stats();
-			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
-			ImGui::SetNextWindowBgAlpha(0.35f);
-			if (ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
-				bud::ui::StatsUI::render(stats, view_snapshot.delta_time);
-			}
-			ImGui::End();
-		}
+            auto stats = rhi->get_stats();
+            const auto seq_state = camera_sequencer.get_state();
+            const auto keyframe_count = camera_sequencer.get_keyframe_count();
+            const auto playback_index = camera_sequencer.get_playback_index();
+            const bool is_paused = camera_sequencer.is_paused();
+            const bool is_looping = camera_sequencer.is_looping();
+            // Provide occluder fraction setter to the stats UI so user can adjust at runtime
+            auto set_occluder = [this](float v) {
+                auto cfg = renderer->get_config();
+                cfg.heuristic_occluder_fraction = v;
+                renderer->set_config(cfg);
+            };
+            float current_occluder = renderer->get_config().heuristic_occluder_fraction;
+            auto set_occluder_enable = [this](bool v) {
+                auto cfg = renderer->get_config();
+                cfg.heuristic_occluder_enable = v;
+                renderer->set_config(cfg);
+            };
+            bool current_occluder_enable = renderer->get_config().heuristic_occluder_enable;
+			auto set_meshlet_rendering_enable = [this](bool v) {
+				renderer->request_meshlet_rendering_enabled(v);
+			};
+			bool current_meshlet_rendering_enable = renderer->is_meshlet_rendering_enabled();
+			auto set_gpu_driven_enable = [this](bool v) {
+				auto cfg = renderer->get_config();
+				cfg.enable_gpu_driven = v;
+				renderer->set_config(cfg);
+			};
+			bool current_gpu_driven_enable = renderer->get_config().enable_gpu_driven;
 
-		ImGui::Render();
-		renderer->update_ui_draw_data(ImGui::GetDrawData());
+			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_meshlet_rendering_enable, current_meshlet_rendering_enable, set_gpu_driven_enable, current_gpu_driven_enable);
+
+            ImGui::Render();
+
+            renderer->update_ui_draw_data(ImGui::GetDrawData());
+        }
 
 		// 发射渲染任务 (Fire and Forget), Pin to Worker 1 for Vulkan WSI safety
 		task_scheduler->spawn_on_thread(1, "RenderTask", [this, render_scene_index, view_snapshot]() mutable {

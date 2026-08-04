@@ -1,7 +1,8 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <vector>
+#include <memory>
 #include <string>
 
 #include "src/core/bud.core.hpp"
@@ -107,6 +108,7 @@ namespace bud::graphics {
 		TextureFormat format = TextureFormat::RGBA8_UNORM;
 		TextureType type = TextureType::Texture2D;
 		bool is_storage = false;
+		bool is_transfer_src = false;
 		ResourceState initial_state = ResourceState::Undefined;
 	};
 
@@ -118,6 +120,8 @@ namespace bud::graphics {
 		uint32_t inflight_frame_count = 3;
 		bool enable_validation = true;
 		bool vsync = false;
+		bool is_puppet_mode = false;
+		bool is_headless = false;
 	};
 
 	struct RenderConfig {
@@ -140,9 +144,17 @@ namespace bud::graphics {
 		bool cache_shadows = false; // Disabled: feature has rendering bugs, enable when fixed
 
 		bool enable_gpu_driven = true;
+		bool enable_meshlets = true;
 		bool debug_hiz = false;
 		uint32_t debug_hiz_mip = 0;
 		bool enable_cluster_visualization = false;
+
+        // Heuristic Occluder selection (CPU heuristic prototype)
+        bool heuristic_occluder_enable = true; // enable heuristic occluder selection by default
+        float heuristic_occluder_fraction = 0.3f; // select top 30% as occluders by default
+        uint32_t heuristic_occluder_min_count = 1;
+        uint32_t heuristic_occluder_max_count = 500;
+        float heuristic_occluder_tri_weight = 1e-4f; // multiplier for triangle count in score
 	};
 
 	struct SceneView {
@@ -218,18 +230,41 @@ namespace bud::graphics {
 	};
 
 	struct ComputePipelineDesc {
+		enum class LayoutKind {
+			HiZCulling,
+			HiZMip,
+			MlIdentity,
+			HeuristicOccluder,
+			MeshletFrustum,
+			MeshletIndirect,
+			MeshletHiZ,
+		};
+
 		ShaderStage cs;
+		LayoutKind layout_kind = LayoutKind::HiZCulling;
 	};
 	// POD, end
 
-	// BufferHandle replaces the old 'MemoryBlock' to avoid API leakage
-	struct BufferHandle {
-		void* internal_state = nullptr; // e.g. VulkanBuffer*
-		uint64_t offset = 0;
-		uint64_t size = 0;
-		void* mapped_ptr = nullptr;
-		bool is_valid() const { return internal_state != nullptr; }
-	};
+	// BufferHandle replaces the old "MemoryBlock" to avoid API leakage
+	// Keep a raw pointer for fast access ( "internal_state" ) and an optional owning
+    // shared_ptr ("owner") that controls lifetime when this handle represents ownership.
+    struct BufferHandle {
+        void* internal_state = nullptr; // e.g. VulkanBuffer*
+        std::shared_ptr<void> owner;    // optional owning reference with custom deleter
+        uint64_t offset = 0;
+        uint64_t size = 0;
+        void* mapped_ptr = nullptr;
+
+        bool is_valid() const { return internal_state != nullptr; }
+
+        void reset() {
+            internal_state = nullptr;
+            owner.reset();
+            offset = 0;
+            size = 0;
+            mapped_ptr = nullptr;
+        }
+    };
 
 	class Texture;
 
@@ -278,10 +313,15 @@ namespace bud::graphics {
 		bud::math::BoundingSphere sphere;
 	};
 
+	// Per-material draw range inside a virtual geometry page.
+	// index_start/index_count are page-local (relative to the page's index data).
+	struct PageSubMesh {
+		uint32_t index_start = 0;
+		uint32_t index_count = 0;
+		uint32_t material_id = 0; // bindless texture slot (resolved at runtime)
+	};
+
 	struct RenderMesh {
-		// Offsets into the global Geometry Pool Mega-Buffers
-		uint32_t first_index = 0;
-		int32_t  vertex_offset = 0;
 		uint32_t index_count = 0;
 
 		// GPU-Driven Meshlet data
@@ -291,11 +331,26 @@ namespace bud::graphics {
 		BufferHandle cull_data_buffer;
 		uint32_t meshlet_count = 0;
 
+		// Virtual geometry page residency
+		bool is_page_backed = false;
+		uint32_t page_index = ~0u;
+		uint32_t page_vertex_data_offset = 0;
+		uint32_t page_index_data_offset = 0;
+
 		bud::math::AABB aabb;
 		bud::math::BoundingSphere sphere;
 		std::vector<SubMesh> submeshes;
 
 		bool is_valid() const { return index_count > 0; }
+		bool has_meshlet_data() const {
+			if (is_page_backed)
+				return meshlet_count > 0 && page_index != ~0u;
+			return meshlet_count > 0 &&
+				meshlet_buffer.is_valid() &&
+				vertex_index_buffer.is_valid() &&
+				meshlet_index_buffer.is_valid() &&
+				cull_data_buffer.is_valid();
+		}
 	};
 
 	struct GPUStats {
@@ -305,6 +360,15 @@ namespace bud::graphics {
 		uint32_t visibleTriangles = 0;
 		uint32_t totalMeshlets = 0;
 		uint32_t visibleMeshlets = 0;
+		uint32_t heuristicTotalCount = 0;
+		uint32_t heuristicCutoffBucket = 0;
+		uint32_t heuristicRemaining = 0;
+		uint32_t heuristicVisibleInstances = 0;
+	};
+
+	enum class VisibilityPath {
+		InstanceFallback,
+		Meshlet,
 	};
 
 
@@ -319,6 +383,7 @@ namespace bud::graphics {
 		uint32_t draw_calls = 0;
 		uint32_t drawn_triangles = 0; // Total accumulated across ALL render passes (Shadows, etc)
 		uint32_t pipeline_binds = 0;
+		VisibilityPath active_visibility_path = VisibilityPath::InstanceFallback;
 
 		// 剔除指标 (GPU Occlusion Culling)
 		uint32_t gpu_total_objects = 0;
@@ -329,6 +394,10 @@ namespace bud::graphics {
 		uint32_t gpu_visible_triangles = 0;
 		uint32_t gpu_total_meshlets = 0;
 		uint32_t gpu_visible_meshlets = 0;
+		uint32_t meshlet_frustum_total_meshlets = 0;
+		uint32_t meshlet_frustum_visible_meshlets = 0;
+		uint32_t meshlet_hiz_total_meshlets = 0;
+		uint32_t meshlet_hiz_visible_meshlets = 0;
 
 		// 剔除指标 (CPU Frustum Culling)
 		uint32_t cpu_total_objects = 0;
@@ -340,9 +409,13 @@ namespace bud::graphics {
 		uint32_t cpu_total_meshlets = 0;
 		uint32_t cpu_visible_meshlets = 0;
 
-		// ML Occluder Stats
+		// Neural/Heuristic Occluder Stats
 		uint32_t occluder_count = 0;
 		uint32_t occluder_triangles = 0;
+		uint32_t heuristic_total_count = 0;
+		uint32_t heuristic_cutoff_bucket = 0;
+		uint32_t heuristic_remaining = 0;
+		uint32_t gpu_occluder_instances = 0;
 
 		uint32_t shadow_casters = 0;
 		uint32_t shadow_caster_submeshes = 0;
@@ -351,6 +424,7 @@ namespace bud::graphics {
 			draw_calls = 0;
 			drawn_triangles = 0;
 			pipeline_binds = 0;
+			active_visibility_path = VisibilityPath::InstanceFallback;
 			gpu_total_objects = 0;
 			gpu_visible_objects = 0;
 			gpu_total_instances = 0;
@@ -359,6 +433,10 @@ namespace bud::graphics {
 			gpu_visible_triangles = 0;
 			gpu_total_meshlets = 0;
 			gpu_visible_meshlets = 0;
+			meshlet_frustum_total_meshlets = 0;
+			meshlet_frustum_visible_meshlets = 0;
+			meshlet_hiz_total_meshlets = 0;
+			meshlet_hiz_visible_meshlets = 0;
 			cpu_total_objects = 0;
 			cpu_visible_objects = 0;
 			cpu_total_instances = 0;
@@ -369,11 +447,12 @@ namespace bud::graphics {
 			cpu_visible_meshlets = 0;
 			occluder_count = 0;
 			occluder_triangles = 0;
+			heuristic_total_count = 0;
+			heuristic_cutoff_bucket = 0;
+			heuristic_remaining = 0;
+			gpu_occluder_instances = 0;
 			shadow_casters = 0;
 			shadow_caster_submeshes = 0;
 		}
-
-
-
 	};
 }

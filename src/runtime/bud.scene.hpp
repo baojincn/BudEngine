@@ -29,7 +29,9 @@ namespace bud::scene {
 		void process_mouse_movement(float x_offset, float y_offset, bool constrain_pitch = true);
 		void process_mouse_scroll(float y_offset);
 		void process_mouse_drag_zoom(float yoffset);
-		
+
+		bud::math::quaternion get_rotation() const;
+		void set_rotation(const bud::math::quaternion& rot);
 		inline bud::math::AABB get_collision_aabb(float radius = 0.2f) const {
 			return { position - bud::math::vec3(radius), position + bud::math::vec3(radius) };
 		}

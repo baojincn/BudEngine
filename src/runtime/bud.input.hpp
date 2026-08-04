@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <unordered_map>
 
@@ -22,6 +22,11 @@ namespace bud::input {
 		E,
 		F3, // Enable debug overlay
 		F4, // Enable cluster visualization
+		F8, // Toggle camera recording
+		F9, // Toggle camera playback (one-shot)
+		LCtrl, // Modifier for Ctrl+F9 loop playback
+        Plus,
+        Minus,
 	};
 
 	 enum class MouseButton {

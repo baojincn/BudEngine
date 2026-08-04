@@ -130,8 +130,8 @@ file(GLOB SHADER_FILES
 
 # Ensure new prepass shaders are included
 list(APPEND SHADER_FILES
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/zprepass.vert"
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/zprepass.frag"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/depth_only.vert"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/depth_only.frag"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/debug_ui.vert"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/debug_ui.frag"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hiz_cull.comp"
@@ -172,7 +172,7 @@ endif()
 
 source_group("Shaders" FILES ${SHADER_FILES})
 
-add_library(bud_engine_core STATIC ${SHADER_FILES})
+add_library(bud_engine_core STATIC ${SHADER_FILES} "samples/triangle/triangle.cpp")
 
 # Ensure shaders are compiled before building the core library
 if(TARGET CompileShaders)
@@ -219,11 +219,14 @@ target_sources(bud_engine_core
 		"src/ui/bud.stats.ui.cpp"
 		"src/graphics/bud.graphics.cpp"
 		"src/graphics/bud.graphics.scene.cpp"
+		"src/graphics/bud.graphics.gpu_scene.cpp"
         "src/graphics/bud.graphics.passes.cpp"
 		"src/graphics/bud.graphics.graph.cpp"
 		"src/graphics/bud.graphics.renderer.cpp"
 		"src/graphics/bud.ml_passes.cpp"
 		"src/graphics/bud.ml_perception.cpp"
+
+		"src/streaming/bud.streaming.manager.cpp"
 
 		"src/core/bud.logger.cpp"
 
@@ -240,7 +243,9 @@ target_sources(bud_engine_core
         "src/third_party/bud_third_party.cpp"
 
 		"src/runtime/bud.input.cpp"
+		"src/input/bud.input.manager.cpp"
 		"src/runtime/bud.scene.cpp"
+		"src/runtime/bud.camera_sequencer.cpp"
 
     PUBLIC
 		"src/core/bud.core.hpp"
@@ -253,6 +258,8 @@ target_sources(bud_engine_core
 		"src/threading/bud.threading.hpp"
 		"src/runtime/bud.input.hpp"
 		"src/runtime/bud.scene.hpp"
+		"src/graphics/bud.graphics.gpu_scene.hpp"
+		"src/runtime/bud.camera_sequencer.hpp"
 
 		"src/ui/bud.stats.ui.hpp"
 
@@ -273,6 +280,8 @@ target_sources(bud_engine_core
 		"src/graphics/vulkan/bud.vulkan.pool.hpp"
 		"src/graphics/vulkan/bud.vulkan.types.hpp"
 		"src/graphics/vulkan/bud.vulkan.utils.hpp"
+
+		"src/streaming/bud.streaming.manager.hpp"
 
 		"src/graphics/bud.ml_passes.hpp"
 		"src/graphics/bud.ml_perception.hpp"
@@ -300,7 +309,7 @@ target_include_directories(bud_engine_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${
 
 # Begin, triangle_sample
 if(BUD_BUILD_SAMPLES)
-    add_executable(triangle_sample samples/triangle/main.cpp)
+    add_executable(triangle_sample samples/triangle/main.cpp "samples/triangle/triangle.cpp")
     target_link_libraries(triangle_sample PRIVATE bud_engine_core)
     target_include_directories(triangle_sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
     
@@ -328,36 +337,36 @@ if(BUD_BUILD_SAMPLES)
 
     # Ensure runtime resources are available next to the executable so launching
     # the binary from the filesystem works the same as from Visual Studio.
-    #add_custom_command(TARGET triangle_sample POST_BUILD
-    #    COMMAND ${CMAKE_COMMAND} -E copy_directory
-    #        "${CMAKE_CURRENT_SOURCE_DIR}/data"
-    #        "$<TARGET_FILE_DIR:triangle_sample>/data"
-    #    COMMENT "Copying data/ to output directory"
-    #)
+    add_custom_command(TARGET triangle_sample POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/data"
+            "$<TARGET_FILE_DIR:triangle_sample>/data"
+        COMMENT "Copying data/ to output directory"
+    )
 
     # Preserve original source tree layout for shaders so runtime loader
     # that expects "src/shaders/..." continues to work when launching exe
     # from the binary folder.
-    #add_custom_command(TARGET triangle_sample POST_BUILD
-    #    COMMAND ${CMAKE_COMMAND} -E make_directory
-    #        "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
-    #    COMMAND ${CMAKE_COMMAND} -E copy_directory
-    #        "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
-    #        "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
-    #    COMMENT "Copying src/shaders to output directory preserving path"
-    #)
+    add_custom_command(TARGET triangle_sample POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
+            "$<TARGET_FILE_DIR:triangle_sample>/src/shaders"
+        COMMENT "Copying src/shaders to output directory preserving path"
+    )
 
     # Copy ImGui runtime config so UI layout persists when launching exe directly
     # Preserve ImGui config path under src/ui/config so code that loads
     # "src/ui/config/imgui.ini" works when run from bin.
-    #add_custom_command(TARGET triangle_sample POST_BUILD
-    #    COMMAND ${CMAKE_COMMAND} -E make_directory
-    #        "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config"
-    #    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    #        "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/config/imgui.ini"
-    #        "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config/imgui.ini"
-    #    COMMENT "Copying src/ui/config/imgui.ini to output directory preserving path"
-    #)
+    add_custom_command(TARGET triangle_sample POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/config/imgui.ini"
+            "$<TARGET_FILE_DIR:triangle_sample>/src/ui/config/imgui.ini"
+        COMMENT "Copying src/ui/config/imgui.ini to output directory preserving path"
+    )
 endif()
 # End, triangle_sample
 
@@ -395,3 +404,28 @@ add_custom_target(GenerateShaderReport
 )
 
 # End, tools
+
+# Python ML Bridge
+set(Python3_FIND_VIRTUALENV FIRST)
+
+find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+ message(STATUS "Python include: ${Python3_INCLUDE_DIRS}")
+     if(NOT Python3_INCLUDE_DIRS)
+       message(FATAL_ERROR "Python3 development headers not found. Install python dev or ensure vcpkg python3 for the triplet is installed.")
+     endif()
+
+    # Ensure triangle_sample links to Python import library when Python is available
+    if(Python3_FOUND)
+        target_link_libraries(triangle_sample PRIVATE Python3::Python)
+    endif()
+find_package(pybind11 CONFIG REQUIRED)
+
+# Ensure bud_engine_core can compile pybind11-using sources when Python was found
+if(Python3_FOUND)
+    target_include_directories(bud_engine_core PUBLIC ${Python3_INCLUDE_DIRS})
+endif()
+
+pybind11_add_module(bud_rl src/ml/bud.ml.rl_py_bind.cpp "samples/triangle/triangle.cpp")
+target_link_libraries(bud_rl PRIVATE pybind11::module bud_engine_core)
+# Output to where python might run
+set_target_properties(bud_rl PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")

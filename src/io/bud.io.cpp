@@ -169,31 +169,78 @@ namespace bud::io {
 	}
 
 	bool VirtualFileSystem::write_binary(const std::filesystem::path& path, const std::vector<char>& data) {
+		// Mirror read_binary: resolve relative paths against root_path so writes always
+		// land in the project tree regardless of process CWD.
+		std::filesystem::path abs_path = path.is_absolute() ? path : (root_path / path);
+
 		// Ensure the parent directory exists
-		auto parent_path = path.parent_path();
-		if (!parent_path.empty() && !std::filesystem::exists(parent_path)) {
-			std::filesystem::create_directories(parent_path);
+		std::error_code ec;
+		auto parent = abs_path.parent_path();
+		if (!parent.empty()) {
+			std::filesystem::create_directories(parent, ec);
+			if (ec) {
+				bud::eprint("[IO] write_binary: failed to create directories '{}': {}",
+					parent.string(), ec.message());
+				return false;
+			}
 		}
 
-		// Write to a temporary file first
-		std::filesystem::path temp_path = path;
-		temp_path.replace_extension(path.extension().string() + ".tmp");
+		// Write to a temporary file first (atomic pattern)
+		std::filesystem::path temp_path = abs_path;
+		temp_path.replace_extension(abs_path.extension().string() + ".tmp");
 
 		{
 			std::ofstream file(temp_path, std::ios::binary | std::ios::trunc);
 			if (!file.is_open()) {
-				bud::eprint("[IO] Failed to open temp file for writing: {}", temp_path.string());
+				bud::eprint("[IO] write_binary: failed to open temp file for writing: {}",
+					temp_path.string());
 				return false;
 			}
-			file.write(data.data(), data.size());
+			file.write(data.data(), static_cast<std::streamsize>(data.size()));
 			file.flush();
+			if (!file) {
+				bud::eprint("[IO] write_binary: write failed for: {}", temp_path.string());
+				return false;
+			}
 		}
 
-		// Atomic rename (on most filesystems)
-		std::filesystem::rename(temp_path, path);
+		// Atomic rename
+		std::filesystem::rename(temp_path, abs_path, ec);
+		if (ec) {
+			bud::eprint("[IO] write_binary: rename failed '{}' -> '{}': {}",
+				temp_path.string(), abs_path.string(), ec.message());
+			// Fallback: leave the .tmp so data isn't lost
+			return false;
+		}
+
+		bud::print("[IO] write_binary: wrote {} bytes to '{}'.",
+			data.size(), abs_path.string());
 		return true;
 	}
 
+
+	std::optional<nlohmann::json> VirtualFileSystem::read_json(const std::filesystem::path& path) {
+		auto data_opt = read_binary(path);
+		if (!data_opt) {
+			bud::eprint("[IO] VFS::read_json: failed to read '{}'.", path.string());
+			return std::nullopt;
+		}
+		try {
+			auto j = nlohmann::json::parse(data_opt->begin(), data_opt->end());
+			bud::print("[IO] VFS::read_json: parsed '{}'.", path.string());
+			return j;
+		}
+		catch (const std::exception& e) {
+			bud::eprint("[IO] VFS::read_json: parse error in '{}': {}", path.string(), e.what());
+			return std::nullopt;
+		}
+	}
+
+	bool VirtualFileSystem::write_json(const std::filesystem::path& path, const nlohmann::json& json) {
+		std::string dump = json.dump(4);
+		std::vector<char> data(dump.begin(), dump.end());
+		return write_binary(path, data);
+	}
 
 	Image::Image(Image&& other) noexcept {
 		move_from(std::move(other));
@@ -673,6 +720,35 @@ namespace bud::io {
 			mesh.texture_paths.push_back("data/textures/default.png");
 		}
 
+		// Materials table (version >= 4)
+		if (header->version >= 4 && header->material_count > 0 && header->material_offset != 0) {
+			mesh.materials.clear();
+			const char* mat_ptr = ptr + header->material_offset;
+			for (uint32_t m = 0; m < header->material_count; ++m) {
+				// MaterialDescriptor is packed as: uint32_t, uint8_t, uint8_t, 2 padding, float
+				uint32_t base_tex = *reinterpret_cast<const uint32_t*>(mat_ptr + m * sizeof(bud::asset::MaterialDescriptor));
+				const uint8_t* byte_ptr = reinterpret_cast<const uint8_t*>(mat_ptr + m * sizeof(bud::asset::MaterialDescriptor));
+				uint8_t alpha_mode = *(byte_ptr + 4);
+				uint8_t double_sided = *(byte_ptr + 5);
+				float alpha_cutoff = *reinterpret_cast<const float*>(mat_ptr + m * sizeof(bud::asset::MaterialDescriptor) + 8);
+				MeshData::Material mm;
+				mm.base_color_texture = base_tex;
+				mm.alpha_mode = alpha_mode;
+				mm.double_sided = double_sided;
+				mm.alpha_cutoff = alpha_cutoff;
+				mesh.materials.push_back(mm);
+			}
+		}
+		else {
+			// fallback: create a default material if none present
+			MeshData::Material mm;
+			mm.base_color_texture = 0;
+            mm.alpha_mode = 0; // OPAQUE
+			mm.double_sided = 0;
+			mm.alpha_cutoff = 0.5f;
+			mesh.materials.push_back(mm);
+		}
+
 		return mesh;
 	}
 
@@ -792,6 +868,30 @@ namespace bud::io {
 			});
 	}
 
+	void AssetManager::load_file_chunk_async(const std::string& path, uint64_t offset, uint64_t size,
+		std::function<void(std::vector<char>)> on_loaded)
+	{
+		task_scheduler->spawn("AsyncChunkLoad", [this, path, offset, size, on_loaded]() {
+			auto resolved = this->virtual_file_system->resolve_path(path);
+			std::vector<char> data;
+			if (resolved) {
+				std::ifstream file(*resolved, std::ios::binary);
+				if (file.is_open()) {
+					file.seekg(static_cast<std::streamoff>(offset));
+					data.resize(size);
+					file.read(data.data(), static_cast<std::streamsize>(size));
+					data.resize(static_cast<size_t>(file.gcount()));
+				}
+				else {
+					bud::eprint("[IO] Failed to open chunk file: {}", resolved->string());
+				}
+			}
+			task_scheduler->submit_main_thread_task([on_loaded, data = std::move(data)]() mutable {
+				on_loaded(std::move(data));
+			});
+		});
+	}
+
 	void AssetManager::load_json_async(const std::string& path, std::function<void(nlohmann::json)> on_loaded) {
 		task_scheduler->spawn("AsyncJSONLoad", [this, path, on_loaded]() {
 			auto data_opt = this->virtual_file_system->read_binary(path);
@@ -842,6 +942,36 @@ namespace bud::io {
 					});
 			}
 			});
+	}
+
+
+
+	bool AssetManager::save_json_sync(const std::string& path, const nlohmann::json& json) {
+		std::string dump = json.dump(4);
+		std::vector<char> data(dump.begin(), dump.end());
+		bool ok = virtual_file_system->write_binary(path, data);
+		if (ok)
+			bud::print("[IO] save_json_sync: wrote '{}'.", path);
+		else
+			bud::eprint("[IO] save_json_sync: failed to write '{}'.", path);
+		return ok;
+	}
+
+	std::optional<nlohmann::json> AssetManager::load_json_sync(const std::string& path) {
+		auto data_opt = virtual_file_system->read_binary(path);
+		if (!data_opt) {
+			bud::eprint("[IO] load_json_sync: failed to read '{}'.", path);
+			return std::nullopt;
+		}
+		try {
+			auto j = nlohmann::json::parse(data_opt->begin(), data_opt->end());
+			bud::print("[IO] load_json_sync: parsed '{}'.", path);
+			return j;
+		}
+		catch (const std::exception& e) {
+			bud::eprint("[IO] load_json_sync: JSON parse error in '{}': {}", path, e.what());
+			return std::nullopt;
+		}
 	}
 
 } // namespace bud::io

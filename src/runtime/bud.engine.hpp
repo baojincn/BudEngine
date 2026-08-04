@@ -18,6 +18,8 @@
 #include "src/graphics/bud.graphics.hpp"
 #include "src/graphics/bud.graphics.scene.hpp"
 #include "src/graphics/bud.graphics.renderer.hpp"
+#include "src/runtime/bud.camera_sequencer.hpp"
+#include "src/input/bud.input.manager.hpp"
 
 
 namespace bud::engine {
@@ -37,10 +39,17 @@ namespace bud::engine {
 		~BudEngine();
 
 		void run(GameLogic perform_game_logic);
+		void step(float fixed_dt, GameLogic perform_game_logic);
 
-		auto* get_asset_manager() { return asset_manager.get(); }
-		auto* get_renderer() { return renderer.get(); }
-		auto& get_scene() { return scene; }
+		bud::io::AssetManager* get_asset_manager() { return asset_manager.get(); }
+		bud::graphics::Renderer* get_renderer() { return renderer.get(); }
+		bud::scene::Scene& get_scene() { return scene; }
+
+		const void* get_readback_pixels() const { return renderer->get_readback_pixels(); }
+
+		// Returns true while the camera sequencer is actively playing back a replay.
+		// Use this in on_update() to suppress camera input during playback.
+		bool is_replay_active() const { return camera_sequencer.is_playing(); }
 
 		auto* get_task_scheduler() { return task_scheduler.get(); }
 
@@ -74,6 +83,7 @@ namespace bud::engine {
 		int last_height = 0;
 
 		std::unique_ptr<bud::threading::TaskScheduler> task_scheduler;
+		std::unique_ptr<bud::input::InputManager> input_manager;
 		std::unique_ptr<bud::Logger> logger;
 		std::unique_ptr<bud::graphics::RHI> rhi;
 		std::unique_ptr<bud::io::AssetManager> asset_manager;
@@ -84,6 +94,9 @@ namespace bud::engine {
 		bud::scene::Scene scene;
 		std::vector<bud::graphics::RenderScene> render_scenes;
 		const bud::graphics::EngineConfig engine_config;
+
+		// 摄像机序列器
+		bud::scene::CameraSequencer camera_sequencer;
 
 		// 渲染配置
 		float far_plane{ 5000.0f };
