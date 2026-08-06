@@ -111,6 +111,7 @@ namespace bud::graphics {
 
 
 	class CSMShadowPass : public RenderPass {
+		void* csm_cull_pipeline = nullptr;
 		Texture* static_cache_texture = nullptr;
 		bud::math::vec3 last_light_dir = bud::math::vec3(0.0f);
 		bud::math::mat4 last_view_proj = bud::math::mat4(1.0f);
@@ -130,7 +131,7 @@ namespace bud::graphics {
 		};
 
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances, const GPUScene& gpu_scene, bud::graphics::BufferHandle mega_vertex_buffer, bud::graphics::BufferHandle mega_index_buffer);
+		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances, const GPUScene& gpu_scene, bud::graphics::BufferHandle mega_vertex_buffer, bud::graphics::BufferHandle mega_index_buffer, bud::graphics::RGHandle rg_instance_data, size_t instance_count);
 	};
 
 	

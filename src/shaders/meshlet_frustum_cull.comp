@@ -12,7 +12,7 @@ struct draw_data {
 	vec3 max;
 	uint meshlet_start;
 	uint meshlet_count;
-	uint page_backed;
+	uint flags;
 	uint page_index;
 	uint visibility_offset;
 };
@@ -149,7 +149,7 @@ void main()
 
 	uint total_triangles = 0u;
 	for (uint i = 0u; i < draw.meshlet_count; ++i) {
-		uint tri_cnt = (draw.page_backed != 0u)
+		uint tri_cnt = ((draw.flags & 1u) != 0u) 
 			? get_triangle_count_from_pool(draw.page_index, draw.meshlet_start + i)
 			: meshlet_data.data[draw.meshlet_start + i].triangle_count;
 		total_triangles += tri_cnt;

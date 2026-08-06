@@ -1,4 +1,4 @@
-﻿#include "src/graphics/bud.graphics.gpu_scene.hpp"
+#include "src/graphics/bud.graphics.gpu_scene.hpp"
 
 #include <algorithm>
 
@@ -155,6 +155,14 @@ namespace bud::graphics {
 				if (frame_resource.indirect_draw.is_valid())
 					rhi->destroy_buffer(frame_resource.indirect_draw);
 				frame_resource.indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_indirect_capacity) * indirect_draw_stride, ResourceState::IndirectArgument);
+			}
+
+			if (!frame_resource.csm_indirect_draw.is_valid() || frame_resource.csm_indirect_capacity < desired_indirect_capacity) {
+				if (frame_resource.csm_indirect_draw.is_valid())
+					rhi->destroy_buffer(frame_resource.csm_indirect_draw);
+				// MAX_CASCADES is 4, we allocate 4x capacity.
+				frame_resource.csm_indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_indirect_capacity) * 4 * indirect_draw_stride, ResourceState::IndirectArgument);
+				frame_resource.csm_indirect_capacity = desired_indirect_capacity;
 			}
 
 			if (!frame_resource.stats_readback.is_valid()) {

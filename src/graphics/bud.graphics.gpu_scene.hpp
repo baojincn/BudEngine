@@ -61,7 +61,9 @@ namespace bud::graphics {
 			BufferHandle meshlet_hiz_stats;
 			BufferHandle meshlet_visibility;
 			BufferHandle meshlet_hiz_visibility;
+			BufferHandle csm_indirect_draw;
 			uint32_t instance_capacity = 0;
+			uint32_t csm_indirect_capacity = 0;
 			uint32_t indirect_capacity = 0;
 			uint32_t meshlet_visibility_capacity = 0;
 		};

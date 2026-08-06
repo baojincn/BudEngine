@@ -790,7 +790,7 @@ namespace bud::graphics {
 			bud::math::vec3 max;
 			uint32_t meshletStart;
 			uint32_t meshletCount;
-			uint32_t pageBacked;
+			uint32_t flags;
 			uint32_t pageIndex;
 			uint32_t visibilityOffset;
 		};
@@ -895,7 +895,7 @@ namespace bud::graphics {
 							mapped[i].max = world_aabb.max;
 							mapped[i].meshletStart = sub.meshlet_start;
 							mapped[i].meshletCount = sub.meshlet_count;
-							mapped[i].pageBacked = mesh.is_page_backed ? 1u : 0u;
+							mapped[i].flags = (mesh.is_page_backed ? 1u : 0u) | ((render_scene.flags[entity_idx] & 1) ? 2u : 0u);
 							mapped[i].pageIndex = mesh.page_index;
 							mapped[i].visibilityOffset = current_visibility_offset;
 							current_visibility_offset += mapped[i].meshletCount;
@@ -912,7 +912,7 @@ namespace bud::graphics {
 							mapped[i].max = world_aabb.max;
 							mapped[i].meshletStart = 0;
 							mapped[i].meshletCount = mesh.meshlet_count;
-							mapped[i].pageBacked = mesh.is_page_backed ? 1u : 0u;
+							mapped[i].flags = (mesh.is_page_backed ? 1u : 0u) | ((render_scene.flags[entity_idx] & 1) ? 2u : 0u);
 							mapped[i].pageIndex = mesh.page_index;
 							mapped[i].visibilityOffset = current_visibility_offset;
 							current_visibility_offset += mapped[i].meshletCount;
@@ -1075,7 +1075,7 @@ namespace bud::graphics {
 				for (uint32_t i = 0; i < cascade_count; ++i)
 					csm_visible_instances[i] = std::move(culled_results[i + 1]);
 
-				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
+				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), rg_inst, visible_count);
 				//bud::print("[Renderer] MainPass: csm_shadow_map.is_valid()={}", shadow_map.is_valid());
 
 				const bool use_gpu_occluder_selection = render_config.enable_gpu_driven

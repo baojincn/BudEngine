@@ -1,22 +1,18 @@
-#version 450
+#version 460
 #extension GL_EXT_nonuniform_qualifier : enable
 
-
 layout(location = 0) in vec2 frag_tex_coord;
-//layout(location = 1) in flat float frag_tex_index;
+layout(location = 1) flat in uint frag_material_id;
+
 layout(push_constant) uniform PushConsts {
     mat4 light_view_proj;
-    mat4 model;
     vec4 light_dir;
-    uint material_id;
-	uint padding[3];
 } push;
 
 layout(binding = 1) uniform sampler2D tex_samplers[];
 
-
 void main() {
-    uint tex_id = push.material_id;
+    uint tex_id = frag_material_id;
 
     // Page-streamed / untextured meshes (tex_id == 0) are opaque. Skip the
     // alpha test so we don't sample the uninitialized fallback texture, which
