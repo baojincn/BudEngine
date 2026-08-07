@@ -200,7 +200,13 @@ void main() {
 
     float metallic = 0.1; 
     float roughness = 0.5;
+    // Screen-space AO sampling from bindless slot 998 (slot 999 is reserved for ImGui Font Atlas)
+    ivec2 ao_tex_size = textureSize(tex_samplers[998], 0);
     float ao = 1.0;
+    if (ao_tex_size.x > 1 && ao_tex_size.y > 1) {
+        vec2 screen_uv = gl_FragCoord.xy / vec2(ao_tex_size);
+        ao = texture(tex_samplers[998], screen_uv).r;
+    }
 
     vec3 N = normalize(frag_normal);
     vec3 V = normalize(ubo.cam_pos - frag_world_pos);

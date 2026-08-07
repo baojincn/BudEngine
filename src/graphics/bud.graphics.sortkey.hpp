@@ -21,7 +21,7 @@ namespace bud::graphics {
 		static inline uint64_t generate_opaque(uint8_t layer, uint16_t pipeline_id, uint32_t material_id, uint32_t mesh_id, uint32_t depth_18bit) {
 			uint64_t key = 0;
 
-			// 1. Layer (4 bits) [60-63]
+			// 1. Layer (4 bits) [60-63] (0 = Opaque, 1 = PageBacked Opaque, 2 = AlphaTested)
 			key |= (uint64_t)(layer & 0xF) << 60;
 
 			// 2. Pipeline (10 bits) [50-59] - 支持 1024 种 Shader

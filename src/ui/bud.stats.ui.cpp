@@ -26,7 +26,9 @@ namespace bud::ui {
 		std::function<void(bool)> set_meshlet_rendering_enable,
 		bool current_meshlet_rendering_enable,
 		std::function<void(bool)> set_gpu_driven_enable,
-		bool current_gpu_driven_enable) {
+		bool current_gpu_driven_enable,
+		std::function<void(bud::graphics::AOMode)> set_ao_mode,
+		bud::graphics::AOMode current_ao_mode) {
 
 		if (show_stats) {
 			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
@@ -207,6 +209,21 @@ namespace bud::ui {
 					bool tmp = current_gpu_driven_enable;
 					if (ImGui::Checkbox("##gpu_driven_enable", &tmp)) {
 						set_gpu_driven_enable(tmp);
+					}
+					ImGui::PopItemWidth();
+					ImGui::PopID();
+				}
+
+				if (set_ao_mode) {
+					ImGui::SameLine();
+					ImGui::TextColored(color_neutral, " | AO:");
+					ImGui::SameLine();
+					ImGui::PushID("ao_mode_combo");
+					ImGui::PushItemWidth(70.0f);
+					int current_idx = static_cast<int>(current_ao_mode);
+					const char* items[] = { "Off", "SSAO", "GTAO" };
+					if (ImGui::Combo("##ao_mode", &current_idx, items, IM_ARRAYSIZE(items))) {
+						set_ao_mode(static_cast<bud::graphics::AOMode>(current_idx));
 					}
 					ImGui::PopItemWidth();
 					ImGui::PopID();

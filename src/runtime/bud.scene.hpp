@@ -58,7 +58,7 @@ namespace bud::scene {
 	 struct Scene {
 		Camera main_camera;
 		DirectionalLight directional_light;
-		float ambient_strength = 0.05f;
+		float ambient_strength = 0.25f;
 		std::vector<Entity> entities;
 	};
 }

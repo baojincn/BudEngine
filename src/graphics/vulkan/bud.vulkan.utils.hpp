@@ -28,13 +28,14 @@ namespace bud::graphics::vulkan {
 		}
 	}
 
-	// 1. 格式转换
+	// 格式转换
 	constexpr VkFormat to_vk_format(TextureFormat format) {
 		switch (format) {
-		case TextureFormat::Undefined:         return VK_FORMAT_UNDEFINED; // [FIX] Allow Undefined
-		case TextureFormat::RGBA8_UNORM:       return VK_FORMAT_R8G8B8A8_SRGB;
+		case TextureFormat::Undefined:         return VK_FORMAT_UNDEFINED;
+		case TextureFormat::R8_UNORM:          return VK_FORMAT_R8_UNORM;
+		case TextureFormat::RGBA8_SRGB:       return VK_FORMAT_R8G8B8A8_SRGB;
 		case TextureFormat::BGRA8_UNORM:       return VK_FORMAT_B8G8R8A8_UNORM;
-		case TextureFormat::BGRA8_SRGB:        return VK_FORMAT_B8G8R8A8_SRGB; // [FIX] match Swapchain
+		case TextureFormat::BGRA8_SRGB:        return VK_FORMAT_B8G8R8A8_SRGB;
 		case TextureFormat::R32G32B32_FLOAT:   return VK_FORMAT_R32G32B32_SFLOAT;
 		case TextureFormat::D32_FLOAT:         return VK_FORMAT_D32_SFLOAT;
 		case TextureFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
@@ -43,7 +44,7 @@ namespace bud::graphics::vulkan {
 		}
 	}
 
-	// 2. 自动推导 Image Aspect (深度/颜色)
+	// 自动推导 Image Aspect (深度/颜色)
 	constexpr VkImageAspectFlags get_aspect_flags(VkFormat format) {
 		switch (format) {
 		case VK_FORMAT_D32_SFLOAT:
@@ -58,7 +59,7 @@ namespace bud::graphics::vulkan {
 		}
 	}
 
-	// 3. 自动推导 Usage Flags
+	// 自动推导 Usage Flags
 	// 根据用途推断 Vulkan Usage
 	constexpr VkImageUsageFlags get_image_usage(VkFormat format, bool is_storage = false) {
 		VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT |      // 总是可以被采样
@@ -79,6 +80,6 @@ namespace bud::graphics::vulkan {
 		return usage;
 	}
 
-    // 4. 状态转换 (Barrier 用)
+    // 状态转换 (Barrier 用)
     // 迁移至 synchronization2 helpers：使用 sync2::get_transition2 / sync2::cmd_image_barrier2
 }

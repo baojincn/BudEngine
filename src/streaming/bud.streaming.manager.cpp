@@ -1,4 +1,4 @@
-#include "src/streaming/bud.streaming.manager.hpp"
+﻿#include "src/streaming/bud.streaming.manager.hpp"
 #include "src/core/bud.logger.hpp"
 #include "src/core/bud.asset.types.hpp"
 #include "src/graphics/bud.graphics.renderer.hpp"
@@ -165,7 +165,7 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 							auto* mapped = static_cast<uint8_t*>(gpu_scene_->get_page_pool_buffer().mapped_ptr);
 							if (mapped) {
 								std::memcpy(mapped + gpu_offset, data.data(), data.size());
-								bud::print("[Streaming] Copied {} bytes to page pool offset {}", data.size(), gpu_offset);
+								//bud::print("[Streaming] Copied {} bytes to page pool offset {}", data.size(), gpu_offset);
 							} else {
 								bud::eprint("[Streaming] page_pool_buffer mapped_ptr is NULL!");
 							}
@@ -208,8 +208,8 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 							pending_loads_.erase(p);
 						}
 
-						bud::print("[Streaming] Page resident: {} slot={} mesh_id={} meshlets={}",
-							p, slot, mesh_id, meshlet_count);
+						//bud::print("[Streaming] Page resident: {} slot={} mesh_id={} meshlets={}",
+						//	p, slot, mesh_id, meshlet_count);
 					});
 		}
 	}

@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.30.0)
+cmake_minimum_required(VERSION 3.30.0)
 
 # Setup vcpkg toolchain
 if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
@@ -137,6 +137,9 @@ list(APPEND SHADER_FILES
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hiz_cull.comp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hiz_mip.comp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/hiz_debug.frag"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/ssao.comp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/gtao.comp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/ao_blur.comp"
 )
 
 # Find glslc compiler

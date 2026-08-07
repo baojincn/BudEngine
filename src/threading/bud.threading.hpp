@@ -10,6 +10,7 @@
 #include <functional>
 #include <mutex>
 #include <deque>
+#include <cstdint>
 
 namespace bud::threading {
 	struct Fiber;
@@ -38,16 +39,26 @@ namespace bud::threading {
 
 	/// <summary>
 	/// Fiber for lightweight cooperative multitasking in user space.
+	/// The fiber stack is a dedicated VirtualAlloc region guarded by a
+	/// PAGE_NOACCESS page at its low end, so stack overflow faults immediately
+	/// instead of silently corrupting the heap.
 	/// </summary>
 	struct alignas(16) Fiber {
 		// Pool List
-		Fiber* next_pool = nullptr;
+		std::atomic<Fiber*> next_pool{ nullptr };
 
 		// Link to the next waiting fiber in the Counter's waiting list 
 		Fiber* next_waiting = nullptr;
 
 		void* rsp = nullptr;
-		std::vector<uint8_t> stack_mem;
+
+		// Stack allocation (Windows x64): the usable stack is
+		// [stack_base, stack_base + stack_size); a guard page sits just below
+		// stack_base. stack_region is the VirtualAlloc base used for release.
+		void* stack_region = nullptr;
+		void* stack_base = nullptr;
+		size_t stack_size = 0;
+
 		std::move_only_function<void()> work;
 		Counter* signal_counter = nullptr;
 
@@ -67,12 +78,13 @@ namespace bud::threading {
 #endif
 
 #ifdef _DEBUG
-		static constexpr size_t DEFAULT_STACK_SIZE = 64 * 1024; // 64KB
+		static constexpr size_t DEFAULT_STACK_SIZE = 256 * 1024; // 256KB
 #else
-		static constexpr size_t DEFAULT_STACK_SIZE = 32 * 1024; // 32KB
+		static constexpr size_t DEFAULT_STACK_SIZE = 128 * 1024; // 128KB
 #endif
 
 		Fiber(size_t stack_size = DEFAULT_STACK_SIZE);
+		~Fiber();
 
 		void reset(std::move_only_function<void()>&& w, Counter* c, void (*entry_fn)(Fiber*));
 	};
@@ -152,7 +164,13 @@ namespace bud::threading {
 
 
 	class LockFreeFiberPool {
-		std::atomic<Fiber*> head{ nullptr };
+		// User-mode x64 pointers use only the low 48 bits; the upper 16 bits hold an
+		// ABA counter so a recycled node cannot satisfy a stale compare-exchange.
+		static constexpr uintptr_t kPointerMask = (uintptr_t{1} << 48) - 1;
+		static constexpr uintptr_t kTagMask = ~kPointerMask;
+		static constexpr uintptr_t kTagStep = uintptr_t{1} << 48;
+
+		std::atomic<uintptr_t> head{ 0 };
 	public:
 		void push(Fiber* f);
 
@@ -275,7 +293,9 @@ inline int current_worker_index() {
 		std::atomic<bool> running{ true };
 		size_t num_threads{ 0 };
 
-		static constexpr size_t MAX_FIBERS_PER_THREAD = 128;
+		// Preallocated fiber cache per worker; allocate_fiber() creates more on
+		// demand if the pool runs dry (stacks are VirtualAlloc-backed now).
+		static constexpr size_t MAX_FIBERS_PER_THREAD = 16;
 
 	public:
 		explicit TaskScheduler(size_t n = std::thread::hardware_concurrency());

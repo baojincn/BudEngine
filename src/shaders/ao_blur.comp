@@ -1,0 +1,84 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D raw_ao_tex;
+layout(binding = 1) uniform sampler2D depth_tex;
+layout(binding = 2, r32f) uniform image2D out_ao;
+
+layout(push_constant) uniform PushConsts {
+    mat4 inv_proj;
+    vec2 screen_size;
+    uint reversed_z;
+    uint blur_radius;
+} pc;
+
+vec3 get_view_pos(vec2 uv, float depth) {
+    // Depth texture stores gl_FragCoord.z in [0,1]; convert to NDC z.
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 view = pc.inv_proj * clip;
+    return view.xyz / view.w;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(pc.screen_size);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / pc.screen_size;
+    float center_depth = texture(depth_tex, uv).r;
+
+    bool is_sky = (pc.reversed_z == 1) ? (center_depth <= 0.00001) : (center_depth >= 0.99999);
+    if (is_sky) {
+        imageStore(out_ao, pixel, vec4(1.0));
+        return;
+    }
+
+    vec3 center_pos = get_view_pos(uv, center_depth);
+
+    // The raw AO lives at a lower (half) resolution. Blurring in that space
+    // makes this pass act as a depth-aware bilateral upsample to full res.
+    vec2 ao_texel = 1.0 / vec2(textureSize(raw_ao_tex, 0));
+
+    float center_ao = texture(raw_ao_tex, uv).r;
+
+    int r = int(clamp(pc.blur_radius, 1u, 3u));
+
+    float total_ao = 0.0;
+    float total_weight = 0.0;
+
+    for (int x = -r; x <= r; ++x) {
+        for (int y = -r; y <= r; ++y) {
+            vec2 offset = vec2(x, y) * ao_texel;
+            vec2 sample_uv = uv + offset;
+
+            // Skip taps that fall outside the viewport (avoids wrap artifacts
+            // with the REPEAT sampler used by compute texture bindings).
+            if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) continue;
+
+            float sample_ao = texture(raw_ao_tex, sample_uv).r;
+            float sample_depth = texture(depth_tex, sample_uv).r;
+
+            vec3 sample_pos = get_view_pos(sample_uv, sample_depth);
+
+            // Spatial Gaussian weight (in AO-texel space)
+            float spatial_weight = exp(-float(x * x + y * y) / (2.0 * float(r * r)));
+
+            // Depth bilateral weight (suppress blurring across sharp depth edges).
+            // Use a RELATIVE tolerance (20% of the center depth) so the kernel
+            // stays fully effective on flat/grazing surfaces -- a strict absolute
+            // weight collapses the kernel there and leaves the half-res AO grid
+            // visible as moiré / motion shimmer on walls.
+            float depth_diff = abs(center_pos.z - sample_pos.z);
+            float depth_weight = exp(-max(depth_diff - 0.20 * abs(center_pos.z), 0.0) * 2.0);
+
+            float weight = spatial_weight * depth_weight;
+
+            total_ao += sample_ao * weight;
+            total_weight += weight;
+        }
+    }
+
+    float blurred_ao = (total_weight > 0.0) ? (total_ao / total_weight) : center_ao;
+    imageStore(out_ao, pixel, vec4(blurred_ao, 0.0, 0.0, 1.0));
+}

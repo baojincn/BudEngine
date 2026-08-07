@@ -1,4 +1,4 @@
-#include <memory>
+﻿#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -25,6 +25,9 @@ namespace bud::graphics {
 		upload_queue = std::make_shared<UploadQueue>();
 		csm_pass = std::make_unique<CSMShadowPass>();
 		depth_only_pass = std::make_unique<DepthOnlyPass>();
+		ao_pass = std::make_unique<AmbientOcclusionPass>();
+		ao_temporal_pass = std::make_unique<AOTemporalPass>();
+		ao_blur_pass = std::make_unique<AOBlurPass>();
 		hiz_mip_pass = std::make_unique<HiZMipPass>();
 		hiz_pass = std::make_unique<HiZCullingPass>();
 		meshlet_frustum_pass = std::make_unique<MeshletFrustumCullingPass>();
@@ -38,6 +41,9 @@ namespace bud::graphics {
 
 		csm_pass->init(rhi, render_config, asset_manager);
 		depth_only_pass->init(rhi, render_config, asset_manager);
+		ao_pass->init(rhi, render_config, asset_manager);
+		ao_temporal_pass->init(rhi, render_config, asset_manager);
+		ao_blur_pass->init(rhi, render_config, asset_manager);
 		hiz_mip_pass->init(rhi, render_config, asset_manager);
 		hiz_pass->init(rhi, render_config, asset_manager);
 		meshlet_frustum_pass->init(rhi, render_config, asset_manager);
@@ -58,6 +64,9 @@ namespace bud::graphics {
 
 		if (csm_pass) csm_pass->shutdown(rhi);
 		if (depth_only_pass) depth_only_pass->shutdown(rhi);
+		if (ao_pass) ao_pass->shutdown(rhi);
+		if (ao_temporal_pass) ao_temporal_pass->shutdown(rhi);
+		if (ao_blur_pass) ao_blur_pass->shutdown(rhi);
 		if (hiz_mip_pass) hiz_mip_pass->shutdown(rhi);
 		if (hiz_pass) hiz_pass->shutdown(rhi);
 		if (meshlet_frustum_pass) meshlet_frustum_pass->shutdown(rhi);
@@ -226,7 +235,7 @@ namespace bud::graphics {
 					bud::graphics::TextureDesc desc{};
 					desc.width = (uint32_t)img_ptr->width;
 					desc.height = (uint32_t)img_ptr->height;
-					desc.format = bud::graphics::TextureFormat::RGBA8_UNORM;
+					desc.format = bud::graphics::TextureFormat::RGBA8_SRGB;
 					desc.mips = static_cast<uint32_t>(std::floor(std::log2(std::max(desc.width, desc.height)))) + 1;
 
 					auto tex = rhi_ptr->create_texture(desc, (const void*)img_ptr->pixels,
@@ -314,7 +323,7 @@ namespace bud::graphics {
 							bud::graphics::TextureDesc desc{};
 							desc.width = (uint32_t)img_ptr->width;
 							desc.height = (uint32_t)img_ptr->height;
-							desc.format = bud::graphics::TextureFormat::RGBA8_UNORM;
+							desc.format = bud::graphics::TextureFormat::RGBA8_SRGB;
 							desc.mips = static_cast<uint32_t>(std::floor(std::log2(std::max(desc.width, desc.height)))) + 1;
 
 							auto tex = rhi_ptr->create_texture(desc, (const void*)img_ptr->pixels,
@@ -466,6 +475,7 @@ namespace bud::graphics {
 
 						if (subset.material_index < material_to_slot.size()) {
 							sub.material_id = material_to_slot[subset.material_index];
+							sub.is_alpha_tested = mesh_data_copy->materials[subset.material_index].alpha_mode == 1; // 1 = AlphaMode::Mask
 						}
 						else {
 							bud::eprint("  Subset[{}]: INVALID mat_idx={} (max: {}) -> using fallback!",
@@ -559,6 +569,7 @@ namespace bud::graphics {
 		size_t visible_count = 0;
 		size_t visible_instance_count = 0;
 		size_t total_draw_count = 0;
+		size_t split_index = 0;
 		std::vector<std::vector<uint32_t>> culled_results(1 + cascade_count);
 
 		if (instance_count > 0) {
@@ -680,11 +691,13 @@ namespace bud::graphics {
 									item.key = UINT64_MAX;
 									continue;
 								}
-								item.key = DrawKey::generate_opaque(0, 0, sub.material_id, mesh_id, depth_key);
+								uint8_t layer = sub.is_alpha_tested ? 2 : (mesh.is_page_backed ? 1 : 0);
+								item.key = DrawKey::generate_opaque(layer, 0, sub.material_id, mesh_id, depth_key);
 							}
 							else {
 								uint32_t material_id = render_scene.material_indices[i];
-								item.key = DrawKey::generate_opaque(0, 0, material_id, mesh_id, depth_key);
+								uint8_t layer = mesh.is_page_backed ? 1 : 0;
+								item.key = DrawKey::generate_opaque(layer, 0, material_id, mesh_id, depth_key);
 							}
 						}
 						else {
@@ -702,7 +715,8 @@ namespace bud::graphics {
 
 								item.entity_index = (uint32_t)i;
 								item.submesh_index = s;
-								item.key = DrawKey::generate_opaque(0, 0, sub.material_id, mesh_id, depth_key);
+								uint8_t layer = sub.is_alpha_tested ? 2 : (mesh.is_page_backed ? 1 : 0);
+								item.key = DrawKey::generate_opaque(layer, 0, sub.material_id, mesh_id, depth_key);
 							}
 						}
 					}
@@ -719,6 +733,12 @@ namespace bud::graphics {
 			auto end_it = std::remove_if(sort_list.begin(), sort_list.begin() + total_draw_count, [](const SortItem& a) { return a.key == UINT64_MAX; });
 			sort_list.erase(end_it, sort_list.end()); // REMOVES INVALID ITEMS!
 			visible_count = sort_list.size();
+			
+			for (; split_index < visible_count; ++split_index) {
+				if ((sort_list[split_index].key >> 60) == 1) {
+					break;
+				}
+			}
 		}
 
 		auto cmd = rhi->begin_frame();
@@ -745,7 +765,7 @@ namespace bud::graphics {
 					bud::graphics::TextureDesc desc{};
 					desc.width = width;
 					desc.height = height;
-					desc.format = bud::graphics::TextureFormat::RGBA8_UNORM;
+					desc.format = bud::graphics::TextureFormat::RGBA8_SRGB;
 					desc.is_transfer_src = true;
 					desc.is_storage = true; // Just in case it's bound as storage
 					offscreen_target = rhi->create_texture(desc, nullptr, 0);
@@ -1075,7 +1095,11 @@ namespace bud::graphics {
 				for (uint32_t i = 0; i < cascade_count; ++i)
 					csm_visible_instances[i] = std::move(culled_results[i + 1]);
 
-				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), rg_inst, visible_count);
+				// main_visible_instances = culled_results[0]; pass a copy so the
+				// shadow pass can tell which casters are already covered by the
+				// GPU cull (main-view only) and fill the out-of-view gap on CPU.
+				const auto main_visible_instances = culled_results[0];
+				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), main_visible_instances, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), rg_inst, visible_count, split_index);
 				//bud::print("[Renderer] MainPass: csm_shadow_map.is_valid()={}", shadow_map.is_valid());
 
 				const bool use_gpu_occluder_selection = render_config.enable_gpu_driven
@@ -1128,14 +1152,6 @@ namespace bud::graphics {
 					rhi->get_render_stats().occluder_count = static_cast<uint32_t>(occluder_count);
 					rhi->get_render_stats().occluder_triangles = tris_sum;
 				}
-				float effective_fraction = 1.0f;
-				if (render_config.heuristic_occluder_enable && visible_count > 0) {
-					uint32_t target_count = static_cast<uint32_t>(static_cast<float>(visible_count) * render_config.heuristic_occluder_fraction);
-					target_count = std::clamp(target_count, render_config.heuristic_occluder_min_count, render_config.heuristic_occluder_max_count);
-					target_count = std::min(target_count, static_cast<uint32_t>(visible_count));
-					effective_fraction = static_cast<float>(target_count) / static_cast<float>(visible_count);
-					occluder_count = target_count;
-				}
 				else {
 					occluder_count = visible_count;
 				}
@@ -1143,15 +1159,25 @@ namespace bud::graphics {
 				rhi->get_render_stats().occluder_count = static_cast<uint32_t>(occluder_count);
 
 				if (use_gpu_occluder_selection) {
-					heuristic_occluder_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count, effective_fraction);
+					float effective_fraction = 1.0f;
+					if (render_config.heuristic_occluder_enable && visible_count > 0) {
+						uint32_t target_count = static_cast<uint32_t>(static_cast<float>(visible_count) * render_config.heuristic_occluder_fraction);
+						target_count = std::clamp(target_count, render_config.heuristic_occluder_min_count, render_config.heuristic_occluder_max_count);
+						target_count = std::min(target_count, static_cast<uint32_t>(visible_count));
+						effective_fraction = static_cast<float>(target_count) / static_cast<float>(visible_count);
+					}
+					rg_draw = heuristic_occluder_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count, effective_fraction);
 				}
+
+
 				else {
 					rhi->get_render_stats().occluder_triangles = 0; // Handled by CPU path above if !use_gpu
 				}
 
-				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, persistent_occluder_list, use_gpu_occluder_selection ? visible_count : occluder_count, use_gpu_occluder_selection ? rg_draw : RGHandle{}, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
+				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, render_config.enable_gpu_driven ? rg_draw : RGHandle{}, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), {}, split_index);
 
 				if (depth_prepass.is_valid()) {
+
 					if (render_config.enable_gpu_driven) {
 						auto rg_hiz = hiz_mip_pass->add_to_graph(render_graph, depth_prepass, render_config);
 
@@ -1170,25 +1196,43 @@ namespace bud::graphics {
 							&& rg_meshlet_hiz_stats.is_valid()) {
 							meshlet_hiz_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_meshlet_hiz_visibility, rg_meshlet_hiz_stats, rg_hiz, scene_view, render_scene, meshes, sort_list, visible_count, gpu_scene);
 							if (meshlet_indirect_pass && rg_draw.is_valid()) {
-								meshlet_indirect_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_hiz_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count, gpu_scene);
+								rg_draw = meshlet_indirect_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_hiz_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count, gpu_scene);
 							}
 						}
 						else {
-							hiz_pass->add_to_graph(render_graph, rg_inst, rg_draw, rg_stats, rg_hiz, scene_view, (uint32_t)visible_count);
+							rg_draw = hiz_pass->add_to_graph(render_graph, rg_inst, rg_draw, rg_stats, rg_hiz, scene_view, (uint32_t)visible_count);
 						}
 
 						if (render_config.debug_hiz) {
 							hiz_debug_pass->add_to_graph(render_graph, back_buffer, rg_hiz, render_config.debug_hiz_mip);
 						}
+						
+						// Render non-occluders into the depth prepass!
+						if (rg_draw.is_valid()) {
+							depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), depth_prepass, split_index);
+						}
+					}
+
+					RGHandle rg_ao{};
+					if (ao_pass && render_config.ao_mode != AOMode::Disabled) {
+						RGHandle raw_ao = ao_pass->add_to_graph(render_graph, depth_prepass, scene_view, render_config);
+						if (raw_ao.is_valid() && ao_temporal_pass) {
+							raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, depth_prepass, scene_view, render_config);
+						}
+						if (raw_ao.is_valid() && ao_blur_pass) {
+							rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, depth_prepass, scene_view, render_config);
+						}
+						else {
+							rg_ao = raw_ao;
+						}
 					}
 
 					if (shadow_map.is_valid()) {
-						//bud::print("[Renderer] MainPass adding: shadow_map valid, visible_count={}", visible_count);
 						if (render_config.enable_cluster_visualization) {
-							cluster_viz_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
+							cluster_viz_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), split_index);
 						}
 						else {
-							main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
+							main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), rg_ao, split_index);
 						}
 						has_main_pass = true;
 					}

@@ -1,4 +1,4 @@
-#include <vector>
+﻿#include <vector>
 #include <string>
 #include <iostream>
 #include <optional>
@@ -218,13 +218,57 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
 	};
 
+	auto build_meshlet_hiz_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+
+	auto build_ao_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+
+	auto build_ao_blur_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+
+	auto build_ao_temporal_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+
 	compute_hiz_cull_set_layout = build_hiz_compute_layout();
 	compute_hiz_mip_set_layout = build_hiz_compute_layout();
 	compute_ml_identity_set_layout = build_small_compute_layout();
 	compute_heuristic_occluder_set_layout = build_heuristic_compute_layout();
 	compute_meshlet_indirect_set_layout = build_small_compute_layout();
 	compute_meshlet_frustum_set_layout = build_frustum_compute_layout();
-	compute_meshlet_hiz_set_layout = build_hiz_compute_layout();
+	compute_meshlet_hiz_set_layout = build_meshlet_hiz_compute_layout();
+	compute_ao_set_layout = build_ao_compute_layout();
+	compute_ao_blur_set_layout = build_ao_blur_compute_layout();
+	compute_ao_temporal_set_layout = build_ao_temporal_compute_layout();
 
 	// 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
@@ -373,7 +417,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		TextureDesc desc{};
 		desc.width = 1;
 		desc.height = 1;
-		desc.format = TextureFormat::RGBA8_UNORM;
+		desc.format = TextureFormat::RGBA8_SRGB;
 
 		// Red Fallback to identify missing textures
         uint32_t color = 0xFF0000FF; // R=FF, G=00, B=00, A=FF (Little Endian)
@@ -564,6 +608,9 @@ void VulkanRHI::cleanup() {
 	if (compute_meshlet_frustum_set_layout) vkDestroyDescriptorSetLayout(device, compute_meshlet_frustum_set_layout, nullptr);
 	if (compute_meshlet_indirect_set_layout) vkDestroyDescriptorSetLayout(device, compute_meshlet_indirect_set_layout, nullptr);
 	if (compute_meshlet_hiz_set_layout) vkDestroyDescriptorSetLayout(device, compute_meshlet_hiz_set_layout, nullptr);
+	if (compute_ao_set_layout) vkDestroyDescriptorSetLayout(device, compute_ao_set_layout, nullptr);
+	if (compute_ao_blur_set_layout) vkDestroyDescriptorSetLayout(device, compute_ao_blur_set_layout, nullptr);
+	if (compute_ao_temporal_set_layout) vkDestroyDescriptorSetLayout(device, compute_ao_temporal_set_layout, nullptr);
 	compute_hiz_cull_set_layout = VK_NULL_HANDLE;
 	compute_hiz_mip_set_layout = VK_NULL_HANDLE;
 	compute_ml_identity_set_layout = VK_NULL_HANDLE;
@@ -571,6 +618,9 @@ void VulkanRHI::cleanup() {
 	compute_meshlet_frustum_set_layout = VK_NULL_HANDLE;
 	compute_meshlet_indirect_set_layout = VK_NULL_HANDLE;
 	compute_meshlet_hiz_set_layout = VK_NULL_HANDLE;
+	compute_ao_set_layout = VK_NULL_HANDLE;
+	compute_ao_blur_set_layout = VK_NULL_HANDLE;
+	compute_ao_temporal_set_layout = VK_NULL_HANDLE;
 
 	// Device & Instance
 	if (shadow_sampler)
@@ -939,6 +989,15 @@ void* VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& desc) {
 		break;
 	case ComputePipelineDesc::LayoutKind::MeshletHiZ:
 		chosen_layout = compute_meshlet_hiz_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::AmbientOcclusion:
+		chosen_layout = compute_ao_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::AOBlur:
+		chosen_layout = compute_ao_blur_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::AOTemporal:
+		chosen_layout = compute_ao_temporal_set_layout;
 		break;
 	default:
 		chosen_layout = compute_hiz_cull_set_layout;
@@ -1747,12 +1806,12 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 
     VkPhysicalDeviceVulkan12Features features12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     features12.pNext = nullptr;
-    features12.descriptorBindingPartiallyBound = VK_FALSE;
-    features12.runtimeDescriptorArray = VK_FALSE;
-    features12.descriptorBindingSampledImageUpdateAfterBind = VK_FALSE;
-    features12.descriptorBindingUniformBufferUpdateAfterBind = VK_FALSE;
-    features12.descriptorBindingStorageBufferUpdateAfterBind = VK_FALSE;
-    features12.shaderSampledImageArrayNonUniformIndexing = VK_FALSE;
+    features12.descriptorBindingPartiallyBound = VK_TRUE;
+    features12.runtimeDescriptorArray = VK_TRUE;
+    features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+    features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+    features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+    features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
 
     VkPhysicalDeviceVulkan11Features features11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
     features11.pNext = nullptr;
@@ -1771,12 +1830,6 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
         features11.pNext = &features12;
         device_features2.pNext = &features11;
     } else if (device_api_version >= VK_API_VERSION_1_2) {
-        features12.descriptorBindingPartiallyBound = VK_TRUE;
-        features12.runtimeDescriptorArray = VK_TRUE;
-        features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
-        features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
-        features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
-        features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
         features11.pNext = &features12;
         device_features2.pNext = &features11;
     } else if (device_api_version >= VK_API_VERSION_1_1) {
@@ -2666,6 +2719,17 @@ void VulkanRHI::update_bindless_texture(uint32_t index, bud::graphics::Texture* 
 		DescriptorWriter writer;
 		writer.write_image(1, index, vk_tex->view, vk_tex->sampler ? vk_tex->sampler : default_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
 		writer.update_set(device, frames[i].global_descriptor_set);
+	}
+}
+
+void VulkanRHI::update_bindless_texture_current_frame(uint32_t index, bud::graphics::Texture* texture) {
+	if (!texture) return;
+	auto vk_tex = static_cast<VulkanTexture*>(texture);
+
+	if (frames[current_frame].global_descriptor_set != VK_NULL_HANDLE) {
+		DescriptorWriter writer;
+		writer.write_image(1, index, vk_tex->view, vk_tex->sampler ? vk_tex->sampler : default_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+		writer.update_set(device, frames[current_frame].global_descriptor_set);
 	}
 }
  

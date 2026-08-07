@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "src/graphics/bud.graphics.types.hpp"
 #include <functional>
@@ -28,7 +28,9 @@ namespace bud::ui {
 					std::function<void(bool)> set_meshlet_rendering_enable = nullptr,
 					bool current_meshlet_rendering_enable = true,
 					std::function<void(bool)> set_gpu_driven_enable = nullptr,
-					bool current_gpu_driven_enable = true);
+					bool current_gpu_driven_enable = true,
+					std::function<void(bud::graphics::AOMode)> set_ao_mode = nullptr,
+					bud::graphics::AOMode current_ao_mode = bud::graphics::AOMode::GTAO);
     };
 
 }

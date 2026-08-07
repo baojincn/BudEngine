@@ -52,6 +52,7 @@ namespace bud::graphics {
 
 	namespace {
 		constexpr uint32_t imgui_font_bindless_slot = 999;
+		constexpr uint32_t ao_map_bindless_slot = 998;
 
 		bool mat4_nearly_equal(const bud::math::mat4& a, const bud::math::mat4& b, float eps = 1e-4f) {
 			for (int c = 0; c < 4; ++c) {
@@ -80,11 +81,13 @@ namespace bud::graphics {
 		const RenderScene& render_scene,
 		const std::vector<RenderMesh>& meshes,
 		std::vector<std::vector<uint32_t>> csm_visible_instances,
+		const std::vector<uint32_t>& main_visible_instances,
 		const GPUScene& gpu_scene,
 		bud::graphics::BufferHandle mega_vertex_buffer,
 		bud::graphics::BufferHandle mega_index_buffer,
 		bud::graphics::RGHandle rg_instance_data,
-		size_t instance_count)
+		size_t instance_count,
+		size_t split_index)
 	{
 		if (config.shadow_map_size == 0 || config.cascade_count == 0) {
 			bud::eprint("[CSMShadowPass] ERROR: Invalid shadow config (size={}, cascades={}).",
@@ -108,6 +111,16 @@ namespace bud::graphics {
 		if (max_scene_count == 0) {
 			bud::eprint("[CSMShadowPass] ERROR: RenderScene arrays are empty.");
 			return {};
+		}
+
+		// The GPU cull (csm_cull.comp) only sees main-camera-visible instances
+		// (the DrawData buffer is built from sort_list). Casters OUTSIDE the main
+		// view but inside a cascade frustum would be missed, causing light leaks.
+		// Build a mask so the dynamic pass can CPU-draw exactly those casters.
+		std::vector<uint8_t> in_main_view(max_scene_count, 0);
+		for (uint32_t entity_idx : main_visible_instances) {
+			if (entity_idx < in_main_view.size())
+				in_main_view[entity_idx] = 1;
 		}
 
 		TextureDesc desc;
@@ -169,6 +182,14 @@ namespace bud::graphics {
 				[=, &gpu_scene, &view, &config](RHI* rhi, CommandHandle cmd) {
 					auto& frame = gpu_scene.frame_resources(rhi->get_current_image_index());
 					if (!frame.csm_indirect_draw.is_valid() || instance_count == 0) return;
+
+					// CRITICAL: the cull shader reads the cascade matrices from
+					// the global UBO (binding 4). Nothing has updated the UBO yet
+					// at this point in the frame, so push the CURRENT frame's
+					// view/cascade matrices now -- otherwise the cull runs one
+					// frame behind the camera and the shadow map misses casters
+					// while moving (black patches / light leaks on rotation).
+					rhi->update_global_uniforms(rhi->get_current_image_index(), view);
 
 					rhi->cmd_bind_pipeline(cmd, csm_cull_pipeline);
 
@@ -269,21 +290,19 @@ namespace bud::graphics {
 							if (config.enable_gpu_driven) {
 								auto& frame = gpu_scene.frame_resources(rhi->get_current_image_index());
 								if (frame.csm_indirect_draw.is_valid()) {
-									bool use_page_pool = false;
-									if (instance_count > 0 && !meshes.empty() && render_scene.mesh_indices.size() > 0) {
-										uint32_t mid = render_scene.mesh_indices[0];
-										if (mid < meshes.size() && meshes[mid].is_page_backed) use_page_pool = true;
-									}
 									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-									if (use_page_pool && pp_buf.is_valid()) {
-										rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-										rhi->cmd_bind_index_buffer(cmd, pp_buf);
-									}
-									else {
+									
+									if (split_index > 0) {
 										rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 										rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+										rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
 									}
-									rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count), sizeof(bud::graphics::IndirectCommand));
+
+									if (split_index < instance_count && pp_buf.is_valid()) {
+										rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+										rhi->cmd_bind_index_buffer(cmd, pp_buf);
+										rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
+									}
 								}
 							}
 							else {
@@ -432,76 +451,90 @@ namespace bud::graphics {
 					push_consts.material_id = 0;
 					push_consts.use_gpu_driven = config.enable_gpu_driven ? 1 : 0;
 
+					// Draw a single shadow caster on the CPU path. The GPU-driven
+					// path also uses it to fill casters the GPU cull cannot see
+					// (they are outside the main camera view), which would
+					// otherwise leave light leaks when the camera rotates.
+					const auto pp_buf = gpu_scene.get_page_pool_buffer();
+					auto draw_occluder = [&](size_t idx, bool skip_cached_static) {
+						bool is_static = (render_scene.flags[idx] & 1) != 0;
+						if (skip_cached_static && is_static) return;
+
+						uint32_t mesh_id = render_scene.mesh_indices[idx];
+						if (mesh_id >= meshes.size()) return;
+						const auto& mesh = meshes[mesh_id];
+						if (!mesh.is_valid()) return;
+
+						// Culling
+						const auto& model_matrix = render_scene.world_matrices[idx];
+						bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
+						if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) return;
+						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+
+						// These are CPU-issued draws: make the vertex shader use
+						// push_consts.model instead of the GPU instance buffer.
+						push_consts.use_gpu_driven = 0;
+						push_consts.model = model_matrix;
+
+						// Page-backed meshes live in the GPU page pool, not the
+						// mega geometry pool, so rebind the buffers per draw.
+						if (mesh.is_page_backed && pp_buf.is_valid()) {
+							rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+							rhi->cmd_bind_index_buffer(cmd, pp_buf);
+						}
+						else {
+							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+						}
+
+						uint32_t sub_idx = render_scene.submesh_indices[idx];
+						if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
+							const auto& sub = mesh.submeshes[sub_idx];
+							push_consts.material_id = sub.material_id;
+							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+						}
+						else {
+							push_consts.material_id = render_scene.material_indices[idx];
+							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)idx);
+						}
+					};
+
 					if (config.enable_gpu_driven) {
 						auto& frame = gpu_scene.frame_resources(rhi->get_current_image_index());
 						if (frame.csm_indirect_draw.is_valid()) {
-							bool use_page_pool = false;
-							if (instance_count > 0 && !meshes.empty() && render_scene.mesh_indices.size() > 0) {
-								uint32_t mid = render_scene.mesh_indices[0];
-								if (mid < meshes.size() && meshes[mid].is_page_backed) use_page_pool = true;
-							}
-							auto pp_buf = gpu_scene.get_page_pool_buffer();
 							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-							if (use_page_pool && pp_buf.is_valid()) {
-								rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-								rhi->cmd_bind_index_buffer(cmd, pp_buf);
-							}
-							else {
+
+							if (split_index > 0) {
 								rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 								rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+								rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
 							}
-							rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count), sizeof(bud::graphics::IndirectCommand));
+
+							if (split_index < instance_count && pp_buf.is_valid()) {
+								rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+								rhi->cmd_bind_index_buffer(cmd, pp_buf);
+								rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
+							}
+						}
+
+						// Coverage gap fix: the GPU cull only saw main-view
+						// instances. CPU-draw the cascade-visible casters that
+						// are outside the main view so shadows do not leak when
+						// the camera rotates. Static ones are re-drawn here too:
+						// the static cache never contained out-of-view casters.
+						const auto& visible_instances = csm_vis[i];
+						for (size_t k = 0; k < visible_instances.size(); ++k) {
+							size_t idx = visible_instances[k];
+							if (idx >= in_main_view.size() || in_main_view[idx]) continue;
+							draw_occluder(idx, false);
 						}
 					}
 					else {
 						const auto& visible_instances = csm_vis[i];
-						size_t count = visible_instances.size();
-
-						for (size_t i = 0; i < count; ++i) {
-							size_t idx = visible_instances[i];
-
-							bool is_static = (render_scene.flags[idx] & 1) != 0;
-							if (did_copy && is_static) continue;
-
-							uint32_t mesh_id = render_scene.mesh_indices[idx];
-							if (mesh_id >= meshes.size()) continue;
-							const auto& mesh = meshes[mesh_id];
-							if (!mesh.is_valid()) continue;
-
-
-							// Culling
-							const auto& model_matrix = render_scene.world_matrices[idx];
-							bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
-							if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) continue;
-							const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
-
-							// Page-backed meshes live in the GPU page pool, not the mega
-							// geometry pool, so rebind the buffers before issuing the draw.
-							const auto pp_buf = gpu_scene.get_page_pool_buffer();
-							if (mesh.is_page_backed && pp_buf.is_valid()) {
-								rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-								rhi->cmd_bind_index_buffer(cmd, pp_buf);
-							}
-							else {
-								rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-								rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-							}
-
-							// Draw
-							push_consts.model = model_matrix;
-
-							uint32_t sub_idx = render_scene.submesh_indices[idx];
-							if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
-								const auto& sub = mesh.submeshes[sub_idx];
-								push_consts.material_id = sub.material_id;
-								rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-								rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
-							}
-							else {
-								push_consts.material_id = render_scene.material_indices[idx];
-								rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)idx);
-							}
+						for (size_t k = 0; k < visible_instances.size(); ++k) {
+							draw_occluder(visible_instances[k], did_copy);
 						}
 					}
 					rhi->cmd_end_render_pass(cmd);
@@ -549,9 +582,9 @@ namespace bud::graphics {
 				builder.set_side_effect();
 				builder.read(instance_buffer, ResourceState::ShaderResource);
 				builder.read(hiz_pyramid, ResourceState::UnorderedAccess); // Keep in GENERAL so we can sample it in GENERAL layout
-				builder.write(indirect_draw_buffer, ResourceState::UnorderedAccess);
+				RGHandle new_draw = builder.write(indirect_draw_buffer, ResourceState::UnorderedAccess);
 				builder.write(stats_buffer, ResourceState::UnorderedAccess);
-				return RGHandle{};
+				return new_draw;
 			},
 			[=, &render_graph, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) return;
@@ -782,9 +815,9 @@ namespace bud::graphics {
 				builder.set_side_effect();
 				builder.read(instance_buffer, ResourceState::ShaderResource);
 				builder.read(meshlet_visibility_buffer, ResourceState::ShaderResource);
-				builder.write(indirect_draw_buffer, ResourceState::UnorderedAccess);
+				RGHandle new_draw = builder.write(indirect_draw_buffer, ResourceState::UnorderedAccess);
 				builder.write(stats_buffer, ResourceState::UnorderedAccess);
-				return RGHandle{};
+				return new_draw;
 			},
 			[=, &render_graph, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) return;
@@ -816,59 +849,59 @@ namespace bud::graphics {
 
 				// --- Async Debug Logging (Previous Frame Results) ---
 				frame_counter++;
-				if (frame_counter % 240 == 0) {
-					// 1. Histogram Summary
-					uint32_t* host_histogram = static_cast<uint32_t*>(histogram_buffer.mapped_ptr);
-					uint32_t histogram_sum = 0;
-					uint32_t max_bucket_val = 0;
-					uint32_t max_bucket_idx = 0;
-					if (host_histogram) {
-						for (int i = 0; i < 2048; ++i) {
-							histogram_sum += host_histogram[i];
-							if (host_histogram[i] > max_bucket_val) {
-								max_bucket_val = host_histogram[i];
-								max_bucket_idx = i;
-							}
-						}
-					}
+				//if (frame_counter % 240 == 0) {
+				//	// 1. Histogram Summary
+				//	uint32_t* host_histogram = static_cast<uint32_t*>(histogram_buffer.mapped_ptr);
+				//	uint32_t histogram_sum = 0;
+				//	uint32_t max_bucket_val = 0;
+				//	uint32_t max_bucket_idx = 0;
+				//	if (host_histogram) {
+				//		for (int i = 0; i < 2048; ++i) {
+				//			histogram_sum += host_histogram[i];
+				//			if (host_histogram[i] > max_bucket_val) {
+				//				max_bucket_val = host_histogram[i];
+				//				max_bucket_idx = i;
+				//			}
+				//		}
+				//	}
 
-					// 2. Cutoff results from config_ubo
-					HeuristicConfigLayout* host_config = static_cast<HeuristicConfigLayout*>(config_ubo.mapped_ptr);
+				//	// 2. Cutoff results from config_ubo
+				//	HeuristicConfigLayout* host_config = static_cast<HeuristicConfigLayout*>(config_ubo.mapped_ptr);
 
-					// 4. Stats Buffer
-					bud::graphics::GPUStats* host_stats = static_cast<bud::graphics::GPUStats*>(stat_buf.mapped_ptr);
+				//	// 4. Stats Buffer
+				//	bud::graphics::GPUStats* host_stats = static_cast<bud::graphics::GPUStats*>(stat_buf.mapped_ptr);
 
-					// 5. Indirect Buffer Emit
-					IndirectCommand* host_ind = static_cast<IndirectCommand*>(ind_buf.mapped_ptr);
-					uint32_t total_emitted_instances = 0;
-					if (host_ind && host_stats) {
-						// Note: host_stats->visibleInstances is the number of indirect commands emitted
-						for (uint32_t i = 0; i < host_stats->visibleInstances; ++i) {
-							total_emitted_instances += host_ind[i].instance_count;
-						}
-					}
-					else if (!host_ind) {
-						bud::eprint("[HeuStats][Warning] IndirectDrawBuffer is NOT host-mapped! Cannot verify emitted count.");
-					}
+				//	// 5. Indirect Buffer Emit
+				//	IndirectCommand* host_ind = static_cast<IndirectCommand*>(ind_buf.mapped_ptr);
+				//	uint32_t total_emitted_instances = 0;
+				//	if (host_ind && host_stats) {
+				//		// Note: host_stats->visibleInstances is the number of indirect commands emitted
+				//		for (uint32_t i = 0; i < host_stats->visibleInstances; ++i) {
+				//			total_emitted_instances += host_ind[i].instance_count;
+				//		}
+				//	}
+				//	else if (!host_ind) {
+				//		bud::eprint("[HeuStats][Warning] IndirectDrawBuffer is NOT host-mapped! Cannot verify emitted count.");
+				//	}
 
-					bud::print("[HeuStats][Histogram] total={} buckets=2048 dispatched={}", histogram_sum, static_cast<uint32_t>(visible_count));
-					if (host_config) {
-						bud::print("[HeuStats][Cutoff] frac={:.3f} bucket={} remaining={} counter={}", host_config->fraction, host_config->cutoff_bucket, host_config->remaining, host_config->counter);
-						bud::print("[HeuStats][CutoffCounter] final={} expected_remaining={}", host_config->counter, host_config->remaining);
-					}
-					if (host_stats) {
-						bud::print("[HeuStats][Stats] total={} vis={} tri_total={} tri_vis={} meshlet_total={} meshlet_vis={}", host_stats->totalInstances, host_stats->visibleInstances, host_stats->totalTriangles, host_stats->visibleTriangles, host_stats->totalMeshlets, host_stats->visibleMeshlets);
-						bud::print("[HeuStats][Heuristics] heu_total={} heu_cutoff_bucket={} heu_remaining={}", host_stats->heuristicTotalCount, host_stats->heuristicCutoffBucket, host_stats->heuristicRemaining);
-					}
-					bud::print("[HeuStats][Indirect] emitted={} expected_vis={}", total_emitted_instances, (host_stats ? host_stats->visibleInstances : 0));
-					if (host_ind && host_stats && host_stats->visibleInstances > 0) {
-						bud::print("[HeuStats][Sample] sample0=(inst={} first_inst={})", host_ind[0].instance_count, host_ind[0].first_instance);
-					}
-					if (host_stats && host_stats->visibleInstances > 0 && total_emitted_instances == 0) {
-						bud::eprint("[HeuStats][Error] Discrepancy: Stats show {} visible instances, but IndirectBuffer emitted 0!", host_stats->visibleInstances);
-					}
-					bud::print("[HeuStats][Hotspot] max_count={} bucket={}", max_bucket_val, max_bucket_idx);
-				}
+				//	bud::print("[HeuStats][Histogram] total={} buckets=2048 dispatched={}", histogram_sum, static_cast<uint32_t>(visible_count));
+				//	if (host_config) {
+				//		bud::print("[HeuStats][Cutoff] frac={:.3f} bucket={} remaining={} counter={}", host_config->fraction, host_config->cutoff_bucket, host_config->remaining, host_config->counter);
+				//		bud::print("[HeuStats][CutoffCounter] final={} expected_remaining={}", host_config->counter, host_config->remaining);
+				//	}
+				//	if (host_stats) {
+				//		bud::print("[HeuStats][Stats] total={} vis={} tri_total={} tri_vis={} meshlet_total={} meshlet_vis={}", host_stats->totalInstances, host_stats->visibleInstances, host_stats->totalTriangles, host_stats->visibleTriangles, host_stats->totalMeshlets, host_stats->visibleMeshlets);
+				//		bud::print("[HeuStats][Heuristics] heu_total={} heu_cutoff_bucket={} heu_remaining={}", host_stats->heuristicTotalCount, host_stats->heuristicCutoffBucket, host_stats->heuristicRemaining);
+				//	}
+				//	bud::print("[HeuStats][Indirect] emitted={} expected_vis={}", total_emitted_instances, (host_stats ? host_stats->visibleInstances : 0));
+				//	if (host_ind && host_stats && host_stats->visibleInstances > 0) {
+				//		bud::print("[HeuStats][Sample] sample0=(inst={} first_inst={})", host_ind[0].instance_count, host_ind[0].first_instance);
+				//	}
+				//	if (host_stats && host_stats->visibleInstances > 0 && total_emitted_instances == 0) {
+				//		bud::eprint("[HeuStats][Error] Discrepancy: Stats show {} visible instances, but IndirectBuffer emitted 0!", host_stats->visibleInstances);
+				//	}
+				//	bud::print("[HeuStats][Hotspot] max_count={} bucket={}", max_bucket_val, max_bucket_idx);
+				//}
 
 				bud::graphics::GPUStats zero_stats{};
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
@@ -941,12 +974,12 @@ namespace bud::graphics {
 
 				auto end_time = std::chrono::high_resolution_clock::now();
 
-				if (frame_counter % 240 == 0) {
-					std::chrono::duration<float, std::milli> p0 = t1 - start_time;
-					std::chrono::duration<float, std::milli> p1 = t2 - t1;
-					std::chrono::duration<float, std::milli> p2 = end_time - t2;
-					bud::print("[HeuStats][Timing] pass0={:.3f}ms pass1={:.3f}ms pass2={:.3f}ms total={:.3f}ms", p0.count(), p1.count(), p2.count(), p0.count() + p1.count() + p2.count());
-				}
+				//if (frame_counter % 240 == 0) {
+				//	std::chrono::duration<float, std::milli> p0 = t1 - start_time;
+				//	std::chrono::duration<float, std::milli> p1 = t2 - t1;
+				//	std::chrono::duration<float, std::milli> p2 = end_time - t2;
+				//	bud::print("[HeuStats][Timing] pass0={:.3f}ms pass1={:.3f}ms pass2={:.3f}ms total={:.3f}ms", p0.count(), p1.count(), p2.count(), p0.count() + p1.count() + p2.count());
+				//}
 			}
 		);
 	}
@@ -1087,9 +1120,9 @@ namespace bud::graphics {
 				builder.set_side_effect();
 				builder.read(instance_buffer, ResourceState::ShaderResource);
 				builder.read(meshlet_visibility_buffer, ResourceState::ShaderResource);
-				builder.write(indirect_draw_buffer, ResourceState::UnorderedAccess);
+				RGHandle new_draw = builder.write(indirect_draw_buffer, ResourceState::UnorderedAccess);
 				builder.write(stats_buffer, ResourceState::UnorderedAccess);
-				return RGHandle{};
+				return new_draw;
 			},
 			[=, &render_graph, &render_scene, &meshes, &sort_list, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) return;
@@ -1163,7 +1196,9 @@ namespace bud::graphics {
 		RGHandle indirect_draw_buffer,
 		const GPUScene& gpu_scene,
 		bud::graphics::BufferHandle mega_vertex_buffer,
-		bud::graphics::BufferHandle mega_index_buffer) {
+		bud::graphics::BufferHandle mega_index_buffer,
+        RGHandle existing_depth_buffer,
+		size_t split_index) {
 		if (!pipeline) {
 			std::string err = "DepthOnlyPass::add_to_graph pipeline is null";
 			bud::eprint("{}", err);
@@ -1226,12 +1261,15 @@ namespace bud::graphics {
 		depth_desc.height = target_height;
 		depth_desc.format = bud::graphics::TextureFormat::D32_FLOAT;
 
-		auto depth_h = std::make_shared<RGHandle>();
-
-		return render_graph.add_pass("Depth Only Pass",
+		auto depth_h = std::make_shared<RGHandle>(existing_depth_buffer);
+		bool clear_depth_flag = !existing_depth_buffer.is_valid();
+        
+		return render_graph.add_pass(clear_depth_flag ? "Depth Only Pass" : "Depth Only Pass (Phase 2)",
 			[=](RGBuilder& builder) {
-				*depth_h = builder.create("MainDepth", depth_desc);
-				builder.write(*depth_h, ResourceState::DepthWrite);
+				if (clear_depth_flag) {
+					*depth_h = builder.create("MainDepth", depth_desc);
+				}
+				*depth_h = builder.write(*depth_h, ResourceState::DepthWrite);
 				if (use_indirect_draw && indirect_draw_buffer.is_valid()) {
 					builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
 				}
@@ -1247,7 +1285,7 @@ namespace bud::graphics {
 
 				RenderPassBeginInfo info;
 				info.depth_attachment = render_graph.get_texture(*depth_h);
-				info.clear_depth = true;
+				info.clear_depth = clear_depth_flag;
 				info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
 
 				rhi->cmd_begin_render_pass(cmd, info);
@@ -1279,24 +1317,23 @@ namespace bud::graphics {
 						return;
 					}
 
-					bool use_page_pool = false;
-					if (draw_count > 0 && sort_list[0].entity_index < render_scene.mesh_indices.size()) {
-						uint32_t mid = render_scene.mesh_indices[sort_list[0].entity_index];
-						if (mid < meshes.size() && meshes[mid].is_page_backed) {
-							use_page_pool = true;
+					if (config.enable_gpu_driven) {
+						if (indirect_draw_buffer.is_valid() && draw_count > 0) {
+							auto pp_buf = gpu_scene.get_page_pool_buffer();
+							
+							if (split_index > 0) {
+								rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+								rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+								rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), 0, static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
+							}
+
+							if (split_index < draw_count && pp_buf.is_valid()) {
+								rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+								rhi->cmd_bind_index_buffer(cmd, pp_buf);
+								rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), split_index * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(draw_count - split_index), sizeof(bud::graphics::IndirectCommand));
+							}
 						}
 					}
-					auto pp_buf = gpu_scene.get_page_pool_buffer();
-					if (use_page_pool && pp_buf.is_valid()) {
-						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-						rhi->cmd_bind_index_buffer(cmd, pp_buf);
-					}
-					else {
-						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-					}
-
-					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
 				}
 				else {
 					for (size_t i = 0; i < draw_count; ++i) {
@@ -1314,33 +1351,21 @@ namespace bud::graphics {
 
 						// Page-backed meshes are backed by the GPU page pool, not the mega
 						// geometry pool, so rebind the buffers before issuing the draw.
-						if (mesh.is_page_backed && pp_buf.is_valid()) {
-							rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-							rhi->cmd_bind_index_buffer(cmd, pp_buf);
+						if (mesh.is_page_backed && gpu_scene.get_page_pool_buffer().is_valid()) {
+							rhi->cmd_bind_vertex_buffer(cmd, gpu_scene.get_page_pool_buffer());
+							rhi->cmd_bind_index_buffer(cmd, gpu_scene.get_page_pool_buffer());
 						}
 						else {
 							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 						}
 
-						struct PushVars {
-							bud::math::mat4 model;
-							uint32_t material_id;
-							uint32_t padding[3];
-						} push_vars;
-
-						push_vars.model = model_matrix;
-
 						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
 							const auto& sub = mesh.submeshes[item.submesh_index];
-							push_vars.material_id = sub.material_id;
-							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
-							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
 						}
 						else {
-							push_vars.material_id = material_id;
-							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushVars), &push_vars);
-							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, 0);
+							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
 						}
 					}
 				}
@@ -1621,7 +1646,9 @@ namespace bud::graphics {
 		RGHandle instance_data,
 		const GPUScene& gpu_scene,
 		bud::graphics::BufferHandle mega_vertex_buffer,
-		bud::graphics::BufferHandle mega_index_buffer)
+		bud::graphics::BufferHandle mega_index_buffer,
+		RGHandle ao_map,
+		size_t split_index)
 	{
 		const size_t max_scene_count = std::min({
 			render_scene.world_matrices.size(),
@@ -1641,12 +1668,7 @@ namespace bud::graphics {
 			return;
 		}
 
-		// instance_count = exploded submesh draw count; sort_list is sized to match.
-		// max_scene_count guards accessing render_scene arrays, but entity_index in
-		// sort_list items are already validated — do NOT clamp draw_count by it.
 		const size_t draw_count = std::min(instance_count, sort_list.size());
-		//bud::print("[MainPass] draw_count={} instance_count={} sort_list={} gpu_driven={}",
-			//draw_count, instance_count, sort_list.size(), config.enable_gpu_driven);
 
 		uint32_t target_width = backbuffer_tex->width;
 		uint32_t target_height = backbuffer_tex->height;
@@ -1656,6 +1678,9 @@ namespace bud::graphics {
 				builder.write(backbuffer, ResourceState::RenderTarget);
 				builder.read(shadow_map, ResourceState::DepthRead);
 				builder.write(depth_buffer, ResourceState::DepthWrite);
+				if (ao_map.is_valid()) {
+					builder.read(ao_map, ResourceState::ShaderResource);
+				}
 				if (config.enable_gpu_driven) {
 					builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
 				}
@@ -1667,6 +1692,14 @@ namespace bud::graphics {
 				if (!pipeline) {
 					bud::eprint("[MainPass] ERROR: Pipeline is null.");
 					return;
+				}
+
+				if (ao_map.is_valid()) {
+					Texture* ao_tex = render_graph.get_texture(ao_map);
+					if (ao_tex) rhi->update_bindless_texture_current_frame(ao_map_bindless_slot, ao_tex);
+				}
+				else {
+					rhi->update_bindless_texture_current_frame(ao_map_bindless_slot, rhi->get_fallback_texture());
 				}
 
 				bud::graphics::BufferHandle ind_buf_handle;
@@ -1696,27 +1729,23 @@ namespace bud::graphics {
 				// Bind global Mega-Buffer once for the entire pass
 				rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+					if (config.enable_gpu_driven) {
+						if (indirect_draw_buffer.is_valid() && draw_count > 0) {
+							auto pp_buf = gpu_scene.get_page_pool_buffer();
+							
+							if (split_index > 0) {
+								rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+								rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+								rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), 0, static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
+							}
 
-				if (config.enable_gpu_driven) {
-					bool use_page_pool = false;
-					if (draw_count > 0 && sort_list[0].entity_index < render_scene.mesh_indices.size()) {
-						uint32_t mid = render_scene.mesh_indices[sort_list[0].entity_index];
-						if (mid < meshes.size() && meshes[mid].is_page_backed) {
-							use_page_pool = true;
+							if (split_index < draw_count && pp_buf.is_valid()) {
+								rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+								rhi->cmd_bind_index_buffer(cmd, pp_buf);
+								rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), split_index * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(draw_count - split_index), sizeof(bud::graphics::IndirectCommand));
+							}
 						}
 					}
-					auto pp_buf = gpu_scene.get_page_pool_buffer();
-					if (use_page_pool && pp_buf.is_valid()) {
-						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-						rhi->cmd_bind_index_buffer(cmd, pp_buf);
-					}
-					else {
-						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-					}
-
-					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
-				}
 				else {
 					auto pp_buf = gpu_scene.get_page_pool_buffer();
 					size_t page_backed_draws = 0;
@@ -1808,7 +1837,7 @@ namespace bud::graphics {
 		TextureDesc tex_desc;
 		tex_desc.width = width;
 		tex_desc.height = height;
-		tex_desc.format = TextureFormat::RGBA8_UNORM;
+		tex_desc.format = TextureFormat::RGBA8_SRGB;
 		tex_desc.mips = 1;
 
 		font_texture = rhi->create_texture(tex_desc, pixels, width * height * 4);
@@ -2057,7 +2086,8 @@ namespace bud::graphics {
 		bud::graphics::RGHandle instance_data,
 		const GPUScene& gpu_scene,
 		bud::graphics::BufferHandle mega_vertex_buffer,
-		bud::graphics::BufferHandle mega_index_buffer)
+		bud::graphics::BufferHandle mega_index_buffer,
+		size_t split_index)
 	{
 		const size_t draw_count = std::min(instance_count, sort_list.size());
 		if (draw_count == 0 || !pipeline) return;
@@ -2104,24 +2134,19 @@ namespace bud::graphics {
 				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 
 				if (config.enable_gpu_driven && ind_buf_handle.is_valid()) {
-					bool use_page_pool = false;
-					if (draw_count > 0 && sort_list[0].entity_index < render_scene.mesh_indices.size()) {
-						uint32_t mid = render_scene.mesh_indices[sort_list[0].entity_index];
-						if (mid < meshes.size() && meshes[mid].is_page_backed) {
-							use_page_pool = true;
-						}
-					}
 					auto pp_buf = gpu_scene.get_page_pool_buffer();
-					if (use_page_pool && pp_buf.is_valid()) {
-						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-						rhi->cmd_bind_index_buffer(cmd, pp_buf);
-					}
-					else {
+					
+					if (split_index > 0) {
 						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+						rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
 					}
 
-					rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, 0, (uint32_t)draw_count, sizeof(IndirectCommand));
+					if (split_index < draw_count && pp_buf.is_valid()) {
+						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
+						rhi->cmd_bind_index_buffer(cmd, pp_buf);
+						rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, split_index * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(draw_count - split_index), sizeof(bud::graphics::IndirectCommand));
+					}
 				}
 				else {
 					for (size_t i = 0; i < draw_count; ++i) {
@@ -2146,5 +2171,356 @@ namespace bud::graphics {
 				rhi->cmd_end_render_pass(cmd);
 			}
 		);
+	}
+
+	void AmbientOcclusionPass::shutdown(RHI* rhi) {
+		if (ssao_pipeline) { rhi->destroy_pipeline(ssao_pipeline); ssao_pipeline = nullptr; }
+		if (gtao_pipeline) { rhi->destroy_pipeline(gtao_pipeline); gtao_pipeline = nullptr; }
+	}
+
+	void AmbientOcclusionPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) return;
+
+		load_shaders_async(asset_manager, { "src/shaders/ssao.comp.spv" }, [this, rhi](std::vector<std::vector<char>> shaders) {
+			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::AmbientOcclusion;
+			desc.cs.code = shaders[0];
+			ssao_pipeline = rhi->create_compute_pipeline(desc);
+			if (ssao_pipeline) bud::print("[AmbientOcclusionPass] SSAO shader loaded and pipeline created.");
+			});
+
+		load_shaders_async(asset_manager, { "src/shaders/gtao.comp.spv" }, [this, rhi](std::vector<std::vector<char>> shaders) {
+			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::AmbientOcclusion;
+			desc.cs.code = shaders[0];
+			gtao_pipeline = rhi->create_compute_pipeline(desc);
+			if (gtao_pipeline) bud::print("[AmbientOcclusionPass] GTAO shader loaded and pipeline created.");
+			});
+	}
+
+	RGHandle AmbientOcclusionPass::add_to_graph(RenderGraph& rg, RGHandle depth_buffer, const SceneView& view, const RenderConfig& config) {
+		if (config.ao_mode == AOMode::Disabled || !depth_buffer.is_valid()) return {};
+
+		auto depth_desc = rg.get_texture_desc(depth_buffer);
+		if (depth_desc.width == 0 || depth_desc.height == 0) return {};
+
+		// Evaluate AO at half resolution by default and let the AO blur pass
+		// depth-aware-upsample it back to full resolution. The AO shaders map
+		// UVs from screen_size, so they adapt to the smaller target.
+		const uint32_t downscale = config.ao_half_res ? 2u : 1u;
+		TextureDesc ao_desc{};
+		ao_desc.width = std::max(1u, depth_desc.width / downscale);
+		ao_desc.height = std::max(1u, depth_desc.height / downscale);
+		// R32F: 8-bit R8_UNORM quantizes the temporally-smoothed AO into 256
+		// levels, producing visible contour banding / moiré on smooth gradients.
+		ao_desc.format = TextureFormat::R32_FLOAT;
+		ao_desc.is_storage = true;
+
+		auto raw_ao_h = std::make_shared<RGHandle>();
+
+		return rg.add_pass("Ambient Occlusion Pass",
+			[=](RGBuilder& builder) {
+				*raw_ao_h = builder.create("RawAOTexture", ao_desc);
+				builder.read(depth_buffer, ResourceState::ShaderResource);
+				builder.write(*raw_ao_h, ResourceState::UnorderedAccess);
+				return *raw_ao_h;
+			},
+			[=, &rg, this](RHI* rhi, CommandHandle cmd) {
+				void* active_pipeline = (config.ao_mode == AOMode::GTAO) ? gtao_pipeline : ssao_pipeline;
+				if (!active_pipeline) return;
+
+				Texture* depth_tex = nullptr;
+				Texture* ao_tex = nullptr;
+				try {
+					depth_tex = rg.get_texture(depth_buffer);
+					ao_tex = rg.get_texture(*raw_ao_h);
+				}
+				catch (const std::exception& e) {
+					bud::eprint("[AmbientOcclusionPass] Resource lookup failed: {}", e.what());
+					return;
+				}
+
+				if (!depth_tex || !ao_tex) return;
+
+				rhi->cmd_bind_pipeline(cmd, active_pipeline);
+				rhi->cmd_bind_compute_texture(cmd, active_pipeline, 0, depth_tex);
+				rhi->cmd_bind_compute_texture(cmd, active_pipeline, 1, ao_tex, 0, true);
+
+				struct PushConsts {
+					bud::math::mat4 proj;
+					bud::math::mat4 inv_proj;
+					bud::math::vec2 screen_size;
+					float radius;
+					float intensity;
+					uint32_t sample_count;
+					uint32_t reversed_z;
+					float time;
+				} pc;
+
+				pc.proj = view.proj_matrix;
+				pc.inv_proj = bud::math::inverse(view.proj_matrix);
+				pc.screen_size = bud::math::vec2(static_cast<float>(ao_desc.width), static_cast<float>(ao_desc.height));
+				pc.radius = config.ao_radius;
+				pc.intensity = config.ao_intensity;
+				pc.sample_count = config.ao_sample_count;
+				pc.reversed_z = config.reversed_z ? 1 : 0;
+				// Per-frame noise phase: wrap time to a 16s window to keep float32
+				// precision, then scale by 37 so the phase advances ~0.6 per frame
+				// (golden-ratio-like decorrelation for the temporal filter).
+				// Per-frame noise phase: rotate the slice pattern ~17 deg/frame (23/60
+				// at 60fps, coprime with 60 so it stays decorrelated over the ~19-frame
+				// averaging window) -- large rotation steps (37) make consecutive
+				// frames differ a lot, inflating the residual noise floor.
+				pc.time = std::fmod(std::fmod(std::fabs(view.time), 16.0f) * 23.0f, 1.0f);
+
+				rhi->cmd_push_constants(cmd, active_pipeline, sizeof(PushConsts), &pc);
+
+				uint32_t gx = (ao_desc.width + 15u) / 16u;
+				uint32_t gy = (ao_desc.height + 15u) / 16u;
+				rhi->cmd_dispatch(cmd, gx, gy, 1);
+			}
+		);
+	}
+
+	void AOBlurPass::shutdown(RHI* rhi) {
+		if (pipeline) { rhi->destroy_pipeline(pipeline); pipeline = nullptr; }
+	}
+
+	void AOBlurPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) return;
+
+		load_shaders_async(asset_manager, { "src/shaders/ao_blur.comp.spv" }, [this, rhi](std::vector<std::vector<char>> shaders) {
+			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::AOBlur;
+			desc.cs.code = shaders[0];
+			pipeline = rhi->create_compute_pipeline(desc);
+			if (pipeline) bud::print("[AOBlurPass] Shader loaded and pipeline created.");
+			});
+	}
+
+	RGHandle AOBlurPass::add_to_graph(RenderGraph& rg, RGHandle raw_ao, RGHandle depth_buffer, const SceneView& view, const RenderConfig& config) {
+		if (!pipeline || !raw_ao.is_valid() || !depth_buffer.is_valid() || !config.ao_blur_enable) return raw_ao;
+
+		auto raw_desc = rg.get_texture_desc(raw_ao);
+		if (raw_desc.width == 0 || raw_desc.height == 0) return raw_ao;
+
+		// The blur pass outputs at full resolution: it reads the lower-res raw
+		// AO and depth-aware upsamples it (kernel steps are half-res texels).
+		auto depth_desc = rg.get_texture_desc(depth_buffer);
+		if (depth_desc.width == 0 || depth_desc.height == 0) return raw_ao;
+
+		TextureDesc blur_desc{};
+		blur_desc.width = depth_desc.width;
+		blur_desc.height = depth_desc.height;
+		blur_desc.format = raw_desc.format;
+		blur_desc.is_storage = true;
+		auto blurred_ao_h = std::make_shared<RGHandle>();
+
+		return rg.add_pass("AO Blur Pass",
+			[=](RGBuilder& builder) {
+				*blurred_ao_h = builder.create("BlurredAOTexture", blur_desc);
+				// Raw AO is read in GENERAL layout (is_general=true) so the history
+				// texture feeding this pass is never taken out of GENERAL.
+				builder.read(raw_ao, ResourceState::UnorderedAccess);
+				builder.read(depth_buffer, ResourceState::ShaderResource);
+				builder.write(*blurred_ao_h, ResourceState::UnorderedAccess);
+				return *blurred_ao_h;
+			},
+			[=, &rg](RHI* rhi, CommandHandle cmd) {
+				if (!pipeline) return;
+
+				Texture* raw_tex = nullptr;
+				Texture* depth_tex = nullptr;
+				Texture* blur_tex = nullptr;
+				try {
+					raw_tex = rg.get_texture(raw_ao);
+					depth_tex = rg.get_texture(depth_buffer);
+					blur_tex = rg.get_texture(*blurred_ao_h);
+				}
+				catch (const std::exception& e) {
+					bud::eprint("[AOBlurPass] Resource lookup failed: {}", e.what());
+					return;
+				}
+
+				if (!raw_tex || !depth_tex || !blur_tex) return;
+
+				// Raw AO stays in GENERAL layout; the render graph skips a
+				// same-state barrier, so record an explicit memory barrier to
+				// order this read after the producing compute dispatch.
+				rhi->resource_barrier(cmd, raw_tex, ResourceState::UnorderedAccess, ResourceState::UnorderedAccess);
+
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_bind_compute_texture(cmd, pipeline, 0, raw_tex, 0, false, true); // is_general: read raw AO from GENERAL layout
+				rhi->cmd_bind_compute_texture(cmd, pipeline, 1, depth_tex);
+				rhi->cmd_bind_compute_texture(cmd, pipeline, 2, blur_tex, 0, true);
+
+				struct PushConsts {
+					bud::math::mat4 inv_proj;
+					bud::math::vec2 screen_size;
+					uint32_t reversed_z;
+					uint32_t blur_radius;
+				} pc;
+
+				pc.inv_proj = bud::math::inverse(view.proj_matrix);
+				pc.screen_size = bud::math::vec2(static_cast<float>(depth_desc.width), static_cast<float>(depth_desc.height));
+				pc.reversed_z = config.reversed_z ? 1 : 0;
+				// Kernel radius measured in half-res AO texels: 7x7 for GTAO,
+				// a single bilinear tap for SSAO (temporal already denoises).
+				pc.blur_radius = (config.ao_mode == AOMode::GTAO) ? 3 : 1;
+
+				rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
+
+				uint32_t gx = (depth_desc.width + 15u) / 16u;
+				uint32_t gy = (depth_desc.height + 15u) / 16u;
+				rhi->cmd_dispatch(cmd, gx, gy, 1);
+			}
+		);
+	}
+
+	void AOTemporalPass::shutdown(RHI* rhi) {
+		RenderPass::shutdown(rhi);
+		if (stored_rhi) {
+			auto* pool = stored_rhi->get_resource_pool();
+			if (pool) {
+				for (auto& tex : history_textures) {
+					if (tex) pool->release_texture(tex);
+					tex = nullptr;
+				}
+			}
+		}
+		has_valid_history = false;
+		has_last_view_proj = false;
+		history_width = 0;
+		history_height = 0;
+	}
+
+	void AOTemporalPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+		if (!rhi || !asset_manager) return;
+		stored_rhi = rhi;
+		load_shaders_async(asset_manager, { "src/shaders/ao_temporal.comp.spv" }, [this, rhi](std::vector<std::vector<char>> shaders) {
+			ComputePipelineDesc desc;
+			desc.layout_kind = ComputePipelineDesc::LayoutKind::AOTemporal;
+			desc.cs.code = shaders[0];
+			pipeline = rhi->create_compute_pipeline(desc);
+			if (pipeline) bud::print("[AOTemporalPass] Shader loaded and pipeline created.");
+			});
+	}
+
+	RGHandle AOTemporalPass::add_to_graph(RenderGraph& rg, RGHandle raw_ao, RGHandle depth_buffer, const SceneView& view, const RenderConfig& config) {
+		if (!pipeline || !raw_ao.is_valid() || !depth_buffer.is_valid() || !config.ao_temporal_enable) return raw_ao;
+
+		auto ao_desc = rg.get_texture_desc(raw_ao);
+		if (ao_desc.width == 0 || ao_desc.height == 0) return raw_ao;
+
+		// (Re)create the ping-pong history textures when the AO resolution changes.
+		if (stored_rhi && (ao_desc.width != history_width || ao_desc.height != history_height)) {
+			auto* pool = stored_rhi->get_resource_pool();
+			for (auto& tex : history_textures) {
+				if (tex && pool) pool->release_texture(tex);
+				tex = nullptr;
+			}
+
+			TextureDesc hist_desc = ao_desc;
+			hist_desc.is_storage = true;
+			for (auto& tex : history_textures) {
+				tex = stored_rhi->create_texture(hist_desc, nullptr, 0);
+			}
+			history_width = ao_desc.width;
+			history_height = ao_desc.height;
+			has_valid_history = false;
+		}
+
+		if (!history_textures[0] || !history_textures[1]) return raw_ao;
+
+		const uint32_t read_idx = history_read_index;
+		const uint32_t write_idx = history_read_index ^ 1u;
+
+		// History textures are kept in VK_IMAGE_LAYOUT_GENERAL at all times:
+		// sampled with is_general=true and written as a storage image. Importing
+		// them as UnorderedAccess (GENERAL) makes the render graph issue no
+		// layout transition, so the previous frame's data is preserved.
+		RGHandle history_read_h = rg.import_texture("AOHistoryRead", history_textures[read_idx], ResourceState::UnorderedAccess);
+		RGHandle history_write_h = rg.import_texture("AOHistoryWrite", history_textures[write_idx], ResourceState::UnorderedAccess);
+
+		// Snapshot camera state NOW (at graph-build time): the graph executes
+		// later, by which point last_view_proj would already be rolled forward.
+		const bud::math::mat4 prev_view_proj = has_last_view_proj ? last_view_proj : view.view_proj_matrix;
+		const uint32_t has_history = (has_valid_history && has_last_view_proj) ? 1u : 0u;
+
+		rg.add_pass("AO Temporal Accumulation",
+			[=](RGBuilder& builder) {
+				builder.read(raw_ao, ResourceState::ShaderResource);
+				builder.read(depth_buffer, ResourceState::ShaderResource);
+				builder.read(history_read_h, ResourceState::UnorderedAccess);
+				builder.write(history_write_h, ResourceState::UnorderedAccess);
+				return history_write_h;
+			},
+			[=, &rg, this](RHI* rhi, CommandHandle cmd) {
+				Texture* current_tex = nullptr;
+				Texture* depth_tex = nullptr;
+				Texture* history_tex = nullptr;
+				Texture* out_tex = nullptr;
+				try {
+					current_tex = rg.get_texture(raw_ao);
+					depth_tex = rg.get_texture(depth_buffer);
+					history_tex = rg.get_texture(history_read_h);
+					out_tex = rg.get_texture(history_write_h);
+				}
+				catch (const std::exception& e) {
+					bud::eprint("[AOTemporalPass] Resource lookup failed: {}", e.what());
+					return;
+				}
+
+				if (!current_tex || !depth_tex || !history_tex || !out_tex) return;
+
+				// First frame (or after a resolution change): freshly created
+				// history images start in UNDEFINED; bring them into GENERAL so
+				// the content-preserving invariant holds from here on.
+				if (has_history == 0) {
+					rhi->resource_barrier(cmd, history_tex, ResourceState::Undefined, ResourceState::UnorderedAccess);
+					rhi->resource_barrier(cmd, out_tex, ResourceState::Undefined, ResourceState::UnorderedAccess);
+				}
+
+				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_bind_compute_texture(cmd, pipeline, 0, current_tex);
+				rhi->cmd_bind_compute_texture(cmd, pipeline, 1, history_tex, 0, false, true); // is_general: sample from GENERAL layout
+				rhi->cmd_bind_compute_texture(cmd, pipeline, 2, depth_tex);
+				rhi->cmd_bind_compute_texture(cmd, pipeline, 3, out_tex, 0, true);
+
+				struct PushConsts {
+					bud::math::mat4 inv_proj;
+					bud::math::mat4 inv_view;
+					bud::math::mat4 prev_view_proj;
+					bud::math::vec2 screen_size;
+					uint32_t reversed_z;
+					uint32_t has_history;
+					float noise_rot;
+				} pc;
+
+				pc.inv_proj = bud::math::inverse(view.proj_matrix);
+				pc.inv_view = bud::math::inverse(view.view_matrix);
+				pc.prev_view_proj = prev_view_proj;
+				pc.screen_size = bud::math::vec2(static_cast<float>(ao_desc.width), static_cast<float>(ao_desc.height));
+				pc.reversed_z = config.reversed_z ? 1 : 0;
+				pc.has_history = has_history;
+				// Per-frame denoise-tap rotation: ~137.5 deg/frame (golden
+				// angle, wrapped) so the integrated footprint is isotropic.
+				pc.noise_rot = std::fmod(std::fmod(std::fabs(view.time), 16.0f) * 144.0f, 6.2831853f);
+
+				rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
+
+				uint32_t gx = (ao_desc.width + 15u) / 16u;
+				uint32_t gy = (ao_desc.height + 15u) / 16u;
+				rhi->cmd_dispatch(cmd, gx, gy, 1);
+			}
+		);
+
+		// Roll state forward for the next frame.
+		last_view_proj = view.view_proj_matrix;
+		has_last_view_proj = true;
+		has_valid_history = true;
+		history_read_index = write_idx;
+
+		return history_write_h;
 	}
 }

@@ -104,6 +104,7 @@ namespace bud::graphics::vulkan {
 
 		bud::graphics::Texture* create_texture(const bud::graphics::TextureDesc& desc, const void* initial_data, uint64_t size) override;
 		void update_bindless_texture(uint32_t index, bud::graphics::Texture* texture) override;
+		void update_bindless_texture_current_frame(uint32_t index, bud::graphics::Texture* texture) override;
 		void update_bindless_image(uint32_t index, bud::graphics::Texture* texture, uint32_t mip_level = 0, bool is_storage = false) override;
 		bud::graphics::Texture* get_fallback_texture() override;
 
@@ -256,6 +257,9 @@ namespace bud::graphics::vulkan {
 		VkDescriptorSetLayout compute_meshlet_frustum_set_layout = VK_NULL_HANDLE;
 		VkDescriptorSetLayout compute_meshlet_indirect_set_layout = VK_NULL_HANDLE;
 		VkDescriptorSetLayout compute_meshlet_hiz_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_ao_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_ao_blur_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_ao_temporal_set_layout = VK_NULL_HANDLE;
 		VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
 		VkSampler default_sampler = VK_NULL_HANDLE;
 		VkSampler shadow_sampler = VK_NULL_HANDLE;

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <string>
 #include <vector>
@@ -85,7 +85,8 @@ namespace bud::graphics {
 
 		// 纹理管理
 		virtual Texture* create_texture(const TextureDesc& desc, const void* initial_data, uint64_t size) = 0;
-		virtual void update_bindless_texture(uint32_t index, Texture* texture) = 0;
+		virtual void update_bindless_texture(uint32_t index, bud::graphics::Texture* texture) = 0;
+		virtual void update_bindless_texture_current_frame(uint32_t index, bud::graphics::Texture* texture) { update_bindless_texture(index, texture); }
 		virtual void update_bindless_image(uint32_t index, Texture* texture, uint32_t mip_level = 0, bool is_storage = false) = 0;
 		virtual Texture* get_fallback_texture() = 0;
 		virtual void update_global_shadow_map(Texture* texture) = 0;
