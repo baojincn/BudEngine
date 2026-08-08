@@ -108,6 +108,13 @@ namespace bud::graphics::vulkan {
 		void update_bindless_image(uint32_t index, bud::graphics::Texture* texture, uint32_t mip_level = 0, bool is_storage = false) override;
 		bud::graphics::Texture* get_fallback_texture() override;
 
+		// Returns the current render-frame slot (0..max_frames_in_flight-1).
+		// Per-frame GPU buffers and staging must be indexed by this slot, NOT
+		// the swapchain image index: sync objects (in_flight_fence, upload
+		// timeline) are per-slot, so buffers indexed by image_index would be
+		// reused out of sync with those fences (cross-frame races -> flicker).
+		uint32_t get_current_frame_index() const override { return current_frame; }
+
 		// 杂项 / 待重构
 		void set_render_config(const bud::graphics::RenderConfig& new_render_config) override;
 		void update_global_uniforms(uint32_t image_index, const bud::graphics::SceneView& scene_view) override;
@@ -202,12 +209,15 @@ namespace bud::graphics::vulkan {
 			VkCommandBuffer main_command_buffer = nullptr;
 			// Per-frame upload command buffer for staging->GPU copies. Recorded
 			// on the copy queue and chained to the main command buffer via a
-			// binary semaphore so per-frame uploads no longer flush the whole
+			// timeline semaphore so per-frame uploads no longer flush the whole
 			// graphics queue with vkQueueWaitIdle.
 			VkCommandPool upload_command_pool = nullptr;
 			VkCommandBuffer upload_command_buffer = nullptr;
-			VkSemaphore upload_finished_semaphore = nullptr; // signaled by upload cb
-			VkFence upload_fence = nullptr;                  // CPU waits on this for staging reuse
+			// Timeline semaphore signaled by the upload submit on the copy queue;
+			// the main command buffer waits on the per-frame value (value-based,
+			// immune to the binary semaphore's stateful signal/wait requirement).
+			VkSemaphore upload_timeline_semaphore = nullptr;
+			uint64_t upload_timeline_value = 0;
 			VkBuffer uniform_buffer = nullptr;       // Per-frame UBO (allocated via VMA when available)
 			VmaAllocation uniform_allocation = VK_NULL_HANDLE; // VMA allocation for the UBO (if used)
 			VmaAllocationInfo uniform_alloc_info = {}; // allocation info containing mapped ptr

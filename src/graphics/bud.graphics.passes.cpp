@@ -167,13 +167,13 @@ namespace bud::graphics {
 			render_graph.add_pass("CSM Cull",
 				[&](RGBuilder& builder) {
 					builder.read(rg_instance_data, ResourceState::ShaderResource);
-					auto& frame = gpu_scene.frame_resources(stored_rhi->get_current_image_index());
+					auto& frame = gpu_scene.frame_resources(stored_rhi->get_current_frame_index());
 					if (frame.csm_indirect_draw.is_valid()) {
 						builder.write(render_graph.import_buffer("CSMIndirect", frame.csm_indirect_draw, ResourceState::UnorderedAccess), ResourceState::UnorderedAccess);
 					}
 				},
 				[=, &gpu_scene, &view, &config](RHI* rhi, CommandHandle cmd) {
-					auto& frame = gpu_scene.frame_resources(rhi->get_current_image_index());
+					auto& frame = gpu_scene.frame_resources(rhi->get_current_frame_index());
 					if (!frame.csm_indirect_draw.is_valid() || instance_count == 0) return;
 
 					// CRITICAL: the cull shader reads the cascade matrices from
@@ -288,7 +288,7 @@ namespace bud::graphics {
 
 							const auto pp_buf = gpu_scene.get_page_pool_buffer();
 							if (config.enable_gpu_driven) {
-								auto& frame = gpu_scene.frame_resources(rhi->get_current_image_index());
+								auto& frame = gpu_scene.frame_resources(rhi->get_current_frame_index());
 								// Static cache: draw ONLY the static casters from
 								// csm_static_indirect_draw (written by csm_cull
 								// with static_only=1), so dynamic objects are never
@@ -506,7 +506,7 @@ namespace bud::graphics {
 					};
 
 					if (config.enable_gpu_driven) {
-						auto& frame = gpu_scene.frame_resources(rhi->get_current_image_index());
+						auto& frame = gpu_scene.frame_resources(rhi->get_current_frame_index());
 						if (frame.csm_indirect_draw.is_valid()) {
 							// csm_cull.comp's second dispatch wrote the DYNAMIC
 							// commands (statics skipped because the static cache

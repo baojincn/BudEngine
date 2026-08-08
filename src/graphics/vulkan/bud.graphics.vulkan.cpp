@@ -586,10 +586,8 @@ void VulkanRHI::cleanup() {
             vkDestroyCommandPool(device, frames[i].main_command_pool, nullptr);
 
         // Async upload resources
-        if (frames[i].upload_finished_semaphore)
-            vkDestroySemaphore(device, frames[i].upload_finished_semaphore, nullptr);
-        if (frames[i].upload_fence)
-            vkDestroyFence(device, frames[i].upload_fence, nullptr);
+        if (frames[i].upload_timeline_semaphore)
+            vkDestroySemaphore(device, frames[i].upload_timeline_semaphore, nullptr);
         if (frames[i].upload_command_pool)
             vkDestroyCommandPool(device, frames[i].upload_command_pool, nullptr);
     }
@@ -1251,15 +1249,24 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	// copies, so the main command buffer only starts after the upload cb is done.
 	VkSemaphore wait_semaphores[2] = {
 		frames[current_frame].image_available_semaphore,
-		frames[current_frame].upload_finished_semaphore
+		frames[current_frame].upload_timeline_semaphore
 	};
 	VkPipelineStageFlags wait_stages[2] = {
 		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
 	};
 	uint32_t wait_count = 1;
+	uint64_t upload_wait_value = frames[current_frame].upload_timeline_value;
+	// Vulkan requires waitSemaphoreValueCount == waitSemaphoreCount when any
+	// semaphore is a timeline. Provide a value for every semaphore (the binary
+	// image_available value is ignored).
+	uint64_t wait_values[2] = { 0, upload_wait_value };
+	VkTimelineSemaphoreSubmitInfo timeline_info{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
 	if (upload_pending_this_frame) {
 		wait_count = 2;
+		timeline_info.waitSemaphoreValueCount = wait_count;
+		timeline_info.pWaitSemaphoreValues = wait_values;
+		submit_info.pNext = &timeline_info;
 	}
 	submit_info.waitSemaphoreCount = wait_count;
 	submit_info.pWaitSemaphores = wait_semaphores;
@@ -1478,15 +1485,23 @@ CommandHandle VulkanRHI::begin_upload() {
     if (frames.empty() || !frames[current_frame].upload_command_pool)
         return nullptr;
 
-    // Wait for this frame's previous upload to finish before reusing the
-    // staging ring / command buffer (ring pages reset on frame begin).
-    if (frames[current_frame].upload_fence) {
-        vkWaitForFences(device, 1, &frames[current_frame].upload_fence, VK_TRUE, UINT64_MAX);
-        vkResetFences(device, 1, &frames[current_frame].upload_fence);
+    // Wait until this frame slot's PREVIOUS upload has completed on the copy
+    // queue before reusing the staging ring / command buffer. Value-based:
+    // upload_timeline_value is the value signaled by the last end_upload of
+    // this slot, so this only blocks when the GPU is genuinely behind.
+    auto& frame = frames[current_frame];
+    if (frame.upload_timeline_semaphore) {
+        uint64_t wait_value = frame.upload_timeline_value;
+        VkSemaphoreWaitInfo wait_info{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+        wait_info.semaphoreCount = 1;
+        wait_info.pSemaphores = &frame.upload_timeline_semaphore;
+        wait_info.pValues = &wait_value;
+        wait_info.flags = 0;
+        vkWaitSemaphores(device, &wait_info, UINT64_MAX);
     }
 
     // The GPU has finished reading the staging buffers uploaded in this frame
-    // slot's PREVIOUS round (upload_fence signaled above), so their deferred
+    // slot's PREVIOUS round (timeline reached above), so their deferred
     // release is now safe. This is per-slot: a slot's uploads are only released
     // when the same slot is reused (frames_in_flight later).
     if (current_frame < pending_staging_buffers_.size() && !pending_staging_buffers_[current_frame].empty()) {
@@ -1536,25 +1551,40 @@ void VulkanRHI::end_upload(CommandHandle cmd) {
     VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &cb;
-    submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores = &frames[current_frame].upload_finished_semaphore;
 
     // Submit on the dedicated copy queue (falls back to the graphics queue).
     // Destination buffers are created with VK_SHARING_MODE_CONCURRENT (graphics
     // + copy family), so no queue-family ownership transfer is required; the
-    // semaphore chain (upload signal -> main cb wait) provides the memory
-    // dependency across queues.
-    vkResetFences(device, 1, &frames[current_frame].upload_fence);
-    VkResult r = vkQueueSubmit(has_dedicated_copy_queue ? copy_queue : graphics_queue, 1, &submit_info, frames[current_frame].upload_fence);
+    // timeline semaphore signal -> main cb wait provides the cross-queue memory
+    // dependency. Value semantics avoid the binary semaphore's stateful
+    // signal-must-be-waited requirement (which caused flicker on skipped waits).
+    auto& frame = frames[current_frame];
+    uint64_t signal_value = ++frame.upload_timeline_value;
+    VkTimelineSemaphoreSubmitInfo timeline_info{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+    timeline_info.signalSemaphoreValueCount = 1;
+    timeline_info.pSignalSemaphoreValues = &signal_value;
+    submit_info.pNext = &timeline_info;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &frame.upload_timeline_semaphore;
+
+    VkResult r = vkQueueSubmit(has_dedicated_copy_queue ? copy_queue : graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
     if (r != VK_SUCCESS) {
         bud::eprint("[Vulkan] end_upload: vkQueueSubmit failed, result={}", (int)r);
     }
 }
 
 void VulkanRHI::wait_upload_fence() {
-    if (frames.empty() || !frames[current_frame].upload_fence) return;
-    vkWaitForFences(device, 1, &frames[current_frame].upload_fence, VK_TRUE, UINT64_MAX);
-    vkResetFences(device, 1, &frames[current_frame].upload_fence);
+    // Wait until this frame slot's most recent upload completes on the copy
+    // queue (value-based).
+    if (frames.empty() || !frames[current_frame].upload_timeline_semaphore) return;
+    auto& frame = frames[current_frame];
+    uint64_t wait_value = frame.upload_timeline_value;
+    VkSemaphoreWaitInfo wait_info{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+    wait_info.semaphoreCount = 1;
+    wait_info.pSemaphores = &frame.upload_timeline_semaphore;
+    wait_info.pValues = &wait_value;
+    wait_info.flags = 0;
+    vkWaitSemaphores(device, &wait_info, UINT64_MAX);
 }
 
 void VulkanRHI::defer_buffer_release(bud::graphics::BufferHandle buffer) {
@@ -1960,6 +1990,9 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
     features12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
     features12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
     features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    // Timeline semaphores (value-based) replace the stateful binary
+    // semaphore + fence combo for async uploads.
+    features12.timelineSemaphore = VK_TRUE;
 
     VkPhysicalDeviceVulkan11Features features11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
     features11.pNext = nullptr;
@@ -2196,9 +2229,20 @@ void VulkanRHI::create_command_buffer() {
 }
 
 void VulkanRHI::create_sync_objects() {
+	// Binary semaphores and fences for non-timeline usage (image available,
+	// render finished, in-flight frame fencing).
 	VkSemaphoreCreateInfo semaphore_info{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
 	VkFenceCreateInfo fence_info{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
 	fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+	// Timeline semaphore for upload completion (value-based sync). Kept in a
+	// SEPARATE create-info so binary semaphores above are not created as
+	// timeline semaphores.
+	VkSemaphoreTypeCreateInfo timeline_type_info{ VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
+	timeline_type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+	timeline_type_info.initialValue = 0;
+	VkSemaphoreCreateInfo timeline_semaphore_info{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+	timeline_semaphore_info.pNext = &timeline_type_info;
 
 	for (int i = 0; i < max_frames_in_flight; i++) {
 		if (vkCreateSemaphore(device, &semaphore_info, nullptr, &frames[i].image_available_semaphore) != VK_SUCCESS ||
@@ -2206,12 +2250,15 @@ void VulkanRHI::create_sync_objects() {
 			throw std::runtime_error("Failed to create synchronization objects for a frame!");
 		}
 
-		// Upload-side sync: fence to signal CPU when the upload cb is done
-		// (staging reuse), binary semaphore chained into the main cb.
-		if (vkCreateSemaphore(device, &semaphore_info, nullptr, &frames[i].upload_finished_semaphore) != VK_SUCCESS ||
-			vkCreateFence(device, &fence_info, nullptr, &frames[i].upload_fence) != VK_SUCCESS) {
-			throw std::runtime_error("Failed to create upload synchronization objects!");
+		// Upload-side sync: a timeline semaphore signals upload completion on
+		// the copy queue. The main command buffer waits on the per-frame value;
+		// value semantics are immune to the binary semaphore's "signal must be
+		// waited before re-signal" requirement (which caused flicker when a
+		// frame skipped its upload wait).
+		if (vkCreateSemaphore(device, &timeline_semaphore_info, nullptr, &frames[i].upload_timeline_semaphore) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create upload timeline semaphore!");
 		}
+		frames[i].upload_timeline_value = 0;
 	}
 
 	render_finished_semaphores.resize(swapchain_images.size());

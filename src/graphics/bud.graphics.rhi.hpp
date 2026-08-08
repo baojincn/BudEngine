@@ -79,6 +79,7 @@ namespace bud::graphics {
 		virtual void cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group_y, uint32_t group_z) = 0;
 		virtual Texture* get_current_swapchain_texture() = 0;
 		virtual uint32_t get_current_image_index() = 0;
+		virtual uint32_t get_current_frame_index() const = 0;
 		virtual void update_global_uniforms(uint32_t image_index, const SceneView& scene_view) = 0;
 		virtual void cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) = 0;
 

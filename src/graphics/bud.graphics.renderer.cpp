@@ -8,6 +8,7 @@
 // TEMP A/B DIAGNOSTIC: force synchronous per-frame uploads (copy_buffer_immediate)
 // to isolate async-upload flicker. Set to 1 to disable async uploads; set to 0
 // to enable the async upload path. Remove once the flicker source is resolved.
+// NOTE: async (0) still exhibits flicker + light leaks; kept off by default.
 #define BUD_FORCE_SYNC_UPLOAD 1
 
 #include "src/graphics/bud.graphics.renderer.hpp"
@@ -787,7 +788,11 @@ namespace bud::graphics {
 
 		auto back_buffer = render_graph.import_texture("Backbuffer", swapchain_tex, ResourceState::RenderTarget);
 
-		uint32_t current_idx = rhi->get_current_image_index();
+		// Use the render-frame slot (NOT the swapchain image index) to index
+		// per-frame GPU buffers: sync objects (in_flight_fence, upload timeline)
+		// are per-slot, so image_index indexing would reuse buffers out of sync
+		// with those fences (cross-frame race -> flicker).
+		uint32_t current_idx = rhi->get_current_frame_index();
 		RGHandle rg_draw;
 		RGHandle rg_inst;
 		RGHandle rg_stats;
