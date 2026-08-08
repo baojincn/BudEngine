@@ -97,6 +97,7 @@ namespace bud::graphics::vulkan {
 		void cmd_set_depth_bias(CommandHandle cmd, float constant, float clamp, float slope) override;
 		void update_global_shadow_map(Texture* texture) override;
 		void update_global_instance_data(bud::graphics::BufferHandle buffer) override;
+		void update_global_csm_instance_data(bud::graphics::BufferHandle buffer) override;
 			void update_global_page_table(bud::graphics::BufferHandle buffer) override;
 			void update_global_page_pool(bud::graphics::BufferHandle buffer) override;
 		void cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) override;

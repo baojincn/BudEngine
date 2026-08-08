@@ -294,6 +294,12 @@ namespace bud::graphics {
 								// with static_only=1), so dynamic objects are never
 								// baked into the cache.
 								if (frame.csm_static_indirect_draw.is_valid()) {
+									// shadow.vert reads the FULL-scene CSM instance
+									// models from binding 6 (dedicated to CSM), so
+									// the main pass's binding 3 is never touched.
+									if (frame.csm_instance_models.is_valid())
+										rhi->update_global_csm_instance_data(frame.csm_instance_models);
+
 									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
 
 									if (split_index > 0) {
@@ -307,7 +313,8 @@ namespace bud::graphics {
 										rhi->cmd_bind_index_buffer(cmd, pp_buf);
 										rhi->cmd_draw_indexed_indirect(cmd, frame.csm_static_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
 									}
-								}
+
+									}
 							}
 							else {
 								const auto& visible_instances = csm_vis[i];
@@ -512,11 +519,10 @@ namespace bud::graphics {
 							// commands (statics skipped because the static cache
 							// was copied above), plus out-of-view casters. The
 							// commands carry gl_InstanceIndex into the full-scene
-							// instance data, so point the shadow pipeline's
-							// instance binding at the full-scene models for these
-							// draws, then restore the main-view buffer.
+							// instance data, read from binding 6 (dedicated to
+							// CSM), so the main pass's binding 3 is untouched.
 							if (frame.csm_instance_models.is_valid())
-								rhi->update_global_instance_data(frame.csm_instance_models);
+								rhi->update_global_csm_instance_data(frame.csm_instance_models);
 
 							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
 
@@ -531,11 +537,6 @@ namespace bud::graphics {
 								rhi->cmd_bind_index_buffer(cmd, pp_buf);
 								rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
 							}
-
-							// Restore the main-view instance buffer for later
-							// passes (main pass relies on binding 3).
-							if (frame.csm_instance_models.is_valid())
-								rhi->update_global_instance_data(frame.instance_data);
 						}
 					}
 					else {

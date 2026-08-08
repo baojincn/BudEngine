@@ -147,7 +147,10 @@ namespace bud::graphics {
 		if (!frame_resource.instance_data.is_valid() || frame_resource.instance_capacity < desired_instance_capacity) {
 			if (frame_resource.instance_data.is_valid())
 				rhi->destroy_buffer(frame_resource.instance_data);
-			frame_resource.instance_data = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_instance_capacity) * instance_data_stride, ResourceState::ShaderResource);
+			// Host-visible + mapped (UnorderedAccess) so the per-frame instance
+			// data can be written directly from the CPU, bypassing the async
+			// staging/upload path that caused texture flicker.
+			frame_resource.instance_data = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_instance_capacity) * instance_data_stride, ResourceState::UnorderedAccess);
 			frame_resource.instance_capacity = desired_instance_capacity;
 		}
 
@@ -189,10 +192,12 @@ namespace bud::graphics {
 
 			// Full-scene InstanceData (model+material) matching the reordered
 			// full-scene DrawData, used by shadow.vert during CSM GPU draws.
+			// Created as UnorderedAccess so it is host-visible+mapped (CPU can
+			// write the reordered models directly, bypassing async staging).
 			if (!frame_resource.csm_instance_models.is_valid() || frame_resource.csm_instance_models_capacity < desired_scene_capacity) {
 				if (frame_resource.csm_instance_models.is_valid())
 					rhi->destroy_buffer(frame_resource.csm_instance_models);
-				frame_resource.csm_instance_models = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * instance_data_stride, ResourceState::ShaderResource);
+				frame_resource.csm_instance_models = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * instance_data_stride, ResourceState::UnorderedAccess);
 				frame_resource.csm_instance_models_capacity = desired_scene_capacity;
 			}
 

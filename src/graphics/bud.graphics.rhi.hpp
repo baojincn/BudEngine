@@ -101,6 +101,10 @@ namespace bud::graphics {
 		virtual Texture* get_fallback_texture() = 0;
 		virtual void update_global_shadow_map(Texture* texture) = 0;
 		virtual void update_global_instance_data(bud::graphics::BufferHandle buffer) = 0;
+		// Binds the full-scene CSM instance models to binding 6 (shadow.vert).
+		// Kept separate from binding 3 (main-view instance data) so CSM shadow
+		// passes do not clobber the main pass's instance binding.
+		virtual void update_global_csm_instance_data(bud::graphics::BufferHandle buffer) = 0;
 			virtual void update_global_page_table(bud::graphics::BufferHandle buffer) = 0;
 			virtual void update_global_page_pool(bud::graphics::BufferHandle buffer) = 0;
 		virtual void cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) = 0; // Shadow Caching

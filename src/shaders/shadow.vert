@@ -16,7 +16,7 @@ struct InstanceData {
 	uint padding[3];
 };
 
-layout(std430, set = 0, binding = 3) readonly buffer InstanceBuffer {
+layout(std430, set = 0, binding = 6) readonly buffer InstanceBuffer {
 	InstanceData data[];
 } instance_buffer;
 

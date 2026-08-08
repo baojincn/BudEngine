@@ -160,6 +160,10 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	layout_builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	layout_builder.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	layout_builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+	// Binding 6: full-scene CSM instance models (shadow.vert). Separate from
+	// binding 3 (main-view instance data) so the CSM shadow passes never fight
+	// the main pass over one descriptor slot.
+	layout_builder.add_binding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1, VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 
 	global_set_layout = layout_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
 
@@ -306,7 +310,9 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		std::vector<VkDescriptorPoolSize> pool_sizes = {
 			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, (uint32_t)frames.size() },
 			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (uint32_t)frames.size() * 1001 }, // 1000 bindless + 1 shadow
-			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)frames.size() }
+			// Binding 3 (instance) / 4 (page table) / 5 (page pool) / 6 (CSM
+			// instance models) are all STORAGE_BUFFER per frame.
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)frames.size() * 8 }
 		};
 
 		VkDescriptorPoolCreateInfo pool_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -2986,6 +2992,12 @@ void VulkanRHI::update_bindless_texture(uint32_t index, bud::graphics::Texture* 
 	if (!texture) return;
 	auto vk_tex = static_cast<VulkanTexture*>(texture);
 
+	// Bindless texture slot: shared across all frames, so update every frame's
+	// set (all sets must be initialized with the fallback at init time; runtime
+	// updates are low-frequency texture loads). Per-frame overwrite of in-flight
+	// sets is NOT a concern here because the binding value is the same texture
+	// for all frames. (Per-frame buffer bindings like instance_data are handled
+	// separately with current_frame-only updates.)
 	for (int i = 0; i < max_frames_in_flight; i++) {
 		if (frames[i].global_descriptor_set == VK_NULL_HANDLE) {
 			bud::eprint("[Vulkan] ERROR: global_descriptor_set at frame {} is NULL!", i);
@@ -3017,6 +3029,8 @@ void VulkanRHI::update_bindless_image(uint32_t index, bud::graphics::Texture* te
 		view_to_bind = vk_tex->mip_views[mip_level];
 	}
 
+	// Bindless image slot: shared across all frames (same value), so update all
+	// frames' sets to keep every set consistent.
 	for (int i = 0; i < max_frames_in_flight; i++) {
 		DescriptorWriter writer;
 		if (is_storage) {
@@ -3065,44 +3079,54 @@ void VulkanRHI::update_global_shadow_map(bud::graphics::Texture* texture) {
 	if (!texture) return;
 	VulkanTexture* vk_tex = static_cast<VulkanTexture*>(texture);
 
-	for (int i = 0; i < max_frames_in_flight; i++) {
-		DescriptorWriter writer;
-		writer.write_image(2, 0, vk_tex->view, shadow_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-		writer.update_set(device, frames[i].global_descriptor_set);
-	}
+	// Current (recording) frame's set only; shadow map is per-frame.
+	DescriptorWriter writer;
+	writer.write_image(2, 0, vk_tex->view, shadow_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+	writer.update_set(device, frames[current_frame].global_descriptor_set);
 }
 
 void VulkanRHI::update_global_instance_data(bud::graphics::BufferHandle buffer) {
 	if (!buffer.is_valid()) return;
 	auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
 
-	for (int i = 0; i < max_frames_in_flight; i++) {
-		DescriptorWriter writer;
-		writer.write_buffer(3, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-		writer.update_set(device, frames[i].global_descriptor_set);
-	}
+	// Current (recording) frame's set only: instance data is per-frame, so each
+	// frame must bind its own buffer. Updating all frames clobbered in-flight
+	// frames' bindings under async (flicker).
+	DescriptorWriter writer;
+	writer.write_buffer(3, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+	writer.update_set(device, frames[current_frame].global_descriptor_set);
 }
 
 void VulkanRHI::update_global_page_table(bud::graphics::BufferHandle buffer) {
 	if (!buffer.is_valid()) return;
 	auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
 
-	for (int i = 0; i < max_frames_in_flight; i++) {
-		DescriptorWriter writer;
-		writer.write_buffer(4, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-		writer.update_set(device, frames[i].global_descriptor_set);
-	}
+	// Current (recording) frame's set only.
+	DescriptorWriter writer;
+	writer.write_buffer(4, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+	writer.update_set(device, frames[current_frame].global_descriptor_set);
 }
 
 void VulkanRHI::update_global_page_pool(bud::graphics::BufferHandle buffer) {
 	if (!buffer.is_valid()) return;
 	auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
 
-	for (int i = 0; i < max_frames_in_flight; i++) {
-		DescriptorWriter writer;
-		writer.write_buffer(5, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-		writer.update_set(device, frames[i].global_descriptor_set);
-	}
+	// Current (recording) frame's set only.
+	DescriptorWriter writer;
+	writer.write_buffer(5, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+	writer.update_set(device, frames[current_frame].global_descriptor_set);
+}
+
+void VulkanRHI::update_global_csm_instance_data(bud::graphics::BufferHandle buffer) {
+	if (!buffer.is_valid()) return;
+	auto* vk_buf = static_cast<VulkanBuffer*>(buffer.internal_state);
+
+	// Current (recording) frame's set only; binding 6 is dedicated to the CSM
+	// shadow passes (shadow.vert) so it never conflicts with the main pass's
+	// instance data on binding 3.
+	DescriptorWriter writer;
+	writer.write_buffer(6, vk_buf->buffer, buffer.size, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+	writer.update_set(device, frames[current_frame].global_descriptor_set);
 }
 
 bud::graphics::Texture* VulkanRHI::get_fallback_texture() {

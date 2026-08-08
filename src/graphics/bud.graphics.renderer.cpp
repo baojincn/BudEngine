@@ -5,11 +5,11 @@
 #include <print>
 #include <cstring>
 
-// TEMP A/B DIAGNOSTIC: force synchronous per-frame uploads (copy_buffer_immediate)
-// to isolate async-upload flicker. Set to 1 to disable async uploads; set to 0
-// to enable the async upload path. Remove once the flicker source is resolved.
-// NOTE: async (0) still exhibits flicker + light leaks; kept off by default.
-#define BUD_FORCE_SYNC_UPLOAD 1
+// Per-frame upload mode.
+//   0 (default): host-write per-frame data into host-visible mapped buffers
+//     (avoids async staging/upload timing that caused flicker + light leaks).
+//   1: synchronous copy_buffer_immediate (legacy; for comparison).
+#define BUD_FORCE_SYNC_UPLOAD 0
 
 #include "src/graphics/bud.graphics.renderer.hpp"
 
@@ -908,8 +908,16 @@ namespace bud::graphics {
 				rhi->copy_buffer_immediate(instance_staging, frame.instance_data, visible_count * sizeof(InstanceData));
 				rhi->destroy_buffer(instance_staging);
 #else
-				if (upload_cmd)
+				// Write per-frame instance data directly into the host-visible
+				// mapped buffer. This avoids the async staging/upload path whose
+				// cross-queue timing caused flicker; the buffer is per-frame so
+				// the CPU write only happens after the previous frame (same
+				// slot) finished on the GPU (begin_frame fence wait).
+				if (frame.instance_data.mapped_ptr) {
+					std::memcpy(frame.instance_data.mapped_ptr, inst_mapped, visible_count * sizeof(InstanceData));
+				} else if (upload_cmd) {
 					rhi->cmd_copy_buffer_async(upload_cmd, instance_staging, frame.instance_data, visible_count * sizeof(InstanceData));
+				}
 				rhi->defer_buffer_release(instance_staging);
 #endif
 				rg_instance_data = render_graph.import_buffer("GlobalInstanceData", frame.instance_data, ResourceState::ShaderResource);
@@ -971,8 +979,13 @@ namespace bud::graphics {
 										rhi->copy_buffer_immediate(staging, current_inst_buf, visible_count * sizeof(DrawData));
 										rhi->destroy_buffer(staging);
 					#else
-										if (upload_cmd)
+										// Host-write DrawData directly (per-frame mapped
+										// buffer); avoids async staging/upload flicker.
+										if (current_inst_buf.mapped_ptr) {
+											std::memcpy(current_inst_buf.mapped_ptr, mapped, visible_count * sizeof(DrawData));
+										} else if (upload_cmd) {
 											rhi->cmd_copy_buffer_async(upload_cmd, staging, current_inst_buf, visible_count * sizeof(DrawData));
+										}
 										rhi->defer_buffer_release(staging);
 					#endif
 
@@ -1074,11 +1087,19 @@ namespace bud::graphics {
 										rhi->destroy_buffer(scene_staging);
 										rhi->destroy_buffer(model_staging);
 					#else
-										if (upload_cmd) {
+										// Host-write CSM DrawData/models directly into the
+										// per-frame mapped buffers (avoids async
+										// staging/upload timing that caused shadow light
+										// leaks).
+										if (frame.csm_instance_data.mapped_ptr) {
+											std::memcpy(frame.csm_instance_data.mapped_ptr, scene_mapped, scene_count * sizeof(DrawData));
+										} else if (upload_cmd) {
 											rhi->cmd_copy_buffer_async(upload_cmd, scene_staging, frame.csm_instance_data, scene_count * sizeof(DrawData));
-											if (frame.csm_instance_models.is_valid()) {
-												rhi->cmd_copy_buffer_async(upload_cmd, model_staging, frame.csm_instance_models, scene_count * sizeof(InstanceData));
-											}
+										}
+										if (frame.csm_instance_models.mapped_ptr) {
+											std::memcpy(frame.csm_instance_models.mapped_ptr, model_mapped, scene_count * sizeof(InstanceData));
+										} else if (upload_cmd && frame.csm_instance_models.is_valid()) {
+											rhi->cmd_copy_buffer_async(upload_cmd, model_staging, frame.csm_instance_models, scene_count * sizeof(InstanceData));
 										}
 										rhi->defer_buffer_release(scene_staging);
 										rhi->defer_buffer_release(model_staging);
