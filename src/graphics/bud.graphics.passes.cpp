@@ -81,7 +81,6 @@ namespace bud::graphics {
 		const RenderScene& render_scene,
 		const std::vector<RenderMesh>& meshes,
 		std::vector<std::vector<uint32_t>> csm_visible_instances,
-		const std::vector<uint32_t>& main_visible_instances,
 		const GPUScene& gpu_scene,
 		bud::graphics::BufferHandle mega_vertex_buffer,
 		bud::graphics::BufferHandle mega_index_buffer,
@@ -111,16 +110,6 @@ namespace bud::graphics {
 		if (max_scene_count == 0) {
 			bud::eprint("[CSMShadowPass] ERROR: RenderScene arrays are empty.");
 			return {};
-		}
-
-		// The GPU cull (csm_cull.comp) only sees main-camera-visible instances
-		// (the DrawData buffer is built from sort_list). Casters OUTSIDE the main
-		// view but inside a cascade frustum would be missed, causing light leaks.
-		// Build a mask so the dynamic pass can CPU-draw exactly those casters.
-		std::vector<uint8_t> in_main_view(max_scene_count, 0);
-		for (uint32_t entity_idx : main_visible_instances) {
-			if (entity_idx < in_main_view.size())
-				in_main_view[entity_idx] = 1;
 		}
 
 		TextureDesc desc;
@@ -504,6 +493,16 @@ namespace bud::graphics {
 					if (config.enable_gpu_driven) {
 						auto& frame = gpu_scene.frame_resources(rhi->get_current_image_index());
 						if (frame.csm_indirect_draw.is_valid()) {
+							// csm_cull.comp wrote commands for the FULL scene
+							// (main-view casters + out-of-view cascade casters),
+							// in page/non-page reordered order. The indirect
+							// commands carry gl_InstanceIndex into the full-scene
+							// instance data, so point the shadow pipeline's
+							// instance binding at the full-scene models for these
+							// draws, then restore the main-view buffer.
+							if (frame.csm_instance_models.is_valid())
+								rhi->update_global_instance_data(frame.csm_instance_models);
+
 							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
 
 							if (split_index > 0) {
@@ -517,18 +516,11 @@ namespace bud::graphics {
 								rhi->cmd_bind_index_buffer(cmd, pp_buf);
 								rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
 							}
-						}
 
-						// Coverage gap fix: the GPU cull only saw main-view
-						// instances. CPU-draw the cascade-visible casters that
-						// are outside the main view so shadows do not leak when
-						// the camera rotates. Static ones are re-drawn here too:
-						// the static cache never contained out-of-view casters.
-						const auto& visible_instances = csm_vis[i];
-						for (size_t k = 0; k < visible_instances.size(); ++k) {
-							size_t idx = visible_instances[k];
-							if (idx >= in_main_view.size() || in_main_view[idx]) continue;
-							draw_occluder(idx, false);
+							// Restore the main-view instance buffer for later
+							// passes (main pass relies on binding 3).
+							if (frame.csm_instance_models.is_valid())
+								rhi->update_global_instance_data(frame.instance_data);
 						}
 					}
 					else {
@@ -1320,7 +1312,7 @@ namespace bud::graphics {
 					if (config.enable_gpu_driven) {
 						if (indirect_draw_buffer.is_valid() && draw_count > 0) {
 							auto pp_buf = gpu_scene.get_page_pool_buffer();
-							
+
 							if (split_index > 0) {
 								rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 								rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);

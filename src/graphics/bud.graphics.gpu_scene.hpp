@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <atomic>
 #include <cstdint>
@@ -62,8 +62,18 @@ namespace bud::graphics {
 			BufferHandle meshlet_visibility;
 			BufferHandle meshlet_hiz_visibility;
 			BufferHandle csm_indirect_draw;
+			// Full-scene DrawData (every scene instance, page/non-page reordered)
+			// consumed by csm_cull.comp so the CSM pass covers casters outside
+			// the main camera view without per-instance CPU draw calls.
+			BufferHandle csm_instance_data;
+			// Full-scene InstanceData (model + material) in the same reordered
+			// order, bound to the shadow pipeline's instance binding (set 0,
+			// binding 3) while the CSM GPU draws are recorded.
+			BufferHandle csm_instance_models;
 			uint32_t instance_capacity = 0;
 			uint32_t csm_indirect_capacity = 0;
+			uint32_t csm_instance_capacity = 0;
+			uint32_t csm_instance_models_capacity = 0;
 			uint32_t indirect_capacity = 0;
 			uint32_t meshlet_visibility_capacity = 0;
 		};
@@ -102,6 +112,7 @@ namespace bud::graphics {
 			uint32_t frame_index,
 			uint32_t required_instance_count,
 			uint32_t required_draw_count,
+			uint32_t required_scene_instance_count,
 			uint32_t required_meshlet_count,
 			uint64_t instance_data_stride,
 			uint64_t indirect_instance_stride,

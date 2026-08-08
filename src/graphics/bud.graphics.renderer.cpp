@@ -791,6 +791,9 @@ namespace bud::graphics {
 		RGHandle rg_instance_data;
 		RGHandle rg_meshlet_visibility;
 		RGHandle rg_meshlet_hiz_visibility;
+		// Full-scene shadow-caster DrawData (GPU-driven CSM cull input).
+		RGHandle csm_instance_h;
+		size_t scene_split = 0;
 		uint32_t total_meshlet_count = 0;
 		if (render_config.enable_meshlets) {
 			for (const auto& mesh : meshes) {
@@ -821,6 +824,7 @@ namespace bud::graphics {
 				current_idx,
 				static_cast<uint32_t>(visible_count),
 				static_cast<uint32_t>(total_draw_count),
+				static_cast<uint32_t>(instance_count),
 				static_cast<uint32_t>(total_meshlet_count),
 				sizeof(InstanceData),
 				sizeof(DrawData),
@@ -946,6 +950,86 @@ namespace bud::graphics {
 					rg_stats = render_graph.import_buffer("GPUStatsReadback", current_stats_buf, ResourceState::UnorderedAccess);
 					rg_meshlet_frustum_stats = render_graph.import_buffer("MeshletFrustumStats", frame.meshlet_frustum_stats, ResourceState::UnorderedAccess);
 					rg_meshlet_hiz_stats = render_graph.import_buffer("MeshletHiZStats", frame.meshlet_hiz_stats, ResourceState::UnorderedAccess);
+				}
+
+				// Full-scene shadow-caster DrawData: reorder so non-page meshes
+				// come first ([0, scene_split)) and page-backed meshes follow
+				// ([scene_split, total)). csm_cull.comp consumes this to cover
+				// casters outside the main camera view without per-instance CPU
+				// draw calls in the shadow pass.
+				scene_split = 0;
+				if (instance_count > 0 && frame.csm_instance_data.is_valid()) {
+					const size_t scene_count = instance_count;
+					auto scene_staging = rhi->get_allocator()->alloc_staging(scene_count * sizeof(DrawData));
+					DrawData* scene_mapped = static_cast<DrawData*>(scene_staging.mapped_ptr);
+
+					// Match the full-scene models in the same reordered layout so
+					// shadow.vert can index them with gl_InstanceIndex during the
+					// CSM GPU draws.
+					auto model_staging = rhi->get_allocator()->alloc_staging(scene_count * sizeof(InstanceData));
+					InstanceData* model_mapped = static_cast<InstanceData*>(model_staging.mapped_ptr);
+
+					for (size_t i = 0; i < scene_count; ++i) {
+						uint32_t mid = render_scene.mesh_indices[i];
+						if (mid < meshes.size() && meshes[mid].is_valid() && !meshes[mid].is_page_backed)
+							++scene_split;
+					}
+
+					uint32_t np = 0;
+					uint32_t pg = static_cast<uint32_t>(scene_split);
+					for (size_t i = 0; i < scene_count; ++i) {
+						uint32_t mesh_id = render_scene.mesh_indices[i];
+						if (mesh_id >= meshes.size() || !meshes[mesh_id].is_valid()) continue;
+						const auto& mesh = meshes[mesh_id];
+						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+
+						DrawData d{};
+						d.meshId = mesh_id;
+						d.flags = (mesh.is_page_backed ? 1u : 0u) | ((render_scene.flags[i] & 1) ? 2u : 0u);
+						d.pageIndex = mesh.page_index;
+						d.meshletStart = 0;
+						d.meshletCount = 0;
+						d.visibilityOffset = 0;
+
+						uint32_t sub_idx = render_scene.submesh_indices[i];
+						uint32_t material_id = 0;
+						if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
+							const auto& sub = mesh.submeshes[sub_idx];
+							d.indexCount = sub.index_count;
+							d.firstIndex = mesh_geometry.first_index + sub.index_start;
+							d.vertexOffset = mesh_geometry.vertex_offset;
+							d.materialId = sub.material_id;
+							material_id = sub.material_id;
+							auto world_aabb = sub.aabb.transform(render_scene.world_matrices[i]);
+							d.min = world_aabb.min;
+							d.max = world_aabb.max;
+						}
+						else {
+							d.indexCount = mesh.index_count;
+							d.firstIndex = mesh_geometry.first_index;
+							d.vertexOffset = mesh_geometry.vertex_offset;
+							d.materialId = render_scene.material_indices[i];
+							material_id = render_scene.material_indices[i];
+							auto world_aabb = mesh.aabb.transform(render_scene.world_matrices[i]);
+							d.min = world_aabb.min;
+							d.max = world_aabb.max;
+						}
+
+						uint32_t dst = (mesh.is_page_backed) ? pg++ : np++;
+
+						scene_mapped[dst] = d;
+						model_mapped[dst].model = render_scene.world_matrices[i];
+						model_mapped[dst].material_id = material_id;
+						model_mapped[dst].padding[0] = model_mapped[dst].padding[1] = model_mapped[dst].padding[2] = 0;
+					}
+
+					rhi->copy_buffer_immediate(scene_staging, frame.csm_instance_data, scene_count * sizeof(DrawData));
+					rhi->destroy_buffer(scene_staging);
+					if (frame.csm_instance_models.is_valid()) {
+						rhi->copy_buffer_immediate(model_staging, frame.csm_instance_models, scene_count * sizeof(InstanceData));
+					}
+					rhi->destroy_buffer(model_staging);
+					csm_instance_h = render_graph.import_buffer("CSMSceneInstanceData", frame.csm_instance_data, ResourceState::UnorderedAccess);
 				}
 
 				// Read back previous frame stats (delayed latency) from this exact buffer which is guaranteed finished
@@ -1095,11 +1179,14 @@ namespace bud::graphics {
 				for (uint32_t i = 0; i < cascade_count; ++i)
 					csm_visible_instances[i] = std::move(culled_results[i + 1]);
 
-				// main_visible_instances = culled_results[0]; pass a copy so the
-				// shadow pass can tell which casters are already covered by the
-				// GPU cull (main-view only) and fill the out-of-view gap on CPU.
-				const auto main_visible_instances = culled_results[0];
-				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), main_visible_instances, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), rg_inst, visible_count, split_index);
+				// GPU-driven: csm_cull.comp consumes the full-scene DrawData
+				// (csm_instance_h) and writes indirect commands covering casters
+				// outside the main view too, so no CPU fill pass is needed.
+				// CPU-driven mode keeps the csm_visible_instances CPU path.
+				const RGHandle csm_inst_input = csm_instance_h.is_valid() ? csm_instance_h : rg_inst;
+				const size_t csm_inst_count = csm_instance_h.is_valid() ? instance_count : visible_count;
+				const size_t csm_split = csm_instance_h.is_valid() ? scene_split : split_index;
+				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), csm_inst_input, csm_inst_count, csm_split);
 				//bud::print("[Renderer] MainPass: csm_shadow_map.is_valid()={}", shadow_map.is_valid());
 
 				const bool use_gpu_occluder_selection = render_config.enable_gpu_driven
