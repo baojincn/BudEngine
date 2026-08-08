@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vector>
 #include <mutex>
@@ -96,21 +96,24 @@ namespace bud::graphics {
     class DepthOnlyPass : public RenderPass {
     public:
         void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-        RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer,
-            const RenderScene& render_scene,
-            const SceneView& view,
-            const RenderConfig& config,
-            const std::vector<RenderMesh>& meshes,
-            const std::vector<SortItem>& sort_list,
-            size_t instance_count,
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer,
+			const RenderScene& render_scene,
+			const SceneView& view,
+			const RenderConfig& config,
+			const std::vector<RenderMesh>& meshes,
+			const std::vector<SortItem>& sort_list,
+			size_t instance_count,
 			RGHandle indirect_draw_buffer,
 			const GPUScene& gpu_scene,
-            bud::graphics::BufferHandle mega_vertex_buffer,
-            bud::graphics::BufferHandle mega_index_buffer);
+			bud::graphics::BufferHandle mega_vertex_buffer,
+			bud::graphics::BufferHandle mega_index_buffer,
+			RGHandle prev_depth_buffer = {},
+			size_t split_index = 0);
     };
 
 
 	class CSMShadowPass : public RenderPass {
+		void* csm_cull_pipeline = nullptr;
 		Texture* static_cache_texture = nullptr;
 		bud::math::vec3 last_light_dir = bud::math::vec3(0.0f);
 		bud::math::mat4 last_view_proj = bud::math::mat4(1.0f);
@@ -130,7 +133,7 @@ namespace bud::graphics {
 		};
 
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances, const GPUScene& gpu_scene, bud::graphics::BufferHandle mega_vertex_buffer, bud::graphics::BufferHandle mega_index_buffer);
+		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances, const GPUScene& gpu_scene, bud::graphics::BufferHandle mega_vertex_buffer, bud::graphics::BufferHandle mega_index_buffer, bud::graphics::RGHandle rg_instance_data, size_t instance_count, size_t split_index = 0);
 	};
 
 	
@@ -148,7 +151,9 @@ namespace bud::graphics {
 			bud::graphics::RGHandle instance_data,
 			const GPUScene& gpu_scene,
 			bud::graphics::BufferHandle mega_vertex_buffer,
-			bud::graphics::BufferHandle mega_index_buffer);
+			bud::graphics::BufferHandle mega_index_buffer,
+			bud::graphics::RGHandle ao_map = {},
+			size_t split_index = 0);
 	};
 
 	class ClusterVisualizationPass : public RenderPass {
@@ -165,7 +170,8 @@ namespace bud::graphics {
 			bud::graphics::RGHandle instance_data,
 			const GPUScene& gpu_scene,
 			bud::graphics::BufferHandle mega_vertex_buffer,
-			bud::graphics::BufferHandle mega_index_buffer);
+			bud::graphics::BufferHandle mega_index_buffer,
+			size_t split_index = 0);
 	};
 
 	struct UIDrawCmdSnapshot {
@@ -227,5 +233,46 @@ namespace bud::graphics {
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		void update_draw_data(ImDrawData* draw_data);
 		void add_to_graph(RenderGraph& rg, RGHandle backbuffer);
+	};
+
+	class AmbientOcclusionPass : public RenderPass {
+		void* ssao_pipeline = nullptr;
+		void* gtao_pipeline = nullptr;
+
+	public:
+		~AmbientOcclusionPass() = default;
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle depth_buffer, const SceneView& view, const RenderConfig& config);
+	};
+
+	class AOBlurPass : public RenderPass {
+	public:
+		~AOBlurPass() = default;
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle raw_ao, RGHandle depth_buffer, const SceneView& view, const RenderConfig& config);
+	};
+
+	class AOTemporalPass : public RenderPass {
+		// Ping-pong history textures so the pass never reads and writes the
+		// same image within one dispatch.
+		Texture* history_textures[2] = { nullptr, nullptr };
+		uint32_t history_read_index = 0;
+		bool has_valid_history = false;
+
+		// Previous frame camera matrix for reprojection.
+		bud::math::mat4 last_view_proj = bud::math::mat4(1.0f);
+		bool has_last_view_proj = false;
+
+		RHI* stored_rhi = nullptr;
+		uint32_t history_width = 0;
+		uint32_t history_height = 0;
+
+	public:
+		~AOTemporalPass() = default;
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle raw_ao, RGHandle depth_buffer, const SceneView& view, const RenderConfig& config);
 	};
 }

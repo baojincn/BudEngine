@@ -74,6 +74,7 @@ layout(set = 0, binding = 9) uniform UniformBufferObject {
     float light_intensity;
     float ambient_strength;
     uint cascade_count;
+    uint debug_cascades;
     uint reversed_z;
 } ubo;
 
@@ -193,12 +194,16 @@ bool aabb_occluded(vec3 bmin, vec3 bmax)
     float depth3 = sample_hiz_depth(uv_max, mip_level);
 
     if (ubo.reversed_z == 1u) {
-        float depth = min(min(depth0, depth1), min(depth2, depth3));
-        return max_z >= depth;
+        // reversed Z: larger depth value = closer. HiZ stores the min (closest foreground).
+        // Occluded if the AABB's closest point (max_z in reversed Z) is behind the occluder.
+        float hiz_depth = min(min(depth0, depth1), min(depth2, depth3));
+        return max_z < hiz_depth;
     }
 
-    float depth = max(max(depth0, depth1), max(depth2, depth3));
-    return min_z <= depth;
+    // Normal Z: smaller depth value = closer. HiZ stores the max (farthest foreground).
+    // Occluded if the AABB's closest point is farther than all foreground depth.
+    float hiz_depth = max(max(depth0, depth1), max(depth2, depth3));
+    return min_z > hiz_depth;
 }
 
 const uint MESHLET_DESC_DWORDS = 4u;

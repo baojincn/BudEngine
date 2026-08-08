@@ -97,6 +97,7 @@ namespace bud::graphics::vulkan {
 		void cmd_set_depth_bias(CommandHandle cmd, float constant, float clamp, float slope) override;
 		void update_global_shadow_map(Texture* texture) override;
 		void update_global_instance_data(bud::graphics::BufferHandle buffer) override;
+		void update_global_csm_instance_data(bud::graphics::BufferHandle buffer) override;
 			void update_global_page_table(bud::graphics::BufferHandle buffer) override;
 			void update_global_page_pool(bud::graphics::BufferHandle buffer) override;
 		void cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) override;
@@ -104,8 +105,16 @@ namespace bud::graphics::vulkan {
 
 		bud::graphics::Texture* create_texture(const bud::graphics::TextureDesc& desc, const void* initial_data, uint64_t size) override;
 		void update_bindless_texture(uint32_t index, bud::graphics::Texture* texture) override;
+		void update_bindless_texture_current_frame(uint32_t index, bud::graphics::Texture* texture) override;
 		void update_bindless_image(uint32_t index, bud::graphics::Texture* texture, uint32_t mip_level = 0, bool is_storage = false) override;
 		bud::graphics::Texture* get_fallback_texture() override;
+
+		// Returns the current render-frame slot (0..max_frames_in_flight-1).
+		// Per-frame GPU buffers and staging must be indexed by this slot, NOT
+		// the swapchain image index: sync objects (in_flight_fence, upload
+		// timeline) are per-slot, so buffers indexed by image_index would be
+		// reused out of sync with those fences (cross-frame races -> flicker).
+		uint32_t get_current_frame_index() const override { return current_frame; }
 
 		// 杂项 / 待重构
 		void set_render_config(const bud::graphics::RenderConfig& new_render_config) override;
@@ -149,6 +158,15 @@ namespace bud::graphics::vulkan {
 		void cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) override;
 		void cmd_copy_image_to_buffer(CommandHandle cmd, bud::graphics::Texture* src, bud::graphics::BufferHandle dst) override;
 
+		// Async upload (per-frame upload command buffer on the copy queue)
+		CommandHandle begin_upload() override;
+		void cmd_copy_buffer_async(CommandHandle cmd, bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) override;
+		void end_upload(CommandHandle cmd) override;
+		void wait_upload_fence() override;
+		// Defer a staging buffer's destruction until the next upload fence wait
+		// (safe for buffers still being read by the async upload command buffer).
+		void defer_buffer_release(bud::graphics::BufferHandle buffer) override;
+
 	private:
 		void create_instance(VkInstance& vk_instance, bool enable_validation);
 		void create_surface(bud::platform::Window* window);
@@ -190,6 +208,17 @@ namespace bud::graphics::vulkan {
 			VkFence in_flight_fence = nullptr;
 			VkCommandPool main_command_pool = nullptr;
 			VkCommandBuffer main_command_buffer = nullptr;
+			// Per-frame upload command buffer for staging->GPU copies. Recorded
+			// on the copy queue and chained to the main command buffer via a
+			// timeline semaphore so per-frame uploads no longer flush the whole
+			// graphics queue with vkQueueWaitIdle.
+			VkCommandPool upload_command_pool = nullptr;
+			VkCommandBuffer upload_command_buffer = nullptr;
+			// Timeline semaphore signaled by the upload submit on the copy queue;
+			// the main command buffer waits on the per-frame value (value-based,
+			// immune to the binary semaphore's stateful signal/wait requirement).
+			VkSemaphore upload_timeline_semaphore = nullptr;
+			uint64_t upload_timeline_value = 0;
 			VkBuffer uniform_buffer = nullptr;       // Per-frame UBO (allocated via VMA when available)
 			VmaAllocation uniform_allocation = VK_NULL_HANDLE; // VMA allocation for the UBO (if used)
 			VmaAllocationInfo uniform_alloc_info = {}; // allocation info containing mapped ptr
@@ -208,6 +237,18 @@ namespace bud::graphics::vulkan {
 		VkSurfaceKHR surface = nullptr;
 		VkQueue graphics_queue = nullptr;
 		VkQueue present_queue = nullptr;
+		// Dedicated transfer/copy queue for async uploads (may alias the
+		// graphics queue when no dedicated transfer family exists).
+		VkQueue copy_queue = nullptr;
+		bool has_dedicated_copy_queue = false;
+		uint32_t graphics_family_index_ = 0;
+		uint32_t copy_family_index_ = 0;
+		bool upload_pending_this_frame = false;
+		// Staging buffers pending release until the upload fence for the SAME
+		// frame slot is waited on (begin_upload). Async uploads read them on the
+		// GPU, so releasing them immediately (or one frame earlier) would be a
+		// use-after-free. Indexed by frame slot (size == max_frames_in_flight).
+		std::vector<std::vector<bud::graphics::BufferHandle>> pending_staging_buffers_;
 		VkDebugUtilsMessengerEXT debug_messenger = nullptr;
 		bool enable_validation_layers = false;
 		bool aftermath_initialized = false;
@@ -256,6 +297,9 @@ namespace bud::graphics::vulkan {
 		VkDescriptorSetLayout compute_meshlet_frustum_set_layout = VK_NULL_HANDLE;
 		VkDescriptorSetLayout compute_meshlet_indirect_set_layout = VK_NULL_HANDLE;
 		VkDescriptorSetLayout compute_meshlet_hiz_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_ao_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_ao_blur_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_ao_temporal_set_layout = VK_NULL_HANDLE;
 		VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
 		VkSampler default_sampler = VK_NULL_HANDLE;
 		VkSampler shadow_sampler = VK_NULL_HANDLE;

@@ -38,7 +38,7 @@ void TriangleApp::on_init(const AppConfig& config) {
 		e.is_static = true;
 		e.transform = glm::mat4(1.0f);
 		s.entities.push_back(std::move(e));
-		bud::print("[TriangleApp] Page entity added: mesh_id={} total_entities={}", mesh_id, s.entities.size());
+		//bud::print("[TriangleApp] Page entity added: mesh_id={} total_entities={}", mesh_id, s.entities.size());
 	});
 
 	// 1. Initial Render Config

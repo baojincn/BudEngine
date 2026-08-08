@@ -8,7 +8,18 @@
 #include <functional>
 #include <mutex>
 #include <deque>
+#include <new>
 #include <print>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include "src/core/bud.core.hpp"
 // #define BUD_TRACK_TASK_SOURCE
@@ -40,6 +51,17 @@ extern "C" void bud_switch_context_linux(void** old_rsp, void* new_rsp);
 
 using namespace bud::threading;
 
+namespace {
+	// Clamp a raw worker index (-1 = "not a worker") to a valid worker slot.
+	// Casting -1 to size_t directly would index the workers vector out of
+	// bounds and corrupt the heap, so guard every call site.
+	inline size_t clamp_worker_index(int raw, size_t worker_count) {
+		if (raw < 0 || worker_count == 0)
+			return 0;
+		return static_cast<size_t>(raw) % worker_count;
+	}
+}
+
 Counter::Counter(int initial) : value(initial) {}
 
 int Counter::fetch_add(int arg, std::memory_order order) {
@@ -58,8 +80,43 @@ void Counter::store(int arg, std::memory_order order) {
 	value.store(arg, order);
 }
 
-Fiber::Fiber(size_t stack_size) {
-	stack_mem.resize(stack_size);
+Fiber::Fiber(size_t stack_size) : stack_size(stack_size) {
+#ifdef _WIN32
+	// Allocate [guard page][usable stack]. The fiber stack grows downward, so
+	// the guard page is placed at the LOW end of the region: any stack overflow
+	// hits PAGE_NOACCESS and faults immediately instead of corrupting the heap.
+	constexpr size_t page_size = 4096;
+	const size_t total = stack_size + page_size;
+	uint8_t* region = static_cast<uint8_t*>(
+		VirtualAlloc(nullptr, total, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+	if (!region)
+		throw std::bad_alloc();
+
+	DWORD old_protect = 0;
+	if (!VirtualProtect(region, page_size, PAGE_NOACCESS, &old_protect)) {
+		VirtualFree(region, 0, MEM_RELEASE);
+		throw std::bad_alloc();
+	}
+
+	stack_region = region;
+	stack_base = region + page_size;
+#else
+	// Non-Windows fallback: plain heap allocation (no guard page).
+	stack_base = ::operator new(stack_size);
+	stack_region = nullptr;
+#endif
+}
+
+Fiber::~Fiber() {
+#ifdef _WIN32
+	if (stack_region)
+		VirtualFree(stack_region, 0, MEM_RELEASE);
+#else
+	if (stack_base)
+		::operator delete(stack_base);
+#endif
+	stack_region = nullptr;
+	stack_base = nullptr;
 }
 
 void Fiber::reset(std::move_only_function<void()>&& w, Counter* c, void (*entry_fn)(Fiber*)) {
@@ -67,7 +124,7 @@ void Fiber::reset(std::move_only_function<void()>&& w, Counter* c, void (*entry_
 	signal_counter = c;
 	is_finished = false;
 	next_waiting = nullptr;
-	next_pool = nullptr;
+	next_pool.store(nullptr, std::memory_order_relaxed);
 	pending_wait_counter = nullptr;
 	target_thread_index = -1;
 
@@ -76,7 +133,7 @@ void Fiber::reset(std::move_only_function<void()>&& w, Counter* c, void (*entry_
 #endif
 
 	// Initialize the stack pointer (RSP) for the fiber
-	uintptr_t top = reinterpret_cast<uintptr_t>(stack_mem.data() + stack_mem.size());
+	uintptr_t top = reinterpret_cast<uintptr_t>(stack_base) + stack_size;
 
 
 	/// @note [Windows x64 ABI Compliance]
@@ -122,22 +179,29 @@ void Fiber::reset(std::move_only_function<void()>&& w, Counter* c, void (*entry_
 
 
 void LockFreeFiberPool::push(Fiber* f) {
-	Fiber* old_head = head.load(std::memory_order_relaxed);
+	uintptr_t old_head = head.load(std::memory_order_relaxed);
 
 	do {
-		f->next_pool = old_head;
-	} while (!head.compare_exchange_weak(old_head, f, std::memory_order_release, std::memory_order_relaxed));
+		f->next_pool.store(reinterpret_cast<Fiber*>(old_head & kPointerMask), std::memory_order_relaxed);
+	} while (!head.compare_exchange_weak(old_head,
+		(old_head & kTagMask) | (reinterpret_cast<uintptr_t>(f) & kPointerMask),
+		std::memory_order_release, std::memory_order_relaxed));
 }
 
 
 Fiber* LockFreeFiberPool::pop() {
-	Fiber* old_head = head.load(std::memory_order_relaxed);
+	uintptr_t old_head = head.load(std::memory_order_relaxed);
 
 	do {
-		if (!old_head) return nullptr;
-	} while (!head.compare_exchange_weak(old_head, old_head->next_pool, std::memory_order_acquire, std::memory_order_relaxed));
+		Fiber* result = reinterpret_cast<Fiber*>(old_head & kPointerMask);
+		if (!result) return nullptr;
 
-	return old_head;
+		Fiber* next = result->next_pool.load(std::memory_order_relaxed);
+		uintptr_t new_head = ((old_head + kTagStep) & kTagMask) | (reinterpret_cast<uintptr_t>(next) & kPointerMask);
+
+		if (head.compare_exchange_weak(old_head, new_head, std::memory_order_acquire, std::memory_order_relaxed))
+			return result;
+	} while (true);
 }
 
 TaskScheduler::TaskScheduler(size_t n)
@@ -186,11 +250,18 @@ TaskScheduler::~TaskScheduler() {
         }
     }
 
-    // Now it is safe to destroy pinned queues and worker objects
+    // Now it is safe to destroy pinned queues and worker objects. Return any
+    // fibers still parked in worker queues back into the pool so the final drain
+    // below deletes every node exactly once (no leak, no double-free).
     for (auto w : workers) {
-        for (auto f : w->pinned_queue)
-            delete f;
-        w->pinned_queue.clear();
+        while (auto opt = w->queue.pop())
+            fiber_pool.push(*opt);
+        {
+            std::lock_guard lock(w->pinned_mtx);
+            for (auto f : w->pinned_queue)
+                fiber_pool.push(f);
+            w->pinned_queue.clear();
+        }
         delete w;
     }
     workers.clear();
@@ -255,7 +326,7 @@ void TaskScheduler::spawn(const char* name, std::move_only_function<void()> work
 	if (counter)
 		counter->fetch_add(1, std::memory_order_relaxed);
 
-    size_t idx = (t_scheduler) ? static_cast<size_t>(t_worker_index) : 0u;
+    size_t idx = clamp_worker_index(t_scheduler ? t_worker_index : 0, workers.size());
     workers[idx]->queue.push(f);
 }
 
@@ -303,18 +374,19 @@ void TaskScheduler::wait_for_counter(Counter& counter, std::function<void()> on_
 		bud_switch_context(&t_current_fiber->rsp, t_worker_rsp);
 	}
 	else {
+		const size_t my_idx = clamp_worker_index(t_worker_index, workers.size());
 		while (counter.value.load(std::memory_order_acquire) > 0) {
 			if (on_idle)
 				on_idle();
 
 			Fiber* f = nullptr;
 
-            auto opt = workers[static_cast<size_t>(t_worker_index)]->queue.pop();
+			auto opt = workers[my_idx]->queue.pop();
 			if (opt)
 				f = *opt;
 
 			if (!f)
-                f = steal_task(static_cast<size_t>(t_worker_index));
+				f = steal_task(my_idx);
 
 			if (f) {
 				execute_task(f);
@@ -368,14 +440,14 @@ void TaskScheduler::fiber_entry_stub(Fiber* f_dummy) {
 			while (waiting_head) {
 				auto next = waiting_head->next_waiting;
 				waiting_head->next_waiting = nullptr;
-                if (waiting_head->target_thread_index != -1) {
-                    auto tidx = static_cast<size_t>(waiting_head->target_thread_index);
-                    std::lock_guard lock(scheduler->workers[tidx]->pinned_mtx);
-                    scheduler->workers[tidx]->pinned_queue.push_back(waiting_head);
-                } else {
-                    auto idx = static_cast<size_t>(t_worker_index);
-                    scheduler->workers[idx]->queue.push(waiting_head);
-                }
+				if (waiting_head->target_thread_index != -1) {
+					auto tidx = clamp_worker_index(waiting_head->target_thread_index, scheduler->workers.size());
+					std::lock_guard lock(scheduler->workers[tidx]->pinned_mtx);
+					scheduler->workers[tidx]->pinned_queue.push_back(waiting_head);
+				} else {
+					auto idx = clamp_worker_index(t_worker_index, scheduler->workers.size());
+					scheduler->workers[idx]->queue.push(waiting_head);
+				}
 				waiting_head = next;
 			}
 		}
@@ -412,14 +484,14 @@ void TaskScheduler::execute_task(Fiber* f) {
 			while (wake_list) {
 				auto next = wake_list->next_waiting;
 				wake_list->next_waiting = nullptr;
-                if (wake_list->target_thread_index != -1) {
-                    auto tidx = static_cast<size_t>(wake_list->target_thread_index);
-                    std::lock_guard lock(workers[tidx]->pinned_mtx);
-                    workers[tidx]->pinned_queue.push_back(wake_list);
-                } else {
-                    auto idx = static_cast<size_t>(t_worker_index);
-                    workers[idx]->queue.push(wake_list);
-                }
+				if (wake_list->target_thread_index != -1) {
+					auto tidx = clamp_worker_index(wake_list->target_thread_index, workers.size());
+					std::lock_guard lock(workers[tidx]->pinned_mtx);
+					workers[tidx]->pinned_queue.push_back(wake_list);
+				} else {
+					auto idx = clamp_worker_index(t_worker_index, workers.size());
+					workers[idx]->queue.push(wake_list);
+				}
 				wake_list = next;
 			}
 		}

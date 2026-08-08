@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <memory>
 #include <atomic>
@@ -88,6 +88,9 @@ namespace bud::graphics {
 
         std::unique_ptr<CSMShadowPass> csm_pass;
         std::unique_ptr<DepthOnlyPass> depth_only_pass;
+		std::unique_ptr<AmbientOcclusionPass> ao_pass;
+		std::unique_ptr<AOTemporalPass> ao_temporal_pass;
+		std::unique_ptr<AOBlurPass> ao_blur_pass;
 		std::unique_ptr<HiZMipPass> hiz_mip_pass;
 		std::unique_ptr<HiZCullingPass> hiz_pass;
 		std::unique_ptr<MeshletFrustumCullingPass> meshlet_frustum_pass;

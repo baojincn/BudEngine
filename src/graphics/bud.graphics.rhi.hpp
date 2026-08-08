@@ -52,6 +52,15 @@ namespace bud::graphics {
 		virtual void copy_buffer_immediate(BufferHandle src, BufferHandle dst, uint64_t size) = 0;
 		virtual void copy_buffer_immediate_offset(BufferHandle src, BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) = 0;
 		virtual void destroy_buffer(BufferHandle block) = 0;
+
+		// 异步上传：录制到每帧 upload command buffer（copy queue），end_frame 时与
+		// 主 command buffer 用 semaphore 串联，替代 vkQueueWaitIdle。
+		// begin_upload 必须在主 command buffer 录制之前调用；end_upload 提交。
+		virtual CommandHandle begin_upload() = 0;
+		virtual void cmd_copy_buffer_async(CommandHandle cmd, BufferHandle src, BufferHandle dst, uint64_t size, uint64_t src_offset = 0, uint64_t dst_offset = 0) = 0;
+		virtual void end_upload(CommandHandle cmd) = 0;
+		virtual void wait_upload_fence() = 0;
+		virtual void defer_buffer_release(BufferHandle buffer) = 0;
 		virtual void* create_graphics_pipeline(const GraphicsPipelineDesc& desc) = 0;
 		virtual void* create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
 		virtual void destroy_pipeline(void* pipeline) = 0;
@@ -70,6 +79,7 @@ namespace bud::graphics {
 		virtual void cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group_y, uint32_t group_z) = 0;
 		virtual Texture* get_current_swapchain_texture() = 0;
 		virtual uint32_t get_current_image_index() = 0;
+		virtual uint32_t get_current_frame_index() const = 0;
 		virtual void update_global_uniforms(uint32_t image_index, const SceneView& scene_view) = 0;
 		virtual void cmd_push_constants(CommandHandle cmd, void* pipeline_layout, uint32_t size, const void* data) = 0;
 
@@ -85,11 +95,16 @@ namespace bud::graphics {
 
 		// 纹理管理
 		virtual Texture* create_texture(const TextureDesc& desc, const void* initial_data, uint64_t size) = 0;
-		virtual void update_bindless_texture(uint32_t index, Texture* texture) = 0;
+		virtual void update_bindless_texture(uint32_t index, bud::graphics::Texture* texture) = 0;
+		virtual void update_bindless_texture_current_frame(uint32_t index, bud::graphics::Texture* texture) { update_bindless_texture(index, texture); }
 		virtual void update_bindless_image(uint32_t index, Texture* texture, uint32_t mip_level = 0, bool is_storage = false) = 0;
 		virtual Texture* get_fallback_texture() = 0;
 		virtual void update_global_shadow_map(Texture* texture) = 0;
 		virtual void update_global_instance_data(bud::graphics::BufferHandle buffer) = 0;
+		// Binds the full-scene CSM instance models to binding 6 (shadow.vert).
+		// Kept separate from binding 3 (main-view instance data) so CSM shadow
+		// passes do not clobber the main pass's instance binding.
+		virtual void update_global_csm_instance_data(bud::graphics::BufferHandle buffer) = 0;
 			virtual void update_global_page_table(bud::graphics::BufferHandle buffer) = 0;
 			virtual void update_global_page_pool(bud::graphics::BufferHandle buffer) = 0;
 		virtual void cmd_copy_image(CommandHandle cmd, Texture* src, Texture* dst) = 0; // Shadow Caching

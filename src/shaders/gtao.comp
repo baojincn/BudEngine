@@ -1,0 +1,137 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D depth_tex;
+layout(binding = 1, r32f) uniform image2D out_ao;
+
+layout(push_constant) uniform PushConsts {
+    mat4 proj;
+    mat4 inv_proj;
+    vec2 screen_size;
+    float radius;
+    float intensity;
+    uint sample_count;
+    uint reversed_z;
+    float time;
+} pc;
+
+const float PI = 3.14159265359;
+
+vec3 get_view_pos(vec2 uv, float depth) {
+    // Depth texture stores gl_FragCoord.z in [0,1]; convert to NDC z.
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 view = pc.inv_proj * clip;
+    return view.xyz / view.w;
+}
+
+// Interleaved Gradient Noise (per-pixel jitter, as used by GameWorks GTAO)
+float IGN(vec2 pixel) {
+    vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(pixel, magic.xy)));
+}
+
+vec3 reconstruct_normal(vec2 uv, vec3 view_pos, vec2 texel) {
+    vec3 pos_r = get_view_pos(uv + vec2(texel.x, 0.0), texture(depth_tex, uv + vec2(texel.x, 0.0)).r);
+    vec3 pos_u = get_view_pos(uv + vec2(0.0, texel.y), texture(depth_tex, uv + vec2(0.0, texel.y)).r);
+    vec3 N = cross(pos_r - view_pos, pos_u - view_pos);
+    if (dot(N, -view_pos) < 0.0) N = -N;
+    float N_len = length(N);
+    return (N_len < 0.00001) ? vec3(0.0, 0.0, 1.0) : (N / N_len);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(pc.screen_size);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / pc.screen_size;
+    float depth = texture(depth_tex, uv).r;
+
+    bool is_sky = (pc.reversed_z == 1) ? (depth <= 0.00001) : (depth >= 0.99999);
+    if (is_sky) {
+        imageStore(out_ao, pixel, vec4(1.0));
+        return;
+    }
+
+    vec3 view_pos = get_view_pos(uv, depth);
+    vec2 texel = 1.0 / pc.screen_size;
+    vec3 N = reconstruct_normal(uv, view_pos, texel);
+    vec3 V = normalize(-view_pos); // View vector pointing to camera
+
+    // GameWorks GTAO: 4 uniformly-spaced slices, jittered per pixel with IGN.
+    const uint num_slices = 4u;
+    uint num_steps = clamp(pc.sample_count / num_slices, 2u, 16u);
+    // Rotate the per-pixel noise by a per-frame phase (pc.time changes ~0.6
+    // per frame) so consecutive frames are decorrelated and the temporal
+    // accumulation pass can average the noise out. A slowly drifting pattern
+    // stays correlated and cannot be denoised.
+    float random_rot = fract(IGN(vec2(pixel)) + pc.time);
+
+    // World-space radius projected to a screen-space pixel radius at this depth
+    vec4 radius_proj = pc.proj * vec4(pc.radius, 0.0, view_pos.z, 1.0);
+    float screen_radius = clamp(abs(radius_proj.x / radius_proj.w) * 0.5 * pc.screen_size.x, 2.0, 256.0);
+
+    float visibility = 0.0;
+
+    for (uint slice = 0u; slice < num_slices; ++slice) {
+        float phi = (float(slice) + random_rot) * (PI / float(num_slices));
+        vec2 dir = vec2(cos(phi), sin(phi));
+        vec3 slice_dir = normalize(vec3(dir.x, dir.y, 0.0));
+
+        // Project the surface normal onto the slice plane
+        vec3 proj_N = N - slice_dir * dot(N, slice_dir);
+        float proj_N_len = length(proj_N);
+        vec3 plane_N = proj_N_len > 0.001 ? proj_N / proj_N_len : N;
+
+        // Angle of the projected normal w.r.t. the view vector
+        float n_angle = acos(clamp(dot(plane_N, V), -1.0, 1.0));
+        if (dot(cross(plane_N, V), slice_dir) < 0.0) n_angle = -n_angle;
+
+        // Horizon search in both directions along the slice. Exponential step
+        // distribution: dense near the pixel, sparse towards the radius edge.
+        vec2 cos_horizons = vec2(-1.0, -1.0);
+
+        for (int side = -1; side <= 1; side += 2) {
+            vec2 step_dir = dir * float(side);
+
+            for (uint step = 1u; step <= num_steps; ++step) {
+                float t = (float(step) - 0.5) / float(num_steps);
+                float step_dist = (t * t) * screen_radius;
+                vec2 sample_uv = uv + step_dir * step_dist * texel;
+
+                if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) break;
+
+                float sample_d = texture(depth_tex, sample_uv).r;
+                vec3 sample_pos = get_view_pos(sample_uv, sample_d);
+                vec3 horizon_vec = sample_pos - view_pos;
+                float dist_sq = dot(horizon_vec, horizon_vec);
+
+                // Only samples within the AO range can raise the horizon
+                if (dist_sq < pc.radius * pc.radius * 4.0) {
+                    float cos_h = dot(normalize(horizon_vec), V);
+                    uint side_idx = (side == -1) ? 0u : 1u;
+                    cos_horizons[side_idx] = max(cos_horizons[side_idx], cos_h);
+                }
+            }
+        }
+
+        // Clamp horizons to the hemisphere defined by the projected normal
+        float h1 = -acos(clamp(cos_horizons[0], -1.0, 1.0));
+        float h2 = acos(clamp(cos_horizons[1], -1.0, 1.0));
+
+        h1 = n_angle + max(h1 - n_angle, -PI * 0.5);
+        h2 = n_angle + min(h2 - n_angle, PI * 0.5);
+
+        // Analytical cosine-weighted integration over the horizon arc (GameWorks)
+        float slice_vis = proj_N_len * (0.25 * (-cos(2.0 * h1 - n_angle) + cos(n_angle) + 2.0 * h1 * sin(n_angle)) +
+                                       0.25 * (-cos(2.0 * h2 - n_angle) + cos(n_angle) + 2.0 * h2 * sin(n_angle)));
+
+        visibility += slice_vis;
+    }
+
+    visibility /= float(num_slices);
+    float final_ao = pow(clamp(visibility, 0.0, 1.0), pc.intensity);
+
+    imageStore(out_ao, pixel, vec4(final_ao, 0.0, 0.0, 1.0));
+}

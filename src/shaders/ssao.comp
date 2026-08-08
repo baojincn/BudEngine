@@ -1,0 +1,122 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D depth_tex;
+layout(binding = 1, r32f) uniform image2D out_ao;
+
+layout(push_constant) uniform PushConsts {
+    mat4 proj;
+    mat4 inv_proj;
+    vec2 screen_size;
+    float radius;
+    float intensity;
+    uint sample_count;
+    uint reversed_z;
+    float time;
+} pc;
+
+const float kGoldenAngle = 2.399963229728653;
+
+vec3 get_view_pos(vec2 uv, float depth) {
+    // Depth texture stores gl_FragCoord.z in [0,1]; convert to NDC z.
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 view = pc.inv_proj * clip;
+    return view.xyz / view.w;
+}
+
+// Pseudo-random hash per pixel (stands in for the 4x4 noise texture
+// NVIDIA GameWorks SSAO uses to rotate the sample kernel).
+float IGN(vec2 pixel) {
+    vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(pixel, magic.xy)));
+}
+
+vec3 reconstruct_normal(vec2 uv, vec3 view_pos, vec2 texel) {
+    vec3 pos_r = get_view_pos(uv + vec2(texel.x, 0.0), texture(depth_tex, uv + vec2(texel.x, 0.0)).r);
+    vec3 pos_u = get_view_pos(uv + vec2(0.0, texel.y), texture(depth_tex, uv + vec2(0.0, texel.y)).r);
+    vec3 N = cross(pos_r - view_pos, pos_u - view_pos);
+    if (dot(N, -view_pos) < 0.0) N = -N;
+    float N_len = length(N);
+    return (N_len < 0.00001) ? vec3(0.0, 0.0, 1.0) : (N / N_len);
+}
+
+// Deterministic cosine-weighted hemisphere sample. Equivalent to the fixed
+// kernel GameWorks uploads: direction + scale = lerp(0.1, 1.0, (i/N)^2).
+vec3 kernel_sample(uint i, uint samples) {
+    float fi = (float(i) + 0.5) / float(samples);
+    float phi = float(i) * kGoldenAngle;
+    float cos_theta = sqrt(1.0 - fi);
+    float sin_theta = sqrt(fi);
+    float r = mix(0.1, 1.0, fi * fi);
+    return vec3(cos(phi) * sin_theta, sin(phi) * sin_theta, cos_theta) * r;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(pc.screen_size);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec2 uv = (vec2(pixel) + 0.5) / pc.screen_size;
+    float depth = texture(depth_tex, uv).r;
+
+    // Background or far plane check
+    bool is_sky = (pc.reversed_z == 1) ? (depth <= 0.00001) : (depth >= 0.99999);
+    if (is_sky) {
+        imageStore(out_ao, pixel, vec4(1.0));
+        return;
+    }
+
+    vec3 view_pos = get_view_pos(uv, depth);
+    vec2 texel = 1.0 / pc.screen_size;
+    vec3 N = reconstruct_normal(uv, view_pos, texel);
+
+    // Stable per-pixel tangent frame, rotated by a random angle around N.
+    // This is the GameWorks TBN construction (their noise texture provides
+    // the per-pixel random vector; we derive the rotation from the hash).
+    vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 t0 = normalize(up - N * dot(up, N));
+    vec3 b0 = cross(N, t0);
+    // Rotate the noise by a substantial per-frame phase so the temporal
+    // accumulation can denoise it.
+    float rot = fract(IGN(vec2(pixel)) + pc.time) * 6.28318530718;
+    vec2 rot2 = vec2(cos(rot), sin(rot));
+    vec3 tangent = t0 * rot2.x + b0 * rot2.y;
+    vec3 bitangent = cross(N, tangent);
+    mat3 TBN = mat3(tangent, bitangent, N);
+
+    float occlusion = 0.0;
+    uint samples = clamp(pc.sample_count, 4u, 64u);
+
+    for (uint i = 0u; i < samples; ++i) {
+        // Sample point hovering inside the hemisphere around the surface
+        vec3 sample_pos = view_pos + (TBN * kernel_sample(i, samples)) * pc.radius;
+
+        // Project the sample back to screen space
+        vec4 offset = pc.proj * vec4(sample_pos, 1.0);
+        if (offset.w <= 0.0) continue;
+        vec2 sample_uv = offset.xy / offset.w * 0.5 + 0.5;
+
+        if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0)
+            continue;
+
+        float sample_depth = texture(depth_tex, sample_uv).r;
+        vec3 sample_actual_pos = get_view_pos(sample_uv, sample_depth);
+
+        // SAO range check: occluders beyond the radius still contribute with a
+        // 1/dist falloff, producing the wide, soft occlusion footprint.
+        float dist = abs(view_pos.z - sample_actual_pos.z);
+        float range_check = smoothstep(0.0, 1.0, pc.radius / max(dist, 1e-4));
+
+        float bias = 0.025; // Prevent acne
+        if (sample_actual_pos.z >= sample_pos.z + bias) {
+            occlusion += range_check;
+        }
+    }
+
+    // GameWorks-style output: intensity is applied as an exponent.
+    float ao = 1.0 - (occlusion / float(samples));
+    ao = clamp(pow(ao, pc.intensity), 0.0, 1.0);
+
+    imageStore(out_ao, pixel, vec4(ao, 0.0, 0.0, 1.0));
+}

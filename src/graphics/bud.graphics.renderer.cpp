@@ -1,9 +1,15 @@
-#include <memory>
+﻿#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
 #include <print>
 #include <cstring>
+
+// Per-frame upload mode.
+//   0 (default): host-write per-frame data into host-visible mapped buffers
+//     (avoids async staging/upload timing that caused flicker + light leaks).
+//   1: synchronous copy_buffer_immediate (legacy; for comparison).
+#define BUD_FORCE_SYNC_UPLOAD 0
 
 #include "src/graphics/bud.graphics.renderer.hpp"
 
@@ -25,6 +31,9 @@ namespace bud::graphics {
 		upload_queue = std::make_shared<UploadQueue>();
 		csm_pass = std::make_unique<CSMShadowPass>();
 		depth_only_pass = std::make_unique<DepthOnlyPass>();
+		ao_pass = std::make_unique<AmbientOcclusionPass>();
+		ao_temporal_pass = std::make_unique<AOTemporalPass>();
+		ao_blur_pass = std::make_unique<AOBlurPass>();
 		hiz_mip_pass = std::make_unique<HiZMipPass>();
 		hiz_pass = std::make_unique<HiZCullingPass>();
 		meshlet_frustum_pass = std::make_unique<MeshletFrustumCullingPass>();
@@ -38,6 +47,9 @@ namespace bud::graphics {
 
 		csm_pass->init(rhi, render_config, asset_manager);
 		depth_only_pass->init(rhi, render_config, asset_manager);
+		ao_pass->init(rhi, render_config, asset_manager);
+		ao_temporal_pass->init(rhi, render_config, asset_manager);
+		ao_blur_pass->init(rhi, render_config, asset_manager);
 		hiz_mip_pass->init(rhi, render_config, asset_manager);
 		hiz_pass->init(rhi, render_config, asset_manager);
 		meshlet_frustum_pass->init(rhi, render_config, asset_manager);
@@ -58,6 +70,9 @@ namespace bud::graphics {
 
 		if (csm_pass) csm_pass->shutdown(rhi);
 		if (depth_only_pass) depth_only_pass->shutdown(rhi);
+		if (ao_pass) ao_pass->shutdown(rhi);
+		if (ao_temporal_pass) ao_temporal_pass->shutdown(rhi);
+		if (ao_blur_pass) ao_blur_pass->shutdown(rhi);
 		if (hiz_mip_pass) hiz_mip_pass->shutdown(rhi);
 		if (hiz_pass) hiz_pass->shutdown(rhi);
 		if (meshlet_frustum_pass) meshlet_frustum_pass->shutdown(rhi);
@@ -226,7 +241,7 @@ namespace bud::graphics {
 					bud::graphics::TextureDesc desc{};
 					desc.width = (uint32_t)img_ptr->width;
 					desc.height = (uint32_t)img_ptr->height;
-					desc.format = bud::graphics::TextureFormat::RGBA8_UNORM;
+					desc.format = bud::graphics::TextureFormat::RGBA8_SRGB;
 					desc.mips = static_cast<uint32_t>(std::floor(std::log2(std::max(desc.width, desc.height)))) + 1;
 
 					auto tex = rhi_ptr->create_texture(desc, (const void*)img_ptr->pixels,
@@ -314,7 +329,7 @@ namespace bud::graphics {
 							bud::graphics::TextureDesc desc{};
 							desc.width = (uint32_t)img_ptr->width;
 							desc.height = (uint32_t)img_ptr->height;
-							desc.format = bud::graphics::TextureFormat::RGBA8_UNORM;
+							desc.format = bud::graphics::TextureFormat::RGBA8_SRGB;
 							desc.mips = static_cast<uint32_t>(std::floor(std::log2(std::max(desc.width, desc.height)))) + 1;
 
 							auto tex = rhi_ptr->create_texture(desc, (const void*)img_ptr->pixels,
@@ -466,6 +481,7 @@ namespace bud::graphics {
 
 						if (subset.material_index < material_to_slot.size()) {
 							sub.material_id = material_to_slot[subset.material_index];
+							sub.is_alpha_tested = mesh_data_copy->materials[subset.material_index].alpha_mode == 1; // 1 = AlphaMode::Mask
 						}
 						else {
 							bud::eprint("  Subset[{}]: INVALID mat_idx={} (max: {}) -> using fallback!",
@@ -559,6 +575,7 @@ namespace bud::graphics {
 		size_t visible_count = 0;
 		size_t visible_instance_count = 0;
 		size_t total_draw_count = 0;
+		size_t split_index = 0;
 		std::vector<std::vector<uint32_t>> culled_results(1 + cascade_count);
 
 		if (instance_count > 0) {
@@ -680,11 +697,13 @@ namespace bud::graphics {
 									item.key = UINT64_MAX;
 									continue;
 								}
-								item.key = DrawKey::generate_opaque(0, 0, sub.material_id, mesh_id, depth_key);
+								uint8_t layer = sub.is_alpha_tested ? 2 : (mesh.is_page_backed ? 1 : 0);
+								item.key = DrawKey::generate_opaque(layer, 0, sub.material_id, mesh_id, depth_key);
 							}
 							else {
 								uint32_t material_id = render_scene.material_indices[i];
-								item.key = DrawKey::generate_opaque(0, 0, material_id, mesh_id, depth_key);
+								uint8_t layer = mesh.is_page_backed ? 1 : 0;
+								item.key = DrawKey::generate_opaque(layer, 0, material_id, mesh_id, depth_key);
 							}
 						}
 						else {
@@ -702,7 +721,8 @@ namespace bud::graphics {
 
 								item.entity_index = (uint32_t)i;
 								item.submesh_index = s;
-								item.key = DrawKey::generate_opaque(0, 0, sub.material_id, mesh_id, depth_key);
+								uint8_t layer = sub.is_alpha_tested ? 2 : (mesh.is_page_backed ? 1 : 0);
+								item.key = DrawKey::generate_opaque(layer, 0, sub.material_id, mesh_id, depth_key);
 							}
 						}
 					}
@@ -719,6 +739,12 @@ namespace bud::graphics {
 			auto end_it = std::remove_if(sort_list.begin(), sort_list.begin() + total_draw_count, [](const SortItem& a) { return a.key == UINT64_MAX; });
 			sort_list.erase(end_it, sort_list.end()); // REMOVES INVALID ITEMS!
 			visible_count = sort_list.size();
+			
+			for (; split_index < visible_count; ++split_index) {
+				if ((sort_list[split_index].key >> 60) == 1) {
+					break;
+				}
+			}
 		}
 
 		auto cmd = rhi->begin_frame();
@@ -745,7 +771,7 @@ namespace bud::graphics {
 					bud::graphics::TextureDesc desc{};
 					desc.width = width;
 					desc.height = height;
-					desc.format = bud::graphics::TextureFormat::RGBA8_UNORM;
+					desc.format = bud::graphics::TextureFormat::RGBA8_SRGB;
 					desc.is_transfer_src = true;
 					desc.is_storage = true; // Just in case it's bound as storage
 					offscreen_target = rhi->create_texture(desc, nullptr, 0);
@@ -762,7 +788,11 @@ namespace bud::graphics {
 
 		auto back_buffer = render_graph.import_texture("Backbuffer", swapchain_tex, ResourceState::RenderTarget);
 
-		uint32_t current_idx = rhi->get_current_image_index();
+		// Use the render-frame slot (NOT the swapchain image index) to index
+		// per-frame GPU buffers: sync objects (in_flight_fence, upload timeline)
+		// are per-slot, so image_index indexing would reuse buffers out of sync
+		// with those fences (cross-frame race -> flicker).
+		uint32_t current_idx = rhi->get_current_frame_index();
 		RGHandle rg_draw;
 		RGHandle rg_inst;
 		RGHandle rg_stats;
@@ -771,6 +801,9 @@ namespace bud::graphics {
 		RGHandle rg_instance_data;
 		RGHandle rg_meshlet_visibility;
 		RGHandle rg_meshlet_hiz_visibility;
+		// Full-scene shadow-caster DrawData (GPU-driven CSM cull input).
+		RGHandle csm_instance_h;
+		size_t scene_split = 0;
 		uint32_t total_meshlet_count = 0;
 		if (render_config.enable_meshlets) {
 			for (const auto& mesh : meshes) {
@@ -790,7 +823,7 @@ namespace bud::graphics {
 			bud::math::vec3 max;
 			uint32_t meshletStart;
 			uint32_t meshletCount;
-			uint32_t pageBacked;
+			uint32_t flags;
 			uint32_t pageIndex;
 			uint32_t visibilityOffset;
 		};
@@ -801,6 +834,7 @@ namespace bud::graphics {
 				current_idx,
 				static_cast<uint32_t>(visible_count),
 				static_cast<uint32_t>(total_draw_count),
+				static_cast<uint32_t>(instance_count),
 				static_cast<uint32_t>(total_meshlet_count),
 				sizeof(InstanceData),
 				sizeof(DrawData),
@@ -845,6 +879,15 @@ namespace bud::graphics {
 			}
 
 			// Common Instance Data Upload
+			// All per-frame staging->GPU copies go through the async upload
+			// command buffer (chained to the main command buffer via a
+			// semaphore in end_frame), eliminating the per-frame
+			// vkQueueWaitIdle that used to flush the whole graphics queue.
+			#if BUD_FORCE_SYNC_UPLOAD
+			CommandHandle upload_cmd = nullptr;
+#else
+			CommandHandle upload_cmd = rhi->begin_upload();
+#endif
 			if (visible_count > 0) {
 				auto instance_staging = rhi->get_allocator()->alloc_staging(visible_count * sizeof(InstanceData));
 				InstanceData* inst_mapped = static_cast<InstanceData*>(instance_staging.mapped_ptr);
@@ -861,8 +904,22 @@ namespace bud::graphics {
 						inst_mapped[i].material_id = render_scene.material_indices[entity_idx];
 					}
 				}
+#if BUD_FORCE_SYNC_UPLOAD
 				rhi->copy_buffer_immediate(instance_staging, frame.instance_data, visible_count * sizeof(InstanceData));
 				rhi->destroy_buffer(instance_staging);
+#else
+				// Write per-frame instance data directly into the host-visible
+				// mapped buffer. This avoids the async staging/upload path whose
+				// cross-queue timing caused flicker; the buffer is per-frame so
+				// the CPU write only happens after the previous frame (same
+				// slot) finished on the GPU (begin_frame fence wait).
+				if (frame.instance_data.mapped_ptr) {
+					std::memcpy(frame.instance_data.mapped_ptr, inst_mapped, visible_count * sizeof(InstanceData));
+				} else if (upload_cmd) {
+					rhi->cmd_copy_buffer_async(upload_cmd, instance_staging, frame.instance_data, visible_count * sizeof(InstanceData));
+				}
+				rhi->defer_buffer_release(instance_staging);
+#endif
 				rg_instance_data = render_graph.import_buffer("GlobalInstanceData", frame.instance_data, ResourceState::ShaderResource);
 			}
 
@@ -895,7 +952,7 @@ namespace bud::graphics {
 							mapped[i].max = world_aabb.max;
 							mapped[i].meshletStart = sub.meshlet_start;
 							mapped[i].meshletCount = sub.meshlet_count;
-							mapped[i].pageBacked = mesh.is_page_backed ? 1u : 0u;
+							mapped[i].flags = (mesh.is_page_backed ? 1u : 0u) | ((render_scene.flags[entity_idx] & 1) ? 2u : 0u);
 							mapped[i].pageIndex = mesh.page_index;
 							mapped[i].visibilityOffset = current_visibility_offset;
 							current_visibility_offset += mapped[i].meshletCount;
@@ -912,20 +969,142 @@ namespace bud::graphics {
 							mapped[i].max = world_aabb.max;
 							mapped[i].meshletStart = 0;
 							mapped[i].meshletCount = mesh.meshlet_count;
-							mapped[i].pageBacked = mesh.is_page_backed ? 1u : 0u;
+							mapped[i].flags = (mesh.is_page_backed ? 1u : 0u) | ((render_scene.flags[entity_idx] & 1) ? 2u : 0u);
 							mapped[i].pageIndex = mesh.page_index;
 							mapped[i].visibilityOffset = current_visibility_offset;
 							current_visibility_offset += mapped[i].meshletCount;
 						}
 					}
-					rhi->copy_buffer_immediate(staging, current_inst_buf, visible_count * sizeof(DrawData));
-					rhi->destroy_buffer(staging);
+					#if BUD_FORCE_SYNC_UPLOAD
+										rhi->copy_buffer_immediate(staging, current_inst_buf, visible_count * sizeof(DrawData));
+										rhi->destroy_buffer(staging);
+					#else
+										// Host-write DrawData directly (per-frame mapped
+										// buffer); avoids async staging/upload flicker.
+										if (current_inst_buf.mapped_ptr) {
+											std::memcpy(current_inst_buf.mapped_ptr, mapped, visible_count * sizeof(DrawData));
+										} else if (upload_cmd) {
+											rhi->cmd_copy_buffer_async(upload_cmd, staging, current_inst_buf, visible_count * sizeof(DrawData));
+										}
+										rhi->defer_buffer_release(staging);
+					#endif
 
-					rg_inst = render_graph.import_buffer("IndirectInstanceData", current_inst_buf, ResourceState::UnorderedAccess);
+										rg_inst = render_graph.import_buffer("IndirectInstanceData", current_inst_buf, ResourceState::UnorderedAccess);
 					rg_draw = render_graph.import_buffer("IndirectDrawCommands", current_draw_buf, ResourceState::IndirectArgument);
 					rg_stats = render_graph.import_buffer("GPUStatsReadback", current_stats_buf, ResourceState::UnorderedAccess);
 					rg_meshlet_frustum_stats = render_graph.import_buffer("MeshletFrustumStats", frame.meshlet_frustum_stats, ResourceState::UnorderedAccess);
 					rg_meshlet_hiz_stats = render_graph.import_buffer("MeshletHiZStats", frame.meshlet_hiz_stats, ResourceState::UnorderedAccess);
+					if (frame.meshlet_hiz_visibility.is_valid()) {
+						rg_meshlet_hiz_visibility = render_graph.import_buffer("MeshletHiZVisibility", frame.meshlet_hiz_visibility, ResourceState::UnorderedAccess);
+					}
+				}
+
+				// Full-scene shadow-caster DrawData: reorder so non-page meshes
+				// come first ([0, scene_split)) and page-backed meshes follow
+				// ([scene_split, total)). csm_cull.comp consumes this to cover
+				// casters outside the main camera view without per-instance CPU
+				// draw calls in the shadow pass.
+				scene_split = 0;
+				if (instance_count > 0 && frame.csm_instance_data.is_valid()) {
+					const size_t scene_count = instance_count;
+					auto scene_staging = rhi->get_allocator()->alloc_staging(scene_count * sizeof(DrawData));
+					DrawData* scene_mapped = static_cast<DrawData*>(scene_staging.mapped_ptr);
+
+					// Match the full-scene models in the same reordered layout so
+					// shadow.vert can index them with gl_InstanceIndex during the
+					// CSM GPU draws.
+					auto model_staging = rhi->get_allocator()->alloc_staging(scene_count * sizeof(InstanceData));
+					InstanceData* model_mapped = static_cast<InstanceData*>(model_staging.mapped_ptr);
+
+					for (size_t i = 0; i < scene_count; ++i) {
+						uint32_t mid = render_scene.mesh_indices[i];
+						if (mid < meshes.size() && meshes[mid].is_valid() && !meshes[mid].is_page_backed)
+							++scene_split;
+					}
+
+					uint32_t np = 0;
+					uint32_t pg = static_cast<uint32_t>(scene_split);
+
+					// Zero the staging first: entities whose mesh is invalid are
+					// skipped below, and without zeroing they'd leave STALE data
+					// from the previous frame in the tail of the buffer. csm_cull
+					// reads every slot every frame, so stale garbage makes the
+					// cull result (and hence shadows) flicker even when static.
+					std::memset(scene_mapped, 0, scene_count * sizeof(DrawData));
+					std::memset(model_mapped, 0, scene_count * sizeof(InstanceData));
+
+					for (size_t i = 0; i < scene_count; ++i) {
+						uint32_t mesh_id = render_scene.mesh_indices[i];
+						if (mesh_id >= meshes.size() || !meshes[mesh_id].is_valid()) continue;
+						const auto& mesh = meshes[mesh_id];
+						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+
+						DrawData d{};
+						d.meshId = mesh_id;
+						d.flags = (mesh.is_page_backed ? 1u : 0u) | ((render_scene.flags[i] & 1) ? 2u : 0u);
+						d.pageIndex = mesh.page_index;
+						d.meshletStart = 0;
+						d.meshletCount = 0;
+						d.visibilityOffset = 0;
+
+						uint32_t sub_idx = render_scene.submesh_indices[i];
+						uint32_t material_id = 0;
+						if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
+							const auto& sub = mesh.submeshes[sub_idx];
+							d.indexCount = sub.index_count;
+							d.firstIndex = mesh_geometry.first_index + sub.index_start;
+							d.vertexOffset = mesh_geometry.vertex_offset;
+							d.materialId = sub.material_id;
+							material_id = sub.material_id;
+							auto world_aabb = sub.aabb.transform(render_scene.world_matrices[i]);
+							d.min = world_aabb.min;
+							d.max = world_aabb.max;
+						}
+						else {
+							d.indexCount = mesh.index_count;
+							d.firstIndex = mesh_geometry.first_index;
+							d.vertexOffset = mesh_geometry.vertex_offset;
+							d.materialId = render_scene.material_indices[i];
+							material_id = render_scene.material_indices[i];
+							auto world_aabb = mesh.aabb.transform(render_scene.world_matrices[i]);
+							d.min = world_aabb.min;
+							d.max = world_aabb.max;
+						}
+
+						uint32_t dst = (mesh.is_page_backed) ? pg++ : np++;
+
+						scene_mapped[dst] = d;
+						model_mapped[dst].model = render_scene.world_matrices[i];
+						model_mapped[dst].material_id = material_id;
+						model_mapped[dst].padding[0] = model_mapped[dst].padding[1] = model_mapped[dst].padding[2] = 0;
+					}
+
+					#if BUD_FORCE_SYNC_UPLOAD
+										rhi->copy_buffer_immediate(scene_staging, frame.csm_instance_data, scene_count * sizeof(DrawData));
+										if (frame.csm_instance_models.is_valid()) {
+											rhi->copy_buffer_immediate(model_staging, frame.csm_instance_models, scene_count * sizeof(InstanceData));
+										}
+										rhi->destroy_buffer(scene_staging);
+										rhi->destroy_buffer(model_staging);
+					#else
+										// Host-write CSM DrawData/models directly into the
+										// per-frame mapped buffers (avoids async
+										// staging/upload timing that caused shadow light
+										// leaks).
+										if (frame.csm_instance_data.mapped_ptr) {
+											std::memcpy(frame.csm_instance_data.mapped_ptr, scene_mapped, scene_count * sizeof(DrawData));
+										} else if (upload_cmd) {
+											rhi->cmd_copy_buffer_async(upload_cmd, scene_staging, frame.csm_instance_data, scene_count * sizeof(DrawData));
+										}
+										if (frame.csm_instance_models.mapped_ptr) {
+											std::memcpy(frame.csm_instance_models.mapped_ptr, model_mapped, scene_count * sizeof(InstanceData));
+										} else if (upload_cmd && frame.csm_instance_models.is_valid()) {
+											rhi->cmd_copy_buffer_async(upload_cmd, model_staging, frame.csm_instance_models, scene_count * sizeof(InstanceData));
+										}
+										rhi->defer_buffer_release(scene_staging);
+										rhi->defer_buffer_release(model_staging);
+					#endif
+										csm_instance_h = render_graph.import_buffer("CSMSceneInstanceData", frame.csm_instance_data, ResourceState::UnorderedAccess);
 				}
 
 				// Read back previous frame stats (delayed latency) from this exact buffer which is guaranteed finished
@@ -950,6 +1129,12 @@ namespace bud::graphics {
 					}
 				}
 			}
+
+			// Always submit the async upload batch, even when the GPU-driven
+			// branch was skipped, so the upload semaphore is signaled and the
+			// main command buffer's wait does not deadlock.
+			if (upload_cmd)
+				rhi->end_upload(upload_cmd);
 
 			// Calculate CPU Frustum Culling Stats
 			uint32_t scene_total_objs = 0;
@@ -1075,7 +1260,14 @@ namespace bud::graphics {
 				for (uint32_t i = 0; i < cascade_count; ++i)
 					csm_visible_instances[i] = std::move(culled_results[i + 1]);
 
-				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
+				// GPU-driven: csm_cull.comp consumes the full-scene DrawData
+				// (csm_instance_h) and writes indirect commands covering casters
+				// outside the main view too, so no CPU fill pass is needed.
+				// CPU-driven mode keeps the csm_visible_instances CPU path.
+				const RGHandle csm_inst_input = csm_instance_h.is_valid() ? csm_instance_h : rg_inst;
+				const size_t csm_inst_count = csm_instance_h.is_valid() ? instance_count : visible_count;
+				const size_t csm_split = csm_instance_h.is_valid() ? scene_split : split_index;
+				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), csm_inst_input, csm_inst_count, csm_split);
 				//bud::print("[Renderer] MainPass: csm_shadow_map.is_valid()={}", shadow_map.is_valid());
 
 				const bool use_gpu_occluder_selection = render_config.enable_gpu_driven
@@ -1128,14 +1320,6 @@ namespace bud::graphics {
 					rhi->get_render_stats().occluder_count = static_cast<uint32_t>(occluder_count);
 					rhi->get_render_stats().occluder_triangles = tris_sum;
 				}
-				float effective_fraction = 1.0f;
-				if (render_config.heuristic_occluder_enable && visible_count > 0) {
-					uint32_t target_count = static_cast<uint32_t>(static_cast<float>(visible_count) * render_config.heuristic_occluder_fraction);
-					target_count = std::clamp(target_count, render_config.heuristic_occluder_min_count, render_config.heuristic_occluder_max_count);
-					target_count = std::min(target_count, static_cast<uint32_t>(visible_count));
-					effective_fraction = static_cast<float>(target_count) / static_cast<float>(visible_count);
-					occluder_count = target_count;
-				}
 				else {
 					occluder_count = visible_count;
 				}
@@ -1143,15 +1327,25 @@ namespace bud::graphics {
 				rhi->get_render_stats().occluder_count = static_cast<uint32_t>(occluder_count);
 
 				if (use_gpu_occluder_selection) {
-					heuristic_occluder_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count, effective_fraction);
+					float effective_fraction = 1.0f;
+					if (render_config.heuristic_occluder_enable && visible_count > 0) {
+						uint32_t target_count = static_cast<uint32_t>(static_cast<float>(visible_count) * render_config.heuristic_occluder_fraction);
+						target_count = std::clamp(target_count, render_config.heuristic_occluder_min_count, render_config.heuristic_occluder_max_count);
+						target_count = std::min(target_count, static_cast<uint32_t>(visible_count));
+						effective_fraction = static_cast<float>(target_count) / static_cast<float>(visible_count);
+					}
+					rg_draw = heuristic_occluder_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count, effective_fraction);
 				}
+
+
 				else {
 					rhi->get_render_stats().occluder_triangles = 0; // Handled by CPU path above if !use_gpu
 				}
 
-				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, persistent_occluder_list, use_gpu_occluder_selection ? visible_count : occluder_count, use_gpu_occluder_selection ? rg_draw : RGHandle{}, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
+				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, render_config.enable_gpu_driven ? rg_draw : RGHandle{}, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), {}, split_index);
 
 				if (depth_prepass.is_valid()) {
+
 					if (render_config.enable_gpu_driven) {
 						auto rg_hiz = hiz_mip_pass->add_to_graph(render_graph, depth_prepass, render_config);
 
@@ -1170,25 +1364,43 @@ namespace bud::graphics {
 							&& rg_meshlet_hiz_stats.is_valid()) {
 							meshlet_hiz_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_visibility, rg_meshlet_hiz_visibility, rg_meshlet_hiz_stats, rg_hiz, scene_view, render_scene, meshes, sort_list, visible_count, gpu_scene);
 							if (meshlet_indirect_pass && rg_draw.is_valid()) {
-								meshlet_indirect_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_hiz_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count, gpu_scene);
+								rg_draw = meshlet_indirect_pass->add_to_graph(render_graph, rg_inst, rg_meshlet_hiz_visibility, rg_draw, rg_stats, scene_view, render_scene, meshes, sort_list, visible_count, gpu_scene);
 							}
 						}
 						else {
-							hiz_pass->add_to_graph(render_graph, rg_inst, rg_draw, rg_stats, rg_hiz, scene_view, (uint32_t)visible_count);
+							rg_draw = hiz_pass->add_to_graph(render_graph, rg_inst, rg_draw, rg_stats, rg_hiz, scene_view, (uint32_t)visible_count);
 						}
 
 						if (render_config.debug_hiz) {
 							hiz_debug_pass->add_to_graph(render_graph, back_buffer, rg_hiz, render_config.debug_hiz_mip);
 						}
+						
+						// Render non-occluders into the depth prepass!
+						if (rg_draw.is_valid()) {
+							depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), depth_prepass, split_index);
+						}
+					}
+
+					RGHandle rg_ao{};
+					if (ao_pass && render_config.ao_mode != AOMode::Disabled) {
+						RGHandle raw_ao = ao_pass->add_to_graph(render_graph, depth_prepass, scene_view, render_config);
+						if (raw_ao.is_valid() && ao_temporal_pass) {
+							raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, depth_prepass, scene_view, render_config);
+						}
+						if (raw_ao.is_valid() && ao_blur_pass) {
+							rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, depth_prepass, scene_view, render_config);
+						}
+						else {
+							rg_ao = raw_ao;
+						}
 					}
 
 					if (shadow_map.is_valid()) {
-						//bud::print("[Renderer] MainPass adding: shadow_map valid, visible_count={}", visible_count);
 						if (render_config.enable_cluster_visualization) {
-							cluster_viz_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
+							cluster_viz_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), split_index);
 						}
 						else {
-							main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer());
+							main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), rg_ao, split_index);
 						}
 						has_main_pass = true;
 					}

@@ -6,6 +6,7 @@ layout(location = 0) in vec3 in_position;
 layout(location = 3) in vec2 in_tex_coord;
 
 layout(location = 0) out vec2 frag_tex_coord;
+layout(location = 1) flat out uint frag_material_id;
 
 layout(binding = 0) uniform UniformBufferObject {
     mat4 view;
@@ -24,14 +25,20 @@ layout(binding = 0) uniform UniformBufferObject {
     uint padding[3];
 } ubo;
 
-layout(push_constant) uniform PushConsts {
-    mat4 model;
-    uint material_id;
-    uint padding[3];
-} push_consts;
+struct InstanceData {
+	mat4 model;
+	uint material_id;
+	uint padding[3];
+};
+
+layout(std430, binding = 3) readonly buffer InstanceBuffer {
+	InstanceData data[];
+} instance_buffer;
 
 void main() {
-    vec4 world_pos = push_consts.model * vec4(in_position, 1.0);
+    InstanceData instance = instance_buffer.data[gl_InstanceIndex];
+    vec4 world_pos = instance.model * vec4(in_position, 1.0);
     frag_tex_coord = in_tex_coord;
+    frag_material_id = instance.material_id;
     gl_Position = ubo.proj * ubo.view * world_pos;
 }

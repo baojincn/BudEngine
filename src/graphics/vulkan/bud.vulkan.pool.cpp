@@ -201,14 +201,11 @@ namespace bud::graphics::vulkan {
         view_info.subresourceRange.baseArrayLayer = 0;
         view_info.subresourceRange.layerCount = desc.array_layers;
 
-        // [FIX] For R32_SFLOAT (used by HiZ), map R to RGB channels so Nsight shows it as grayscale
-        // rather than bright blinding red.
-        if (vk_format == VK_FORMAT_R32_SFLOAT) {
-            view_info.components.r = VK_COMPONENT_SWIZZLE_R;
-            view_info.components.g = VK_COMPONENT_SWIZZLE_R;
-            view_info.components.b = VK_COMPONENT_SWIZZLE_R;
-            view_info.components.a = VK_COMPONENT_SWIZZLE_ONE;
-        }
+        // [FIX] Use identity swizzle for all views. Non-identity swizzle (RRR1) on
+        // R32_SFLOAT views violates the Vulkan spec when the view is used as a
+        // STORAGE_IMAGE or INPUT_ATTACHMENT descriptor. Layer and mip views below
+        // also use identity swizzle for the same reason.
+        view_info.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
 
         if (vkCreateImageView(device, &view_info, nullptr, &tex->view) != VK_SUCCESS) {
             std::string err = std::format("VulkanResourcePool::create_texture_smart failed to create base image view for image {}", (void*)tex->image);

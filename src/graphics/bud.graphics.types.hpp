@@ -58,7 +58,8 @@ namespace bud::graphics {
 
 	enum class TextureFormat {
 		Undefined,
-		RGBA8_UNORM,
+		R8_UNORM,
+		RGBA8_SRGB,
 		BGRA8_UNORM,
 		BGRA8_SRGB,
 		R32G32B32_FLOAT,
@@ -105,7 +106,7 @@ namespace bud::graphics {
 		uint32_t depth = 1;
 		uint32_t array_layers = 1;
 		uint32_t mips = 1;
-		TextureFormat format = TextureFormat::RGBA8_UNORM;
+		TextureFormat format = TextureFormat::RGBA8_SRGB;
 		TextureType type = TextureType::Texture2D;
 		bool is_storage = false;
 		bool is_transfer_src = false;
@@ -122,6 +123,12 @@ namespace bud::graphics {
 		bool vsync = false;
 		bool is_puppet_mode = false;
 		bool is_headless = false;
+	};
+
+	enum class AOMode : uint32_t {
+		Disabled = 0,
+		SSAO = 1,
+		GTAO = 2
 	};
 
 	struct RenderConfig {
@@ -148,6 +155,17 @@ namespace bud::graphics {
 		bool debug_hiz = false;
 		uint32_t debug_hiz_mip = 0;
 		bool enable_cluster_visualization = false;
+
+		// Ambient Occlusion
+		AOMode ao_mode = AOMode::GTAO;
+		float ao_radius = 1.0f;
+		float ao_intensity = 0.8f;
+		// 32 samples = 8 steps per slice direction at half-res. Good balance of
+		// quality and cost now that the temporal reprojection is fixed.
+		uint32_t ao_sample_count = 32;
+		bool ao_blur_enable = true;
+		bool ao_half_res = true;         // Evaluate AO at half resolution and upsample
+		bool ao_temporal_enable = true;  // Temporal accumulation over the previous frame
 
         // Heuristic Occluder selection (CPU heuristic prototype)
         bool heuristic_occluder_enable = true; // enable heuristic occluder selection by default
@@ -180,7 +198,7 @@ namespace bud::graphics {
 		bud::math::vec3 light_dir = { 0.5f, 1.0f, 0.3f };
 		bud::math::vec3 light_color = { 1.0f, 1.0f, 1.0f };
 		float light_intensity = 5.0f;
-		float ambient_strength = 0.05f;
+		float ambient_strength = 0.25f;
 
 		bool show_debug_stats = false;
 
@@ -238,6 +256,9 @@ namespace bud::graphics {
 			MeshletFrustum,
 			MeshletIndirect,
 			MeshletHiZ,
+			AmbientOcclusion,
+			AOBlur,
+			AOTemporal
 		};
 
 		ShaderStage cs;
@@ -279,7 +300,7 @@ namespace bud::graphics {
 
 		uint32_t width = 0;
 		uint32_t height = 0;
-		TextureFormat format = TextureFormat::RGBA8_UNORM;
+		TextureFormat format = TextureFormat::RGBA8_SRGB;
 		uint32_t mips = 1;
 		uint32_t array_layers = 1;
 		TextureType type = TextureType::Texture2D;
@@ -308,6 +329,7 @@ namespace bud::graphics {
 		uint32_t meshlet_count;
 		uint32_t material_id;
 		bool double_sided = false;
+		bool is_alpha_tested = false;
 
 		bud::math::AABB aabb;
 		bud::math::BoundingSphere sphere;

@@ -1,0 +1,155 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D current_ao_tex;
+layout(binding = 1) uniform sampler2D history_ao_tex;
+layout(binding = 2) uniform sampler2D depth_tex;
+layout(binding = 3, r32f) uniform image2D out_ao;
+
+layout(push_constant) uniform PushConsts {
+	mat4 inv_proj;
+	mat4 inv_view;
+	mat4 prev_view_proj;
+	vec2 screen_size;
+	uint reversed_z;
+	uint has_history;
+	float noise_rot; // per-frame rotation angle (radians) for the denoise taps
+} pc;
+
+vec3 get_view_pos(vec2 uv, float depth) {
+	// Depth texture stores gl_FragCoord.z in [0,1]; convert to NDC z.
+	vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+	vec4 view = pc.inv_proj * clip;
+	return view.xyz / view.w;
+}
+
+float hash_pixel(ivec2 p) {
+	vec2 q = vec2(p) * vec2(0.06711056, 0.00583715) + vec2(0.1);
+	return fract(sin(dot(q, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+// Frostbite-style rotating spatial denoise of the CURRENT frame AO.
+// Five taps sit on a ring of ~2.2 half-res texels (a rotated pentagon); the
+// whole pentagon rotates by a per-frame golden-angle step plus per-pixel
+// jitter, so the temporally-integrated footprint is isotropic while each
+// frame stays cheap. Depth-aware weights keep the filter from bleeding
+// across edges. 5 taps over 3 gives noticeably lower residual noise in
+// shadowed regions where it is most visible.
+float denoise_current_ao(vec2 uv, float depth) {
+	vec2 texel = 1.0 / pc.screen_size;
+	float center = texture(current_ao_tex, uv).r;
+	vec3 center_pos = get_view_pos(uv, depth);
+
+	float sum = center;
+	float wsum = 1.0;
+
+	float rotation = pc.noise_rot + hash_pixel(ivec2(gl_GlobalInvocationID.xy)) * 6.2831853;
+	for (int i = 0; i < 5; ++i) {
+		float a = rotation + float(i) * 1.25663706144; // 72-degree pentagon
+		vec2 dir = vec2(cos(a), sin(a));
+		vec2 s_uv = uv + dir * (2.2 * texel);
+
+		if (s_uv.x < 0.0 || s_uv.x > 1.0 || s_uv.y < 0.0 || s_uv.y > 1.0) continue;
+
+		float s_ao = texture(current_ao_tex, s_uv).r;
+		float s_depth = texture(depth_tex, s_uv).r;
+		vec3 s_pos = get_view_pos(s_uv, s_depth);
+
+		float depth_diff = abs(s_pos.z - center_pos.z);
+		// Relative bilateral weight: keeps edges, rejects cross-surface bleed.
+		float w = exp(-max(depth_diff - 0.15 * abs(center_pos.z), 0.0) * 2.0);
+		sum += s_ao * w;
+		wsum += w;
+	}
+	return sum / wsum;
+}
+
+void main() {
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 size = ivec2(pc.screen_size);
+	if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+	vec2 uv = (vec2(pixel) + 0.5) / pc.screen_size;
+	float depth = texture(depth_tex, uv).r;
+
+	bool is_sky = (pc.reversed_z == 1) ? (depth <= 0.00001) : (depth >= 0.99999);
+
+	// Spatial-denoise the current frame BEFORE the temporal mix: this removes
+	// the residual half-res corner/edge noise that the temporal filter alone
+	// cannot converge, especially while moving.
+	float current_ao = denoise_current_ao(uv, depth);
+
+	// No valid history yet (first frame / resolution change): just pass through.
+	if (is_sky || pc.has_history == 0) {
+		imageStore(out_ao, pixel, vec4(current_ao, 0.0, 0.0, 1.0));
+		return;
+	}
+
+	vec3 view_pos = get_view_pos(uv, depth);
+
+	// get_view_pos returns the CURRENT camera's view-space position. Convert it
+	// back to WORLD space (inv_view) before reprojecting with the previous
+	// frame's view-proj -- skipping this made the reprojection use incorrect
+	// parallax while the camera moved, which caused the history to be sampled at
+	// a drifting offset (walls shimmered / flickered during motion).
+	vec3 world_pos = (pc.inv_view * vec4(view_pos, 1.0)).xyz;
+
+	// Reproject the world position into the previous frame's clip space.
+	vec4 prev_clip = pc.prev_view_proj * vec4(world_pos, 1.0);
+	vec2 prev_uv = prev_clip.xy / prev_clip.w * 0.5 + 0.5;
+
+	// Samples outside the previous frame's viewport cannot be trusted.
+	if (prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0) {
+		imageStore(out_ao, pixel, vec4(current_ao, 0.0, 0.0, 1.0));
+		return;
+	}
+
+	// NOTE: no per-pixel depth-disocclusion gate here. With the (now correct)
+	// view->world reprojection, moving across a slanted wall makes the current
+	// depth at prev_uv differ from depth(uv) purely by parallax; a depth
+	// threshold would flip history_weight between 1 and ~0 in bands where the
+	// wall gradient crosses the tolerance, showing up as zebra stripes while
+	// moving. The neighborhood clamp below is the disocclusion safety net.
+
+	float history_ao = texture(history_ao_tex, prev_uv).r;
+
+	// TAA-style neighborhood clamp: bound the history to the local min/max of
+	// the current frame so a history outlier (e.g. from a one-frame reprojection
+	// miss) cannot flicker. AO is low-frequency, so the 3x3 range is a safe
+	// bound and convergence is preserved.
+	float lo = current_ao;
+	float hi = current_ao;
+	{
+		vec2 texel = 1.0 / pc.screen_size;
+		for (int dy = -1; dy <= 1; ++dy) {
+			for (int dx = -1; dx <= 1; ++dx) {
+				if (dx == 0 && dy == 0) continue;
+				vec2 nuv = uv + vec2(float(dx), float(dy)) * texel;
+				if (nuv.x < 0.0 || nuv.x > 1.0 || nuv.y < 0.0 || nuv.y > 1.0) continue;
+				float n = texture(current_ao_tex, nuv).r;
+				lo = min(lo, n);
+				hi = max(hi, n);
+			}
+		}
+	}
+	history_ao = clamp(history_ao, lo, hi);
+
+	// Motion-adaptive exponential moving average: keep a strong history even
+	// while moving (reprojection is accurate for static geometry), so the
+	// per-frame noise stays averaged instead of flickering. The floor is kept
+	// at 0.95 -- the neighborhood clamp above already prevents smearing
+	// outliers, so we don't need to gut the feedback for fast motion.
+	float motion_px = length((prev_uv - uv) * pc.screen_size);
+	float feedback = mix(0.97, 0.95, 1.0 - exp(-motion_px * 0.15));
+
+	// Dark AO (shadowed areas) makes any residual noise far more visible:
+	// the pixel color there is almost purely ambient * ao. Bias the blend
+	// toward history for dark AO values so shadows hold steady while moving.
+	float dark_boost = mix(1.18, 1.0, smoothstep(0.0, 0.5, current_ao));
+	feedback = min(feedback * dark_boost, 0.98);
+
+	float ao = mix(current_ao, history_ao, feedback);
+
+	imageStore(out_ao, pixel, vec4(ao, 0.0, 0.0, 1.0));
+}

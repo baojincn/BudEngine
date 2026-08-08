@@ -12,7 +12,7 @@ struct draw_data {
     vec3 max;
     uint meshlet_start;
     uint meshlet_count;
-    uint page_backed;
+    uint flags;
     uint page_index;
     uint visibility_offset;
 };
@@ -53,6 +53,7 @@ layout(set = 0, binding = 4) uniform uniform_buffer_object {
     float light_intensity;
     float ambient_strength;
     uint cascade_count;
+    uint debug_cascades;
     uint reversed_z;
 } ubo;
 
