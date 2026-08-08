@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <vector>
 #include <string>
 
@@ -21,7 +21,7 @@ namespace bud::scene {
 
 		Camera(bud::math::vec3 start_pos = bud::math::vec3(0.0f, 0.0f, 3.0f),
 			bud::math::vec3 start_up = bud::math::vec3(0.0f, 1.0f, 0.0f),
-			float start_yaw = -90.0f,
+			float start_yaw = 0.0f,
 			float start_pitch = 0.0f);
 
 		bud::math::mat4 get_view_matrix() const;
