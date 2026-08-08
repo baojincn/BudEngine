@@ -53,7 +53,8 @@ layout(set = 0, binding = 4) uniform uniform_buffer_object {
 
 layout(push_constant) uniform PushConstants {
     uint total_instances;
-    uint did_copy; // If 1, we skip drawing static objects (flags & 2)
+    uint did_copy;   // If 1, we skip drawing static objects (flags & 2)
+    uint static_only; // If 1, we ONLY emit static objects (for the static cache)
 } pc;
 
 bool aabb_visible(vec3 bmin, vec3 bmax, mat4 view_proj)
@@ -95,10 +96,14 @@ void main()
     draw_data draw = instance_data.data[draw_index];
 
     bool is_static = (draw.flags & 2u) != 0u;
-    bool should_skip = (pc.did_copy == 1u) && is_static;
+    bool keep = true;
+    if (pc.static_only == 1u)
+        keep = is_static;              // static cache pass: only static casters
+    else if (pc.did_copy == 1u)
+        keep = !is_static;             // dynamic pass: statics come from the cache
 
     for (uint i = 0; i < ubo.cascade_count; ++i) {
-        bool visible = !should_skip && aabb_visible(draw.min, draw.max, ubo.cascade_view_proj[i]);
+        bool visible = keep && aabb_visible(draw.min, draw.max, ubo.cascade_view_proj[i]);
 
         indirect_command command;
         command.index_count = draw.index_count;

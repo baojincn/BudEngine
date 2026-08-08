@@ -1,4 +1,4 @@
-﻿#include <memory>
+#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -950,6 +950,9 @@ namespace bud::graphics {
 					rg_stats = render_graph.import_buffer("GPUStatsReadback", current_stats_buf, ResourceState::UnorderedAccess);
 					rg_meshlet_frustum_stats = render_graph.import_buffer("MeshletFrustumStats", frame.meshlet_frustum_stats, ResourceState::UnorderedAccess);
 					rg_meshlet_hiz_stats = render_graph.import_buffer("MeshletHiZStats", frame.meshlet_hiz_stats, ResourceState::UnorderedAccess);
+					if (frame.meshlet_hiz_visibility.is_valid()) {
+						rg_meshlet_hiz_visibility = render_graph.import_buffer("MeshletHiZVisibility", frame.meshlet_hiz_visibility, ResourceState::UnorderedAccess);
+					}
 				}
 
 				// Full-scene shadow-caster DrawData: reorder so non-page meshes

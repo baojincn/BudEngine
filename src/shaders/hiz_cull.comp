@@ -55,6 +55,7 @@ layout(binding = 4) uniform UniformBufferObject {
     float light_intensity;
     float ambient_strength;
     uint cascade_count;
+    uint debug_cascades;
     uint reversed_z;
 } ubo;
 

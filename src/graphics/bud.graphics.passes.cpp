@@ -159,6 +159,10 @@ namespace bud::graphics {
 
 		auto shadow_map_h = std::make_shared<RGHandle>();
 
+		// Whether the static cache texture is available (used by the cull pass
+		// to decide if statics can be skipped for the dynamic CSM draw).
+		bool valid_cache = config.cache_shadows && static_cache_texture;
+
 		if (config.enable_gpu_driven && csm_cull_pipeline) {
 			render_graph.add_pass("CSM Cull",
 				[&](RGBuilder& builder) {
@@ -181,10 +185,8 @@ namespace bud::graphics {
 					rhi->update_global_uniforms(rhi->get_current_image_index(), view);
 
 					rhi->cmd_bind_pipeline(cmd, csm_cull_pipeline);
-
 					rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 0, render_graph.get_buffer(rg_instance_data));
 					rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 1, render_graph.get_buffer(rg_instance_data)); // Dummy
-					rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 2, frame.csm_indirect_draw);
 					rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 3, frame.csm_indirect_draw); // Dummy
 					rhi->cmd_bind_compute_ubo(cmd, csm_cull_pipeline, 4);
 					rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 5, frame.csm_indirect_draw); // Dummy
@@ -192,18 +194,28 @@ namespace bud::graphics {
 					struct PushConstants {
 						uint32_t total_instances;
 						uint32_t did_copy;
+						uint32_t static_only;
 					} pc;
 					pc.total_instances = static_cast<uint32_t>(instance_count);
-					// For cull pass, we just evaluate visibility. 'did_copy' is applied later during the actual draw loop.
-					// Wait, the cull pass actually handles skipping static objects for the dynamic pass if 'did_copy' is true.
-					// But we only run cull pass once. So we should NOT skip in cull pass, we skip in draw pass!
-					// Or we run cull pass twice? No, it's better to just cull everything, and then in the draw pass, if we did_copy, we just don't draw static?
-					// Indirect draw draws what is in the buffer. So we can't easily skip statically without modifying the buffer.
-					// Wait, csm_cull.comp has did_copy. We can just set it to 0 for now since we run it once.
-					pc.did_copy = 0;
-					rhi->cmd_push_constants(cmd, csm_cull_pipeline, sizeof(PushConstants), &pc);
 
 					uint32_t group_x = (static_cast<uint32_t>(instance_count) + 255) / 256;
+
+					// Pass 1: static-only commands -> static cache buffer.
+					if (frame.csm_static_indirect_draw.is_valid()) {
+						rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 2, frame.csm_static_indirect_draw);
+						pc.did_copy = 0;
+						pc.static_only = 1;
+						rhi->cmd_push_constants(cmd, csm_cull_pipeline, sizeof(PushConstants), &pc);
+						rhi->cmd_dispatch(cmd, group_x, 1, 1);
+						rhi->resource_barrier(cmd, frame.csm_static_indirect_draw, ResourceState::UnorderedAccess, ResourceState::IndirectArgument);
+					}
+
+					// Pass 2: dynamic commands (or all when the static cache is
+					// unavailable) -> main CSM indirect buffer.
+					rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 2, frame.csm_indirect_draw);
+					pc.did_copy = valid_cache ? 1u : 0u;
+					pc.static_only = 0;
+					rhi->cmd_push_constants(cmd, csm_cull_pipeline, sizeof(PushConstants), &pc);
 					rhi->cmd_dispatch(cmd, group_x, 1, 1);
 
 					rhi->resource_barrier(cmd, frame.csm_indirect_draw, ResourceState::UnorderedAccess, ResourceState::IndirectArgument);
@@ -213,7 +225,6 @@ namespace bud::graphics {
 
 		// [CSM] 2. Static Cache Update Pass
 		RGHandle static_cache_h;
-		bool valid_cache = config.cache_shadows && static_cache_texture;
 
 		if (valid_cache) {
 			static_cache_h = render_graph.import_texture("StaticShadowCache", static_cache_texture, ResourceState::Undefined);
@@ -278,19 +289,23 @@ namespace bud::graphics {
 							const auto pp_buf = gpu_scene.get_page_pool_buffer();
 							if (config.enable_gpu_driven) {
 								auto& frame = gpu_scene.frame_resources(rhi->get_current_image_index());
-								if (frame.csm_indirect_draw.is_valid()) {
+								// Static cache: draw ONLY the static casters from
+								// csm_static_indirect_draw (written by csm_cull
+								// with static_only=1), so dynamic objects are never
+								// baked into the cache.
+								if (frame.csm_static_indirect_draw.is_valid()) {
 									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-									
+
 									if (split_index > 0) {
 										rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 										rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-										rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
+										rhi->cmd_draw_indexed_indirect(cmd, frame.csm_static_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
 									}
 
 									if (split_index < instance_count && pp_buf.is_valid()) {
 										rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
 										rhi->cmd_bind_index_buffer(cmd, pp_buf);
-										rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
+										rhi->cmd_draw_indexed_indirect(cmd, frame.csm_static_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
 									}
 								}
 							}
@@ -493,9 +508,9 @@ namespace bud::graphics {
 					if (config.enable_gpu_driven) {
 						auto& frame = gpu_scene.frame_resources(rhi->get_current_image_index());
 						if (frame.csm_indirect_draw.is_valid()) {
-							// csm_cull.comp wrote commands for the FULL scene
-							// (main-view casters + out-of-view cascade casters),
-							// in page/non-page reordered order. The indirect
+							// csm_cull.comp's second dispatch wrote the DYNAMIC
+							// commands (statics skipped because the static cache
+							// was copied above), plus out-of-view casters. The
 							// commands carry gl_InstanceIndex into the full-scene
 							// instance data, so point the shadow pipeline's
 							// instance binding at the full-scene models for these
@@ -1051,6 +1066,14 @@ namespace bud::graphics {
 
 				rhi->cmd_bind_pipeline(cmd, pipeline);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
+				// Bindings 1-4 (meshlet_data / vertex_index / meshlet_index /
+				// meshlet_cull_data) are only read for non-page mesh triangle
+				// stats. Bind valid buffers so the descriptors are initialized
+				// (the page pool path supplies real data for page-backed meshes).
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 3, inst_buf);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline, 4, inst_buf);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline, 6, vis_in_buf);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline, 7, vis_out_buf);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline, 8, stat_buf);
@@ -2356,9 +2379,9 @@ namespace bud::graphics {
 				pc.inv_proj = bud::math::inverse(view.proj_matrix);
 				pc.screen_size = bud::math::vec2(static_cast<float>(depth_desc.width), static_cast<float>(depth_desc.height));
 				pc.reversed_z = config.reversed_z ? 1 : 0;
-				// Kernel radius measured in half-res AO texels: 7x7 for GTAO,
-				// a single bilinear tap for SSAO (temporal already denoises).
-				pc.blur_radius = (config.ao_mode == AOMode::GTAO) ? 3 : 1;
+				// Kernel radius measured in half-res AO texels: 5 for GTAO
+				// (smooths the 22.5° slice bands on flat walls), 1 for SSAO.
+				pc.blur_radius = (config.ao_mode == AOMode::GTAO) ? 5 : 1;
 
 				rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &pc);
 

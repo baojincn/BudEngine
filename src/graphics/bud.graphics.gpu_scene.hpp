@@ -62,6 +62,10 @@ namespace bud::graphics {
 			BufferHandle meshlet_visibility;
 			BufferHandle meshlet_hiz_visibility;
 			BufferHandle csm_indirect_draw;
+			// Static-only indirect commands (one range per cascade) written by
+			// csm_cull.comp with static_only=1; used by the CSM static cache
+			// update pass so dynamic objects are never drawn into the cache.
+			BufferHandle csm_static_indirect_draw;
 			// Full-scene DrawData (every scene instance, page/non-page reordered)
 			// consumed by csm_cull.comp so the CSM pass covers casters outside
 			// the main camera view without per-instance CPU draw calls.

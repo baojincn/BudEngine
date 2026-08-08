@@ -68,6 +68,7 @@ layout(set = 0, binding = 7) uniform uniform_buffer_object {
 	float light_intensity;
 	float ambient_strength;
 	uint cascade_count;
+	uint debug_cascades;
 	uint reversed_z;
 } ubo;
 
