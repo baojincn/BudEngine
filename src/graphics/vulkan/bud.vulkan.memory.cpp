@@ -59,9 +59,13 @@ namespace bud::graphics::vulkan {
 
     // VulkanMemoryAllocator
 
-    VulkanMemoryAllocator::VulkanMemoryAllocator(VkInstance instance, VkDevice device, VkPhysicalDevice phy_device, uint32_t frames_in_flight, uint32_t api_version)
-        : instance(instance), device(device), phy_device(phy_device), frames_in_flight(frames_in_flight), vulkan_api_version(api_version) {
-        
+    VulkanMemoryAllocator::VulkanMemoryAllocator(VkInstance instance, VkDevice device, VkPhysicalDevice phy_device,
+        uint32_t frames_in_flight, uint32_t api_version, uint32_t graphics_family, uint32_t copy_family,
+        bool use_concurrent_sharing)
+        : instance(instance), device(device), phy_device(phy_device), frames_in_flight(frames_in_flight),
+          vulkan_api_version(api_version), graphics_family(graphics_family), copy_family(copy_family),
+          use_concurrent_sharing(use_concurrent_sharing) {
+
     }
 
     // (No global debug allocation tracking)
@@ -83,10 +87,20 @@ namespace bud::graphics::vulkan {
         deferred_free_buffers.resize(frames_in_flight);
         deferred_free_textures.resize(frames_in_flight);
         // No allocation tracking initialization required
+        const uint32_t queue_family_indices[2] = { graphics_family, copy_family };
         for (uint32_t i = 0; i < frames_in_flight; ++i) {
             VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             bufferInfo.size = 64 * 1024 * 1024; // 64 MB
             bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT; // Allow binding as vertex/index buffer
+            // Staging is read by the copy queue during async uploads; use
+            // CONCURRENT sharing so no ownership transfer is needed.
+            if (use_concurrent_sharing) {
+                bufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+                bufferInfo.queueFamilyIndexCount = 2;
+                bufferInfo.pQueueFamilyIndices = queue_family_indices;
+            } else {
+                bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            }
 
             VmaAllocationCreateInfo allocInfo = {};
             allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
@@ -460,11 +474,18 @@ namespace bud::graphics::vulkan {
 
         // Fallback: allocate a dedicated temporary mapped buffer for this staging request
         // This avoids throwing in runtime when the ring buffer is exhausted.
+        const uint32_t queue_family_indices_fb[2] = { graphics_family, copy_family };
         VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         buffer_info.size = size;
         // Always allow binding as vertex and index buffer for UI/upload buffers
         buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (use_concurrent_sharing) {
+            buffer_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+            buffer_info.queueFamilyIndexCount = 2;
+            buffer_info.pQueueFamilyIndices = queue_family_indices_fb;
+        } else {
+            buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
 
         VmaAllocationCreateInfo alloc_info = {};
         alloc_info.usage = VMA_MEMORY_USAGE_AUTO;

@@ -1,9 +1,14 @@
-#include <memory>
+﻿#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
 #include <print>
 #include <cstring>
+
+// TEMP A/B DIAGNOSTIC: force synchronous per-frame uploads (copy_buffer_immediate)
+// to isolate async-upload flicker. Set to 1 to disable async uploads; set to 0
+// to enable the async upload path. Remove once the flicker source is resolved.
+#define BUD_FORCE_SYNC_UPLOAD 1
 
 #include "src/graphics/bud.graphics.renderer.hpp"
 
@@ -869,6 +874,15 @@ namespace bud::graphics {
 			}
 
 			// Common Instance Data Upload
+			// All per-frame staging->GPU copies go through the async upload
+			// command buffer (chained to the main command buffer via a
+			// semaphore in end_frame), eliminating the per-frame
+			// vkQueueWaitIdle that used to flush the whole graphics queue.
+			#if BUD_FORCE_SYNC_UPLOAD
+			CommandHandle upload_cmd = nullptr;
+#else
+			CommandHandle upload_cmd = rhi->begin_upload();
+#endif
 			if (visible_count > 0) {
 				auto instance_staging = rhi->get_allocator()->alloc_staging(visible_count * sizeof(InstanceData));
 				InstanceData* inst_mapped = static_cast<InstanceData*>(instance_staging.mapped_ptr);
@@ -885,8 +899,14 @@ namespace bud::graphics {
 						inst_mapped[i].material_id = render_scene.material_indices[entity_idx];
 					}
 				}
+#if BUD_FORCE_SYNC_UPLOAD
 				rhi->copy_buffer_immediate(instance_staging, frame.instance_data, visible_count * sizeof(InstanceData));
 				rhi->destroy_buffer(instance_staging);
+#else
+				if (upload_cmd)
+					rhi->cmd_copy_buffer_async(upload_cmd, instance_staging, frame.instance_data, visible_count * sizeof(InstanceData));
+				rhi->defer_buffer_release(instance_staging);
+#endif
 				rg_instance_data = render_graph.import_buffer("GlobalInstanceData", frame.instance_data, ResourceState::ShaderResource);
 			}
 
@@ -942,10 +962,16 @@ namespace bud::graphics {
 							current_visibility_offset += mapped[i].meshletCount;
 						}
 					}
-					rhi->copy_buffer_immediate(staging, current_inst_buf, visible_count * sizeof(DrawData));
-					rhi->destroy_buffer(staging);
+					#if BUD_FORCE_SYNC_UPLOAD
+										rhi->copy_buffer_immediate(staging, current_inst_buf, visible_count * sizeof(DrawData));
+										rhi->destroy_buffer(staging);
+					#else
+										if (upload_cmd)
+											rhi->cmd_copy_buffer_async(upload_cmd, staging, current_inst_buf, visible_count * sizeof(DrawData));
+										rhi->defer_buffer_release(staging);
+					#endif
 
-					rg_inst = render_graph.import_buffer("IndirectInstanceData", current_inst_buf, ResourceState::UnorderedAccess);
+										rg_inst = render_graph.import_buffer("IndirectInstanceData", current_inst_buf, ResourceState::UnorderedAccess);
 					rg_draw = render_graph.import_buffer("IndirectDrawCommands", current_draw_buf, ResourceState::IndirectArgument);
 					rg_stats = render_graph.import_buffer("GPUStatsReadback", current_stats_buf, ResourceState::UnorderedAccess);
 					rg_meshlet_frustum_stats = render_graph.import_buffer("MeshletFrustumStats", frame.meshlet_frustum_stats, ResourceState::UnorderedAccess);
@@ -980,6 +1006,15 @@ namespace bud::graphics {
 
 					uint32_t np = 0;
 					uint32_t pg = static_cast<uint32_t>(scene_split);
+
+					// Zero the staging first: entities whose mesh is invalid are
+					// skipped below, and without zeroing they'd leave STALE data
+					// from the previous frame in the tail of the buffer. csm_cull
+					// reads every slot every frame, so stale garbage makes the
+					// cull result (and hence shadows) flicker even when static.
+					std::memset(scene_mapped, 0, scene_count * sizeof(DrawData));
+					std::memset(model_mapped, 0, scene_count * sizeof(InstanceData));
+
 					for (size_t i = 0; i < scene_count; ++i) {
 						uint32_t mesh_id = render_scene.mesh_indices[i];
 						if (mesh_id >= meshes.size() || !meshes[mesh_id].is_valid()) continue;
@@ -1026,13 +1061,24 @@ namespace bud::graphics {
 						model_mapped[dst].padding[0] = model_mapped[dst].padding[1] = model_mapped[dst].padding[2] = 0;
 					}
 
-					rhi->copy_buffer_immediate(scene_staging, frame.csm_instance_data, scene_count * sizeof(DrawData));
-					rhi->destroy_buffer(scene_staging);
-					if (frame.csm_instance_models.is_valid()) {
-						rhi->copy_buffer_immediate(model_staging, frame.csm_instance_models, scene_count * sizeof(InstanceData));
-					}
-					rhi->destroy_buffer(model_staging);
-					csm_instance_h = render_graph.import_buffer("CSMSceneInstanceData", frame.csm_instance_data, ResourceState::UnorderedAccess);
+					#if BUD_FORCE_SYNC_UPLOAD
+										rhi->copy_buffer_immediate(scene_staging, frame.csm_instance_data, scene_count * sizeof(DrawData));
+										if (frame.csm_instance_models.is_valid()) {
+											rhi->copy_buffer_immediate(model_staging, frame.csm_instance_models, scene_count * sizeof(InstanceData));
+										}
+										rhi->destroy_buffer(scene_staging);
+										rhi->destroy_buffer(model_staging);
+					#else
+										if (upload_cmd) {
+											rhi->cmd_copy_buffer_async(upload_cmd, scene_staging, frame.csm_instance_data, scene_count * sizeof(DrawData));
+											if (frame.csm_instance_models.is_valid()) {
+												rhi->cmd_copy_buffer_async(upload_cmd, model_staging, frame.csm_instance_models, scene_count * sizeof(InstanceData));
+											}
+										}
+										rhi->defer_buffer_release(scene_staging);
+										rhi->defer_buffer_release(model_staging);
+					#endif
+										csm_instance_h = render_graph.import_buffer("CSMSceneInstanceData", frame.csm_instance_data, ResourceState::UnorderedAccess);
 				}
 
 				// Read back previous frame stats (delayed latency) from this exact buffer which is guaranteed finished
@@ -1057,6 +1103,12 @@ namespace bud::graphics {
 					}
 				}
 			}
+
+			// Always submit the async upload batch, even when the GPU-driven
+			// branch was skipped, so the upload semaphore is signaled and the
+			// main command buffer's wait does not deadlock.
+			if (upload_cmd)
+				rhi->end_upload(upload_cmd);
 
 			// Calculate CPU Frustum Culling Stats
 			uint32_t scene_total_objs = 0;

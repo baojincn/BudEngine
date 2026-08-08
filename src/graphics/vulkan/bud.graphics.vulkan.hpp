@@ -150,6 +150,15 @@ namespace bud::graphics::vulkan {
 		void cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) override;
 		void cmd_copy_image_to_buffer(CommandHandle cmd, bud::graphics::Texture* src, bud::graphics::BufferHandle dst) override;
 
+		// Async upload (per-frame upload command buffer on the copy queue)
+		CommandHandle begin_upload() override;
+		void cmd_copy_buffer_async(CommandHandle cmd, bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) override;
+		void end_upload(CommandHandle cmd) override;
+		void wait_upload_fence() override;
+		// Defer a staging buffer's destruction until the next upload fence wait
+		// (safe for buffers still being read by the async upload command buffer).
+		void defer_buffer_release(bud::graphics::BufferHandle buffer) override;
+
 	private:
 		void create_instance(VkInstance& vk_instance, bool enable_validation);
 		void create_surface(bud::platform::Window* window);
@@ -191,6 +200,14 @@ namespace bud::graphics::vulkan {
 			VkFence in_flight_fence = nullptr;
 			VkCommandPool main_command_pool = nullptr;
 			VkCommandBuffer main_command_buffer = nullptr;
+			// Per-frame upload command buffer for staging->GPU copies. Recorded
+			// on the copy queue and chained to the main command buffer via a
+			// binary semaphore so per-frame uploads no longer flush the whole
+			// graphics queue with vkQueueWaitIdle.
+			VkCommandPool upload_command_pool = nullptr;
+			VkCommandBuffer upload_command_buffer = nullptr;
+			VkSemaphore upload_finished_semaphore = nullptr; // signaled by upload cb
+			VkFence upload_fence = nullptr;                  // CPU waits on this for staging reuse
 			VkBuffer uniform_buffer = nullptr;       // Per-frame UBO (allocated via VMA when available)
 			VmaAllocation uniform_allocation = VK_NULL_HANDLE; // VMA allocation for the UBO (if used)
 			VmaAllocationInfo uniform_alloc_info = {}; // allocation info containing mapped ptr
@@ -209,6 +226,18 @@ namespace bud::graphics::vulkan {
 		VkSurfaceKHR surface = nullptr;
 		VkQueue graphics_queue = nullptr;
 		VkQueue present_queue = nullptr;
+		// Dedicated transfer/copy queue for async uploads (may alias the
+		// graphics queue when no dedicated transfer family exists).
+		VkQueue copy_queue = nullptr;
+		bool has_dedicated_copy_queue = false;
+		uint32_t graphics_family_index_ = 0;
+		uint32_t copy_family_index_ = 0;
+		bool upload_pending_this_frame = false;
+		// Staging buffers pending release until the upload fence for the SAME
+		// frame slot is waited on (begin_upload). Async uploads read them on the
+		// GPU, so releasing them immediately (or one frame earlier) would be a
+		// use-after-free. Indexed by frame slot (size == max_frames_in_flight).
+		std::vector<std::vector<bud::graphics::BufferHandle>> pending_staging_buffers_;
 		VkDebugUtilsMessengerEXT debug_messenger = nullptr;
 		bool enable_validation_layers = false;
 		bool aftermath_initialized = false;

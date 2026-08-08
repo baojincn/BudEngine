@@ -133,7 +133,8 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 
 	// 初始化基础设施 (Subsystems)
 	// 接管内存、资源池、管线缓存、描述符分配
-    memory_allocator = std::make_unique<VulkanMemoryAllocator>(instance, device, physical_device, max_frames_in_flight, device_api_version);
+    memory_allocator = std::make_unique<VulkanMemoryAllocator>(instance, device, physical_device, max_frames_in_flight, device_api_version,
+        graphics_family_index_, copy_family_index_, has_dedicated_copy_queue);
     memory_allocator->init();
 
 	resource_pool = std::make_unique<VulkanResourcePool>(device, memory_allocator.get());
@@ -583,7 +584,26 @@ void VulkanRHI::cleanup() {
 
         if (frames[i].main_command_pool)
             vkDestroyCommandPool(device, frames[i].main_command_pool, nullptr);
+
+        // Async upload resources
+        if (frames[i].upload_finished_semaphore)
+            vkDestroySemaphore(device, frames[i].upload_finished_semaphore, nullptr);
+        if (frames[i].upload_fence)
+            vkDestroyFence(device, frames[i].upload_fence, nullptr);
+        if (frames[i].upload_command_pool)
+            vkDestroyCommandPool(device, frames[i].upload_command_pool, nullptr);
     }
+
+
+
+    // Release any staging buffers whose async upload may not have been waited
+    // on (shutdown path).
+    for (auto& slot : pending_staging_buffers_) {
+        for (auto& b : slot)
+            destroy_buffer(b);
+        slot.clear();
+    }
+    pending_staging_buffers_.clear();
 
     if (memory_allocator)
         memory_allocator->cleanup();
@@ -651,7 +671,18 @@ void VulkanRHI::wait_idle() {
 bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::graphics::ResourceState usage_state) {
 	VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	buffer_info.size = size;
-	buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	// Use CONCURRENT sharing when a dedicated copy queue exists so the async
+	// upload command buffer (copy queue) can write this buffer without
+	// queue-family ownership transfer barriers. pQueueFamilyIndices is filled
+	// below and must outlive vkCreateBuffer (vmaCreateBuffer copies it).
+	const uint32_t queue_family_indices[2] = { graphics_family_index_, copy_family_index_ };
+	if (has_dedicated_copy_queue) {
+		buffer_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+		buffer_info.queueFamilyIndexCount = 2;
+		buffer_info.pQueueFamilyIndices = queue_family_indices;
+	} else {
+		buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	}
 
 	buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
@@ -1216,9 +1247,21 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 		throw std::runtime_error("failed to record command buffer!");
 
 	VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-	VkSemaphore wait_semaphores[] = { frames[current_frame].image_available_semaphore };
-	VkPipelineStageFlags wait_stages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-	submit_info.waitSemaphoreCount = 1;
+	// Wait on the per-frame upload semaphore if this frame recorded any async
+	// copies, so the main command buffer only starts after the upload cb is done.
+	VkSemaphore wait_semaphores[2] = {
+		frames[current_frame].image_available_semaphore,
+		frames[current_frame].upload_finished_semaphore
+	};
+	VkPipelineStageFlags wait_stages[2] = {
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+	};
+	uint32_t wait_count = 1;
+	if (upload_pending_this_frame) {
+		wait_count = 2;
+	}
+	submit_info.waitSemaphoreCount = wait_count;
 	submit_info.pWaitSemaphores = wait_semaphores;
 	submit_info.pWaitDstStageMask = wait_stages;
 	submit_info.commandBufferCount = 1;
@@ -1226,6 +1269,7 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	VkSemaphore signal_semaphores[] = { render_finished_semaphores[current_image_index] };
 	submit_info.signalSemaphoreCount = 1;
 	submit_info.pSignalSemaphores = signal_semaphores;
+	upload_pending_this_frame = false;
 
     VkResult submit_result = vkQueueSubmit(graphics_queue, 1, &submit_info, frames[current_frame].in_flight_fence);
     if (submit_result != VK_SUCCESS) {
@@ -1428,6 +1472,96 @@ void VulkanRHI::cmd_copy_buffer(CommandHandle cmd, bud::graphics::BufferHandle s
     copy_region.dstOffset = static_cast<VkDeviceSize>(dst.offset);
     copy_region.size = size;
     vkCmdCopyBuffer(static_cast<VkCommandBuffer>(cmd), vk_src->buffer, vk_dst->buffer, 1, &copy_region);
+}
+
+CommandHandle VulkanRHI::begin_upload() {
+    if (frames.empty() || !frames[current_frame].upload_command_pool)
+        return nullptr;
+
+    // Wait for this frame's previous upload to finish before reusing the
+    // staging ring / command buffer (ring pages reset on frame begin).
+    if (frames[current_frame].upload_fence) {
+        vkWaitForFences(device, 1, &frames[current_frame].upload_fence, VK_TRUE, UINT64_MAX);
+        vkResetFences(device, 1, &frames[current_frame].upload_fence);
+    }
+
+    // The GPU has finished reading the staging buffers uploaded in this frame
+    // slot's PREVIOUS round (upload_fence signaled above), so their deferred
+    // release is now safe. This is per-slot: a slot's uploads are only released
+    // when the same slot is reused (frames_in_flight later).
+    if (current_frame < pending_staging_buffers_.size() && !pending_staging_buffers_[current_frame].empty()) {
+        for (auto& b : pending_staging_buffers_[current_frame])
+            destroy_buffer(b);
+        pending_staging_buffers_[current_frame].clear();
+    }
+
+    VkCommandBuffer cb = frames[current_frame].upload_command_buffer;
+    vkResetCommandBuffer(cb, 0);
+
+    VkCommandBufferBeginInfo begin_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(cb, &begin_info) != VK_SUCCESS) {
+        bud::eprint("[Vulkan] begin_upload: failed to begin upload command buffer");
+        return nullptr;
+    }
+    upload_pending_this_frame = true;
+    return cb;
+}
+
+void VulkanRHI::cmd_copy_buffer_async(CommandHandle cmd, bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) {
+    if (!cmd || !src.is_valid() || !dst.is_valid()) return;
+    auto* vk_src = static_cast<bud::graphics::vulkan::VulkanBuffer*>(src.internal_state);
+    auto* vk_dst = static_cast<bud::graphics::vulkan::VulkanBuffer*>(dst.internal_state);
+    if (!vk_src || !vk_dst || !vk_src->buffer || !vk_dst->buffer) return;
+
+    // Buffer is on the transfer queue; staging (src) is host-visible. When the
+    // destination is used by the graphics queue, ownership is handled by the
+    // semaphore chain + buffer barriers recorded by the consumer. No explicit
+    // transfer here: the copy is a pure transfer-queue operation.
+    VkBufferCopy copy_region{};
+    copy_region.srcOffset = src.offset + src_offset;
+    copy_region.dstOffset = dst.offset + dst_offset;
+    copy_region.size = size;
+    vkCmdCopyBuffer(static_cast<VkCommandBuffer>(cmd), vk_src->buffer, vk_dst->buffer, 1, &copy_region);
+}
+
+void VulkanRHI::end_upload(CommandHandle cmd) {
+    if (!cmd) return;
+    VkCommandBuffer cb = static_cast<VkCommandBuffer>(cmd);
+    if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
+        bud::eprint("[Vulkan] end_upload: failed to end upload command buffer");
+        return;
+    }
+
+    VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &cb;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &frames[current_frame].upload_finished_semaphore;
+
+    // Submit on the dedicated copy queue (falls back to the graphics queue).
+    // Destination buffers are created with VK_SHARING_MODE_CONCURRENT (graphics
+    // + copy family), so no queue-family ownership transfer is required; the
+    // semaphore chain (upload signal -> main cb wait) provides the memory
+    // dependency across queues.
+    vkResetFences(device, 1, &frames[current_frame].upload_fence);
+    VkResult r = vkQueueSubmit(has_dedicated_copy_queue ? copy_queue : graphics_queue, 1, &submit_info, frames[current_frame].upload_fence);
+    if (r != VK_SUCCESS) {
+        bud::eprint("[Vulkan] end_upload: vkQueueSubmit failed, result={}", (int)r);
+    }
+}
+
+void VulkanRHI::wait_upload_fence() {
+    if (frames.empty() || !frames[current_frame].upload_fence) return;
+    vkWaitForFences(device, 1, &frames[current_frame].upload_fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &frames[current_frame].upload_fence);
+}
+
+void VulkanRHI::defer_buffer_release(bud::graphics::BufferHandle buffer) {
+    if (!buffer.is_valid()) return;
+    if (pending_staging_buffers_.size() <= current_frame)
+        pending_staging_buffers_.resize(max_frames_in_flight);
+    pending_staging_buffers_[current_frame].push_back(buffer);
 }
 
 void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) {
@@ -1789,12 +1923,26 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 	QueueFamilyIndices indices = find_queue_families(physical_device);
 	std::vector<VkDeviceQueueCreateInfo> queue_infos;
 	std::set<uint32_t> unique_families = { indices.graphics_family.value(), indices.present_family.value() };
-	float priority = 1.0f;
+	if (indices.copy_family.has_value())
+		unique_families.insert(indices.copy_family.value());
+
+	// Keep the priority arrays alive until vkCreateDevice reads them. Use a
+	// vector of vectors (reserved up front) so each inner vector's data()
+	// pointer stays stable across the loop.
+	std::vector<std::vector<float>> priorities;
+	priorities.reserve(unique_families.size());
 	for (uint32_t family : unique_families) {
 		VkDeviceQueueCreateInfo info{ VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
 		info.queueFamilyIndex = family;
-		info.queueCount = 1;
-		info.pQueuePriorities = &priority;
+		// When the copy queue falls back to the graphics family (queue_index 1),
+		// that family must expose 2 queues.
+		const bool hosts_copy_at_index1 = indices.copy_family.has_value()
+			&& indices.copy_family.value() == family
+			&& indices.copy_queue_index == 1;
+		const uint32_t queue_count = hosts_copy_at_index1 ? 2u : 1u;
+		info.queueCount = queue_count;
+		priorities.emplace_back(queue_count, 1.0f);
+		info.pQueuePriorities = priorities.back().data();
 		queue_infos.push_back(info);
 	}
 
@@ -1891,6 +2039,24 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 
 	vkGetDeviceQueue(device, indices.graphics_family.value(), 0, &graphics_queue);
 	vkGetDeviceQueue(device, indices.present_family.value(), 0, &present_queue);
+
+	graphics_family_index_ = indices.graphics_family.value();
+	copy_family_index_ = indices.copy_family.has_value() ? indices.copy_family.value() : graphics_family_index_;
+
+	if (indices.copy_family.has_value()) {
+		vkGetDeviceQueue(device, indices.copy_family.value(), indices.copy_queue_index, &copy_queue);
+		has_dedicated_copy_queue = indices.copy_family.value() != indices.graphics_family.value();
+	} else {
+		// No dedicated transfer family and no spare graphics queue: uploads
+		// fall back to the main graphics queue (still async via semaphores).
+		copy_queue = graphics_queue;
+		has_dedicated_copy_queue = false;
+	}
+	if (copy_queue) {
+		bud::print("[Vulkan] Copy queue {} (dedicated={})",
+			indices.copy_family.has_value() ? std::to_string(indices.copy_family.value()) : "alias-graphics",
+			has_dedicated_copy_queue ? "yes" : "no");
+	}
 
 	fpCmdPushDescriptorSetKHR = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR");
 	if (!fpCmdPushDescriptorSetKHR) {
@@ -1992,6 +2158,17 @@ void VulkanRHI::create_command_pool() {
 		if (vkCreateCommandPool(device, &pool_info, nullptr, &frames[i].main_command_pool) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create main command pool!");
 		}
+
+		// The upload command buffer is submitted on the dedicated copy queue,
+		// so its command pool must come from the copy family (falls back to the
+		// graphics family when no dedicated transfer queue exists).
+		VkCommandPoolCreateInfo upload_pool_info{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+		upload_pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		upload_pool_info.queueFamilyIndex = copy_family_index_;
+
+		if (vkCreateCommandPool(device, &upload_pool_info, nullptr, &frames[i].upload_command_pool) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create upload command pool!");
+		}
 	}
 }
 
@@ -2004,6 +2181,16 @@ void VulkanRHI::create_command_buffer() {
 
 		if (vkAllocateCommandBuffers(device, &alloc_info, &frames[i].main_command_buffer) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to allocate command buffers!");
+		}
+
+		// Allocate the per-frame upload command buffer from its own pool.
+		VkCommandBufferAllocateInfo upload_alloc_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+		upload_alloc_info.commandPool = frames[i].upload_command_pool;
+		upload_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		upload_alloc_info.commandBufferCount = 1;
+
+		if (vkAllocateCommandBuffers(device, &upload_alloc_info, &frames[i].upload_command_buffer) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to allocate upload command buffer!");
 		}
 	}
 }
@@ -2018,6 +2205,13 @@ void VulkanRHI::create_sync_objects() {
 			vkCreateFence(device, &fence_info, nullptr, &frames[i].in_flight_fence) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create synchronization objects for a frame!");
 		}
+
+		// Upload-side sync: fence to signal CPU when the upload cb is done
+		// (staging reuse), binary semaphore chained into the main cb.
+		if (vkCreateSemaphore(device, &semaphore_info, nullptr, &frames[i].upload_finished_semaphore) != VK_SUCCESS ||
+			vkCreateFence(device, &fence_info, nullptr, &frames[i].upload_fence) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create upload synchronization objects!");
+		}
 	}
 
 	render_finished_semaphores.resize(swapchain_images.size());
@@ -2026,7 +2220,8 @@ void VulkanRHI::create_sync_objects() {
 			throw std::runtime_error("Failed to create render finished semaphores!");
 		}
 	}
-}
+
+	}
 
 
 VkCommandBuffer VulkanRHI::begin_single_time_commands() {
@@ -2091,7 +2286,15 @@ void VulkanRHI::end_single_time_commands(VkCommandBuffer command_buffer) {
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &command_buffer;
 
-    // 提交并等待队列空闲（同步阻塞）
+    // Wait for the whole queue to drain. This path is used by low-frequency
+    // texture/mesh uploads from async IO threads; after the upload completes,
+    // the caller updates the bindless descriptor set. If the GPU were still
+    // rendering (only this submit waited on), that descriptor update would race
+    // with in-flight rendering and cause textures to "not keep up" (flicker,
+    // especially on alpha-tested materials). vkQueueWaitIdle is thread-safe and
+    // guarantees the GPU is idle before the descriptor update. Per-frame
+    // instance/draw/CSM uploads already run on the async copy queue, so this
+    // wait only affects low-frequency asset streaming, not the per-frame path.
     VkResult r = vkQueueSubmit(graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
     if (r != VK_SUCCESS) {
         bud::eprint("[Vulkan] Failed to submit single time command! result={}", (int)r);
@@ -2124,6 +2327,32 @@ QueueFamilyIndices VulkanRHI::find_queue_families(VkPhysicalDevice device) {
 		if (indices.is_complete()) break;
 		i++;
 	}
+
+	// Dedicated transfer (copy) family: a family with VK_QUEUE_TRANSFER_BIT but
+	// no GRAPHICS/COMPUTE bit. Prefer this so uploads run on an independent
+	// hardware queue. Store the family and index; if none exists we fall back to
+	// the graphics family with queue_index=1 (see create_logical_device).
+	indices.copy_family.reset();
+	indices.copy_queue_index = 0;
+	for (uint32_t family = 0; family < queue_families.size(); ++family) {
+		const auto& qf = queue_families[family];
+		const VkQueueFlags flags = qf.queueFlags;
+		const bool is_pure_transfer = (flags & VK_QUEUE_TRANSFER_BIT) != 0
+			&& (flags & VK_QUEUE_GRAPHICS_BIT) == 0
+			&& (flags & VK_QUEUE_COMPUTE_BIT) == 0;
+		if (is_pure_transfer && qf.queueCount >= 1) {
+			indices.copy_family = family;
+			indices.copy_queue_index = 0;
+			break;
+		}
+	}
+	if (!indices.copy_family.has_value() && indices.graphics_family.has_value()
+		&& queue_families[indices.graphics_family.value()].queueCount >= 2) {
+		// Fall back to a second queue in the graphics family.
+		indices.copy_family = indices.graphics_family;
+		indices.copy_queue_index = 1;
+	}
+
 	return indices;
 }
 

@@ -56,7 +56,10 @@ namespace bud::graphics::vulkan {
 
     class VulkanMemoryAllocator : public bud::graphics::Allocator {
     public:
-        VulkanMemoryAllocator(VkInstance instance, VkDevice device, VkPhysicalDevice phy_device, uint32_t frames_in_flight, uint32_t api_version = VK_API_VERSION_1_1);
+        VulkanMemoryAllocator(VkInstance instance, VkDevice device, VkPhysicalDevice phy_device,
+                              uint32_t frames_in_flight, uint32_t api_version = VK_API_VERSION_1_1,
+                              uint32_t graphics_family = 0, uint32_t copy_family = 0,
+                              bool use_concurrent_sharing = false);
 
 		void init() override;
 		void cleanup() override;
@@ -105,11 +108,16 @@ namespace bud::graphics::vulkan {
 		VkInstance instance;
 		VkDevice device;
 		VkPhysicalDevice phy_device;
-        uint32_t vulkan_api_version = VK_API_VERSION_1_1;
+		uint32_t vulkan_api_version = VK_API_VERSION_1_1;
 		VmaAllocator vma_allocator = VK_NULL_HANDLE;
 		uint32_t frames_in_flight;
 		uint32_t current_frame_index = 0;
 		std::mutex mutex;
+
+		// Queue family info for CONCURRENT sharing (async copy queue access).
+		uint32_t graphics_family = 0;
+		uint32_t copy_family = 0;
+		bool use_concurrent_sharing = false;
 
 
 		std::vector<VmaLinearPage> staging_pages; // CPU-to-GPU (Uniforms), Per Frame

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <string>
 #include <vector>
@@ -52,6 +52,15 @@ namespace bud::graphics {
 		virtual void copy_buffer_immediate(BufferHandle src, BufferHandle dst, uint64_t size) = 0;
 		virtual void copy_buffer_immediate_offset(BufferHandle src, BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) = 0;
 		virtual void destroy_buffer(BufferHandle block) = 0;
+
+		// 异步上传：录制到每帧 upload command buffer（copy queue），end_frame 时与
+		// 主 command buffer 用 semaphore 串联，替代 vkQueueWaitIdle。
+		// begin_upload 必须在主 command buffer 录制之前调用；end_upload 提交。
+		virtual CommandHandle begin_upload() = 0;
+		virtual void cmd_copy_buffer_async(CommandHandle cmd, BufferHandle src, BufferHandle dst, uint64_t size, uint64_t src_offset = 0, uint64_t dst_offset = 0) = 0;
+		virtual void end_upload(CommandHandle cmd) = 0;
+		virtual void wait_upload_fence() = 0;
+		virtual void defer_buffer_release(BufferHandle buffer) = 0;
 		virtual void* create_graphics_pipeline(const GraphicsPipelineDesc& desc) = 0;
 		virtual void* create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
 		virtual void destroy_pipeline(void* pipeline) = 0;

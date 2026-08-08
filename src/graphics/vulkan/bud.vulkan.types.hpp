@@ -65,6 +65,11 @@ namespace bud::graphics::vulkan {
 	struct QueueFamilyIndices {
 		std::optional<uint32_t> graphics_family;
 		std::optional<uint32_t> present_family;
+		// Dedicated transfer/copy queue family (pure VK_QUEUE_TRANSFER_BIT) so
+		// uploads can run on a separate hardware queue. Falls back to the
+		// graphics family with queue_index=1 when no dedicated family exists.
+		std::optional<uint32_t> copy_family;
+		uint32_t copy_queue_index = 0;
 
 		bool is_complete() const {
 			return graphics_family.has_value() && present_family.has_value();
