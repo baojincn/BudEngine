@@ -32,6 +32,9 @@ namespace bud::scene {
 
 		bud::math::quaternion get_rotation() const;
 		void set_rotation(const bud::math::quaternion& rot);
+		// Rebuild front/right/up from the current yaw/pitch (public so scene
+		// deserialization can apply loaded angles immediately).
+		void refresh_camera_vectors() { update_camera_vectors(); }
 		inline bud::math::AABB get_collision_aabb(float radius = 0.2f) const {
 			return { position - bud::math::vec3(radius), position + bud::math::vec3(radius) };
 		}

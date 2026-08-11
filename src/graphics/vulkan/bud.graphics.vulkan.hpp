@@ -104,6 +104,7 @@ namespace bud::graphics::vulkan {
 		void cmd_blit_image(CommandHandle cmd, Texture* src, Texture* dst) override;
 
 		bud::graphics::Texture* create_texture(const bud::graphics::TextureDesc& desc, const void* initial_data, uint64_t size) override;
+		bud::graphics::Texture* create_texture_async(const bud::graphics::TextureDesc& desc, const void* initial_data, uint64_t size, uint32_t bindless_slot) override;
 		void update_bindless_texture(uint32_t index, bud::graphics::Texture* texture) override;
 		void update_bindless_texture_current_frame(uint32_t index, bud::graphics::Texture* texture) override;
 		void update_bindless_image(uint32_t index, bud::graphics::Texture* texture, uint32_t mip_level = 0, bool is_storage = false) override;
@@ -133,6 +134,11 @@ namespace bud::graphics::vulkan {
 		void cmd_bind_compute_texture(CommandHandle cmd, void* pipeline, uint32_t binding, bud::graphics::Texture* texture, uint32_t mip_level = 0, bool is_storage = false, bool is_general = false) override;
 		void cmd_bind_compute_ubo(CommandHandle cmd, void* pipeline, uint32_t binding) override;
 		void cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group_y, uint32_t group_z) override;
+		CommandHandle begin_async_compute() override;
+		void end_async_compute() override;
+		void wait_compute_timeline(uint64_t value) override;
+		uint64_t get_compute_timeline_value() const override { return compute_timeline_value; }
+		bool has_dedicated_compute_queue() const override { return has_dedicated_compute_queue_; }
 
 		VulkanMemoryAllocator* get_memory_allocator() { return memory_allocator.get(); }
 		bud::graphics::ResourcePool* get_resource_pool() override { return resource_pool.get(); }
@@ -158,14 +164,7 @@ namespace bud::graphics::vulkan {
 		void cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) override;
 		void cmd_copy_image_to_buffer(CommandHandle cmd, bud::graphics::Texture* src, bud::graphics::BufferHandle dst) override;
 
-		// Async upload (per-frame upload command buffer on the copy queue)
-		CommandHandle begin_upload() override;
-		void cmd_copy_buffer_async(CommandHandle cmd, bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) override;
-		void end_upload(CommandHandle cmd) override;
-		void wait_upload_fence() override;
-		// Defer a staging buffer's destruction until the next upload fence wait
-		// (safe for buffers still being read by the async upload command buffer).
-		void defer_buffer_release(bud::graphics::BufferHandle buffer) override;
+		bud::graphics::BufferHandle create_dedicated_upload_buffer(uint64_t size);
 
 	private:
 		void create_instance(VkInstance& vk_instance, bool enable_validation);
@@ -180,6 +179,12 @@ namespace bud::graphics::vulkan {
 
 		VkCommandBuffer begin_single_time_commands();
 		void end_single_time_commands(VkCommandBuffer command_buffer);
+		// Records staging->image copy + mipmap generation + final transition
+		// into the given command buffer (shared by sync/async texture uploads).
+		void record_texture_upload(VkCommandBuffer cb, class VulkanTexture* tex, VkBuffer staging_buf, uint64_t staging_offset, const TextureDesc& desc);
+		void queue_bindless_update(uint32_t slot, Texture* tex, VkFence fence, VkCommandBuffer cb, bud::graphics::BufferHandle staging);
+		void queue_bindless_fallback(uint32_t slot, Texture* tex);
+		void apply_pending_bindless();
 		void transition_image_layout_immediate(VkImage image, VkFormat format, VkImageLayout old_layout, VkImageLayout new_layout);
 		void copy_buffer_to_image(VkImage image, VkBuffer buffer, uint64_t buffer_offset, uint32_t width, uint32_t height);
 		void generate_mipmaps(VkImage image, VkFormat format, int32_t texWidth, int32_t texHeight, uint32_t mipLevels); 
@@ -208,17 +213,13 @@ namespace bud::graphics::vulkan {
 			VkFence in_flight_fence = nullptr;
 			VkCommandPool main_command_pool = nullptr;
 			VkCommandBuffer main_command_buffer = nullptr;
-			// Per-frame upload command buffer for staging->GPU copies. Recorded
-			// on the copy queue and chained to the main command buffer via a
-			// timeline semaphore so per-frame uploads no longer flush the whole
-			// graphics queue with vkQueueWaitIdle.
-			VkCommandPool upload_command_pool = nullptr;
-			VkCommandBuffer upload_command_buffer = nullptr;
-			// Timeline semaphore signaled by the upload submit on the copy queue;
-			// the main command buffer waits on the per-frame value (value-based,
-			// immune to the binary semaphore's stateful signal/wait requirement).
-			VkSemaphore upload_timeline_semaphore = nullptr;
-			uint64_t upload_timeline_value = 0;
+			// 2 timestamp queries (frame start / frame end) for GPU frame time.
+			// Read back after the in-flight fence is reached (next begin_frame).
+			VkQueryPool timestamp_pool = nullptr;
+			bool timestamp_ready = false; // true once timestamps were written once
+			// Per-frame async compute command pool/buffer (compute family).
+			VkCommandPool async_command_pool = nullptr;
+			VkCommandBuffer async_command_buffer = nullptr;
 			VkBuffer uniform_buffer = nullptr;       // Per-frame UBO (allocated via VMA when available)
 			VmaAllocation uniform_allocation = VK_NULL_HANDLE; // VMA allocation for the UBO (if used)
 			VmaAllocationInfo uniform_alloc_info = {}; // allocation info containing mapped ptr
@@ -237,6 +238,10 @@ namespace bud::graphics::vulkan {
 		VkSurfaceKHR surface = nullptr;
 		VkQueue graphics_queue = nullptr;
 		VkQueue present_queue = nullptr;
+		// Device timestamp period in nanoseconds per tick (Vulkan timestamps).
+		// Guarded by timestamp_queries_supported_.
+		float timestamp_period_ns_ = 1.0f;
+		bool timestamp_queries_supported_ = false;
 		// Dedicated transfer/copy queue for async uploads (may alias the
 		// graphics queue when no dedicated transfer family exists).
 		VkQueue copy_queue = nullptr;
@@ -244,11 +249,43 @@ namespace bud::graphics::vulkan {
 		uint32_t graphics_family_index_ = 0;
 		uint32_t copy_family_index_ = 0;
 		bool upload_pending_this_frame = false;
-		// Staging buffers pending release until the upload fence for the SAME
-		// frame slot is waited on (begin_upload). Async uploads read them on the
-		// GPU, so releasing them immediately (or one frame earlier) would be a
-		// use-after-free. Indexed by frame slot (size == max_frames_in_flight).
-		std::vector<std::vector<bud::graphics::BufferHandle>> pending_staging_buffers_;
+		// Async compute queue (dedicated compute family) + per-frame async
+		// command pool/buffer + compute timeline semaphore.
+		VkQueue compute_queue = nullptr;
+		bool has_dedicated_compute_queue_ = false;
+		uint32_t compute_family_index_ = 0;
+		VkSemaphore compute_timeline_semaphore = nullptr; // shared, value-based
+		uint64_t compute_timeline_value = 0;
+		bool async_recording_ = false;
+		bool async_compute_pending_this_frame = false;
+
+		// Asynchronous texture upload: one command buffer per in-flight frame,
+		// submitted to the graphics queue without blocking the main render.
+		// The upload fence signals completion; bindless binding is applied at
+		// frame begin once the fence is reached.
+		// Shared upload resources (fence/cb/staging) released exactly once when
+		// the LAST frame slot applies the pending update (reference counted via
+		// shared_ptr). The same PendingBindless is replicated per frame slot so
+		// every frame's descriptor set gets bound over consecutive frames, but
+		// the underlying fence/cb/staging must not be freed more than once.
+		struct BindlessUploadState {
+			VkFence upload_fence = VK_NULL_HANDLE;
+			VkCommandBuffer cb = VK_NULL_HANDLE;
+			bud::graphics::BufferHandle staging;
+		};
+		struct PendingBindless {
+			uint32_t slot = 0;
+			bud::graphics::Texture* tex = nullptr;
+			std::shared_ptr<BindlessUploadState> state; // null for fallback (already ready)
+		};
+		// Releases a BindlessUploadState's GPU resources (uses RHI members).
+		void release_bindless_upload_state(BindlessUploadState* s);
+		// Per-frame-slot pending bindless updates (indexed by frame slot).
+		std::vector<std::vector<PendingBindless>> pending_bindless_;
+		std::mutex pending_bindless_mutex_;
+		// Dedicated graphics-family pool for one-time async texture upload cbs
+		// (kept separate from the per-frame main command pools).
+		VkCommandPool texture_upload_pool_ = VK_NULL_HANDLE;
 		VkDebugUtilsMessengerEXT debug_messenger = nullptr;
 		bool enable_validation_layers = false;
 		bool aftermath_initialized = false;

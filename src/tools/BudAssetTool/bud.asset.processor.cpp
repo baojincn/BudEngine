@@ -30,6 +30,7 @@
 #include <future>
 #include <atomic>
 #include <mutex>
+#include <functional>
 // note: avoid depending on bud::io; use local helpers above
 
 #if defined(BUD_HAVE_SPIRV_REFLECT)
@@ -100,6 +101,15 @@ namespace bud::tool {
         std::vector<uint32_t> all_meshlet_vertices;
         std::vector<uint32_t> all_meshlet_triangles;
         std::vector<asset::SubMeshDescriptor> submeshes;
+        // Parallel per-cluster LOD metadata (Nanite-style): emitted alongside
+        // all_meshlets so page writing can build PageClusterDesc.
+        std::vector<uint32_t> all_cluster_lod;
+        std::vector<float> all_cluster_error;
+        // Which source mesh each cluster belongs to. Nanite-style LOD is a
+        // per-mesh DAG (a mesh's LOD0..LOD2 clusters are one simplification
+        // chain); coarse pages must therefore only group clusters of a SINGLE
+        // mesh, never stitch clusters from different meshes.
+        std::vector<uint32_t> all_cluster_mesh;
 
 
         std::string input_path_str = std::string(input_path);
@@ -241,22 +251,64 @@ namespace bud::tool {
             for (const auto& v : group_vertices) all_vertices.push_back(v);
             for (auto idx : optimized_indices) all_indices.push_back(group_base_vertex + idx);
 
-            size_t max_meshlets = meshopt_buildMeshletsBound(optimized_indices.size(), max_vertices, max_triangles);
-            std::vector<meshopt_Meshlet> local_meshlets(max_meshlets);
-            std::vector<unsigned int> local_meshlet_vertices(max_meshlets * max_vertices);
-            std::vector<unsigned char> local_meshlet_triangles(max_meshlets * max_triangles * 3);
+            // --- Nanite-style multi-level LOD generation ---
+            // LOD 0 = original meshlet set; LOD 1.. = meshopt_simplify then
+            // rebuild meshlets. Every cluster keeps its LOD level and the
+            // accumulated simplification error (object-space, relative to LOD0).
+            const uint32_t LOD_COUNT = 3; // LOD0 (full), LOD1, LOD2
+            const float lod_target_errors[LOD_COUNT] = { 0.0f, 1e-3f, 5e-3f };
 
-            size_t meshlet_count = meshopt_buildMeshlets(local_meshlets.data(), local_meshlet_vertices.data(), local_meshlet_triangles.data(),
-                                                         optimized_indices.data(), optimized_indices.size(), &group_vertices[0].position[0], group_vertices.size(), sizeof(asset::Vertex),
-                                                         max_vertices, max_triangles, cone_weight);
+            // Per-LOD meshlet generation: produce meshlets from a triangle list.
+            // meshlet_sets[level] = (meshlets, vertices, triangles)
+            std::vector<std::vector<meshopt_Meshlet>> lod_meshlets;
+            std::vector<std::vector<unsigned int>> lod_meshlet_vertices;
+            std::vector<std::vector<unsigned char>> lod_meshlet_triangles;
 
-            local_meshlets.resize(meshlet_count);
+            // Simplification result per level (indices into group_vertices).
+            std::vector<unsigned int> lod_indices = optimized_indices;
+            float lod_error = 0.0f;
+
+            for (uint32_t lod = 0; lod < LOD_COUNT; ++lod) {
+                // For LOD>0, simplify the previous level's indices.
+                if (lod > 0) {
+                    const float target = lod_target_errors[lod];
+                    float target_error = target;
+                    size_t target_index_count = lod_indices.size() / 2; // 50% reduction per level
+                    if (target_index_count < 3) target_index_count = 3;
+                    std::vector<unsigned int> simplified(lod_indices.size());
+                    float result_error = 0.0f;
+                    size_t simplified_count = meshopt_simplify(
+                        simplified.data(), lod_indices.data(), lod_indices.size(),
+                        &group_vertices[0].position[0], group_vertices.size(), sizeof(asset::Vertex),
+                        target_index_count, target_error, 0, &result_error);
+                    simplified.resize(simplified_count);
+                    lod_indices.swap(simplified);
+                    lod_error = result_error;
+                }
+
+                size_t max_meshlets = meshopt_buildMeshletsBound(lod_indices.size(), max_vertices, max_triangles);
+                std::vector<meshopt_Meshlet> local_meshlets(max_meshlets);
+                std::vector<unsigned int> local_meshlet_vertices(max_meshlets * max_vertices);
+                std::vector<unsigned char> local_meshlet_triangles(max_meshlets * max_triangles * 3);
+
+                size_t meshlet_count = meshopt_buildMeshlets(local_meshlets.data(), local_meshlet_vertices.data(), local_meshlet_triangles.data(),
+                                                             lod_indices.data(), lod_indices.size(), &group_vertices[0].position[0], group_vertices.size(), sizeof(asset::Vertex),
+                                                             max_vertices, max_triangles, cone_weight);
+                local_meshlets.resize(meshlet_count);
+                lod_meshlets.push_back(std::move(local_meshlets));
+                lod_meshlet_vertices.push_back(std::move(local_meshlet_vertices));
+                lod_meshlet_triangles.push_back(std::move(local_meshlet_triangles));
+            }
+
+            // Total clusters across all LOD levels.
+            uint32_t total_clusters = 0;
+            for (const auto& set : lod_meshlets) total_clusters += (uint32_t)set.size();
 
             asset::SubMeshDescriptor sub_desc = {};
             sub_desc.index_start = group_base_index;
             sub_desc.index_count = (uint32_t)group_indices.size();
             sub_desc.meshlet_start = group_base_meshlet;
-            sub_desc.meshlet_count = (uint32_t)meshlet_count;
+            sub_desc.meshlet_count = total_clusters;
             sub_desc.material_id = mapped_mat_idx;
             
             // Compute SubMesh AABB
@@ -272,36 +324,50 @@ namespace bud::tool {
             }
             submeshes.push_back(sub_desc);
 
-            for (size_t i = 0; i < meshlet_count; ++i) {
-                meshopt_Meshlet& m = local_meshlets[i];
-                meshopt_optimizeMeshlet(&local_meshlet_vertices[m.vertex_offset], &local_meshlet_triangles[m.triangle_offset], m.triangle_count, m.vertex_count);
+            // Emit clusters for every LOD level. cluster_error is the accumulated
+            // simplification error (object-space) for that level; parent_error
+            // chains to the coarser level (level+1) so the GPU can transition.
+            for (uint32_t lod = 0; lod < LOD_COUNT; ++lod) {
+                float this_error = (lod == 0) ? 0.0f : lod_error;
+                float parent_error = (lod + 1 < LOD_COUNT) ? lod_target_errors[lod + 1] : lod_target_errors[LOD_COUNT - 1];
+                auto& local_meshlets = lod_meshlets[lod];
+                auto& local_meshlet_vertices = lod_meshlet_vertices[lod];
+                auto& local_meshlet_triangles = lod_meshlet_triangles[lod];
 
-                asset::MeshletDescriptor desc = {};
-                desc.vertex_offset = (uint32_t)all_meshlet_vertices.size();
-                desc.vertex_count = m.vertex_count;
-                desc.triangle_offset = (uint32_t)all_meshlet_triangles.size();
-                desc.triangle_count = m.triangle_count;
-                all_meshlets.push_back(desc);
+                for (size_t i = 0; i < local_meshlets.size(); ++i) {
+                    meshopt_Meshlet& m = local_meshlets[i];
+                    meshopt_optimizeMeshlet(&local_meshlet_vertices[m.vertex_offset], &local_meshlet_triangles[m.triangle_offset], m.triangle_count, m.vertex_count);
 
-                for (uint32_t v_idx = 0; v_idx < m.vertex_count; ++v_idx) {
-                    all_meshlet_vertices.push_back(group_base_vertex + local_meshlet_vertices[m.vertex_offset + v_idx]);
+                    asset::MeshletDescriptor desc = {};
+                    desc.vertex_offset = (uint32_t)all_meshlet_vertices.size();
+                    desc.vertex_count = m.vertex_count;
+                    desc.triangle_offset = (uint32_t)all_meshlet_triangles.size();
+                    desc.triangle_count = m.triangle_count;
+                    all_meshlets.push_back(desc);
+                    all_cluster_lod.push_back(lod);
+                    all_cluster_error.push_back(this_error);
+                    all_cluster_mesh.push_back((uint32_t)i); // mesh (instance) ownership
+
+                    for (uint32_t v_idx = 0; v_idx < m.vertex_count; ++v_idx) {
+                        all_meshlet_vertices.push_back(group_base_vertex + local_meshlet_vertices[m.vertex_offset + v_idx]);
+                    }
+                    for (uint32_t t_idx = 0; t_idx < m.triangle_count * 3; ++t_idx) {
+                        all_meshlet_triangles.push_back(local_meshlet_triangles[m.triangle_offset + t_idx]);
+                    }
+
+                    meshopt_Bounds mbounds = meshopt_computeMeshletBounds(&local_meshlet_vertices[m.vertex_offset], &local_meshlet_triangles[m.triangle_offset],
+                                                                        m.triangle_count, &group_vertices[0].position[0], group_vertices.size(), sizeof(asset::Vertex));
+                    asset::MeshletCullData cull = {};
+                    cull.bounding_sphere[0] = mbounds.center[0];
+                    cull.bounding_sphere[1] = mbounds.center[1];
+                    cull.bounding_sphere[2] = mbounds.center[2];
+                    cull.bounding_sphere[3] = mbounds.radius;
+                    cull.cone_axis[0] = mbounds.cone_axis_s8[0];
+                    cull.cone_axis[1] = mbounds.cone_axis_s8[1];
+                    cull.cone_axis[2] = mbounds.cone_axis_s8[2];
+                    cull.cone_cutoff = mbounds.cone_cutoff_s8;
+                    all_cull_data.push_back(cull);
                 }
-                for (uint32_t t_idx = 0; t_idx < m.triangle_count * 3; ++t_idx) {
-                    all_meshlet_triangles.push_back(local_meshlet_triangles[m.triangle_offset + t_idx]);
-                }
-
-                meshopt_Bounds mbounds = meshopt_computeMeshletBounds(&local_meshlet_vertices[m.vertex_offset], &local_meshlet_triangles[m.triangle_offset],
-                                                                    m.triangle_count, &group_vertices[0].position[0], group_vertices.size(), sizeof(asset::Vertex));
-                asset::MeshletCullData cull = {};
-                cull.bounding_sphere[0] = mbounds.center[0];
-                cull.bounding_sphere[1] = mbounds.center[1];
-                cull.bounding_sphere[2] = mbounds.center[2];
-                cull.bounding_sphere[3] = mbounds.radius;
-                cull.cone_axis[0] = mbounds.cone_axis_s8[0];
-                cull.cone_axis[1] = mbounds.cone_axis_s8[1];
-                cull.cone_axis[2] = mbounds.cone_axis_s8[2];
-                cull.cone_cutoff = mbounds.cone_cutoff_s8;
-                all_cull_data.push_back(cull);
             }
         }
 
@@ -380,6 +446,10 @@ namespace bud::tool {
         if (page_size > 0) {
             out.close();
 
+            // LOD constants for page metadata (must match the instance loop).
+            constexpr uint32_t LOD_COUNT = 3;
+            constexpr float lod_target_errors[LOD_COUNT] = { 0.0f, 1e-3f, 5e-3f };
+
             std::string json_path = output_path;
             std::string bin_path = output_path;
             if (json_path.find(".budmesh") != std::string::npos) {
@@ -387,24 +457,174 @@ namespace bud::tool {
                 bin_path  = bin_path.substr(0, bin_path.rfind('.')) + ".budmesh.bin";
             }
 
-            // Build page table
-            // Reserve 64B header + up to 47B alignment + 1 vertex margin per page
+            // Build page table (Nanite-style: spatial BVH subtrees become pages).
+            // Reserve 64B header + up to 47B alignment + 1 vertex margin per page.
             constexpr uint64_t page_reserve = 64 + 47 + 48;
-            std::vector<uint32_t> page_starts, page_counts;
-            uint64_t cur_sz = 0;
-            uint32_t cur_st = 0;
-            for (uint32_t m = 0; m < (uint32_t)all_meshlets.size(); ++m) {
-                uint64_t ms = all_meshlets[m].vertex_count * sizeof(asset::Vertex)
-                            + all_meshlets[m].triangle_count * 3 * sizeof(uint32_t)
-                            + sizeof(asset::MeshletDescriptor) + sizeof(asset::MeshletCullData);
-                if (cur_sz + ms > page_size - page_reserve && cur_sz > 0) {
-                    page_starts.push_back(cur_st);
-                    page_counts.push_back(m - cur_st);
-                    cur_st = m; cur_sz = 0;
+            const uint32_t meshlet_total = (uint32_t)all_meshlets.size();
+
+            // meshlet_ordering maps the spatial-BVH traversal order back to the
+            // original meshlet index. The binary page data (vertices/indices/
+            // descriptors) below is written page by page in this new order, so
+            // page_starts/page_counts index into the REORDERED meshlet sequence.
+            std::vector<uint32_t> meshlet_ordering(meshlet_total);
+            for (uint32_t i = 0; i < meshlet_total; ++i) meshlet_ordering[i] = i;
+
+            // Page model v3 (Nanite-like hierarchy):
+            //   - Every BVH node becomes a page. Leaf pages keep the full
+            //     LOD0..LOD2 cluster set of their subtree (existing behavior).
+            //   - Internal (coarse) pages aggregate the subtree's LOD2
+            //     clusters so an unloaded leaf can be replaced by its parent's
+            //     coarse geometry while streaming (no holes).
+            // page_cluster_ids[page] holds the original meshlet ids of that
+            // page, ordered by LOD then by the BVH layout.
+            std::vector<std::vector<uint32_t>> page_cluster_ids;
+            std::vector<uint32_t> page_parent;       // INVALID_INDEX for root
+            std::vector<std::vector<uint32_t>> page_children;
+            std::vector<uint8_t> page_is_coarse;
+
+            auto new_page = [&](std::vector<uint32_t> cluster_ids, uint32_t parent, bool coarse) -> uint32_t {
+                uint32_t pid = (uint32_t)page_cluster_ids.size();
+                page_cluster_ids.push_back(std::move(cluster_ids));
+                page_parent.push_back(parent);
+                page_children.emplace_back();
+                page_is_coarse.push_back(coarse ? 1u : 0u);
+                if (parent != asset::INVALID_INDEX)
+                    page_children[parent].push_back(pid);
+                return pid;
+            };
+
+            // meshlet_size[i] in bytes for the given original meshlet index.
+            // NOTE: pages store PageClusterDesc (28 B in v3, was 24 in v2), so
+            // the page-size estimation must use the v3 descriptor stride or
+            // leaf pages overflow page_size and corrupt the binary layout.
+            auto meshlet_size = [&](uint32_t mi) -> uint64_t {
+                return all_meshlets[mi].vertex_count * sizeof(asset::Vertex)
+                     + all_meshlets[mi].triangle_count * 3 * sizeof(uint32_t)
+                     + asset::PAGE_CLUSTER_DESC_STRIDE + sizeof(asset::MeshletCullData);
+            };
+            // Total byte size of meshlets in the ordering range [begin, end).
+            auto range_size = [&](const std::vector<uint32_t>& ord, size_t begin, size_t end) -> uint64_t {
+                uint64_t s = 0;
+                for (size_t k = begin; k < end; ++k) s += meshlet_size(ord[k]);
+                return s;
+            };
+
+            // Recursively split [begin,end) of meshlet_ordering by the meshlet
+            // bounding-sphere center along the largest-extent axis (median
+            // split). Leaf pages hold the subtree's full LOD set; internal
+            // nodes additionally become coarse pages aggregating LOD2.
+            std::function<uint32_t(size_t, size_t, uint32_t)> bvh_build =
+                [&](size_t begin, size_t end, uint32_t parent) -> uint32_t {
+                size_t count = end - begin;
+                if (count == 0) return asset::INVALID_INDEX;
+                uint64_t sz = range_size(meshlet_ordering, begin, end);
+                if (count == 1 || sz + page_reserve <= page_size) {
+                    // Leaf page: full LOD set of this subtree.
+                    // NOTE: must use iterator range construction; (begin, end)
+                    // are size_t indices, and vector(count, value) would fill
+                    // 'begin' copies of 'end' -> out-of-bounds all_cluster_lod.
+                    std::vector<uint32_t> ids(meshlet_ordering.begin() + begin, meshlet_ordering.begin() + end);
+                    // Order by LOD (LOD0..LOD2) for contiguous per-LOD ranges.
+                    std::stable_sort(ids.begin(), ids.end(), [&](uint32_t a, uint32_t b) {
+                        return all_cluster_lod[a] < all_cluster_lod[b];
+                    });
+                    return new_page(std::move(ids), parent, false);
                 }
-                cur_sz += ms;
-            }
-            if (cur_sz > 0) { page_starts.push_back(cur_st); page_counts.push_back((uint32_t)all_meshlets.size() - cur_st); }
+                // Compute AABB over the meshlet bounding-sphere centers.
+                float cmin[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+                float cmax[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+                for (size_t k = begin; k < end; ++k) {
+                    uint32_t mi = meshlet_ordering[k];
+                    const float* c = all_cull_data[mi].bounding_sphere;
+                    for (int a = 0; a < 3; ++a) {
+                        cmin[a] = std::min(cmin[a], c[a]);
+                        cmax[a] = std::max(cmax[a], c[a]);
+                    }
+                }
+                float ext[3] = { cmax[0]-cmin[0], cmax[1]-cmin[1], cmax[2]-cmin[2] };
+                int axis = (ext[0] >= ext[1] && ext[0] >= ext[2]) ? 0 : (ext[1] >= ext[2] ? 1 : 2);
+                size_t mid = begin + count / 2;
+                std::nth_element(meshlet_ordering.begin() + begin, meshlet_ordering.begin() + mid, meshlet_ordering.begin() + end,
+                    [&](uint32_t a, uint32_t b) {
+                        return all_cull_data[a].bounding_sphere[axis] < all_cull_data[b].bounding_sphere[axis];
+                    });
+
+                // Recurse children first.
+                uint32_t left = bvh_build(begin, mid, asset::INVALID_INDEX);
+                uint32_t right = bvh_build(mid, end, asset::INVALID_INDEX);
+
+                // Internal node -> coarse page. Per-mesh DAG rule: a coarse
+                // page must only group clusters of a SINGLE mesh (they are one
+                // simplification chain). Aggregate the LOD2 clusters of the
+                // mesh that has the most clusters in this subtree; other meshes'
+                // LOD2 stays on their own leaf pages (no cross-mesh stitching).
+                std::unordered_map<uint32_t, size_t> mesh_cluster_count;
+                for (size_t k = begin; k < end; ++k) {
+                    uint32_t mi = meshlet_ordering[k];
+                    if (all_cluster_lod[mi] == 2)
+                        mesh_cluster_count[all_cluster_mesh[mi]]++;
+                }
+                uint32_t dominant_mesh = asset::INVALID_INDEX;
+                size_t dominant_count = 0;
+                for (const auto& [mesh_idx, cnt] : mesh_cluster_count) {
+                    if (cnt > dominant_count) { dominant_mesh = mesh_idx; dominant_count = cnt; }
+                }
+                std::vector<uint32_t> coarse_ids;
+                if (dominant_mesh != asset::INVALID_INDEX) {
+                    for (size_t k = begin; k < end; ++k) {
+                        uint32_t mi = meshlet_ordering[k];
+                        if (all_cluster_lod[mi] == 2 && all_cluster_mesh[mi] == dominant_mesh)
+                            coarse_ids.push_back(mi);
+                    }
+                }
+                // Coarse pages must fit page_size (v3 descriptor is 28 B, so a
+                // large subtree's LOD2 aggregate can overflow). If it does, split
+                // the coarse set recursively until each coarse page fits.
+                // Returns the topmost coarse page created for this subtree.
+                std::function<uint32_t(std::vector<uint32_t>, uint32_t, uint32_t)> build_coarse =
+                    [&](std::vector<uint32_t> ids, uint32_t par, uint32_t top) -> uint32_t {
+                    uint64_t s = 0;
+                    for (uint32_t mi : ids) s += meshlet_size(mi);
+                    if (ids.size() == 1 || s + page_reserve <= page_size) {
+                        uint32_t pid = new_page(std::move(ids), par, true);
+                        return (top == asset::INVALID_INDEX) ? pid : top;
+                    }
+                    float lo[3] = { FLT_MAX, FLT_MAX, FLT_MAX }, hi[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+                    for (uint32_t mi : ids) {
+                        const float* c = all_cull_data[mi].bounding_sphere;
+                        for (int a = 0; a < 3; ++a) { lo[a] = std::min(lo[a], c[a]); hi[a] = std::max(hi[a], c[a]); }
+                    }
+                    float ex[3] = { hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2] };
+                    int ax = (ex[0] >= ex[1] && ex[0] >= ex[2]) ? 0 : (ex[1] >= ex[2] ? 1 : 2);
+                    size_t m = ids.size() / 2;
+                    std::nth_element(ids.begin(), ids.begin() + m, ids.end(),
+                        [&](uint32_t a, uint32_t b) { return all_cull_data[a].bounding_sphere[ax] < all_cull_data[b].bounding_sphere[ax]; });
+                    std::vector<uint32_t> la(ids.begin(), ids.begin() + m);
+                    std::vector<uint32_t> ra(ids.begin() + m, ids.end());
+                    // Both halves are coarse pages under `par`; keep the first
+                    // created coarse page as the subtree's coarse representative.
+                    uint32_t t1 = build_coarse(std::move(la), par, top);
+                    uint32_t t2 = build_coarse(std::move(ra), par, t1);
+                    return t2;
+                };
+                if (!coarse_ids.empty()) {
+                    uint32_t cpid = build_coarse(std::move(coarse_ids), parent, asset::INVALID_INDEX);
+                    // cpid is always a valid coarse page id now (coarse_ids was
+                    // non-empty). Reparent the (leaf) children under it.
+                    if (cpid == asset::INVALID_INDEX) cpid = asset::INVALID_INDEX; // defensive
+                    if (left != asset::INVALID_INDEX && cpid != asset::INVALID_INDEX) { page_parent[left] = cpid; page_children[cpid].push_back(left); }
+                    if (right != asset::INVALID_INDEX && cpid != asset::INVALID_INDEX) { page_parent[right] = cpid; page_children[cpid].push_back(right); }
+                    return cpid == asset::INVALID_INDEX ? (left != asset::INVALID_INDEX ? left : right) : cpid;
+                }
+                // No LOD2 in this subtree: propagate the parent up.
+                if (left != asset::INVALID_INDEX) page_parent[left] = parent;
+                if (right != asset::INVALID_INDEX) page_parent[right] = parent;
+                return parent == asset::INVALID_INDEX
+                    ? (left != asset::INVALID_INDEX ? left : right)
+                    : parent;
+            };
+
+            uint32_t root_page = bvh_build(0, meshlet_total, asset::INVALID_INDEX);
 
             // Per-meshlet base color texture index (from the owning submesh's material)
             std::vector<uint32_t> meshlet_tex_index(all_meshlets.size(), 0);
@@ -419,28 +639,88 @@ namespace bud::tool {
             j["magic"] = "BUDM"; j["version"] = asset::MESH_VERSION;
             j["data_uri"] = std::filesystem::path(bin_path).filename().string();
             j["pages"] = nlohmann::json::array();
-            for (uint32_t i = 0; i < (uint32_t)page_starts.size(); ++i) {
-                // Split the page into contiguous per-material (per-texture) submeshes
+            for (uint32_t i = 0; i < (uint32_t)page_cluster_ids.size(); ++i) {
+                const auto& ids = page_cluster_ids[i];
+                const size_t mc = ids.size();
+                // Split the page into contiguous per-(LOD, material) submeshes.
+                // ids are already LOD-ordered (LOD0..LOD2) so each LOD level is
+                // a contiguous run and submesh ranges map 1:1 to the index data.
                 nlohmann::json subs = nlohmann::json::array();
-                uint32_t cum_idx = 0;
-                uint32_t cur_tex = meshlet_tex_index[page_starts[i]];
+                uint32_t cum_idx = 0;      // running offset into the page index data
+                uint32_t cum_clusters = 0; // running cluster offset within the page
+                int cur_lod = -1;
+                uint32_t cur_tex = 0;
                 uint32_t run_count = 0;
-                for (uint32_t k = 0; k < page_counts[i]; ++k) {
-                    uint32_t m = page_starts[i] + k;
+                uint32_t run_clusters = 0;
+                uint32_t run_start = 0;
+                uint32_t run_cluster_start = 0;
+                std::vector<uint32_t> lod_range_start(LOD_COUNT, 0);
+                std::vector<uint32_t> lod_range_count(LOD_COUNT, 0);
+
+                for (uint32_t k = 0; k < (uint32_t)mc; ++k) {
+                    uint32_t m = ids[k]; // original meshlet index
+                    uint32_t lod = all_cluster_lod[m];
                     uint32_t tex = meshlet_tex_index[m];
                     uint32_t tris = all_meshlets[m].triangle_count * 3;
-                    if (tex != cur_tex && run_count > 0) {
-                        subs.push_back({{"index_start", cum_idx - run_count}, {"index_count", run_count}, {"material_id", cur_tex}});
-                        cur_tex = tex;
-                        run_count = 0;
+                    if ((int)lod != cur_lod || tex != cur_tex) {
+                        if (run_count > 0)
+                            subs.push_back({{"index_start", run_start}, {"index_count", run_count},
+                                            {"material_id", cur_tex}, {"lod_level", cur_lod},
+                                            {"cluster_start", run_cluster_start}, {"cluster_count", run_clusters}});
+                        cur_lod = (int)lod; cur_tex = tex;
+                        run_start = cum_idx; run_cluster_start = cum_clusters;
+                        run_count = 0; run_clusters = 0;
                     }
+                    if (lod_range_count[lod] == 0)
+                        lod_range_start[lod] = cum_idx; // first cluster of this LOD
                     run_count += tris;
+                    run_clusters += 1;
                     cum_idx += tris;
+                    cum_clusters += 1;
+                    lod_range_count[lod] = cum_idx - lod_range_start[lod];
                 }
                 if (run_count > 0)
-                    subs.push_back({{"index_start", cum_idx - run_count}, {"index_count", run_count}, {"material_id", cur_tex}});
+                    subs.push_back({{"index_start", run_start}, {"index_count", run_count},
+                                    {"material_id", cur_tex}, {"lod_level", cur_lod},
+                                    {"cluster_start", run_cluster_start}, {"cluster_count", run_clusters}});
 
-                j["pages"].push_back({{"page_id",i},{"file_offset",(uint64_t)i*page_size},{"capacity",page_size},{"cluster_start",page_starts[i]},{"cluster_count",page_counts[i]},{"material_id",meshlet_tex_index[page_starts[i]]},{"submeshes",subs}});
+                // Per-LOD index ranges [start, count] within the page index data.
+                nlohmann::json lod_ranges = nlohmann::json::array();
+                for (uint32_t lod = 0; lod < LOD_COUNT; ++lod)
+                    lod_ranges.push_back({lod_range_start[lod], lod_range_count[lod]});
+
+                // Per-page AABB (for distance-based on-demand streaming).
+                float amin[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+                float amax[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+                for (size_t m = 0; m < mc; ++m) {
+                    uint32_t mi = ids[m]; // original meshlet index
+                    const auto& md = all_meshlets[mi];
+                    for (uint32_t v = 0; v < md.vertex_count; ++v) {
+                        const auto& vt = all_vertices[all_meshlet_vertices[md.vertex_offset + v]];
+                        for (int k = 0; k < 3; ++k) {
+                            amin[k] = std::min(amin[k], vt.position[k]);
+                            amax[k] = std::max(amax[k], vt.position[k]);
+                        }
+                    }
+                }
+
+                nlohmann::json children = nlohmann::json::array();
+                for (uint32_t c : page_children[i]) children.push_back(c);
+
+                j["pages"].push_back({
+                    {"page_id", i},
+                    {"file_offset", (uint64_t)i * page_size},
+                    {"capacity", page_size},
+                    {"cluster_count", (uint32_t)mc},
+                    {"parent_page_id", page_parent[i] == asset::INVALID_INDEX ? nlohmann::json(nullptr) : nlohmann::json(page_parent[i])},
+                    {"is_coarse", page_is_coarse[i] != 0u},
+                    {"children", children},
+                    {"material_id", ids.empty() ? 0u : meshlet_tex_index[ids[0]]},
+                    {"aabb_min", {amin[0], amin[1], amin[2]}},
+                    {"aabb_max", {amax[0], amax[1], amax[2]}},
+                    {"lod_ranges", lod_ranges},
+                    {"submeshes", subs}
+                });
             }
             j["textures"] = nlohmann::json(texture_paths);
             std::ofstream jf(json_path); if (jf.is_open()) jf << j.dump(4);
@@ -448,21 +728,23 @@ namespace bud::tool {
             // Binary
             std::ofstream bf(bin_path, std::ios::binary);
             if (bf.is_open()) {
-                for (uint32_t pi = 0; pi < (uint32_t)page_starts.size(); ++pi) {
-                    uint32_t ms = page_starts[pi], mc = page_counts[pi];
+                for (uint32_t pi = 0; pi < (uint32_t)page_cluster_ids.size(); ++pi) {
+                    const auto& ids = page_cluster_ids[pi];
+                    const uint32_t mc = (uint32_t)ids.size();
                     uint64_t pg_start = bf.tellp();
 
                     float amin[3]={FLT_MAX,FLT_MAX,FLT_MAX}, amax[3]={-FLT_MAX,-FLT_MAX,-FLT_MAX};
                     uint32_t vcnt = 0;
                     for (uint32_t m = 0; m < mc; ++m) {
-                        const auto& md = all_meshlets[ms+m];
+                        uint32_t mi = ids[m]; // original meshlet index
+                        const auto& md = all_meshlets[mi];
                         vcnt += md.vertex_count;
                         for (uint32_t v=0; v<md.vertex_count; ++v) {
                             const auto& vt = all_vertices[all_meshlet_vertices[md.vertex_offset+v]];
                             for (int k=0;k<3;++k){amin[k]=std::min(amin[k],vt.position[k]);amax[k]=std::max(amax[k],vt.position[k]);}
                         }
                     }
-                    uint32_t ce = asset::PAGE_HEADER_SIZE + mc*asset::PAGE_MESHLET_DESC_STRIDE + mc*asset::PAGE_CULL_DATA_STRIDE;
+                    uint32_t ce = asset::PAGE_HEADER_SIZE + mc*asset::PAGE_CLUSTER_DESC_STRIDE + mc*asset::PAGE_CULL_DATA_STRIDE;
                     uint32_t vo = ce, io = vo + vcnt*asset::PAGE_VERTEX_STRIDE;
 
                     // Build page-local vertex remap: global vertex id -> page-local vertex id
@@ -473,7 +755,8 @@ namespace bud::tool {
 
                     uint32_t tri_total = 0;
                     for (uint32_t m=0;m<mc;++m) {
-                        const auto& md = all_meshlets[ms+m];
+                        uint32_t mi = ids[m];
+                        const auto& md = all_meshlets[mi];
                         meshlet_local_vert_off.push_back((uint32_t)page_vertex_ids.size());
                         for(uint32_t v=0;v<md.vertex_count;++v) {
                             uint32_t gvid = all_meshlet_vertices[md.vertex_offset+v];
@@ -487,23 +770,35 @@ namespace bud::tool {
                     }
 
                     asset::PageBinaryHeader h={};
-                    h.magic=asset::PageBinaryHeader::MAGIC; h.version=1; h.meshlet_count=mc;
+                    h.magic=asset::PageBinaryHeader::MAGIC; h.version=asset::PageBinaryHeader::VERSION;
+                    h.cluster_count=mc; h.parent_page_id = page_parent[pi] == asset::INVALID_INDEX ? asset::INVALID_INDEX : page_parent[pi];
                     h.vertex_count=(uint32_t)page_vertex_ids.size(); h.index_count=tri_total;
                     std::memcpy(h.aabb_min,amin,sizeof(amin)); std::memcpy(h.aabb_max,amax,sizeof(amax));
                     // Align vertex data offset to 48-byte stride so draw vertexOffset stays integer-exact
                     uint32_t vo2 = (ce + asset::PAGE_VERTEX_STRIDE - 1) / asset::PAGE_VERTEX_STRIDE * asset::PAGE_VERTEX_STRIDE;
                     uint32_t io2 = vo2 + (uint32_t)page_vertex_ids.size()*asset::PAGE_VERTEX_STRIDE;
                     h.vertex_data_offset=vo2; h.index_data_offset=io2;
-                    h.padding[0] = meshlet_tex_index[ms]; // base color texture index for this page
+                    h.max_error = lod_target_errors[LOD_COUNT-1]; // coarsest level error (for threshold scale)
+                    h.padding[0] = (page_is_coarse[pi] ? 1u : 0u) | (ids.empty() ? 0u : (meshlet_tex_index[ids[0]] << 1));
+                    // NOTE: padding has exactly one element (byte 60..63, struct is 64 bytes);
+                    // writing padding[1] would overflow past the end of the struct.
                     bf.write((const char*)&h,sizeof(h));
 
                     for (uint32_t m=0;m<mc;++m) {
-                        asset::MeshletDescriptor pd = all_meshlets[ms+m];
+                        uint32_t mi = ids[m];
+                        const auto& md = all_meshlets[mi];
+                        asset::PageClusterDesc pd = {};
                         pd.vertex_offset = meshlet_local_vert_off[m];
+                        pd.vertex_count = md.vertex_count;
                         pd.triangle_offset = meshlet_local_tri_off[m];
+                        pd.triangle_count = md.triangle_count;
+                        pd.lod_level = all_cluster_lod[mi];
+                        pd.cluster_error = all_cluster_error[mi];
+                        uint32_t lod = all_cluster_lod[mi];
+                        pd.parent_error = (lod + 1 < LOD_COUNT) ? lod_target_errors[lod + 1] : lod_target_errors[LOD_COUNT - 1];
                         bf.write((const char*)&pd,sizeof(pd));
                     }
-                    for (uint32_t m=0;m<mc;++m) bf.write((const char*)&all_cull_data[ms+m],sizeof(asset::MeshletCullData));
+                    for (uint32_t m=0;m<mc;++m) bf.write((const char*)&all_cull_data[ids[m]],sizeof(asset::MeshletCullData));
                     // Pad to aligned vertex_data_offset
                     {
                         uint64_t cur = (uint64_t)bf.tellp() - pg_start;
@@ -511,7 +806,7 @@ namespace bud::tool {
                     }
                     for (uint32_t gvid : page_vertex_ids) bf.write((const char*)&all_vertices[gvid],sizeof(asset::Vertex));
                     for (uint32_t m=0;m<mc;++m){
-                        const auto& md = all_meshlets[ms+m];
+                        const auto& md = all_meshlets[ids[m]];
                         for(uint32_t t=0;t<md.triangle_count*3;++t) {
                             uint32_t local_vi = all_meshlet_triangles[md.triangle_offset+t];
                             uint32_t gvid = all_meshlet_vertices[md.vertex_offset+local_vi];
@@ -523,7 +818,7 @@ namespace bud::tool {
                     if (wr < page_size) { std::vector<char> pad((size_t)(page_size-wr),0); bf.write(pad.data(),pad.size()); }
                 }
             }
-            std::cout << "[BudAssetTool] Exported " << all_meshlets.size() << " meshlets in " << page_starts.size() << " pages to " << json_path << std::endl;
+            std::cout << "[BudAssetTool] Exported " << all_meshlets.size() << " meshlets in " << page_cluster_ids.size() << " pages to " << json_path << std::endl;
             return true;
         }
 

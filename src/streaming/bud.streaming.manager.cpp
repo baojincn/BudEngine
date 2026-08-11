@@ -56,15 +56,43 @@ void StreamingManager::register_budmesh_async(const std::string& json_path) {
 				sp.capacity = pj.value("capacity", static_cast<uint64_t>(bud::graphics::GPUScene::PagePool::kPageSize));
 				sp.bin_path = bin_path;
 				sp.material_id = pj.value("material_id", 0u);
+				if (pj.contains("aabb_min") && pj.contains("aabb_max")) {
+					const auto& mn = pj["aabb_min"];
+					const auto& mx = pj["aabb_max"];
+					if (mn.is_array() && mx.is_array() && mn.size() == 3 && mx.size() == 3) {
+						sp.aabb.min = bud::math::vec3(mn[0].get<float>(), mn[1].get<float>(), mn[2].get<float>());
+						sp.aabb.max = bud::math::vec3(mx[0].get<float>(), mx[1].get<float>(), mx[2].get<float>());
+						sp.has_aabb = true;
+					}
+				}
 				if (pj.contains("submeshes") && pj["submeshes"].is_array()) {
 					for (const auto& sm : pj["submeshes"]) {
 						bud::graphics::PageSubMesh ps;
 						ps.index_start = sm.value("index_start", 0u);
 						ps.index_count = sm.value("index_count", 0u);
 						ps.material_id = sm.value("material_id", 0u);
+						ps.lod_level = sm.value("lod_level", 0u);
+						ps.cluster_start = sm.value("cluster_start", 0u);
+						ps.cluster_count = sm.value("cluster_count", 0u);
 						if (ps.index_count > 0)
 							sp.submeshes.push_back(ps);
 					}
+				}
+				// Per-LOD index ranges, used by the shadow path to rasterize only
+				// the selected LOD instead of every LOD in the page.
+				if (pj.contains("lod_ranges") && pj["lod_ranges"].is_array()) {
+					for (const auto& lr : pj["lod_ranges"]) {
+						if (lr.is_array() && lr.size() >= 2)
+							sp.lod_ranges.emplace_back(lr[0].get<uint32_t>(), lr[1].get<uint32_t>());
+					}
+				}
+				// Nanite-like hierarchy (v3).
+				sp.is_coarse = pj.value("is_coarse", false);
+				sp.parent_page_id = pj.contains("parent_page_id") && !pj["parent_page_id"].is_null()
+					? pj["parent_page_id"].get<uint32_t>() : bud::asset::INVALID_INDEX;
+				if (pj.contains("children") && pj["children"].is_array()) {
+					for (const auto& c : pj["children"])
+						sp.children.push_back(c.get<uint32_t>());
 				}
 				asset.pages.push_back(sp);
 			}
@@ -77,20 +105,29 @@ void StreamingManager::register_budmesh_async(const std::string& json_path) {
 
 		{
 				std::scoped_lock lock(mutex_);
-				for (const auto& sp : asset.pages)
+				// CPU-driven path: register LEAF pages only. Coarse pages are
+				// Nanite-style parent placeholders; leaves already contain all
+				// LODs (selected by screen error), so drawing coarse pages too
+				// would duplicate geometry.
+				uint32_t leaf_count = 0;
+				for (const auto& sp : asset.pages) {
+					if (sp.is_coarse) continue;
 					all_pages_.emplace(sp.get_unique_id(), sp);
+					++leaf_count;
+				}
 				managed_assets_[json_path] = std::move(asset);
 
 				// Auto-register a bounding region covering all pages of this asset
 				RegionManifest region;
 				region.id = json_path;
 				region.aabb = bud::math::AABB(bud::math::vec3(-1e6f), bud::math::vec3(1e6f));
-				for (const auto& sp : managed_assets_[json_path].pages)
+				for (const auto& sp : managed_assets_[json_path].pages) {
+					if (sp.is_coarse) continue;
 					region.pages.push_back(sp.get_unique_id());
+				}
 				regions_.push_back(std::move(region));
+				bud::print("[Streaming] Registered budmesh: {} with {} leaf pages ({} total)", json_path, leaf_count, managed_assets_[json_path].pages.size());
 			}
-
-			bud::print("[Streaming] Registered budmesh: {} with {} pages", json_path, managed_assets_[json_path].pages.size());
 	});
 }
 
@@ -98,21 +135,45 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 	std::vector<std::string> to_load;
 	{
 		std::scoped_lock lock(mutex_);
-		for (const auto& r : regions_) {
-			float d = std::sqrt(bud::math::distance2(camera_position, r.aabb.center()));
-			for (const auto& p : r.pages) {
-				bool resident = residency_.count(p) && residency_[p];
-				if (!resident && d <= load_radius_)
-					to_load.push_back(p);
-				if (resident && d > unload_radius_) {
-					if (auto it = page_gpu_slots_.find(p); it != page_gpu_slots_.end()) {
-						gpu_scene_->get_page_pool().free_page(it->second);
-						page_gpu_slots_.erase(it);
-					}
-					page_mesh_ids_.erase(p);
-						pending_loads_.erase(p);
-						residency_.erase(p);
+		for (const auto& [page_key, sp] : all_pages_) {
+			// Per-page distance-based residency: use the distance from the
+			// camera to the page's own AABB. Pages near the camera load, far
+			// ones unload. Falls back to the region AABB when a page has no
+			// AABB (old asset files) so nothing accidentally unloads the whole
+			// scene.
+			bud::math::vec3 bmin, bmax;
+			if (sp.has_aabb) {
+				bmin = sp.aabb.min;
+				bmax = sp.aabb.max;
+			} else {
+				// Fallback: cover everything (keep resident while near origin).
+				bmin = bud::math::vec3(-1e6f);
+				bmax = bud::math::vec3(1e6f);
+			}
+			bud::math::vec3 closest(
+				std::clamp(camera_position.x, bmin.x, bmax.x),
+				std::clamp(camera_position.y, bmin.y, bmax.y),
+				std::clamp(camera_position.z, bmin.z, bmax.z));
+			float d = bud::math::length(camera_position - closest);
+
+			bool resident = residency_.count(page_key) && residency_[page_key];
+			if (!resident && d <= load_radius_)
+				to_load.push_back(page_key);
+			if (resident && d > unload_radius_) {
+				if (auto it = page_gpu_slots_.find(page_key); it != page_gpu_slots_.end()) {
+					gpu_scene_->get_page_pool().free_page(it->second);
+					page_gpu_slots_.erase(it);
 				}
+				// Notify the owner to remove the scene entity that references
+				// this page's mesh; otherwise the stale entity stays in the
+				// scene and later slot reuse overwrites its geometry.
+				if (page_unregistered_cb_) {
+					if (auto mit = page_mesh_ids_.find(page_key); mit != page_mesh_ids_.end())
+						page_unregistered_cb_(mit->second);
+				}
+				page_mesh_ids_.erase(page_key);
+					pending_loads_.erase(page_key);
+					residency_.erase(page_key);
 			}
 		}
 	}
@@ -142,7 +203,7 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 					if (data.size() >= sizeof(bud::asset::PageBinaryHeader)) {
 						auto* hdr = reinterpret_cast<const bud::asset::PageBinaryHeader*>(data.data());
 						if (hdr->magic == bud::asset::PageBinaryHeader::MAGIC) {
-								meshlet_count = hdr->meshlet_count;
+								meshlet_count = hdr->cluster_count; // v2: cluster_count
 								index_count = hdr->index_count;
 								vertex_data_offset = hdr->vertex_data_offset;
 								index_data_offset = hdr->index_data_offset;
@@ -183,6 +244,11 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 								rs.index_start = sm.index_start;
 								rs.index_count = sm.index_count;
 								rs.material_id = resolve_texture_slot(sp.asset_id, sm.material_id);
+								// Keep the per-(LOD, material) metadata so the renderer
+								// can select one LOD level and cull the correct clusters.
+								rs.lod_level = sm.lod_level;
+								rs.cluster_start = sm.cluster_start;
+								rs.cluster_count = sm.cluster_count;
 								resolved_submeshes.push_back(rs);
 							}
 						}
@@ -191,10 +257,13 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 							rs.index_start = 0;
 							rs.index_count = index_count;
 							rs.material_id = resolve_texture_slot(sp.asset_id, sp.material_id);
+							// Whole-page fallback: cover every cluster at LOD0.
+							rs.cluster_start = 0;
+							rs.cluster_count = meshlet_count;
 							resolved_submeshes.push_back(rs);
 						}
 						mesh_id = renderer_->register_page_backed_mesh(slot, meshlet_count, index_count, page_aabb,
-							vertex_data_offset, index_data_offset, resolved_submeshes);
+							vertex_data_offset, index_data_offset, resolved_submeshes, sp.lod_ranges);
 					}
 
 					if (mesh_id != ~0u && page_registered_cb_)

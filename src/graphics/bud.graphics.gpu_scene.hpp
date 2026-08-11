@@ -50,7 +50,9 @@ namespace bud::graphics {
 			uint32_t padding;
 			uint32_t pool_offset;
 		};
-		static constexpr uint32_t kMaxPageTableEntries = 4096;
+		// 64K entries for large-world scenes (Nanite-like virtual geometry).
+		// 65536 * 12 B = 786 KB on the GPU, acceptable for a streaming pool.
+		static constexpr uint32_t kMaxPageTableEntries = 65536;
 
 		struct FrameResources {
 			BufferHandle instance_data;

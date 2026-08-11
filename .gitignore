@@ -10,6 +10,11 @@ vcpkg_installed/
 /data/replays
 /aftermath_dumps
 
+# BudAssetTool exports (DDC, regenerate locally, do not upload)
+*.budmesh
+*.budmesh.bin
+*.budmesh.json
+
 # IDE files
 .vs/
 .vscode/

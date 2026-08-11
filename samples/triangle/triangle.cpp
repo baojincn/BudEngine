@@ -41,6 +41,20 @@ void TriangleApp::on_init(const AppConfig& config) {
 		//bud::print("[TriangleApp] Page entity added: mesh_id={} total_entities={}", mesh_id, s.entities.size());
 	});
 
+	// When a page is unloaded, remove the scene entity referencing its mesh so
+	// stale entities do not accumulate and later slot reuse does not corrupt
+	// their geometry (broken vertices collapsing to the origin).
+	streaming_manager->set_page_unregistered_callback([engine](uint32_t mesh_id) {
+		auto& s = engine->get_scene();
+		for (auto it = s.entities.begin(); it != s.entities.end();) {
+			if (it->asset_path == "[page_streaming]" && it->mesh_index == mesh_id) {
+				it = s.entities.erase(it);
+			} else {
+				++it;
+			}
+		}
+	});
+
 	// 1. Initial Render Config
 	bud::graphics::RenderConfig render_config;
 	render_config.shadow_bias_constant = 0.005f;

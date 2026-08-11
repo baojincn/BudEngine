@@ -159,12 +159,16 @@ else()
             set(SHADER_OUTPUT "${SHADER_SOURCE}.spv")
 
 			add_custom_command(
-                OUTPUT ${SHADER_OUTPUT}
-                COMMAND ${GLSLC_EXECUTABLE} ${SHADER_SOURCE} -o ${SHADER_OUTPUT}
-                DEPENDS ${SHADER_SOURCE}
-                COMMENT "Compiling ${SHADER_SOURCE} -> ${SHADER_OUTPUT}"
-                VERBATIM
-            )
+				OUTPUT ${SHADER_OUTPUT}
+				# -g keeps SPIR-V debug info (source + line mapping) so
+				# Nsight Graphics / Aftermath GPU crash dumps can resolve the
+				# exact shader instruction that faulted. -O keeps the default
+				# optimization level (needed for readable disassembly).
+				COMMAND ${GLSLC_EXECUTABLE} -g ${SHADER_SOURCE} -o ${SHADER_OUTPUT}
+				DEPENDS ${SHADER_SOURCE}
+				COMMENT "Compiling ${SHADER_SOURCE} -> ${SHADER_OUTPUT}"
+				VERBATIM
+			)
             
             list(APPEND SPV_OUTPUTS ${SHADER_OUTPUT})
         endif()

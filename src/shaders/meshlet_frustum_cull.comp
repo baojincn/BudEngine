@@ -90,11 +90,11 @@ layout(push_constant) uniform PushConstants {
 	uint draw_count;
 } pc;
 
-const uint MESHLET_DESC_DWORDS = 4u;
+const uint CLUSTER_DESC_DWORDS = 7u; // PageClusterDesc is 28 bytes (7 dwords)
 const uint PAGE_HEADER_DWORDS = 16u; // 64-byte PageBinaryHeader
 
 uint get_triangle_count_from_pool(uint page_index, uint meshlet_idx) {
-	uint base = page_table.data[page_index].pool_offset / 4u + PAGE_HEADER_DWORDS + meshlet_idx * MESHLET_DESC_DWORDS;
+	uint base = page_table.data[page_index].pool_offset / 4u + PAGE_HEADER_DWORDS + meshlet_idx * CLUSTER_DESC_DWORDS;
 	return page_pool.data[base + 3u]; // triangle_count is 4th field
 }
 

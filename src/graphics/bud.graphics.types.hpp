@@ -4,6 +4,8 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <algorithm>
+#include <cmath>
 
 #include "src/core/bud.core.hpp"
 #include "src/core/bud.math.hpp"
@@ -13,6 +15,24 @@ namespace math = bud::math;
 
 namespace bud::graphics {
 	constexpr uint32_t ALL_MIPS = 0xFFFFFFFF;
+
+	// Screen-space-error LOD selection for page-backed meshes (Nanite-style
+	// single threshold). A LOD level's object-space error projects to
+	// `error * focal_pixels / distance` pixels; we pick the COARSEST level
+	// whose projected error is still below the threshold. This keeps small
+	// nearby pages (flowers, statues) at full detail and coarsens large far
+	// pages, which a naive distance/radius ratio gets wrong.
+	inline uint32_t select_page_lod(float distance, float radius, float focal_pixels,
+		float error_lod1, float error_lod2, float threshold_px) {
+		(void)radius;
+		float dist = std::max(distance, 1e-3f);
+		// Prefer LOD2 while its projected error is acceptable.
+		float e2 = error_lod2 * focal_pixels / dist;
+		if (e2 <= threshold_px) return 2;
+		float e1 = error_lod1 * focal_pixels / dist;
+		if (e1 <= threshold_px) return 1;
+		return 0;
+	}
 
 	// Enum, begin
 	enum class Backend {
@@ -155,6 +175,15 @@ namespace bud::graphics {
 		bool debug_hiz = false;
 		uint32_t debug_hiz_mip = 0;
 		bool enable_cluster_visualization = false;
+
+		// CPU-driven page LOD selection by screen-space error (Nanite-style
+		// single threshold): a LOD level L is used while its accumulated
+		// object-space error projects to <= lod_error_threshold_px pixels.
+		// lod_error_lod1/lod_error_lod2 must match BudAssetTool's
+		// lod_target_errors = {0, 1e-3, 5e-3} (per-cluster cluster_error).
+		float lod_error_lod1 = 1e-3f;
+		float lod_error_lod2 = 5e-3f;
+		float lod_error_threshold_px = 2.0f;
 
 		// Ambient Occlusion
 		AOMode ao_mode = AOMode::GTAO;
@@ -328,6 +357,10 @@ namespace bud::graphics {
 		uint32_t meshlet_start;
 		uint32_t meshlet_count;
 		uint32_t material_id;
+		// LOD level of this draw range (page-backed meshes only). Page-backed
+		// meshes carry one submesh per (LOD, material) run so the CPU-driven
+		// path can draw a single LOD level per frame.
+		uint32_t lod_level = 0;
 		bool double_sided = false;
 		bool is_alpha_tested = false;
 
@@ -335,12 +368,17 @@ namespace bud::graphics {
 		bud::math::BoundingSphere sphere;
 	};
 
-	// Per-material draw range inside a virtual geometry page.
+	// Per-(LOD, material) draw range inside a virtual geometry page.
 	// index_start/index_count are page-local (relative to the page's index data).
+	// cluster_start/cluster_count are page-local cluster ranges (into the page's
+	// LOD-grouped PageClusterDesc array).
 	struct PageSubMesh {
 		uint32_t index_start = 0;
 		uint32_t index_count = 0;
 		uint32_t material_id = 0; // bindless texture slot (resolved at runtime)
+		uint32_t lod_level = 0;
+		uint32_t cluster_start = 0;
+		uint32_t cluster_count = 0;
 	};
 
 	struct RenderMesh {
@@ -358,6 +396,13 @@ namespace bud::graphics {
 		uint32_t page_index = ~0u;
 		uint32_t page_vertex_data_offset = 0;
 		uint32_t page_index_data_offset = 0;
+		// Per-LOD index ranges inside the page's index data (exported by
+		// BudAssetTool as lod_ranges; all zero when the asset predates LOD
+		// grouping). The page index stream is ordered LOD0 then LOD1 then LOD2,
+		// so each level is one contiguous range. Used by the CSM/shadow path to
+		// rasterize only the selected LOD instead of every LOD in the page.
+		uint32_t lod_index_start[3] = {};
+		uint32_t lod_index_count[3] = {};
 
 		bud::math::AABB aabb;
 		bud::math::BoundingSphere sphere;

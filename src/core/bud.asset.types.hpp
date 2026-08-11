@@ -56,6 +56,22 @@ namespace bud::asset {
         uint32_t triangle_count;   // Number of triangles
     };
 
+    // Per-cluster descriptor inside a page (Nanite-style, with LOD metadata).
+    // 28 bytes (5 u32 + 2 f32): the GPU uses cluster_error for the single
+    // threshold and parent_error for the parent-child transition (coarse LOD
+    // streaming: a page may be replaced by its parent page while loading).
+    struct PageClusterDesc {
+        uint32_t vertex_offset;    // Page-local vertex offset
+        uint32_t vertex_count;
+        uint32_t triangle_offset;  // Page-local triangle offset
+        uint32_t triangle_count;
+        uint32_t lod_level;        // LOD level (0 = full detail)
+        float cluster_error;       // Object-space error relative to LOD0
+        float parent_error;        // Error of the parent (coarser) cluster this
+                                   // cluster descends from; drives page fallback
+    };
+    static_assert(sizeof(PageClusterDesc) == 28, "PageClusterDesc must be 28 bytes");
+
     struct MeshletCullData {
         float bounding_sphere[4];  // x, y, z, radius
         int8_t cone_axis[3];       // Compressed normal cone axis
@@ -118,21 +134,25 @@ namespace bud::asset {
 	// Each page in the GPU Page Pool: 64-byte header + data sections
 	struct PageBinaryHeader {
 		static constexpr uint32_t MAGIC = 0x50414745;
-		static constexpr uint32_t VERSION = 1;
+		static constexpr uint32_t VERSION = 3; // v3: clusters carry parent_error; reserved = parent_page_id + coarse flag
 		uint32_t magic;
 		uint32_t version;
-		uint32_t meshlet_count;
+		uint32_t cluster_count;      // total clusters across all LOD levels in this page
 		uint32_t vertex_count;
 		uint32_t index_count;
+		uint32_t parent_page_id;     // (was reserved) page id of the parent (coarser) page, INVALID_INDEX for root
 		float aabb_min[3];
 		float aabb_max[3];
 		uint32_t vertex_data_offset;
 		uint32_t index_data_offset;
-		uint32_t padding[3];
+		float max_error;             // coarsest-level object-space error (for screen threshold)
+		uint32_t padding[1];         // bit0 = is_coarse_page (aggregated subtree geometry)
 	};
+	static_assert(sizeof(PageBinaryHeader) == 64, "PageBinaryHeader must stay 64 bytes");
+	static_assert(sizeof(PageClusterDesc) == 28, "PageClusterDesc must be 28 bytes");
 	static constexpr uint32_t PAGE_HEADER_SIZE = 64;
-	static constexpr uint32_t PAGE_MESHLET_DESC_STRIDE = 24;
-	static constexpr uint32_t PAGE_CULL_DATA_STRIDE = 16;
+	static constexpr uint32_t PAGE_CLUSTER_DESC_STRIDE = sizeof(PageClusterDesc); // 28
+	static constexpr uint32_t PAGE_CULL_DATA_STRIDE = sizeof(MeshletCullData); // 20 (float4 + 4x int8)
 	static constexpr uint32_t PAGE_VERTEX_STRIDE = 48;
 
 	constexpr uint32_t INVALID_INDEX = 0xFFFFFFFFu;

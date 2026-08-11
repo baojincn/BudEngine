@@ -265,10 +265,29 @@ namespace bud::graphics {
 	}
 
 	void RenderGraph::execute(CommandHandle cmd) {
+		const bool use_async = rhi->has_dedicated_compute_queue();
+		CommandHandle async_cmd = nullptr;
+		bool async_active = false;
+		bool async_used = false;
+
 		for (int pass_idx : sorted_passes) {
 			auto& pass = passes[pass_idx];
+			const bool is_async = use_async && pass.async_compute;
+			if (is_async) async_used = true;
 
-			rhi->cmd_begin_debug_label(cmd, pass.name, 1.0f, 0.7f, 0.0f);
+			if (is_async) {
+				if (!async_active) {
+					async_cmd = rhi->begin_async_compute();
+					async_active = (async_cmd != nullptr);
+				}
+				if (!async_active) {
+					// Fallback: no dedicated compute queue; run on the main cb.
+					async_cmd = cmd;
+				}
+			}
+			CommandHandle target = is_async ? async_cmd : cmd;
+
+			rhi->cmd_begin_debug_label(target, pass.name, 1.0f, 0.7f, 0.0f);
 
 			// Inject Barriers (Phase 3)
 			for (auto& barrier : pass.before_barriers) {
@@ -279,20 +298,31 @@ namespace bud::graphics {
 				auto& debug_name = resources[barrier.handle.id].name;
 				if (tex) {
 					rhi->set_debug_name(tex, ObjectType::Texture, debug_name);
-					rhi->resource_barrier(cmd, tex, barrier.old_state, barrier.new_state);
+					rhi->resource_barrier(target, tex, barrier.old_state, barrier.new_state);
 				} else if (buf.is_valid()) {
 					rhi->set_debug_name(buf, ObjectType::Buffer, debug_name);
-					rhi->resource_barrier(cmd, buf, barrier.old_state, barrier.new_state);
+					rhi->resource_barrier(target, buf, barrier.old_state, barrier.new_state);
 				}
 			}
 
 			if (pass.execute) {
-				pass.execute(rhi, cmd);
+				pass.execute(rhi, target);
 			}
 
-			rhi->cmd_end_debug_label(cmd);
+			rhi->cmd_end_debug_label(target);
+
+			// After an async compute pass completes recording, submit it on the
+			// compute queue (signals the compute timeline). The MAIN command
+			// buffer waits on this timeline at submission (end_frame), so every
+			// graphics pass is ordered after the async output. This guarantees
+			// correctness (serialized); moving the wait closer to the true
+			// consumer is the overlap optimization.
+			if (is_async && use_async && async_active) {
+				rhi->end_async_compute();
+				async_active = false;
+			}
 		}
-		
+
 		reset(); 
 	}
 

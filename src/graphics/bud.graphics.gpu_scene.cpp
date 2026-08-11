@@ -141,7 +141,10 @@ namespace bud::graphics {
 		const uint32_t desired_indirect_capacity = std::max(required_draw_count + 1024u, 1024u);
 		// The CSM cull now processes every scene instance, so its buffers must
 		// cover the full scene (casters outside the main view included).
-		const uint32_t desired_scene_capacity = std::max(required_scene_instance_count + 1024u, 1024u);
+		// Use a 2x margin: scene entity count can fluctuate within a frame
+		// (coarse placeholders register/unregister asynchronously) while the
+		// per-frame buffer is reused, so a tight +1024 margin can overflow.
+		const uint32_t desired_scene_capacity = std::max(required_scene_instance_count * 2u + 2048u, 2048u);
 		const uint32_t desired_meshlet_capacity = std::max(required_meshlet_count, 1024u);
 
 		if (!frame_resource.instance_data.is_valid() || frame_resource.instance_capacity < desired_instance_capacity) {
