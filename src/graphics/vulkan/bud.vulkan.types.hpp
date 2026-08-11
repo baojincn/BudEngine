@@ -70,6 +70,10 @@ namespace bud::graphics::vulkan {
 		// graphics family with queue_index=1 when no dedicated family exists.
 		std::optional<uint32_t> copy_family;
 		uint32_t copy_queue_index = 0;
+		// Dedicated async-compute queue family (VK_QUEUE_COMPUTE_BIT without
+		// VK_QUEUE_GRAPHICS_BIT) so async compute passes can overlap graphics.
+		std::optional<uint32_t> compute_family;
+		uint32_t compute_queue_index = 0;
 
 		bool is_complete() const {
 			return graphics_family.has_value() && present_family.has_value();

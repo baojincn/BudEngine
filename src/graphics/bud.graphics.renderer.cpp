@@ -5,12 +5,6 @@
 #include <print>
 #include <cstring>
 
-// Per-frame upload mode.
-//   0 (default): host-write per-frame data into host-visible mapped buffers
-//     (avoids async staging/upload timing that caused flicker + light leaks).
-//   1: synchronous copy_buffer_immediate (legacy; for comparison).
-#define BUD_FORCE_SYNC_UPLOAD 0
-
 #include "src/graphics/bud.graphics.renderer.hpp"
 
 #include "src/graphics/bud.graphics.rhi.hpp"
@@ -127,7 +121,8 @@ namespace bud::graphics {
 	uint32_t Renderer::register_page_backed_mesh(uint32_t page_index, uint32_t meshlet_count,
 		uint32_t index_count, const bud::math::AABB& aabb,
 		uint32_t vertex_data_offset, uint32_t index_data_offset,
-		const std::vector<PageSubMesh>& page_submeshes)
+		const std::vector<PageSubMesh>& page_submeshes,
+		const std::vector<std::pair<uint32_t, uint32_t>>& lod_index_ranges)
 	{
 		std::scoped_lock lock(mesh_mutex, mesh_bounds_mutex);
 
@@ -145,6 +140,13 @@ namespace bud::graphics {
 			bud::math::vec3 center = (aabb.min + aabb.max) * 0.5f;
 			float radius = bud::math::length(aabb.max - center);
 			mesh.sphere = bud::math::BoundingSphere(center, radius);
+		}
+
+		// Per-LOD index ranges (page-local). Kept so the shadow path can draw a
+		// single LOD level instead of rasterizing every LOD in the page.
+		for (size_t i = 0; i < lod_index_ranges.size() && i < 3; ++i) {
+			mesh.lod_index_start[i] = lod_index_ranges[i].first;
+			mesh.lod_index_count[i] = lod_index_ranges[i].second;
 		}
 
 		// Build one render submesh per per-material run inside the page so draw-count
@@ -165,25 +167,18 @@ namespace bud::graphics {
 			mesh.submeshes.push_back(fallback_sub);
 		}
 		else {
-			uint32_t allocated_meshlets = 0;
 			for (size_t i = 0; i < page_submeshes.size(); ++i) {
 				const auto& ps = page_submeshes[i];
 				SubMesh sub{};
 				sub.index_start = ps.index_start;
 				sub.index_count = ps.index_count;
-				sub.meshlet_start = allocated_meshlets;
-				if (i + 1 == page_submeshes.size()) {
-					sub.meshlet_count = (meshlet_count > allocated_meshlets) ? (meshlet_count - allocated_meshlets) : 0;
-				}
-				else {
-					uint32_t count = (index_count > 0) ? static_cast<uint32_t>((static_cast<uint64_t>(ps.index_count) * meshlet_count) / index_count) : 0;
-					if (count == 0 && meshlet_count > allocated_meshlets + (page_submeshes.size() - 1 - i)) {
-						count = 1;
-					}
-					sub.meshlet_count = count;
-				}
-				allocated_meshlets += sub.meshlet_count;
+				// Use the exact page-local cluster range exported by BudAssetTool
+				// (the previous proportional estimate breaks once pages carry
+				// multiple LOD levels in a LOD-grouped layout).
+				sub.meshlet_start = ps.cluster_start;
+				sub.meshlet_count = ps.cluster_count;
 				sub.material_id = ps.material_id;
+				sub.lod_level = ps.lod_level;
 				sub.aabb = aabb; // conservative page AABB
 				sub.sphere = mesh.sphere;
 				mesh.submeshes.push_back(sub);
@@ -216,7 +211,11 @@ namespace bud::graphics {
 		{
 			std::lock_guard lock(queue->mutex);
 			queue->commands.push_back([rhi_ptr, current_slot]() {
-				rhi_ptr->update_bindless_texture(current_slot, rhi_ptr->get_fallback_texture());
+				// Bind the fallback at the frame boundary (pending list), NOT
+				// via update_bindless_texture: that would update every frame's
+				// descriptor set mid-frame while some are still in flight on
+				// the GPU (crashes the driver under async uploads).
+				rhi_ptr->queue_bindless_fallback(current_slot, rhi_ptr->get_fallback_texture());
 				});
 		}
 
@@ -244,10 +243,12 @@ namespace bud::graphics {
 					desc.format = bud::graphics::TextureFormat::RGBA8_SRGB;
 					desc.mips = static_cast<uint32_t>(std::floor(std::log2(std::max(desc.width, desc.height)))) + 1;
 
-					auto tex = rhi_ptr->create_texture(desc, (const void*)img_ptr->pixels,
-						(uint64_t)img_ptr->width * img_ptr->height * 4);
+					// Async upload: the transfer + mip generation is submitted
+					// without blocking the main render queue; the slot is bound
+					// once the upload finishes (at frame begin).
+					auto tex = rhi_ptr->create_texture_async(desc, (const void*)img_ptr->pixels,
+						(uint64_t)img_ptr->width * img_ptr->height * 4, current_slot);
 					rhi_ptr->set_debug_name(tex, ObjectType::Texture, path);
-					rhi_ptr->update_bindless_texture(current_slot, tex);
 
 					//bud::print("[Renderer] Texture BOUND: {} -> Slot {}", path, current_slot);
 					});
@@ -303,7 +304,11 @@ namespace bud::graphics {
 				{
 					std::lock_guard lock(queue->mutex);
 					queue->commands.push_back([rhi_ptr, current_slot]() {
-						rhi_ptr->update_bindless_texture(current_slot, rhi_ptr->get_fallback_texture());
+						// Frame-boundary fallback binding (safe while other
+						// frames' descriptor sets are in flight; a direct
+						// all-frame update mid-frame would race the GPU and
+						// flicker UI/geometry).
+						rhi_ptr->queue_bindless_fallback(current_slot, rhi_ptr->get_fallback_texture());
 						});
 				}
 
@@ -332,10 +337,9 @@ namespace bud::graphics {
 							desc.format = bud::graphics::TextureFormat::RGBA8_SRGB;
 							desc.mips = static_cast<uint32_t>(std::floor(std::log2(std::max(desc.width, desc.height)))) + 1;
 
-							auto tex = rhi_ptr->create_texture(desc, (const void*)img_ptr->pixels,
-								(uint64_t)img_ptr->width * img_ptr->height * 4);
+							auto tex = rhi_ptr->create_texture_async(desc, (const void*)img_ptr->pixels,
+								(uint64_t)img_ptr->width * img_ptr->height * 4, current_slot);
 							rhi_ptr->set_debug_name(tex, ObjectType::Texture, tex_path);
-							rhi_ptr->update_bindless_texture(current_slot, tex);
 
 							//bud::print("[Renderer] ✓ Texture BOUND: {} -> Slot {}", tex_path, current_slot);
 							});
@@ -685,6 +689,16 @@ namespace bud::graphics {
 						auto depth_normalized = std::clamp(distance / (scene_view.far_plane * scene_view.far_plane), 0.0f, 1.0f);
 						depth_key = static_cast<uint32_t>(depth_normalized * 0x3FFFF);
 
+						// CPU-driven page LOD: pick one LOD level per page per
+						// frame by screen-space error (Nanite-style threshold).
+						uint32_t page_lod = 0;
+						if (mesh.is_page_backed) {
+							float dist = bud::math::length(scene_view.camera_position - mesh.sphere.center);
+							float focal = scene_view.proj_matrix[1][1] * scene_view.viewport_height * 0.5f;
+							page_lod = select_page_lod(dist, mesh.sphere.radius, focal,
+								render_config.lod_error_lod1, render_config.lod_error_lod2, render_config.lod_error_threshold_px);
+						}
+
 						if (sub_idx_original != bud::asset::INVALID_INDEX) {
 							auto& item = sort_list[draw_start];
 							item.entity_index = (uint32_t)i;
@@ -692,6 +706,10 @@ namespace bud::graphics {
 
 							if (sub_idx_original < mesh.submeshes.size()) {
 								const auto& sub = mesh.submeshes[sub_idx_original];
+								if (mesh.is_page_backed && sub.lod_level != page_lod) {
+									item.key = UINT64_MAX;
+									continue;
+								}
 								auto world_sub_aabb = sub.aabb.transform(world_matrix);
 								if (!bud::math::intersect_aabb_frustum(world_sub_aabb, main_camera_frustum)) {
 									item.key = UINT64_MAX;
@@ -708,9 +726,28 @@ namespace bud::graphics {
 						}
 						else {
 							// Explode!
+							// Clamp the target LOD to the levels actually present
+							// in this page so geometry never disappears when a
+							// page lacks the exact requested level.
+							uint32_t target_lod = page_lod;
+							if (mesh.is_page_backed) {
+								uint32_t min_avail = UINT32_MAX, max_avail = 0;
+								for (const auto& sub : mesh.submeshes) {
+									min_avail = std::min(min_avail, sub.lod_level);
+									max_avail = std::max(max_avail, sub.lod_level);
+								}
+								if (min_avail > max_avail) { min_avail = 0; max_avail = 0; }
+								target_lod = std::clamp(target_lod, min_avail, max_avail);
+							}
 							for (uint32_t s = 0; s < (uint32_t)mesh.submeshes.size(); ++s) {
 								auto& item = sort_list[draw_start + s];
 								const auto& sub = mesh.submeshes[s];
+								if (mesh.is_page_backed && sub.lod_level != target_lod) {
+									item.key = UINT64_MAX;
+									item.entity_index = (uint32_t)i;
+									item.submesh_index = s;
+									continue;
+								}
 								auto world_sub_aabb = sub.aabb.transform(world_matrix);
 								if (!bud::math::intersect_aabb_frustum(world_sub_aabb, main_camera_frustum)) {
 									item.key = UINT64_MAX;
@@ -739,7 +776,7 @@ namespace bud::graphics {
 			auto end_it = std::remove_if(sort_list.begin(), sort_list.begin() + total_draw_count, [](const SortItem& a) { return a.key == UINT64_MAX; });
 			sort_list.erase(end_it, sort_list.end()); // REMOVES INVALID ITEMS!
 			visible_count = sort_list.size();
-			
+
 			for (; split_index < visible_count; ++split_index) {
 				if ((sort_list[split_index].key >> 60) == 1) {
 					break;
@@ -880,14 +917,8 @@ namespace bud::graphics {
 
 			// Common Instance Data Upload
 			// All per-frame staging->GPU copies go through the async upload
-			// command buffer (chained to the main command buffer via a
-			// semaphore in end_frame), eliminating the per-frame
-			// vkQueueWaitIdle that used to flush the whole graphics queue.
-			#if BUD_FORCE_SYNC_UPLOAD
-			CommandHandle upload_cmd = nullptr;
-#else
-			CommandHandle upload_cmd = rhi->begin_upload();
-#endif
+			// Per-frame data is host-written into mapped buffers (avoids async
+			// staging/upload cross-queue timing); no upload command buffer used.
 			if (visible_count > 0) {
 				auto instance_staging = rhi->get_allocator()->alloc_staging(visible_count * sizeof(InstanceData));
 				InstanceData* inst_mapped = static_cast<InstanceData*>(instance_staging.mapped_ptr);
@@ -904,22 +935,15 @@ namespace bud::graphics {
 						inst_mapped[i].material_id = render_scene.material_indices[entity_idx];
 					}
 				}
-#if BUD_FORCE_SYNC_UPLOAD
-				rhi->copy_buffer_immediate(instance_staging, frame.instance_data, visible_count * sizeof(InstanceData));
-				rhi->destroy_buffer(instance_staging);
-#else
 				// Write per-frame instance data directly into the host-visible
-				// mapped buffer. This avoids the async staging/upload path whose
-				// cross-queue timing caused flicker; the buffer is per-frame so
-				// the CPU write only happens after the previous frame (same
-				// slot) finished on the GPU (begin_frame fence wait).
+				// mapped buffer (avoids async staging/upload cross-queue timing).
+				// The buffer is per-frame, so the CPU write only happens after
+				// the previous frame (same slot) finished on the GPU (begin_frame
+				// fence wait). Staging is only a CPU-side scratch buffer here.
 				if (frame.instance_data.mapped_ptr) {
 					std::memcpy(frame.instance_data.mapped_ptr, inst_mapped, visible_count * sizeof(InstanceData));
-				} else if (upload_cmd) {
-					rhi->cmd_copy_buffer_async(upload_cmd, instance_staging, frame.instance_data, visible_count * sizeof(InstanceData));
 				}
-				rhi->defer_buffer_release(instance_staging);
-#endif
+				rhi->destroy_buffer(instance_staging);
 				rg_instance_data = render_graph.import_buffer("GlobalInstanceData", frame.instance_data, ResourceState::ShaderResource);
 			}
 
@@ -975,21 +999,14 @@ namespace bud::graphics {
 							current_visibility_offset += mapped[i].meshletCount;
 						}
 					}
-					#if BUD_FORCE_SYNC_UPLOAD
-										rhi->copy_buffer_immediate(staging, current_inst_buf, visible_count * sizeof(DrawData));
-										rhi->destroy_buffer(staging);
-					#else
-										// Host-write DrawData directly (per-frame mapped
-										// buffer); avoids async staging/upload flicker.
-										if (current_inst_buf.mapped_ptr) {
-											std::memcpy(current_inst_buf.mapped_ptr, mapped, visible_count * sizeof(DrawData));
-										} else if (upload_cmd) {
-											rhi->cmd_copy_buffer_async(upload_cmd, staging, current_inst_buf, visible_count * sizeof(DrawData));
-										}
-										rhi->defer_buffer_release(staging);
-					#endif
+					// Host-write DrawData directly (per-frame mapped buffer);
+					// avoids async staging/upload flicker.
+					if (current_inst_buf.mapped_ptr) {
+						std::memcpy(current_inst_buf.mapped_ptr, mapped, visible_count * sizeof(DrawData));
+					}
+					rhi->destroy_buffer(staging);
 
-										rg_inst = render_graph.import_buffer("IndirectInstanceData", current_inst_buf, ResourceState::UnorderedAccess);
+					rg_inst = render_graph.import_buffer("IndirectInstanceData", current_inst_buf, ResourceState::UnorderedAccess);
 					rg_draw = render_graph.import_buffer("IndirectDrawCommands", current_draw_buf, ResourceState::IndirectArgument);
 					rg_stats = render_graph.import_buffer("GPUStatsReadback", current_stats_buf, ResourceState::UnorderedAccess);
 					rg_meshlet_frustum_stats = render_graph.import_buffer("MeshletFrustumStats", frame.meshlet_frustum_stats, ResourceState::UnorderedAccess);
@@ -1061,8 +1078,25 @@ namespace bud::graphics {
 							d.max = world_aabb.max;
 						}
 						else {
-							d.indexCount = mesh.index_count;
-							d.firstIndex = mesh_geometry.first_index;
+							uint32_t index_start = 0;
+							uint32_t index_count = mesh.index_count;
+							if (mesh.is_page_backed) {
+								// Rasterize only the selected LOD level into the
+								// shadow map. Pages carry LOD0+LOD1+LOD2 geometry,
+								// so drawing the whole page triples the CSM static
+								// update cost. Fall back to the whole page when no
+								// LOD ranges are available (legacy assets).
+								float lod_dist = bud::math::length(scene_view.camera_position - mesh.sphere.center);
+								float focal = scene_view.proj_matrix[1][1] * scene_view.viewport_height * 0.5f;
+								uint32_t lod = select_page_lod(lod_dist, mesh.sphere.radius, focal,
+									render_config.lod_error_lod1, render_config.lod_error_lod2, render_config.lod_error_threshold_px);
+								if (lod < 3 && mesh.lod_index_count[lod] > 0) {
+									index_start = mesh.lod_index_start[lod];
+									index_count = mesh.lod_index_count[lod];
+								}
+							}
+							d.indexCount = index_count;
+							d.firstIndex = mesh_geometry.first_index + index_start;
 							d.vertexOffset = mesh_geometry.vertex_offset;
 							d.materialId = render_scene.material_indices[i];
 							material_id = render_scene.material_indices[i];
@@ -1079,33 +1113,19 @@ namespace bud::graphics {
 						model_mapped[dst].padding[0] = model_mapped[dst].padding[1] = model_mapped[dst].padding[2] = 0;
 					}
 
-					#if BUD_FORCE_SYNC_UPLOAD
-										rhi->copy_buffer_immediate(scene_staging, frame.csm_instance_data, scene_count * sizeof(DrawData));
-										if (frame.csm_instance_models.is_valid()) {
-											rhi->copy_buffer_immediate(model_staging, frame.csm_instance_models, scene_count * sizeof(InstanceData));
+					// Host-write CSM DrawData/models directly into the per-frame
+					// mapped buffers (avoids async staging/upload timing that
+					// caused shadow light leaks).
+					if (frame.csm_instance_data.mapped_ptr) {
+						std::memcpy(frame.csm_instance_data.mapped_ptr, scene_mapped, scene_count * sizeof(DrawData));
+					}
+					if (frame.csm_instance_models.mapped_ptr) {
+						std::memcpy(frame.csm_instance_models.mapped_ptr, model_mapped, scene_count * sizeof(InstanceData));
+					}
+					rhi->destroy_buffer(scene_staging);
+					rhi->destroy_buffer(model_staging);
+											csm_instance_h = render_graph.import_buffer("CSMSceneInstanceData", frame.csm_instance_data, ResourceState::UnorderedAccess);
 										}
-										rhi->destroy_buffer(scene_staging);
-										rhi->destroy_buffer(model_staging);
-					#else
-										// Host-write CSM DrawData/models directly into the
-										// per-frame mapped buffers (avoids async
-										// staging/upload timing that caused shadow light
-										// leaks).
-										if (frame.csm_instance_data.mapped_ptr) {
-											std::memcpy(frame.csm_instance_data.mapped_ptr, scene_mapped, scene_count * sizeof(DrawData));
-										} else if (upload_cmd) {
-											rhi->cmd_copy_buffer_async(upload_cmd, scene_staging, frame.csm_instance_data, scene_count * sizeof(DrawData));
-										}
-										if (frame.csm_instance_models.mapped_ptr) {
-											std::memcpy(frame.csm_instance_models.mapped_ptr, model_mapped, scene_count * sizeof(InstanceData));
-										} else if (upload_cmd && frame.csm_instance_models.is_valid()) {
-											rhi->cmd_copy_buffer_async(upload_cmd, model_staging, frame.csm_instance_models, scene_count * sizeof(InstanceData));
-										}
-										rhi->defer_buffer_release(scene_staging);
-										rhi->defer_buffer_release(model_staging);
-					#endif
-										csm_instance_h = render_graph.import_buffer("CSMSceneInstanceData", frame.csm_instance_data, ResourceState::UnorderedAccess);
-				}
 
 				// Read back previous frame stats (delayed latency) from this exact buffer which is guaranteed finished
 				if (frame.stats_readback.is_valid()) {
@@ -1129,12 +1149,6 @@ namespace bud::graphics {
 					}
 				}
 			}
-
-			// Always submit the async upload batch, even when the GPU-driven
-			// branch was skipped, so the upload semaphore is signaled and the
-			// main command buffer's wait does not deadlock.
-			if (upload_cmd)
-				rhi->end_upload(upload_cmd);
 
 			// Calculate CPU Frustum Culling Stats
 			uint32_t scene_total_objs = 0;

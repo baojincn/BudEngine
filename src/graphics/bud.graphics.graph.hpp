@@ -60,6 +60,10 @@ namespace bud::graphics {
 		// Culling info
 		uint32_t ref_count = 0;
 		bool has_side_effects = false;
+		// Async compute pass: recorded to the dedicated compute command buffer
+		// and submitted on the compute queue (when available) so it can overlap
+		// graphics rendering. Consumers must wait on the compute timeline.
+		bool async_compute = false;
 
 		// Barrier info calculated during compile()
 		struct BarrierInfo { 
@@ -88,6 +92,10 @@ namespace bud::graphics {
 
 		// Mark pass as having side effects (cannot be culled)
 		void set_side_effect(bool value = true);
+
+		// Mark the pass as an async compute pass (recorded on the dedicated
+		// compute command buffer when a dedicated compute queue is available).
+		void set_async_compute(bool value = true) { pass_node.async_compute = value; }
 
 	private:
 		class RenderGraph& render_graph;

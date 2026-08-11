@@ -24,7 +24,21 @@ struct StreamingPage {
 	uint64_t capacity;
 	std::string bin_path;
 	uint32_t material_id = 0; // base color texture index (into BudMeshAsset::textures)
-	std::vector<bud::graphics::PageSubMesh> submeshes; // per-material runs (material_id = texture index)
+	// World-space AABB of the page's geometry, exported by BudAssetTool and
+	// used for distance-based on-demand streaming.
+	bud::math::AABB aabb;
+	bool has_aabb = false;
+	std::vector<bud::graphics::PageSubMesh> submeshes; // per-(LOD, material) runs
+	// Per-LOD index ranges [start, count] inside the page's index data
+	// (from the JSON lod_ranges). The page index stream is ordered LOD0->LOD2.
+	std::vector<std::pair<uint32_t, uint32_t>> lod_ranges;
+	// Nanite-like hierarchy (v3): coarse pages aggregate a subtree's LOD2
+	// clusters. In the CPU-driven path they are skipped (leaves already contain
+	// all LODs and select LOD by screen error); kept for future GPU-driven
+	// hierarchy traversal.
+	bool is_coarse = false;
+	uint32_t parent_page_id = bud::asset::INVALID_INDEX;
+	std::vector<uint32_t> children;
 	std::string get_unique_id() const { return asset_id + ":page_" + std::to_string(page_id); }
 };
 
@@ -46,6 +60,7 @@ struct RegionManifest {
 class StreamingManager {
 public:
 	using PageRegisteredCallback = std::function<void(uint32_t mesh_id, const bud::math::AABB& aabb)>;
+	using PageUnregisteredCallback = std::function<void(uint32_t mesh_id)>;
 
 	StreamingManager(bud::io::AssetManager* asset_manager,
 		bud::graphics::GPUScene* gpu_scene,
@@ -53,6 +68,10 @@ public:
 		bud::graphics::RHI* rhi);
 
 	void set_page_registered_callback(PageRegisteredCallback cb) { page_registered_cb_ = std::move(cb); }
+	// Called when a page is unloaded so the owner can remove the scene entity
+	// referencing its mesh. Without this, unloaded meshes stay in the scene and
+	// later slot reuse overwrites their geometry (broken vertices at origin).
+	void set_page_unregistered_callback(PageUnregisteredCallback cb) { page_unregistered_cb_ = std::move(cb); }
 
 	void register_budmesh_async(const std::string& json_path);
 	void register_region(const RegionManifest& region);
@@ -81,9 +100,18 @@ private:
 	std::unordered_map<std::string, uint32_t> page_mesh_ids_;
 
 	PageRegisteredCallback page_registered_cb_;
+	PageUnregisteredCallback page_unregistered_cb_;
 
-	float load_radius_ = 150.0f;
-	float unload_radius_ = 200.0f;
+	// Distance thresholds in world units (≈1 unit = 1 m). Sponza's exported
+	// scene spans ~3700 units (BudAssetTool keeps the obj scale). 2000/2500
+	// keeps the whole scene resident while the camera is inside it, with
+	// hysteresis to avoid load/unload thrash at the boundary.
+	// Distance thresholds in world units (≈1 unit = 1 m). Sponza's exported
+	// scene spans ~3700 units (BudAssetTool keeps the obj scale). 2000/2500
+	// keeps the whole scene resident while the camera is inside it, with
+	// hysteresis to avoid load/unload thrash at the boundary.
+	float load_radius_ = 2000.0f;
+	float unload_radius_ = 2500.0f;
 };
 
 } // namespace bud::streaming

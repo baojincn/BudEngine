@@ -166,6 +166,11 @@ namespace bud::graphics {
 		if (config.enable_gpu_driven && csm_cull_pipeline) {
 			render_graph.add_pass("CSM Cull",
 				[&](RGBuilder& builder) {
+					// Async compute: runs on the dedicated compute queue so it can
+					// overlap the graphics passes. Its output (csm_indirect_draw)
+					// is consumed by CSM Shadow, which the graphics queue waits on
+					// via the compute timeline at submission.
+					builder.set_async_compute();
 					builder.read(rg_instance_data, ResourceState::ShaderResource);
 					auto& frame = gpu_scene.frame_resources(stored_rhi->get_current_frame_index());
 					if (frame.csm_indirect_draw.is_valid()) {
@@ -368,7 +373,21 @@ namespace bud::graphics {
 										if (is_paged) {
 											rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
 											rhi->cmd_bind_index_buffer(cmd, pp_buf);
-											rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, 0);
+											// Rasterize only the selected LOD level into
+											// the shadow map; pages carry all LOD levels
+											// and drawing the whole page triples the CSM
+											// static update cost.
+											uint32_t index_start = 0;
+											uint32_t index_count = mesh.index_count;
+											float lod_dist = bud::math::length(view.camera_position - mesh.sphere.center);
+											float focal = view.proj_matrix[1][1] * view.viewport_height * 0.5f;
+											uint32_t lod = bud::graphics::select_page_lod(lod_dist, mesh.sphere.radius, focal,
+												config.lod_error_lod1, config.lod_error_lod2, config.lod_error_threshold_px);
+											if (lod < 3 && mesh.lod_index_count[lod] > 0) {
+												index_start = mesh.lod_index_start[lod];
+												index_count = mesh.lod_index_count[lod];
+											}
+											rhi->cmd_draw_indexed(cmd, index_count, 1, mesh_geometry.first_index + index_start, mesh_geometry.vertex_offset, 0);
 										}
 										else if (kUseBindVertexByteOffset) {
 											auto vb = mega_vertex_buffer;

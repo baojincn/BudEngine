@@ -1,4 +1,4 @@
-#include "bud.stats.ui.hpp"
+﻿#include "bud.stats.ui.hpp"
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <cmath>
@@ -43,6 +43,7 @@ namespace bud::ui {
 				static float update_timer = 0.0f;
 				static float display_fps = 0.0f;
 				static float display_ms = 0.0f;
+				static float display_gpu_ms = 0.0f;
 				static constexpr float fps_ema_tau_seconds = 0.8f;
 				static uint32_t display_draw_calls = 0;
 				static uint32_t display_drawn_tris = 0;
@@ -86,6 +87,17 @@ namespace bud::ui {
 					display_ms = ema_alpha * current_ms + (1.0f - ema_alpha) * display_ms;
 				}
 				display_fps = (display_ms > 0.0f) ? (1000.0f / display_ms) : 0.0f;
+
+				// GPU frame time (Vulkan timestamp query read back 1-2 frames
+				// late). Smoothed with the same EMA as the CPU frame time.
+				if (stats.gpu_render_time > 0.0f) {
+					if (display_gpu_ms <= 0.0f) {
+						display_gpu_ms = stats.gpu_render_time;
+					}
+					else {
+						display_gpu_ms = ema_alpha * stats.gpu_render_time + (1.0f - ema_alpha) * display_gpu_ms;
+					}
+				}
 
 				update_timer += delta_time;
 				if (update_timer >= 0.5f) {
@@ -138,7 +150,7 @@ namespace bud::ui {
 					? "Meshlet"
 					: "Instance/Submesh Fallback";
 
-				ImGui::TextColored(fps_color, "FPS: %.1f (%.2f ms)", display_fps, display_ms);
+				ImGui::TextColored(fps_color, "FPS: %.1f (%.2f ms CPU / %.2f ms GPU)", display_fps, display_ms, display_gpu_ms);
 				//ImGui::TextColored(color_neutral, "Visibility Path: %s", visibility_path_text);
 
 				// Build and show sequencer status using the supplied values to avoid cross-thread calls.

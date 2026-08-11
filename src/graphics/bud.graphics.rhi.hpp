@@ -52,15 +52,6 @@ namespace bud::graphics {
 		virtual void copy_buffer_immediate(BufferHandle src, BufferHandle dst, uint64_t size) = 0;
 		virtual void copy_buffer_immediate_offset(BufferHandle src, BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) = 0;
 		virtual void destroy_buffer(BufferHandle block) = 0;
-
-		// 异步上传：录制到每帧 upload command buffer（copy queue），end_frame 时与
-		// 主 command buffer 用 semaphore 串联，替代 vkQueueWaitIdle。
-		// begin_upload 必须在主 command buffer 录制之前调用；end_upload 提交。
-		virtual CommandHandle begin_upload() = 0;
-		virtual void cmd_copy_buffer_async(CommandHandle cmd, BufferHandle src, BufferHandle dst, uint64_t size, uint64_t src_offset = 0, uint64_t dst_offset = 0) = 0;
-		virtual void end_upload(CommandHandle cmd) = 0;
-		virtual void wait_upload_fence() = 0;
-		virtual void defer_buffer_release(BufferHandle buffer) = 0;
 		virtual void* create_graphics_pipeline(const GraphicsPipelineDesc& desc) = 0;
 		virtual void* create_compute_pipeline(const ComputePipelineDesc& desc) = 0;
 		virtual void destroy_pipeline(void* pipeline) = 0;
@@ -77,6 +68,21 @@ namespace bud::graphics {
 		virtual void cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) = 0;
 		virtual void cmd_draw_indexed_indirect(CommandHandle cmd, BufferHandle buffer, uint64_t offset, uint32_t draw_count, uint32_t stride) = 0;
 		virtual void cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group_y, uint32_t group_z) = 0;
+		// Async compute: begin recording into the per-frame async compute command
+		// buffer (dedicated compute queue when available). Returns the command
+		// handle or nullptr if no dedicated compute queue exists (async falls back
+		// to the main graphics command buffer).
+		virtual CommandHandle begin_async_compute() = 0;
+		virtual void end_async_compute() = 0;
+		// Waits for the graphics queue to reach the given compute timeline value
+		// (i.e. all async compute submitted up to that value has completed).
+		virtual void wait_compute_timeline(uint64_t value) = 0;
+		// Latest compute timeline value (used by the render graph to wait on all
+		// async compute submitted this frame).
+		virtual uint64_t get_compute_timeline_value() const = 0;
+		// Whether a dedicated compute queue is available (async compute can
+		// actually overlap graphics).
+		virtual bool has_dedicated_compute_queue() const = 0;
 		virtual Texture* get_current_swapchain_texture() = 0;
 		virtual uint32_t get_current_image_index() = 0;
 		virtual uint32_t get_current_frame_index() const = 0;
@@ -95,6 +101,17 @@ namespace bud::graphics {
 
 		// 纹理管理
 		virtual Texture* create_texture(const TextureDesc& desc, const void* initial_data, uint64_t size) = 0;
+		// Asynchronous texture upload: allocates the image and records the
+		// staging->image copy + mipmap generation into an independent command
+		// buffer, submitted without blocking the main render queue. The caller
+		// must queue_bindless_update(slot, tex, ...) after the upload is
+		// submitted; the texture is bound to the bindless slot once the upload
+		// completes (checked at frame begin).
+		virtual Texture* create_texture_async(const TextureDesc& desc, const void* initial_data, uint64_t size, uint32_t bindless_slot) = 0;
+		// Safely binds a fallback texture to a bindless slot at the frame
+		// boundary (propagates to all frame sets over consecutive frames).
+		// Unlike update_bindless_texture, safe while other frames are in flight.
+		virtual void queue_bindless_fallback(uint32_t slot, Texture* tex) = 0;
 		virtual void update_bindless_texture(uint32_t index, bud::graphics::Texture* texture) = 0;
 		virtual void update_bindless_texture_current_frame(uint32_t index, bud::graphics::Texture* texture) { update_bindless_texture(index, texture); }
 		virtual void update_bindless_image(uint32_t index, Texture* texture, uint32_t mip_level = 0, bool is_storage = false) = 0;

@@ -64,9 +64,14 @@ int main(int argc, char* argv[]) {
     }
 
     if (input_path.empty() || output_path.empty()) {
-        std::cerr << "[BudAssetTool] Error: Missing input or output path." << std::endl;
-        print_usage();
-        return 1;
+        // Debug default: when launched from Visual Studio without args
+        // (launch.vs.json args are sometimes not forwarded), fall back to a
+        // bundled Sponza export so F5 just works for local debugging.
+        input_path = "data/cryteksponza/sponza.obj";
+        output_path = "tmp/sponza_debug.budmesh";
+        page_size = 131072;
+        std::cout << "[BudAssetTool] No args; using debug default: "
+            << input_path << " -> " << output_path << std::endl;
     }
 
     std::cout << "[BudAssetTool] Processing glTF: " << input_path << " -> " << output_path << std::endl;

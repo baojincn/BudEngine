@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <limits>
 #include <mutex>
+#include <map>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <chrono>
@@ -33,6 +35,7 @@
 #ifdef BUD_ENABLE_AFTERMATH
 #include <GFSDK_Aftermath.h>
 #include <GFSDK_Aftermath_GpuCrashDump.h>
+#include <GFSDK_Aftermath_GpuCrashDumpDecoding.h>
 #endif
 
 using namespace bud::graphics;
@@ -55,6 +58,25 @@ struct VulkanPipelineObject {
 std::mutex aftermath_mutex;
 std::once_flag aftermath_enable_once;
 
+// Directory where shader debug info files are cached (so Nsight Graphics can
+// find them at analysis time). Matches the crash dump location.
+static std::filesystem::path g_shader_debug_dir;
+
+// Shader debug info identifier -> serialized blob cache.
+// Kept alive in case Nsight Graphics queries them after the fact.
+// GFSDK_Aftermath_ShaderDebugInfoIdentifier has no operator<, so provide a
+// custom comparator for use as a map key.
+struct ShaderDebugInfoIdentifierLess {
+    bool operator()(const GFSDK_Aftermath_ShaderDebugInfoIdentifier& a,
+                    const GFSDK_Aftermath_ShaderDebugInfoIdentifier& b) const {
+        if (a.id[0] != b.id[0]) return a.id[0] < b.id[0];
+        return a.id[1] < b.id[1];
+    }
+};
+
+static std::mutex g_shader_debug_cache_mutex;
+static std::map<GFSDK_Aftermath_ShaderDebugInfoIdentifier, std::vector<char>, ShaderDebugInfoIdentifierLess> g_shader_debug_cache;
+
 void gpu_crash_dump_callback(const void* pGpuCrashDump, const uint32_t gpuCrashDumpSize, void* /*pUserData*/) {
 	std::lock_guard lock(aftermath_mutex);
 
@@ -72,6 +94,50 @@ void gpu_crash_dump_callback(const void* pGpuCrashDump, const uint32_t gpuCrashD
 		file.write(reinterpret_cast<const char*>(pGpuCrashDump), gpuCrashDumpSize);
 		file.flush();
 	}
+
+	bud::print("[Aftermath] GPU crash dump saved to: {}", dump_path.string());
+}
+
+void shader_debug_info_callback(const void* pShaderDebugInfo, const uint32_t shaderDebugInfoSize, void* /*pUserData*/) {
+	// Extract the unique identifier for this shader debug info blob.
+	GFSDK_Aftermath_ShaderDebugInfoIdentifier identifier = {};
+	GFSDK_Aftermath_Result res = GFSDK_Aftermath_GetShaderDebugInfoIdentifier(
+		GFSDK_Aftermath_Version_API,
+		pShaderDebugInfo,
+		shaderDebugInfoSize,
+		&identifier);
+	if (res != GFSDK_Aftermath_Result_Success) {
+		return;
+	}
+
+	// Cache in memory so the JSON decoder / Nsight Graphics can look it up later.
+	{
+		std::lock_guard lock(g_shader_debug_cache_mutex);
+		g_shader_debug_cache[identifier].assign(
+			static_cast<const char*>(pShaderDebugInfo),
+			static_cast<const char*>(pShaderDebugInfo) + shaderDebugInfoSize);
+	}
+
+	// Also write to disk for offline analysis (Nsight Graphics can load these
+	// alongside the crash dump).
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	if (g_shader_debug_dir.empty()) {
+		g_shader_debug_dir = fs::current_path(ec) / "aftermath_dumps";
+	}
+	fs::create_directories(g_shader_debug_dir, ec);
+
+	char id_str[64];
+	snprintf(id_str, sizeof(id_str), "%016llx%016llx",
+		(unsigned long long)identifier.id[0],
+		(unsigned long long)identifier.id[1]);
+
+	fs::path debug_path = g_shader_debug_dir / ("shader_debug_" + std::string(id_str) + ".nv-shdebug");
+	std::ofstream file(debug_path, std::ios::binary);
+	if (file.is_open()) {
+		file.write(reinterpret_cast<const char*>(pShaderDebugInfo), shaderDebugInfoSize);
+		file.flush();
+	}
 }
 
 void enable_aftermath_crash_dumps() {
@@ -79,11 +145,13 @@ void enable_aftermath_crash_dumps() {
 		GFSDK_Aftermath_Result res = GFSDK_Aftermath_EnableGpuCrashDumps(
 			GFSDK_Aftermath_Version_API,
 			GFSDK_Aftermath_GpuCrashDumpWatchedApiFlags_Vulkan,
-			GFSDK_Aftermath_GpuCrashDumpFeatureFlags_Default,
+			// Use DeferDebugInfoCallbacks so the shader debug info callback is
+			// only invoked on actual GPU crash, not for every shader compilation.
+			GFSDK_Aftermath_GpuCrashDumpFeatureFlags_DeferDebugInfoCallbacks,
 			gpu_crash_dump_callback,
-			nullptr,
-			nullptr,
-			nullptr,
+			shader_debug_info_callback,   // <-- was nullptr, now saves debug info
+			nullptr,                       // description callback (optional)
+			nullptr,                       // resolve marker callback (optional)
 			nullptr);
 
 		if (res != GFSDK_Aftermath_Result_Success) {
@@ -130,6 +198,16 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	create_command_pool();
 	create_command_buffer();
 	create_sync_objects();
+
+	// 专用纹理上传命令池（graphics family，独立于每帧主池）
+	{
+		VkCommandPoolCreateInfo pool_info{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+		pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		pool_info.queueFamilyIndex = graphics_family_index_;
+		if (vkCreateCommandPool(device, &pool_info, nullptr, &texture_upload_pool_) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create texture upload command pool!");
+		}
+	}
 
 	// 初始化基础设施 (Subsystems)
 	// 接管内存、资源池、管线缓存、描述符分配
@@ -591,23 +669,38 @@ void VulkanRHI::cleanup() {
         if (frames[i].main_command_pool)
             vkDestroyCommandPool(device, frames[i].main_command_pool, nullptr);
 
-        // Async upload resources
-        if (frames[i].upload_timeline_semaphore)
-            vkDestroySemaphore(device, frames[i].upload_timeline_semaphore, nullptr);
-        if (frames[i].upload_command_pool)
-            vkDestroyCommandPool(device, frames[i].upload_command_pool, nullptr);
+        // Async compute resources
+        if (frames[i].async_command_pool)
+            vkDestroyCommandPool(device, frames[i].async_command_pool, nullptr);
+
+        if (frames[i].timestamp_pool) {
+            vkDestroyQueryPool(device, frames[i].timestamp_pool, nullptr);
+            frames[i].timestamp_pool = nullptr;
+        }
+    }
+
+    if (compute_timeline_semaphore) {
+        vkDestroySemaphore(device, compute_timeline_semaphore, nullptr);
+        compute_timeline_semaphore = nullptr;
     }
 
 
-
-    // Release any staging buffers whose async upload may not have been waited
-    // on (shutdown path).
-    for (auto& slot : pending_staging_buffers_) {
-        for (auto& b : slot)
-            destroy_buffer(b);
-        slot.clear();
+    // Release any in-flight async texture uploads (cb/staging/fence). The
+    // shared state is reference-counted per frame slot; clear all slots and
+    // let the shared_ptr deleters release resources exactly once.
+    for (auto& slot : pending_bindless_) {
+        for (auto& p : slot) {
+            if (p.state) {
+                vkWaitForFences(device, 1, &p.state->upload_fence, VK_TRUE, UINT64_MAX);
+            }
+        }
+        slot.clear(); // drops shared_ptr -> release_bindless_upload_state
     }
-    pending_staging_buffers_.clear();
+    pending_bindless_.clear();
+    if (texture_upload_pool_) {
+        vkDestroyCommandPool(device, texture_upload_pool_, nullptr);
+        texture_upload_pool_ = VK_NULL_HANDLE;
+    }
 
     if (memory_allocator)
         memory_allocator->cleanup();
@@ -675,14 +768,21 @@ void VulkanRHI::wait_idle() {
 bud::graphics::BufferHandle VulkanRHI::create_gpu_buffer(uint64_t size, bud::graphics::ResourceState usage_state) {
 	VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	buffer_info.size = size;
-	// Use CONCURRENT sharing when a dedicated copy queue exists so the async
-	// upload command buffer (copy queue) can write this buffer without
-	// queue-family ownership transfer barriers. pQueueFamilyIndices is filled
-	// below and must outlive vkCreateBuffer (vmaCreateBuffer copies it).
-	const uint32_t queue_family_indices[2] = { graphics_family_index_, copy_family_index_ };
+	// Use CONCURRENT sharing across graphics/copy/compute families so the async
+	// upload command buffer (copy queue) and async compute passes (compute
+	// queue) can access the buffer without queue-family ownership transfer
+	// barriers. pQueueFamilyIndices must outlive vmaCreateBuffer (it copies).
+	uint32_t queue_family_indices[3] = { graphics_family_index_, UINT32_MAX, UINT32_MAX };
+	uint32_t sharing_family_count = 1;
 	if (has_dedicated_copy_queue) {
+		queue_family_indices[sharing_family_count++] = copy_family_index_;
+	}
+	if (has_dedicated_compute_queue_) {
+		queue_family_indices[sharing_family_count++] = compute_family_index_;
+	}
+	if (sharing_family_count > 1) {
 		buffer_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
-		buffer_info.queueFamilyIndexCount = 2;
+		buffer_info.queueFamilyIndexCount = sharing_family_count;
 		buffer_info.pQueueFamilyIndices = queue_family_indices;
 	} else {
 		buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -1208,6 +1308,19 @@ void VulkanRHI::cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group
 CommandHandle VulkanRHI::begin_frame() {
 	vkWaitForFences(device, 1, &frames[current_frame].in_flight_fence, VK_TRUE, UINT64_MAX);
 
+	// Read back the previous submission's GPU frame time for this slot. The
+	// fence above guarantees the GPU finished it, so the timestamps are valid.
+	// Done AFTER current_stats.reset() (below) so the value survives.
+	float gpu_frame_ms = 0.0f;
+	if (timestamp_queries_supported_ && frames[current_frame].timestamp_pool && frames[current_frame].timestamp_ready) {
+		uint64_t ts[2] = { 0, 0 };
+		VkResult qr = vkGetQueryPoolResults(device, frames[current_frame].timestamp_pool, 0, 2,
+			sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+		if (qr == VK_SUCCESS && ts[1] > ts[0]) {
+			gpu_frame_ms = static_cast<float>((ts[1] - ts[0]) * timestamp_period_ns_ * 1e-6);
+		}
+	}
+
 	VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, frames[current_frame].image_available_semaphore, VK_NULL_HANDLE, &current_image_index);
 
 	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -1221,6 +1334,7 @@ CommandHandle VulkanRHI::begin_frame() {
 	vkResetFences(device, 1, &frames[current_frame].in_flight_fence);
 
 	current_stats.reset();
+	current_stats.gpu_render_time = gpu_frame_ms;
 
 	// 通知分配器新的一帧开始了 (重置 Linear Allocator)
 	memory_allocator->on_frame_begin(current_frame);
@@ -1234,11 +1348,21 @@ CommandHandle VulkanRHI::begin_frame() {
 	writer.write_buffer(0, frames[current_frame].uniform_buffer, VK_WHOLE_SIZE, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
 	writer.update_set(device, frames[current_frame].global_descriptor_set);
 
+	// Apply any finished async texture uploads to this frame's descriptor set
+	// (the set is not yet submitted, so the update is safe).
+	apply_pending_bindless();
+
 	vkResetCommandBuffer(frames[current_frame].main_command_buffer, 0);
 
 	VkCommandBufferBeginInfo begin_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
 	if (vkBeginCommandBuffer(frames[current_frame].main_command_buffer, &begin_info) != VK_SUCCESS) {
 		throw std::runtime_error("failed to begin recording command buffer!");
+	}
+
+	// GPU frame-time timestamps: reset the pool and record the frame start.
+	if (timestamp_queries_supported_ && frames[current_frame].timestamp_pool) {
+		vkCmdResetQueryPool(frames[current_frame].main_command_buffer, frames[current_frame].timestamp_pool, 0, 2);
+		vkCmdWriteTimestamp(frames[current_frame].main_command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, frames[current_frame].timestamp_pool, 0);
 	}
 
 	return frames[current_frame].main_command_buffer;
@@ -1247,28 +1371,36 @@ CommandHandle VulkanRHI::begin_frame() {
 void VulkanRHI::end_frame(CommandHandle cmd) {
 	VkCommandBuffer command_buffer = static_cast<VkCommandBuffer>(cmd);
 
+	// Record the end-of-frame timestamp (before vkEndCommandBuffer) so the
+	// query covers the whole main command buffer.
+	if (timestamp_queries_supported_ && frames[current_frame].timestamp_pool) {
+		vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, frames[current_frame].timestamp_pool, 1);
+		frames[current_frame].timestamp_ready = true;
+	}
+
 	if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS)
 		throw std::runtime_error("failed to record command buffer!");
 
 	VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-	// Wait on the per-frame upload semaphore if this frame recorded any async
-	// copies, so the main command buffer only starts after the upload cb is done.
+	// Wait on the async-compute timeline (if this frame recorded async compute)
+	// so the main command buffer is ordered after any compute output it reads.
+	// Value semantics: waiting on an already-reached value returns immediately.
 	VkSemaphore wait_semaphores[2] = {
 		frames[current_frame].image_available_semaphore,
-		frames[current_frame].upload_timeline_semaphore
+		compute_timeline_semaphore
 	};
 	VkPipelineStageFlags wait_stages[2] = {
 		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
 	};
 	uint32_t wait_count = 1;
-	uint64_t upload_wait_value = frames[current_frame].upload_timeline_value;
+	uint64_t compute_wait_value = compute_timeline_value;
 	// Vulkan requires waitSemaphoreValueCount == waitSemaphoreCount when any
 	// semaphore is a timeline. Provide a value for every semaphore (the binary
 	// image_available value is ignored).
-	uint64_t wait_values[2] = { 0, upload_wait_value };
+	uint64_t wait_values[2] = { 0, compute_wait_value };
 	VkTimelineSemaphoreSubmitInfo timeline_info{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
-	if (upload_pending_this_frame) {
+	if (async_compute_pending_this_frame) {
 		wait_count = 2;
 		timeline_info.waitSemaphoreValueCount = wait_count;
 		timeline_info.pWaitSemaphoreValues = wait_values;
@@ -1282,7 +1414,7 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	VkSemaphore signal_semaphores[] = { render_finished_semaphores[current_image_index] };
 	submit_info.signalSemaphoreCount = 1;
 	submit_info.pSignalSemaphores = signal_semaphores;
-	upload_pending_this_frame = false;
+	async_compute_pending_this_frame = false;
 
     VkResult submit_result = vkQueueSubmit(graphics_queue, 1, &submit_info, frames[current_frame].in_flight_fence);
     if (submit_result != VK_SUCCESS) {
@@ -1487,117 +1619,61 @@ void VulkanRHI::cmd_copy_buffer(CommandHandle cmd, bud::graphics::BufferHandle s
     vkCmdCopyBuffer(static_cast<VkCommandBuffer>(cmd), vk_src->buffer, vk_dst->buffer, 1, &copy_region);
 }
 
-CommandHandle VulkanRHI::begin_upload() {
-    if (frames.empty() || !frames[current_frame].upload_command_pool)
+CommandHandle VulkanRHI::begin_async_compute() {
+    if (frames.empty() || !frames[current_frame].async_command_pool)
         return nullptr;
 
-    // Wait until this frame slot's PREVIOUS upload has completed on the copy
-    // queue before reusing the staging ring / command buffer. Value-based:
-    // upload_timeline_value is the value signaled by the last end_upload of
-    // this slot, so this only blocks when the GPU is genuinely behind.
-    auto& frame = frames[current_frame];
-    if (frame.upload_timeline_semaphore) {
-        uint64_t wait_value = frame.upload_timeline_value;
-        VkSemaphoreWaitInfo wait_info{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
-        wait_info.semaphoreCount = 1;
-        wait_info.pSemaphores = &frame.upload_timeline_semaphore;
-        wait_info.pValues = &wait_value;
-        wait_info.flags = 0;
-        vkWaitSemaphores(device, &wait_info, UINT64_MAX);
-    }
-
-    // The GPU has finished reading the staging buffers uploaded in this frame
-    // slot's PREVIOUS round (timeline reached above), so their deferred
-    // release is now safe. This is per-slot: a slot's uploads are only released
-    // when the same slot is reused (frames_in_flight later).
-    if (current_frame < pending_staging_buffers_.size() && !pending_staging_buffers_[current_frame].empty()) {
-        for (auto& b : pending_staging_buffers_[current_frame])
-            destroy_buffer(b);
-        pending_staging_buffers_[current_frame].clear();
-    }
-
-    VkCommandBuffer cb = frames[current_frame].upload_command_buffer;
+    VkCommandBuffer cb = frames[current_frame].async_command_buffer;
     vkResetCommandBuffer(cb, 0);
 
     VkCommandBufferBeginInfo begin_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     if (vkBeginCommandBuffer(cb, &begin_info) != VK_SUCCESS) {
-        bud::eprint("[Vulkan] begin_upload: failed to begin upload command buffer");
+        bud::eprint("[Vulkan] begin_async_compute: failed to begin command buffer");
         return nullptr;
     }
-    upload_pending_this_frame = true;
+    async_recording_ = true;
     return cb;
 }
 
-void VulkanRHI::cmd_copy_buffer_async(CommandHandle cmd, bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) {
-    if (!cmd || !src.is_valid() || !dst.is_valid()) return;
-    auto* vk_src = static_cast<bud::graphics::vulkan::VulkanBuffer*>(src.internal_state);
-    auto* vk_dst = static_cast<bud::graphics::vulkan::VulkanBuffer*>(dst.internal_state);
-    if (!vk_src || !vk_dst || !vk_src->buffer || !vk_dst->buffer) return;
-
-    // Buffer is on the transfer queue; staging (src) is host-visible. When the
-    // destination is used by the graphics queue, ownership is handled by the
-    // semaphore chain + buffer barriers recorded by the consumer. No explicit
-    // transfer here: the copy is a pure transfer-queue operation.
-    VkBufferCopy copy_region{};
-    copy_region.srcOffset = src.offset + src_offset;
-    copy_region.dstOffset = dst.offset + dst_offset;
-    copy_region.size = size;
-    vkCmdCopyBuffer(static_cast<VkCommandBuffer>(cmd), vk_src->buffer, vk_dst->buffer, 1, &copy_region);
-}
-
-void VulkanRHI::end_upload(CommandHandle cmd) {
-    if (!cmd) return;
-    VkCommandBuffer cb = static_cast<VkCommandBuffer>(cmd);
+void VulkanRHI::end_async_compute() {
+    if (frames.empty() || !async_recording_) return;
+    VkCommandBuffer cb = frames[current_frame].async_command_buffer;
     if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
-        bud::eprint("[Vulkan] end_upload: failed to end upload command buffer");
+        bud::eprint("[Vulkan] end_async_compute: failed to end command buffer");
+        async_recording_ = false;
         return;
     }
+    async_recording_ = false;
 
-    VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &cb;
-
-    // Submit on the dedicated copy queue (falls back to the graphics queue).
-    // Destination buffers are created with VK_SHARING_MODE_CONCURRENT (graphics
-    // + copy family), so no queue-family ownership transfer is required; the
-    // timeline semaphore signal -> main cb wait provides the cross-queue memory
-    // dependency. Value semantics avoid the binary semaphore's stateful
-    // signal-must-be-waited requirement (which caused flicker on skipped waits).
-    auto& frame = frames[current_frame];
-    uint64_t signal_value = ++frame.upload_timeline_value;
+    uint64_t signal_value = ++compute_timeline_value;
     VkTimelineSemaphoreSubmitInfo timeline_info{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
     timeline_info.signalSemaphoreValueCount = 1;
     timeline_info.pSignalSemaphoreValues = &signal_value;
-    submit_info.pNext = &timeline_info;
-    submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores = &frame.upload_timeline_semaphore;
 
-    VkResult r = vkQueueSubmit(has_dedicated_copy_queue ? copy_queue : graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    submit_info.pNext = &timeline_info;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &cb;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &compute_timeline_semaphore;
+
+    VkResult r = vkQueueSubmit(compute_queue ? compute_queue : graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
     if (r != VK_SUCCESS) {
-        bud::eprint("[Vulkan] end_upload: vkQueueSubmit failed, result={}", (int)r);
+        bud::eprint("[Vulkan] end_async_compute: vkQueueSubmit failed, result={}", (int)r);
+    } else {
+        async_compute_pending_this_frame = true;
     }
 }
 
-void VulkanRHI::wait_upload_fence() {
-    // Wait until this frame slot's most recent upload completes on the copy
-    // queue (value-based).
-    if (frames.empty() || !frames[current_frame].upload_timeline_semaphore) return;
-    auto& frame = frames[current_frame];
-    uint64_t wait_value = frame.upload_timeline_value;
+void VulkanRHI::wait_compute_timeline(uint64_t value) {
+    if (!compute_timeline_semaphore) return;
     VkSemaphoreWaitInfo wait_info{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
     wait_info.semaphoreCount = 1;
-    wait_info.pSemaphores = &frame.upload_timeline_semaphore;
-    wait_info.pValues = &wait_value;
+    wait_info.pSemaphores = &compute_timeline_semaphore;
+    wait_info.pValues = &value;
     wait_info.flags = 0;
     vkWaitSemaphores(device, &wait_info, UINT64_MAX);
-}
-
-void VulkanRHI::defer_buffer_release(bud::graphics::BufferHandle buffer) {
-    if (!buffer.is_valid()) return;
-    if (pending_staging_buffers_.size() <= current_frame)
-        pending_staging_buffers_.resize(max_frames_in_flight);
-    pending_staging_buffers_[current_frame].push_back(buffer);
 }
 
 void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) {
@@ -1608,17 +1684,20 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle 
 		case RS::UnorderedAccess:
 			return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT };
 		case RS::IndirectArgument:
-			return { VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT };
+			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT };
 		case RS::ShaderResource:
-			return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT };
+			// ALL_COMMANDS so the barrier is valid on ANY queue (graphics,
+		// compute, copy). Async compute passes record these barriers on the
+		// compute command buffer, where graphics-only stages would be invalid.
+			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT };
 		case RS::VertexBuffer:
-			return { VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT, VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT };
+			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT };
 		case RS::IndexBuffer:
-			return { VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT, VK_ACCESS_2_INDEX_READ_BIT };
+			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_INDEX_READ_BIT };
 		case RS::TransferSrc:
-			return { VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT };
+			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_TRANSFER_READ_BIT };
 		case RS::TransferDst:
-			return { VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT };
+			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT };
 		default:
 			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT };
 		}
@@ -1938,20 +2017,29 @@ void VulkanRHI::pick_physical_device() {
 		vkGetPhysicalDeviceProperties(dev, &props);
 		if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
 			physical_device = dev;
-            bud::print("[Vulkan] Selected Discrete GPU: {}", props.deviceName);
-            // Record device API version (capability). Clamp to 1.4 maximum target.
-            device_api_version = std::min(props.apiVersion, VK_API_VERSION_1_4);
-            bud::print("[Vulkan] Physical device API version: {}.{}.{}", VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion));
+			bud::print("[Vulkan] Selected Discrete GPU: {}", props.deviceName);
+			// Record device API version (capability). Clamp to 1.4 maximum target.
+			device_api_version = std::min(props.apiVersion, VK_API_VERSION_1_4);
+			bud::print("[Vulkan] Physical device API version: {}.{}.{}", VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion));
 			break;
 		}
 	}
 	if (physical_device == nullptr) {
 		physical_device = devices[0];
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(physical_device, &props);
-        device_api_version = std::min(props.apiVersion, VK_API_VERSION_1_4);
-        bud::print("[Vulkan] Warning: Using Integrated/Fallback GPU.");
-        bud::print("[Vulkan] Physical device API version: {}.{}.{}", VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion));
+		VkPhysicalDeviceProperties props;
+		vkGetPhysicalDeviceProperties(physical_device, &props);
+		device_api_version = std::min(props.apiVersion, VK_API_VERSION_1_4);
+		bud::print("[Vulkan] Warning: Using Integrated/Fallback GPU.");
+		bud::print("[Vulkan] Physical device API version: {}.{}.{}", VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion));
+	}
+	{
+		// GPU frame-time timestamps (VkQueryPool per frame slot).
+		VkPhysicalDeviceProperties props;
+		vkGetPhysicalDeviceProperties(physical_device, &props);
+		timestamp_period_ns_ = props.limits.timestampPeriod;
+		timestamp_queries_supported_ = props.limits.timestampComputeAndGraphics == VK_TRUE;
+		bud::print("[Vulkan] Timestamp queries {}supported (period {:.2f} ns/tick)",
+			timestamp_queries_supported_ ? "" : "NOT ", timestamp_period_ns_);
 	}
 }
 
@@ -1961,6 +2049,8 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 	std::set<uint32_t> unique_families = { indices.graphics_family.value(), indices.present_family.value() };
 	if (indices.copy_family.has_value())
 		unique_families.insert(indices.copy_family.value());
+	if (indices.compute_family.has_value())
+		unique_families.insert(indices.compute_family.value());
 
 	// Keep the priority arrays alive until vkCreateDevice reads them. Use a
 	// vector of vectors (reserved up front) so each inner vector's data()
@@ -2097,6 +2187,20 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 			has_dedicated_copy_queue ? "yes" : "no");
 	}
 
+	compute_family_index_ = indices.compute_family.has_value() ? indices.compute_family.value() : graphics_family_index_;
+	if (indices.compute_family.has_value()) {
+		vkGetDeviceQueue(device, indices.compute_family.value(), indices.compute_queue_index, &compute_queue);
+		has_dedicated_compute_queue_ = (compute_queue != graphics_queue);
+	} else {
+		compute_queue = graphics_queue;
+		has_dedicated_compute_queue_ = false;
+	}
+	if (compute_queue) {
+		bud::print("[Vulkan] Compute queue {} (dedicated={})",
+			indices.compute_family.has_value() ? std::to_string(indices.compute_family.value()) : "alias-graphics",
+			has_dedicated_compute_queue_ ? "yes" : "no");
+	}
+
 	fpCmdPushDescriptorSetKHR = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR");
 	if (!fpCmdPushDescriptorSetKHR) {
 		bud::eprint("[Vulkan] Warning: vkCmdPushDescriptorSetKHR not found, compute bindings may fail!");
@@ -2198,15 +2302,14 @@ void VulkanRHI::create_command_pool() {
 			throw std::runtime_error("Failed to create main command pool!");
 		}
 
-		// The upload command buffer is submitted on the dedicated copy queue,
-		// so its command pool must come from the copy family (falls back to the
-		// graphics family when no dedicated transfer queue exists).
-		VkCommandPoolCreateInfo upload_pool_info{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
-		upload_pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-		upload_pool_info.queueFamilyIndex = copy_family_index_;
+		// Per-frame async compute command pool (compute family; graphics family
+		// fallback when no dedicated compute queue exists).
+		VkCommandPoolCreateInfo async_pool_info{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+		async_pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		async_pool_info.queueFamilyIndex = compute_family_index_;
 
-		if (vkCreateCommandPool(device, &upload_pool_info, nullptr, &frames[i].upload_command_pool) != VK_SUCCESS) {
-			throw std::runtime_error("Failed to create upload command pool!");
+		if (vkCreateCommandPool(device, &async_pool_info, nullptr, &frames[i].async_command_pool) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create async command pool!");
 		}
 	}
 }
@@ -2222,14 +2325,14 @@ void VulkanRHI::create_command_buffer() {
 			throw std::runtime_error("Failed to allocate command buffers!");
 		}
 
-		// Allocate the per-frame upload command buffer from its own pool.
-		VkCommandBufferAllocateInfo upload_alloc_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-		upload_alloc_info.commandPool = frames[i].upload_command_pool;
-		upload_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		upload_alloc_info.commandBufferCount = 1;
+		// Allocate the per-frame async compute command buffer.
+		VkCommandBufferAllocateInfo async_alloc_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+		async_alloc_info.commandPool = frames[i].async_command_pool;
+		async_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		async_alloc_info.commandBufferCount = 1;
 
-		if (vkAllocateCommandBuffers(device, &upload_alloc_info, &frames[i].upload_command_buffer) != VK_SUCCESS) {
-			throw std::runtime_error("Failed to allocate upload command buffer!");
+		if (vkAllocateCommandBuffers(device, &async_alloc_info, &frames[i].async_command_buffer) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to allocate async command buffer!");
 		}
 	}
 }
@@ -2250,31 +2353,38 @@ void VulkanRHI::create_sync_objects() {
 	VkSemaphoreCreateInfo timeline_semaphore_info{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
 	timeline_semaphore_info.pNext = &timeline_type_info;
 
+	VkQueryPoolCreateInfo query_pool_info{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+	query_pool_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+	query_pool_info.queryCount = 2; // frame start / frame end
+
 	for (int i = 0; i < max_frames_in_flight; i++) {
 		if (vkCreateSemaphore(device, &semaphore_info, nullptr, &frames[i].image_available_semaphore) != VK_SUCCESS ||
 			vkCreateFence(device, &fence_info, nullptr, &frames[i].in_flight_fence) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create synchronization objects for a frame!");
 		}
 
-		// Upload-side sync: a timeline semaphore signals upload completion on
-		// the copy queue. The main command buffer waits on the per-frame value;
-		// value semantics are immune to the binary semaphore's "signal must be
-		// waited before re-signal" requirement (which caused flicker when a
-		// frame skipped its upload wait).
-		if (vkCreateSemaphore(device, &timeline_semaphore_info, nullptr, &frames[i].upload_timeline_semaphore) != VK_SUCCESS) {
-			throw std::runtime_error("Failed to create upload timeline semaphore!");
+		if (timestamp_queries_supported_ &&
+			vkCreateQueryPool(device, &query_pool_info, nullptr, &frames[i].timestamp_pool) != VK_SUCCESS) {
+			bud::eprint("[Vulkan] Failed to create timestamp query pool for frame {}", i);
+			frames[i].timestamp_pool = nullptr;
 		}
-		frames[i].upload_timeline_value = 0;
-	}
 
-	render_finished_semaphores.resize(swapchain_images.size());
+		}
+
+		render_finished_semaphores.resize(swapchain_images.size());
 	for (size_t i = 0; i < swapchain_images.size(); ++i) {
 		if (vkCreateSemaphore(device, &semaphore_info, nullptr, &render_finished_semaphores[i]) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create render finished semaphores!");
 		}
 	}
 
+	// Async compute timeline semaphore (value-based, signals compute completion
+	// for the frame; graphics waits on the value before consuming compute output).
+	if (vkCreateSemaphore(device, &timeline_semaphore_info, nullptr, &compute_timeline_semaphore) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create compute timeline semaphore!");
 	}
+	compute_timeline_value = 0;
+}
 
 
 VkCommandBuffer VulkanRHI::begin_single_time_commands() {
@@ -2404,6 +2514,23 @@ QueueFamilyIndices VulkanRHI::find_queue_families(VkPhysicalDevice device) {
 		// Fall back to a second queue in the graphics family.
 		indices.copy_family = indices.graphics_family;
 		indices.copy_queue_index = 1;
+	}
+
+	// Dedicated async-compute family: VK_QUEUE_COMPUTE_BIT without
+	// VK_QUEUE_GRAPHICS_BIT. Enables real overlap between compute passes and
+	// graphics rendering. No fallback (compute shares graphics otherwise).
+	indices.compute_family.reset();
+	indices.compute_queue_index = 0;
+	for (uint32_t family = 0; family < queue_families.size(); ++family) {
+		const auto& qf = queue_families[family];
+		const VkQueueFlags flags = qf.queueFlags;
+		const bool is_pure_compute = (flags & VK_QUEUE_COMPUTE_BIT) != 0
+			&& (flags & VK_QUEUE_GRAPHICS_BIT) == 0;
+		if (is_pure_compute && qf.queueCount >= 1) {
+			indices.compute_family = family;
+			indices.compute_queue_index = 0;
+			break;
+		}
 	}
 
 	return indices;
@@ -2790,6 +2917,58 @@ void VulkanRHI::cmd_copy_image_to_buffer(CommandHandle cmd, bud::graphics::Textu
     );
 }
 
+// Dedicated (non-ring) host-visible staging buffer for ASYNC uploads. Unlike
+// alloc_staging (per-frame ring that on_frame_begin resets each frame), this
+// buffer lives until the caller releases it, so an async upload that spans
+// frames is never overwritten by the ring reuse.
+bud::graphics::BufferHandle VulkanRHI::create_dedicated_upload_buffer(uint64_t size) {
+	VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	buffer_info.size = size;
+	buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+	VmaAllocationCreateInfo alloc_info = {};
+	alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+	alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+	auto vma_allocator = get_memory_allocator()->get_vma_allocator();
+	auto* vk_buf = new VulkanBuffer();
+	VmaAllocationInfo alloc_result_info;
+	VkResult r = vmaCreateBuffer(vma_allocator, &buffer_info, &alloc_info, &vk_buf->buffer, &vk_buf->allocation, &alloc_result_info);
+	if (r != VK_SUCCESS) {
+		delete vk_buf;
+		std::string err = std::format("create_dedicated_upload_buffer vmaCreateBuffer failed: {}", (int)r);
+		bud::eprint("{}", err);
+#if defined(_DEBUG)
+		throw std::runtime_error(err);
+#else
+		return {};
+#endif
+	}
+
+	vk_buf->mapped_ptr = alloc_result_info.pMappedData;
+	vk_buf->size = size;
+	vk_buf->owns_allocation = true;
+	vk_buf->allocator = vma_allocator;
+	vk_buf->owning_allocator = dynamic_cast<VulkanMemoryAllocator*>(get_allocator());
+	bud::graphics::BufferHandle handle;
+	handle.internal_state = vk_buf;
+	// IMPORTANT: do NOT call vmaDestroyBuffer here AND let ~VulkanBuffer do it.
+	// VulkanBuffer::~VulkanBuffer() already destroys the allocation when
+	// owns_allocation is true (RAII); manually destroying it here then deleting
+	// the wrapper causes a DOUBLE FREE (crash in VmaDeviceMemoryBlock on the
+	// second destroy). Just delete the wrapper; the destructor handles it.
+	handle.owner = std::shared_ptr<void>(vk_buf, [mem_alloc = vk_buf->owning_allocator](void* p) {
+		auto* b = static_cast<VulkanBuffer*>(p);
+		if (mem_alloc) mem_alloc->unregister_allocation_buffer(b);
+		delete b;
+	});
+	handle.offset = 0;
+	handle.size = size;
+	handle.mapped_ptr = vk_buf->mapped_ptr;
+	return handle;
+}
+
 bud::graphics::BufferHandle VulkanRHI::create_upload_buffer(uint64_t size) {
     // Prefer allocating staging memory from the unified allocator (ring staging). Falls back inside allocator if needed.
     if (memory_allocator) {
@@ -2986,6 +3165,209 @@ bud::graphics::Texture* VulkanRHI::create_texture(const bud::graphics::TextureDe
 
 	tex->sampler = default_sampler;
 	return tex;
+}
+
+void VulkanRHI::record_texture_upload(VkCommandBuffer cb, class VulkanTexture* tex, VkBuffer staging_buf, uint64_t staging_offset, const TextureDesc& desc) {
+	VkFormat vk_format = to_vk_format(desc.format);
+
+	// 1. Transition base mip (and all levels) to TRANSFER_DST.
+	sync2::cmd_image_barrier2(cb, tex->image, VK_IMAGE_ASPECT_COLOR_BIT,
+		0, desc.mips, 0, 1,
+		VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+		VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+	// 2. Copy staging -> image level 0.
+	VkBufferImageCopy region{};
+	region.bufferOffset = staging_offset;
+	region.bufferRowLength = 0;
+	region.bufferImageHeight = 0;
+	region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	region.imageOffset = { 0, 0, 0 };
+	region.imageExtent = { desc.width, desc.height, 1 };
+	vkCmdCopyBufferToImage(cb, staging_buf, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+	// 3. Generate mips (same blit chain as generate_mipmaps).
+	int32_t mipWidth = static_cast<int32_t>(desc.width);
+	int32_t mipHeight = static_cast<int32_t>(desc.height);
+	for (uint32_t i = 1; i < desc.mips; ++i) {
+		// Level i-1: TRANSFER_DST -> TRANSFER_SRC
+		sync2::cmd_image_barrier2(cb, tex->image, VK_IMAGE_ASPECT_COLOR_BIT,
+			i - 1, 1, 0, 1,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+			VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+
+		// Level i: UNDEFINED -> TRANSFER_DST
+		sync2::cmd_image_barrier2(cb, tex->image, VK_IMAGE_ASPECT_COLOR_BIT,
+			i, 1, 0, 1,
+			VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+			VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+		// Blit i-1 -> i
+		VkImageBlit blit{};
+		blit.srcOffsets[0] = { 0, 0, 0 };
+		blit.srcOffsets[1] = { mipWidth, mipHeight, 1 };
+		blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, 1 };
+		blit.dstOffsets[0] = { 0, 0, 0 };
+		blit.dstOffsets[1] = { mipWidth > 1 ? mipWidth / 2 : 1, mipHeight > 1 ? mipHeight / 2 : 1, 1 };
+		blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1 };
+		vkCmdBlitImage(cb, tex->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+
+		// Level i-1 -> SHADER_READ_ONLY
+		sync2::cmd_image_barrier2(cb, tex->image, VK_IMAGE_ASPECT_COLOR_BIT,
+			i - 1, 1, 0, 1,
+			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+			VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+
+		if (mipWidth > 1) mipWidth /= 2;
+		if (mipHeight > 1) mipHeight /= 2;
+	}
+
+	// 4. Final level -> SHADER_READ_ONLY.
+	sync2::cmd_image_barrier2(cb, tex->image, VK_IMAGE_ASPECT_COLOR_BIT,
+		desc.mips - 1, 1, 0, 1,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+		VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+}
+
+bud::graphics::Texture* VulkanRHI::create_texture_async(const bud::graphics::TextureDesc& desc, const void* initial_data, uint64_t size, uint32_t bindless_slot) {
+	auto tex = dynamic_cast<VulkanTexture*>(resource_pool->acquire_texture(desc));
+	tex->width = desc.width;
+	tex->height = desc.height;
+	tex->format = desc.format;
+	tex->mips = desc.mips;
+	tex->array_layers = desc.array_layers;
+	tex->sampler = default_sampler;
+
+	if (!initial_data || size == 0) return tex;
+
+	// Use a DEDICATED staging buffer (not the per-frame ring) so the upload can
+	// span frames without being overwritten by the ring's per-frame reset.
+	bud::graphics::BufferHandle staging = this->create_dedicated_upload_buffer(size);
+	if (!staging.is_valid() || !staging.mapped_ptr) {
+		bud::eprint("[Vulkan] create_texture_async: staging alloc failed");
+		return tex;
+	}
+	std::memcpy(staging.mapped_ptr, initial_data, size);
+	auto* vk_staging = static_cast<VulkanBuffer*>(staging.internal_state);
+
+	// Allocate a one-time command buffer from the dedicated texture upload pool
+	// (graphics family) and record the transfer + mips, then submit without
+	// blocking the main render queue. (Mip generation uses vkCmdBlitImage which
+	// needs graphics.)
+	VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+	ai.commandPool = texture_upload_pool_;
+	ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	ai.commandBufferCount = 1;
+	VkCommandBuffer cb = VK_NULL_HANDLE;
+	if (vkAllocateCommandBuffers(device, &ai, &cb) != VK_SUCCESS) {
+		bud::eprint("[Vulkan] create_texture_async: vkAllocateCommandBuffers failed");
+		this->destroy_buffer(staging);
+		return tex;
+	}
+
+	VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	if (vkBeginCommandBuffer(cb, &bi) != VK_SUCCESS) {
+		bud::eprint("[Vulkan] create_texture_async: vkBeginCommandBuffer failed");
+		vkFreeCommandBuffers(device, texture_upload_pool_, 1, &cb);
+		this->destroy_buffer(staging);
+		return tex;
+	}
+
+	record_texture_upload(cb, tex, vk_staging->buffer, staging.offset, desc);
+	vkEndCommandBuffer(cb);
+
+	VkFenceCreateInfo fi{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+	VkFence fence = VK_NULL_HANDLE;
+	if (vkCreateFence(device, &fi, nullptr, &fence) != VK_SUCCESS) {
+		bud::eprint("[Vulkan] create_texture_async: vkCreateFence failed");
+		vkFreeCommandBuffers(device, texture_upload_pool_, 1, &cb);
+		this->destroy_buffer(staging);
+		return tex;
+	}
+
+	VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &cb;
+	VkResult r = vkQueueSubmit(graphics_queue, 1, &si, fence);
+	if (r != VK_SUCCESS) {
+		bud::eprint("[Vulkan] create_texture_async: vkQueueSubmit failed, result={}", (int)r);
+		vkDestroyFence(device, fence, nullptr);
+		vkFreeCommandBuffers(device, texture_upload_pool_, 1, &cb);
+		this->destroy_buffer(staging);
+		return tex;
+	}
+
+	// Bind the slot once the upload finishes (checked at frame begin).
+	queue_bindless_update(bindless_slot, tex, fence, cb, staging);
+	return tex;
+}
+
+void VulkanRHI::release_bindless_upload_state(BindlessUploadState* s) {
+	if (!s) return;
+	// Release once when the LAST frame slot drops its shared_ptr.
+	if (s->cb)
+		vkFreeCommandBuffers(device, texture_upload_pool_, 1, &s->cb);
+	if (s->staging.is_valid())
+		destroy_buffer(s->staging);
+	if (s->upload_fence)
+		vkDestroyFence(device, s->upload_fence, nullptr);
+}
+
+void VulkanRHI::queue_bindless_update(uint32_t slot, Texture* tex, VkFence fence, VkCommandBuffer cb, bud::graphics::BufferHandle staging) {
+	std::lock_guard lock(pending_bindless_mutex_);
+	if (pending_bindless_.size() < max_frames_in_flight)
+		pending_bindless_.resize(max_frames_in_flight);
+
+	// Fallback binding: state == null (already ready, no resources to free).
+	std::shared_ptr<BindlessUploadState> state;
+	if (fence != VK_NULL_HANDLE) {
+		auto* raw = new BindlessUploadState{ fence, cb, staging };
+		state = std::shared_ptr<BindlessUploadState>(raw, [this](BindlessUploadState* s) {
+			release_bindless_upload_state(s);
+			delete s;
+		});
+	}
+	PendingBindless p{ slot, tex, std::move(state) };
+	for (auto& slot_pending : pending_bindless_)
+		slot_pending.push_back(p);
+}
+
+void VulkanRHI::queue_bindless_fallback(uint32_t slot, Texture* tex) {
+	// Bind the fallback at the frame boundary (state = null => already ready).
+	// Safe even when other frames' descriptor sets are in flight.
+	queue_bindless_update(slot, tex, VK_NULL_HANDLE, VK_NULL_HANDLE, bud::graphics::BufferHandle{});
+}
+
+void VulkanRHI::apply_pending_bindless() {
+	if (frames.empty() || current_frame >= pending_bindless_.size()) return;
+	std::lock_guard lock(pending_bindless_mutex_);
+	auto& pending = pending_bindless_[current_frame];
+	for (auto it = pending.begin(); it != pending.end();) {
+		// state == null means "already ready" (fallback); otherwise the upload
+		// fence must have signaled.
+		bool done = (it->state == nullptr);
+		if (!done) {
+			VkResult st = vkGetFenceStatus(device, it->state->upload_fence);
+			done = (st == VK_SUCCESS);
+		}
+		if (done) {
+			// Bind the texture to this (current, unsubmitted) set at the frame
+			// boundary — never while a set is bound to in-flight GPU work.
+			// Resources (fence/cb/staging) are freed by the shared state when
+			// the last frame slot is erased.
+			update_bindless_texture_current_frame(it->slot, it->tex);
+			it = pending.erase(it);
+		} else {
+			++it;
+		}
+	}
 }
 
 void VulkanRHI::update_bindless_texture(uint32_t index, bud::graphics::Texture* texture) {

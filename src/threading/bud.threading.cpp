@@ -366,36 +366,55 @@ void TaskScheduler::submit_main_thread_task(std::move_only_function<void()> work
 }
 
 void TaskScheduler::wait_for_counter(Counter& counter, std::function<void()> on_idle) {
-	if (counter.value.load(std::memory_order_acquire) == 0)
-		return;
-
 	if (t_current_fiber) {
-		t_current_fiber->pending_wait_counter = &counter; // Only flag here
-		bud_switch_context(&t_current_fiber->rsp, t_worker_rsp);
-	}
-	else {
-		const size_t my_idx = clamp_worker_index(t_worker_index, workers.size());
-		while (counter.value.load(std::memory_order_acquire) > 0) {
-			if (on_idle)
-				on_idle();
-
-			Fiber* f = nullptr;
-
-			auto opt = workers[my_idx]->queue.pop();
-			if (opt)
-				f = *opt;
-
-			if (!f)
-				f = steal_task(my_idx);
-
-			if (f) {
-				execute_task(f);
+		// Fiber path: park on the counter's waiting list while value > 0. When
+		// the final task detaches the list it wakes us; the value is either
+		// still -1 (draining) or already 0, both handled by the loop below.
+		while (counter.value.load(std::memory_order_acquire) != 0) {
+			int v = counter.value.load(std::memory_order_acquire);
+			if (v > 0) {
+				t_current_fiber->pending_wait_counter = &counter; // Only flag here
+				bud_switch_context(&t_current_fiber->rsp, t_worker_rsp);
 			}
 			else {
+				// v == -1: the final task is still draining (waking parked
+				// fibers); it will publish 0 right after. Spin so we do not
+				// destroy this Counter (on our stack) while it is in use.
 				std::this_thread::yield();
 			}
 		}
+		return;
 	}
+
+	// Main-thread path: run tasks until the counter is satisfied.
+	const size_t my_idx = clamp_worker_index(t_worker_index, workers.size());
+	while (counter.value.load(std::memory_order_acquire) > 0) {
+		if (on_idle)
+			on_idle();
+
+		Fiber* f = nullptr;
+
+		auto opt = workers[my_idx]->queue.pop();
+		if (opt)
+			f = *opt;
+
+		if (!f)
+			f = steal_task(my_idx);
+
+		if (f) {
+			execute_task(f);
+		}
+		else {
+			std::this_thread::yield();
+		}
+	}
+
+	// value is now 0 (finished) or -1 (the final task is still waking parked
+	// fibers). Wait for the drain to publish 0 before returning so this Counter
+	// (typically a stack object owned by this caller) is not destroyed while
+	// the final task still references it.
+	while (counter.value.load(std::memory_order_acquire) != 0)
+		std::this_thread::yield();
 }
 
 
@@ -433,22 +452,41 @@ void TaskScheduler::fiber_entry_stub(Fiber* f_dummy) {
 
 	// Process dependencies
 	if (self->signal_counter) {
-		auto prev = self->signal_counter->value.fetch_sub(1, std::memory_order_acq_rel);
-		if (prev == 1) {
-			auto waiting_head = self->signal_counter->waiting_list.exchange(nullptr, std::memory_order_acquire);
-
-			while (waiting_head) {
-				auto next = waiting_head->next_waiting;
-				waiting_head->next_waiting = nullptr;
-				if (waiting_head->target_thread_index != -1) {
-					auto tidx = clamp_worker_index(waiting_head->target_thread_index, scheduler->workers.size());
-					std::lock_guard lock(scheduler->workers[tidx]->pinned_mtx);
-					scheduler->workers[tidx]->pinned_queue.push_back(waiting_head);
-				} else {
-					auto idx = clamp_worker_index(t_worker_index, scheduler->workers.size());
-					scheduler->workers[idx]->queue.push(waiting_head);
+		auto& c = *self->signal_counter;
+		// Decrement the task counter with a CAS protocol that gives the final
+		// task a "draining" window (value == -1) between detaching the waiting
+		// list and publishing 0. wait_for_counter treats -1 as "still draining",
+		// so a caller never destroys the Counter while the final task still
+		// references it (fixes a use-after-free of stack Counter objects).
+		int v = c.value.load(std::memory_order_acquire);
+		while (v > 0) {
+			if (v == 1) {
+				int expected = 1;
+				if (c.value.compare_exchange_weak(expected, -1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+					// Last task: wake every parked fiber, then publish 0.
+					auto waiting_head = c.waiting_list.exchange(nullptr, std::memory_order_acquire);
+					while (waiting_head) {
+						auto next = waiting_head->next_waiting;
+						waiting_head->next_waiting = nullptr;
+						if (waiting_head->target_thread_index != -1) {
+							auto tidx = clamp_worker_index(waiting_head->target_thread_index, scheduler->workers.size());
+							std::lock_guard lock(scheduler->workers[tidx]->pinned_mtx);
+							scheduler->workers[tidx]->pinned_queue.push_back(waiting_head);
+						} else {
+							auto idx = clamp_worker_index(t_worker_index, scheduler->workers.size());
+							scheduler->workers[idx]->queue.push(waiting_head);
+						}
+						waiting_head = next;
+					}
+					c.value.store(0, std::memory_order_release);
+					break;
 				}
-				waiting_head = next;
+				v = expected; // CAS lost; retry with the fresh value
+			}
+			else {
+				if (c.value.compare_exchange_weak(v, v - 1, std::memory_order_acq_rel, std::memory_order_acquire))
+					break; // not the last task
+				// else retry with the updated v
 			}
 		}
 	}
@@ -479,7 +517,11 @@ void TaskScheduler::execute_task(Fiber* f) {
 			old_head, f,
 			std::memory_order_release, std::memory_order_relaxed));
 
-		if (c->value.load(std::memory_order_acquire) == 0) {
+		// value <= 0 covers both "finished" (0) and "final task still draining"
+		// (-1). In the -1 case the final task also drains via exchange; the two
+		// races resolve atomically, and if we inserted after its exchange we must
+		// wake ourselves here or we would be stranded on the list.
+		if (c->value.load(std::memory_order_acquire) <= 0) {
 			auto wake_list = c->waiting_list.exchange(nullptr, std::memory_order_acquire);
 			while (wake_list) {
 				auto next = wake_list->next_waiting;

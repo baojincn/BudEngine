@@ -62,7 +62,8 @@ namespace bud::graphics {
 			uint32_t register_page_backed_mesh(uint32_t page_index, uint32_t meshlet_count,
 				uint32_t index_count, const bud::math::AABB& aabb,
 				uint32_t vertex_data_offset = 0, uint32_t index_data_offset = 0,
-				const std::vector<PageSubMesh>& submeshes = {});
+				const std::vector<PageSubMesh>& submeshes = {},
+				const std::vector<std::pair<uint32_t, uint32_t>>& lod_index_ranges = {});
 
 			// Reserves a bindless texture slot, binds the fallback immediately, and
 			// queues an async texture upload. Returns the bindless slot (>= 1) to use
