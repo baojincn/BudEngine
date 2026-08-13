@@ -63,6 +63,11 @@ void TriangleApp::on_init(const AppConfig& config) {
 	render_config.cascade_count = 4;
 	render_config.cascade_split_lambda = 0.5;
 	render_config.debug_cascades = false;
+	// CPU-driven path: page-backed streaming is validated via the CPU indirect
+	// path (GPU-driven meshlet rendering would need per-page meshlet GPU data
+	// that streaming does not upload yet).
+	render_config.enable_gpu_driven = false;
+	render_config.enable_meshlets = false;
 	renderer->set_config(render_config);
 
 	// 2. Load Scene Data-Driven
@@ -75,7 +80,9 @@ void TriangleApp::on_init(const AppConfig& config) {
 				bud::print("[TriangleApp] Scene file parsed. Entities found: {}", scene.entities.size());
 
 				// Count pending mesh loads
-				// Route .budmesh.json assets through streaming
+				// Route streamed assets: legacy page-streaming uses .budmesh.json
+				// (JSON metadata + .bin); the new UE5-aligned single-file layout also
+				// uses the .budmesh extension (magic "BNNT", distinguished at load).
 				for (auto& e : scene.entities) {
 					if (!e.asset_path.empty() && e.asset_path.ends_with(".budmesh.json")) {
 						if (streaming_manager)
@@ -85,11 +92,16 @@ void TriangleApp::on_init(const AppConfig& config) {
 						// page-registered entity (which would render the same mesh).
 						e.mesh_index = bud::asset::INVALID_INDEX;
 					}
+					else if (!e.asset_path.empty() && e.asset_path.ends_with(".budmesh") && !e.asset_path.ends_with(".budmesh.json")) {
+						if (streaming_manager)
+							streaming_manager->register_budnanite_async(e.asset_path);
+						e.mesh_index = bud::asset::INVALID_INDEX;
+					}
 				}
 
 				int count = 0;
 				for (auto& e : scene.entities)
-					if (!e.asset_path.empty() && !e.asset_path.ends_with(".budmesh.json"))
+					if (!e.asset_path.empty() && !e.asset_path.ends_with(".budmesh.json") && !(e.asset_path.ends_with(".budmesh") && !e.asset_path.ends_with(".budmesh.json")))
 						++count;
 
 				pending_mesh_loads->store(count);
@@ -101,7 +113,7 @@ void TriangleApp::on_init(const AppConfig& config) {
 
 				for (size_t i = 0; i < scene.entities.size(); ++i) {
 					const auto asset_path = scene.entities[i].asset_path;
-						if (asset_path.empty() || asset_path.ends_with(".budmesh.json")) continue;
+						if (asset_path.empty() || asset_path.ends_with(".budmesh.json") || (asset_path.ends_with(".budmesh") && !asset_path.ends_with(".budmesh.json"))) continue;
 
 					asset_manager->load_mesh_async(asset_path, [this, engine, renderer, pending_mesh = pending_mesh_loads, asset_path, i](bud::io::MeshData mesh) mutable {
 						auto mesh_handle = renderer->upload_mesh(mesh);

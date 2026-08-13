@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vector>
 #include <mutex>
@@ -139,6 +139,10 @@ namespace bud::graphics {
 	
 	class MainPass : public RenderPass {
 	public:
+		void* pipeline_wireframe = nullptr;
+		bool is_ready() const { return pipeline != nullptr && pipeline_wireframe != nullptr; }
+		void shutdown(RHI* rhi) override;
+
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		void add_to_graph(RenderGraph& rg, RGHandle shadow_map, RGHandle backbuffer, RGHandle depth_buffer,
 			const RenderScene& render_scene,

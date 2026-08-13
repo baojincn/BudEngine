@@ -1,6 +1,6 @@
 {
     "name":  "Sponza Page-Streaming Test",
-    "ambient_strength":  0.1,
+    "ambient_strength":  0.35,
     "directional_light":  {
                               "color":  [
                                             1.0,
@@ -16,7 +16,7 @@
                           },
     "entities":  [
                      {
-                         "asset_path":  "data/meshlets/sponza_page.budmesh.json",
+                         "asset_path":  "data/cryteksponza/sponza.budmesh",
                          "is_active":  true,
                          "is_static":  true,
                          "material_index":  0,
@@ -48,7 +48,7 @@
                                          100,
                                          0
                                      ],
-                        "yaw":  0,
+                        "yaw":  -90.0,
                         "zoom":  45.0,
                         "speed":  50.0,
                         "sensitivity":  0.1

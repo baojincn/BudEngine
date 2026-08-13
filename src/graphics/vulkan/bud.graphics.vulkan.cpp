@@ -1,4 +1,4 @@
-﻿#include <vector>
+#include <vector>
 #include <string>
 #include <iostream>
 #include <optional>
@@ -1040,6 +1040,7 @@ void* VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& desc) {
 	key.depth_bias_enable = desc.enable_depth_bias;
 	key.blending_enable = desc.blending_enable;
 	key.vertex_layout = desc.vertex_layout;
+	key.wireframe = desc.wireframe;
 
 	switch (desc.depth_compare_op) {
 	case CompareOp::Less: key.depth_compare_op = VK_COMPARE_OP_LESS; break;
@@ -1329,11 +1330,7 @@ CommandHandle VulkanRHI::begin_frame() {
 	}
 	else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
 		throw std::runtime_error("failed to acquire swap chain image!");
-	}
-
-	vkResetFences(device, 1, &frames[current_frame].in_flight_fence);
-
-	current_stats.reset();
+	}	current_stats.reset();
 	current_stats.gpu_render_time = gpu_frame_ms;
 
 	// 通知分配器新的一帧开始了 (重置 Linear Allocator)
@@ -1416,6 +1413,7 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	submit_info.pSignalSemaphores = signal_semaphores;
 	async_compute_pending_this_frame = false;
 
+	vkResetFences(device, 1, &frames[current_frame].in_flight_fence);
     VkResult submit_result = vkQueueSubmit(graphics_queue, 1, &submit_info, frames[current_frame].in_flight_fence);
     if (submit_result != VK_SUCCESS) {
         std::string err = std::format("VulkanRHI::end_frame vkQueueSubmit failed: {}", (int)submit_result);
@@ -1789,7 +1787,7 @@ void VulkanRHI::cmd_bind_vertex_buffer(CommandHandle cmd, bud::graphics::BufferH
     vkCmdBindVertexBuffers(static_cast<VkCommandBuffer>(cmd), 0, 1, &vk_buf->buffer, offsets);
 }
 
-void VulkanRHI::cmd_bind_index_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer) {
+void VulkanRHI::cmd_bind_index_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer, bool is_u16) {
     if (!buffer.is_valid()) {
         std::string err = std::format("cmd_bind_index_buffer invalid BufferHandle: valid={} offset={} size={}", buffer.is_valid(), buffer.offset, buffer.size);
         bud::eprint("{}", err);
@@ -1813,7 +1811,7 @@ void VulkanRHI::cmd_bind_index_buffer(CommandHandle cmd, bud::graphics::BufferHa
     // Diagnostic: log index bind info
     //bud::print("[Vulkan][bind_index] VkBuffer={} byteOffset={} mapped_ptr={}", (void*)vk_buf->buffer, (uint64_t)buffer.offset, vk_buf->mapped_ptr);
 
-    vkCmdBindIndexBuffer(static_cast<VkCommandBuffer>(cmd), vk_buf->buffer, static_cast<VkDeviceSize>(buffer.offset), VK_INDEX_TYPE_UINT32);
+    vkCmdBindIndexBuffer(static_cast<VkCommandBuffer>(cmd), vk_buf->buffer, static_cast<VkDeviceSize>(buffer.offset), is_u16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
 }
 
 void VulkanRHI::cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) {

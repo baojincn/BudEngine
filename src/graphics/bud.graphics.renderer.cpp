@@ -1,4 +1,4 @@
-﻿#include <memory>
+#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -122,7 +122,8 @@ namespace bud::graphics {
 		uint32_t index_count, const bud::math::AABB& aabb,
 		uint32_t vertex_data_offset, uint32_t index_data_offset,
 		const std::vector<PageSubMesh>& page_submeshes,
-		const std::vector<std::pair<uint32_t, uint32_t>>& lod_index_ranges)
+		const std::vector<std::pair<uint32_t, uint32_t>>& lod_index_ranges,
+		const float lod_errors[3])
 	{
 		std::scoped_lock lock(mesh_mutex, mesh_bounds_mutex);
 
@@ -140,6 +141,20 @@ namespace bud::graphics {
 			bud::math::vec3 center = (aabb.min + aabb.max) * 0.5f;
 			float radius = bud::math::length(aabb.max - center);
 			mesh.sphere = bud::math::BoundingSphere(center, radius);
+		}
+
+		// Per-LOD object-space error for CPU-driven screen-space LOD selection.
+		// Missing levels keep FLT_MAX (never selected); LOD0 error is 0.
+		if (lod_errors) {
+			for (int i = 0; i < 3; ++i)
+				mesh.lod_error[i] = lod_errors[i];
+		}
+		else {
+			// No per-LOD errors provided (should not happen for new-layout
+			// pages): stay at full detail (LOD0).
+			mesh.lod_error[0] = 0.0f;
+			mesh.lod_error[1] = FLT_MAX;
+			mesh.lod_error[2] = FLT_MAX;
 		}
 
 		// Per-LOD index ranges (page-local). Kept so the shadow path can draw a
@@ -193,11 +208,21 @@ namespace bud::graphics {
 			mesh_bounds.resize(mesh_id + 1);
 		mesh_bounds[mesh_id] = aabb;
 
-		gpu_scene.set_mesh_geometry(mesh_id, (page_index * GPUScene::PagePool::kPageSize + index_data_offset) / 4,
-			(page_index * GPUScene::PagePool::kPageSize + vertex_data_offset) / 48);
+		gpu_scene.set_mesh_geometry(mesh_id, static_cast<uint32_t>((page_index * GPUScene::PagePool::kPageSize + index_data_offset) / sizeof(uint16_t)), 0);
 
-		//bud::print("[Renderer] Registered page-backed mesh_id={} page_index={} meshlets={}",
-		//	mesh_id, page_index, meshlet_count);
+		// TEMP DIAGNOSTIC: first few page meshes
+		//if (mesh_id < 4) {
+		//	bud::print("[Reg dbg] mesh {} page {} vcnt={} voff={} ioff={} first_idx={} vert_off={} submeshes={}",
+		//		mesh_id, page_index, meshlet_count, vertex_data_offset, index_data_offset,
+		//		(page_index * GPUScene::PagePool::kPageSize + index_data_offset) / 4,
+		//		(page_index * GPUScene::PagePool::kPageSize + vertex_data_offset) / 48,
+		//		mesh.submeshes.size());
+		//	for (const auto& s : mesh.submeshes) {
+		//		if (s.lod_level < 3)
+		//			bud::print("[Reg dbg]   sub lod {} istart {} icount {} mat {}",
+		//				s.lod_level, s.index_start, s.index_count, s.material_id);
+		//	}
+		//}
 		return mesh_id;
 	}
 
@@ -635,10 +660,18 @@ namespace bud::graphics {
 			const auto& visible_instances = culled_results[0];
 			visible_instance_count = visible_instances.size();
 			total_draw_count = 0;
+			// TEMP DIAGNOSTIC
+			{
+				static int dc = 0;
+				if (dc < 8)
+					bud::print("[R dbg2] frame {} visible_instances={} total_scene_inst={} meshes={}",
+						dc++, visible_instances.size(), instance_count, meshes.size());
+			}
 			std::vector<uint32_t> draw_offsets(visible_instance_count + 1);
 			for (size_t k = 0; k < visible_instance_count; ++k) {
 				uint32_t i = visible_instances[k];
 				uint32_t mesh_id = render_scene.mesh_indices[i];
+				if (mesh_id >= meshes.size()) continue;
 				const auto& mesh = meshes[mesh_id];
 				uint32_t sub_idx = render_scene.submesh_indices[i];
 
@@ -690,26 +723,32 @@ namespace bud::graphics {
 						depth_key = static_cast<uint32_t>(depth_normalized * 0x3FFFF);
 
 						// CPU-driven page LOD: pick one LOD level per page per
-						// frame by screen-space error (Nanite-style threshold).
+						// frame by screen-space error (Nanite-style threshold),
+						// using the page's real per-LOD cluster errors (not the
+						// legacy fixed 1e-3/5e-3 thresholds, which are the wrong
+						// magnitude for the new layout and would always pick the
+						// coarsest level on large scenes).
 						uint32_t page_lod = 0;
 						if (mesh.is_page_backed) {
 							float dist = bud::math::length(scene_view.camera_position - mesh.sphere.center);
 							float focal = scene_view.proj_matrix[1][1] * scene_view.viewport_height * 0.5f;
 							page_lod = select_page_lod(dist, mesh.sphere.radius, focal,
-								render_config.lod_error_lod1, render_config.lod_error_lod2, render_config.lod_error_threshold_px);
+								mesh.lod_error[1], mesh.lod_error[2], render_config.lod_error_threshold_px);
 						}
 
-						if (sub_idx_original != bud::asset::INVALID_INDEX) {
+						// Page-backed meshes always go through the explode path below:
+						// their scene entities carry submesh_indices=0 by default, but
+						// a page has one submesh per (LOD, material) run and the LOD
+						// must be selected per frame by screen error. Locking to
+						// submesh[0] would drop every LOD != submesh[0].level (all
+						// draws skipped -> zero triangles) or draw the wrong LOD.
+						if (sub_idx_original != bud::asset::INVALID_INDEX && !mesh.is_page_backed) {
 							auto& item = sort_list[draw_start];
 							item.entity_index = (uint32_t)i;
 							item.submesh_index = sub_idx_original;
 
 							if (sub_idx_original < mesh.submeshes.size()) {
 								const auto& sub = mesh.submeshes[sub_idx_original];
-								if (mesh.is_page_backed && sub.lod_level != page_lod) {
-									item.key = UINT64_MAX;
-									continue;
-								}
 								auto world_sub_aabb = sub.aabb.transform(world_matrix);
 								if (!bud::math::intersect_aabb_frustum(world_sub_aabb, main_camera_frustum)) {
 									item.key = UINT64_MAX;
@@ -776,6 +815,10 @@ namespace bud::graphics {
 			auto end_it = std::remove_if(sort_list.begin(), sort_list.begin() + total_draw_count, [](const SortItem& a) { return a.key == UINT64_MAX; });
 			sort_list.erase(end_it, sort_list.end()); // REMOVES INVALID ITEMS!
 			visible_count = sort_list.size();
+			// TEMP DIAGNOSTIC
+			static int diag_frames = 0;
+			if (diag_frames < 5)
+				bud::print("[R dbg] frame {} total_draw={} visible={} inst={}", diag_frames++, total_draw_count, visible_count, instance_count);
 
 			for (; split_index < visible_count; ++split_index) {
 				if ((sort_list[split_index].key >> 60) == 1) {
@@ -934,6 +977,7 @@ namespace bud::graphics {
 					else {
 						inst_mapped[i].material_id = render_scene.material_indices[entity_idx];
 					}
+					inst_mapped[i].page_slot = mesh.is_page_backed ? mesh.page_index : ~0u;
 				}
 				// Write per-frame instance data directly into the host-visible
 				// mapped buffer (avoids async staging/upload cross-queue timing).
@@ -967,7 +1011,7 @@ namespace bud::graphics {
 							const auto& sub = mesh.submeshes[item.submesh_index];
 							mapped[i].indexCount = sub.index_count;
 							mapped[i].firstIndex = mesh_geometry.first_index + sub.index_start;
-							mapped[i].vertexOffset = mesh_geometry.vertex_offset;
+							mapped[i].vertexOffset = mesh.is_page_backed ? 0 : mesh_geometry.vertex_offset;
 							mapped[i].materialId = sub.material_id;
 							mapped[i].meshId = mesh_id;
 
@@ -984,7 +1028,7 @@ namespace bud::graphics {
 						else {
 							mapped[i].indexCount = mesh.index_count;
 							mapped[i].firstIndex = mesh_geometry.first_index;
-							mapped[i].vertexOffset = mesh_geometry.vertex_offset;
+							mapped[i].vertexOffset = mesh.is_page_backed ? 0 : mesh_geometry.vertex_offset;
 							mapped[i].materialId = render_scene.material_indices[entity_idx];
 							mapped[i].meshId = mesh_id;
 
@@ -1022,6 +1066,13 @@ namespace bud::graphics {
 				// casters outside the main camera view without per-instance CPU
 				// draw calls in the shadow pass.
 				scene_split = 0;
+				for (size_t i = 0; i < instance_count; ++i) {
+					uint32_t mid = render_scene.mesh_indices[i];
+					if (mid < meshes.size() && meshes[mid].is_valid() && !meshes[mid].is_page_backed) {
+						++scene_split;
+					}
+				}
+
 				if (instance_count > 0 && frame.csm_instance_data.is_valid()) {
 					const size_t scene_count = instance_count;
 					auto scene_staging = rhi->get_allocator()->alloc_staging(scene_count * sizeof(DrawData));
@@ -1033,15 +1084,6 @@ namespace bud::graphics {
 					auto model_staging = rhi->get_allocator()->alloc_staging(scene_count * sizeof(InstanceData));
 					InstanceData* model_mapped = static_cast<InstanceData*>(model_staging.mapped_ptr);
 
-					for (size_t i = 0; i < scene_count; ++i) {
-						uint32_t mid = render_scene.mesh_indices[i];
-						if (mid < meshes.size() && meshes[mid].is_valid() && !meshes[mid].is_page_backed)
-							++scene_split;
-					}
-
-					uint32_t np = 0;
-					uint32_t pg = static_cast<uint32_t>(scene_split);
-
 					// Zero the staging first: entities whose mesh is invalid are
 					// skipped below, and without zeroing they'd leave STALE data
 					// from the previous frame in the tail of the buffer. csm_cull
@@ -1050,11 +1092,18 @@ namespace bud::graphics {
 					std::memset(scene_mapped, 0, scene_count * sizeof(DrawData));
 					std::memset(model_mapped, 0, scene_count * sizeof(InstanceData));
 
-					for (size_t i = 0; i < scene_count; ++i) {
+					uint32_t static_idx = 0;
+					uint32_t page_idx = static_cast<uint32_t>(scene_split);
+
+					for (size_t i = 0; i < instance_count; ++i) {
 						uint32_t mesh_id = render_scene.mesh_indices[i];
+						
 						if (mesh_id >= meshes.size() || !meshes[mesh_id].is_valid()) continue;
+						
 						const auto& mesh = meshes[mesh_id];
 						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+
+						uint32_t write_idx = mesh.is_page_backed ? page_idx++ : static_idx++;
 
 						DrawData d{};
 						d.meshId = mesh_id;
@@ -1064,53 +1113,32 @@ namespace bud::graphics {
 						d.meshletCount = 0;
 						d.visibilityOffset = 0;
 
-						uint32_t sub_idx = render_scene.submesh_indices[i];
-						uint32_t material_id = 0;
-						if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
-							const auto& sub = mesh.submeshes[sub_idx];
-							d.indexCount = sub.index_count;
-							d.firstIndex = mesh_geometry.first_index + sub.index_start;
-							d.vertexOffset = mesh_geometry.vertex_offset;
-							d.materialId = sub.material_id;
-							material_id = sub.material_id;
-							auto world_aabb = sub.aabb.transform(render_scene.world_matrices[i]);
-							d.min = world_aabb.min;
-							d.max = world_aabb.max;
-						}
-						else {
-							uint32_t index_start = 0;
-							uint32_t index_count = mesh.index_count;
-							if (mesh.is_page_backed) {
-								// Rasterize only the selected LOD level into the
-								// shadow map. Pages carry LOD0+LOD1+LOD2 geometry,
-								// so drawing the whole page triples the CSM static
-								// update cost. Fall back to the whole page when no
-								// LOD ranges are available (legacy assets).
-								float lod_dist = bud::math::length(scene_view.camera_position - mesh.sphere.center);
-								float focal = scene_view.proj_matrix[1][1] * scene_view.viewport_height * 0.5f;
-								uint32_t lod = select_page_lod(lod_dist, mesh.sphere.radius, focal,
-									render_config.lod_error_lod1, render_config.lod_error_lod2, render_config.lod_error_threshold_px);
-								if (lod < 3 && mesh.lod_index_count[lod] > 0) {
-									index_start = mesh.lod_index_start[lod];
-									index_count = mesh.lod_index_count[lod];
-								}
+						uint32_t index_start = 0;
+						uint32_t index_count = mesh.index_count;
+						if (mesh.is_page_backed) {
+							float lod_dist = bud::math::length(scene_view.camera_position - mesh.sphere.center);
+							float focal = scene_view.proj_matrix[1][1] * scene_view.viewport_height * 0.5f;
+							uint32_t lod = select_page_lod(lod_dist, mesh.sphere.radius, focal,
+								mesh.lod_error[1], mesh.lod_error[2], render_config.lod_error_threshold_px);
+							if (lod < 3 && mesh.lod_index_count[lod] > 0) {
+								index_start = mesh.lod_index_start[lod];
+								index_count = mesh.lod_index_count[lod];
 							}
-							d.indexCount = index_count;
-							d.firstIndex = mesh_geometry.first_index + index_start;
-							d.vertexOffset = mesh_geometry.vertex_offset;
-							d.materialId = render_scene.material_indices[i];
-							material_id = render_scene.material_indices[i];
-							auto world_aabb = mesh.aabb.transform(render_scene.world_matrices[i]);
-							d.min = world_aabb.min;
-							d.max = world_aabb.max;
 						}
+						d.indexCount = index_count;
+						d.firstIndex = mesh_geometry.first_index + index_start;
+						d.vertexOffset = mesh.is_page_backed ? 0 : mesh_geometry.vertex_offset;
+						d.materialId = render_scene.material_indices[i];
+						
+						auto world_aabb = mesh.aabb.transform(render_scene.world_matrices[i]);
+						d.min = world_aabb.min;
+						d.max = world_aabb.max;
 
-						uint32_t dst = (mesh.is_page_backed) ? pg++ : np++;
-
-						scene_mapped[dst] = d;
-						model_mapped[dst].model = render_scene.world_matrices[i];
-						model_mapped[dst].material_id = material_id;
-						model_mapped[dst].padding[0] = model_mapped[dst].padding[1] = model_mapped[dst].padding[2] = 0;
+						scene_mapped[write_idx] = d;
+						model_mapped[write_idx].model = render_scene.world_matrices[i];
+						model_mapped[write_idx].material_id = render_scene.material_indices[i];
+						model_mapped[write_idx].page_slot = mesh.is_page_backed ? mesh.page_index : ~0u;
+						model_mapped[write_idx].padding[0] = model_mapped[write_idx].padding[1] = 0;
 					}
 
 					// Host-write CSM DrawData/models directly into the per-frame

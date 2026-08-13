@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -86,7 +86,7 @@ namespace bud::graphics::vulkan {
 		void cmd_end_render_pass(CommandHandle cmd) override;
 
 		void cmd_bind_vertex_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer) override;
-		void cmd_bind_index_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer) override;
+		void cmd_bind_index_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer, bool is_u16 = false) override;
 		void cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) override;
 		void cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset, uint32_t first_instance) override;
 		void cmd_draw_indexed_indirect(CommandHandle cmd, bud::graphics::BufferHandle buffer, uint64_t offset, uint32_t draw_count, uint32_t stride) override;

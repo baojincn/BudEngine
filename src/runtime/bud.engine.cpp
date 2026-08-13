@@ -94,6 +94,7 @@ namespace bud::engine {
 		// Register default action bindings
 		input_manager->bind_key("ToggleDebug", bud::input::Key::F3);
 		input_manager->bind_key("ToggleClusterVis", bud::input::Key::F4);
+		input_manager->bind_key("ToggleWireframe", bud::input::Key::F5);
 		input_manager->bind_key("TogglePause", bud::input::Key::Space);
 		input_manager->bind_key("ToggleRecord", bud::input::Key::F8);
 		input_manager->bind_key("TogglePlayback", bud::input::Key::F9);
@@ -130,6 +131,14 @@ namespace bud::engine {
 			if (!camera_sequencer.is_playing()) {
 				auto config = renderer->get_config();
 				config.enable_cluster_visualization = !config.enable_cluster_visualization;
+				renderer->set_config(config);
+			}
+		});
+
+		input_manager->register_action_callback("ToggleWireframe", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				auto config = renderer->get_config();
+				config.enable_wireframe = !config.enable_wireframe;
 				renderer->set_config(config);
 			}
 		});

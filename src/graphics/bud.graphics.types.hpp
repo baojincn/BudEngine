@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstdint>
 #include <vector>
@@ -26,10 +26,16 @@ namespace bud::graphics {
 		float error_lod1, float error_lod2, float threshold_px) {
 		(void)radius;
 		float dist = std::max(distance, 1e-3f);
+		// Vulkan's clip-space Y is flipped, so proj[1][1] (and thus focal_pixels
+		// = proj[1][1] * viewport_height * 0.5) is NEGATIVE. Using a negative
+		// focal would make every projected error negative, so e <= threshold is
+		// always true and the coarsest LOD is always selected (broken, stretched
+		// meshes). Use the absolute focal length.
+		const float f = std::abs(focal_pixels);
 		// Prefer LOD2 while its projected error is acceptable.
-		float e2 = error_lod2 * focal_pixels / dist;
+		float e2 = error_lod2 * f / dist;
 		if (e2 <= threshold_px) return 2;
-		float e1 = error_lod1 * focal_pixels / dist;
+		float e1 = error_lod1 * f / dist;
 		if (e1 <= threshold_px) return 1;
 		return 0;
 	}
@@ -175,6 +181,7 @@ namespace bud::graphics {
 		bool debug_hiz = false;
 		uint32_t debug_hiz_mip = 0;
 		bool enable_cluster_visualization = false;
+		bool enable_wireframe = false;
 
 		// CPU-driven page LOD selection by screen-space error (Nanite-style
 		// single threshold): a LOD level L is used while its accumulated
@@ -274,6 +281,7 @@ namespace bud::graphics {
 		bool enable_depth_bias = false;
 		bool blending_enable = false;
 		VertexLayoutType vertex_layout = VertexLayoutType::Default;
+		bool wireframe = false;
 	};
 
 	struct ComputePipelineDesc {
@@ -403,6 +411,10 @@ namespace bud::graphics {
 		// rasterize only the selected LOD instead of every LOD in the page.
 		uint32_t lod_index_start[3] = {};
 		uint32_t lod_index_count[3] = {};
+		// Per-LOD object-space error (max cluster error of the level) used by the
+		// CPU-driven screen-space LOD selector. Missing levels = FLT_MAX (never
+		// selected); LOD0 = 0.
+		float lod_error[3] = {};
 
 		bud::math::AABB aabb;
 		bud::math::BoundingSphere sphere;

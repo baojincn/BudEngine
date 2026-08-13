@@ -1,4 +1,4 @@
-﻿#include "bud.asset.processor.hpp"
+#include "bud.asset.processor.hpp"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -12,6 +12,8 @@
 
 #include <meshoptimizer.h>
 #include <optional>
+#include <cmath>
+#include <chrono>
 
 #include "../bud_tool_support/bud_tool_support.hpp"
 #if defined(__has_include)
@@ -68,86 +70,1014 @@ static bool reflect_and_validate_spv(const std::filesystem::path& spv_path) {
 }
 #endif
 
+namespace {
+
+    // ====================================================================
+    // Nanite cluster DAG builder (UE5-aligned)
+    //
+    // 自底向上构建 per-mesh cluster 层次 DAG：
+    //   - Level 0 = 原始网格 meshlet 化（<=128 顶点 / 128 三角形）
+    //   - 上层 = 下层 groups 合并几何的简化父 cluster
+    //   - cluster -> group（父，更粗）；group -> children groups（更细）
+    //   - children 范围保持连续：上层 clusters 按父 group 顺序生成（空间
+    //     近似有序），无需再次全局排序即可保证连续
+    // ====================================================================
+
+    struct NaniteClusterBuild {
+        uint32_t material_index = 0;
+        uint32_t level = 0;
+        uint32_t group_index = bud::asset::INVALID_INDEX;   // 所属（更粗）group
+        uint32_t source_group = bud::asset::INVALID_INDEX;  // 来源（更细）group，构建期用
+        float lod_error = 0.0f;          // 相对父 cluster 的误差
+        float parent_lod_error = 0.0f;   // 父 cluster 的 lod_error（页回退用）
+        std::vector<bud::asset::Vertex> vertices;   // 对象空间顶点（局部）
+        std::vector<uint32_t> indices;              // 局部三角形列表
+        float bounds_min[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+        float bounds_max[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+        float lod_bounds_center[3] = { 0.0f, 0.0f, 0.0f };
+        float lod_bounds_radius = 0.0f;
+        float cone_axis[3] = { 0.0f, 0.0f, 1.0f };
+        float cone_cutoff = 0.0f;
+        // 页分配/序列化结果（后续步骤填充）
+        uint32_t page_index = bud::asset::INVALID_INDEX;
+        uint32_t page_vertex_offset = 0;
+        uint32_t page_index_offset = 0;
+    };
+
+    struct NaniteGroupBuild {
+        uint32_t level = 0;
+        uint32_t cluster_start = 0;
+        uint32_t cluster_count = 0;
+        uint32_t children_start = bud::asset::INVALID_INDEX;
+        uint32_t children_count = 0;
+        float lod_bounds_center[3] = { 0.0f, 0.0f, 0.0f };
+        float lod_bounds_radius = 0.0f;
+        float lod_error = 0.0f;
+    };
+
+    // 简化目标误差：meshopt 的 target_error 语义为“相对输入网格尺寸的比例”
+    // （如 0.01 = 1% 变形，见 meshopt SimplifyErrorAbsolute 注释）。这里传纯相对值。
+    // 注意：不能把值放得过大，否则 meshopt 的 performEdgeCollapses 会因“目标按
+    // 每折叠 1-2 三角形计数、实际按退化三角形移除远超目标”而级联折叠到 0 条索引
+    // （实测 4.0×radius 会返回 0）。0.02 = 2% 网格尺寸是较合理的 LOD 简化预算。
+    constexpr float NANITE_SIMPLIFY_RELATIVE_ERROR = 0.02f;
+
+    // 每个父 cluster 合并的子 cluster 数（空间相邻同材质为一组）。
+    // 二分 DAG（2 个一组）对齐 UE5 MaxClustersPerGroup=2；父 cluster 简化时锁定
+    // 边界顶点，保证跨 LOD 无缝。
+    constexpr uint32_t NANITE_GROUP_SIZE = 2;
+
+    // 层级构建对齐 UE5：自底向上逐层合并/简化直到单个根 cluster（不再人为截断层级）。
+    // 仅当一层无法减少任何 cluster（几何不可继续简化）时回滚终止，防止无限循环。
+
+    // 3D Morton code（10 bit/轴，基于网格 AABB 归一化）
+    static uint32_t morton3(const float* p, const float origin[3], const float scale[3]) {
+        auto part1by2 = [](uint32_t v) -> uint32_t {
+            v &= 0x3ffu;
+            v = (v | (v << 16)) & 0x030000FFu;
+            v = (v | (v << 8)) & 0x0300F00Fu;
+            v = (v | (v << 4)) & 0x030C30C3u;
+            v = (v | (v << 2)) & 0x09249249u;
+            return v;
+        };
+        auto q = [&](float v, int a) -> uint32_t {
+            float t = std::clamp((v - origin[a]) * scale[a], 0.0f, 1023.0f);
+            return (uint32_t)t;
+        };
+        return (part1by2(q(p[0], 0)) | (part1by2(q(p[1], 1)) << 1) | (part1by2(q(p[2], 2)) << 2));
+    }
+
+    // 计算 cluster 的 AABB / LOD 包围球 / 法锥
+    static void compute_cluster_bounds(NaniteClusterBuild& cb) {
+        for (int k = 0; k < 3; ++k) {
+            cb.bounds_min[k] = FLT_MAX;
+            cb.bounds_max[k] = -FLT_MAX;
+        }
+        for (const auto& v : cb.vertices) {
+            for (int k = 0; k < 3; ++k) {
+                cb.bounds_min[k] = std::min(cb.bounds_min[k], v.position[k]);
+                cb.bounds_max[k] = std::max(cb.bounds_max[k], v.position[k]);
+            }
+        }
+        float c[3] = { 0.0f, 0.0f, 0.0f };
+        for (int k = 0; k < 3; ++k)
+            c[k] = (cb.bounds_min[k] + cb.bounds_max[k]) * 0.5f;
+        float r2 = 0.0f;
+        for (int k = 0; k < 3; ++k) {
+            float d = std::max(cb.bounds_max[k] - c[k], c[k] - cb.bounds_min[k]);
+            r2 += d * d;
+        }
+        const float r = std::sqrt(r2);
+        for (int k = 0; k < 3; ++k)
+            cb.lod_bounds_center[k] = c[k];
+        cb.lod_bounds_radius = r + cb.lod_error;
+
+        if (!cb.indices.empty()) {
+            meshopt_Bounds mb = meshopt_computeClusterBounds(
+                cb.indices.data(), cb.indices.size(),
+                &cb.vertices[0].position[0], cb.vertices.size(), sizeof(bud::asset::Vertex));
+            cb.cone_axis[0] = mb.cone_axis_s8[0] / 127.0f;
+            cb.cone_axis[1] = mb.cone_axis_s8[1] / 127.0f;
+            cb.cone_axis[2] = mb.cone_axis_s8[2] / 127.0f;
+            cb.cone_cutoff = mb.cone_cutoff_s8 / 127.0f;
+        }
+    }
+
+    // LOD0：原始网格 meshlet 化
+    static void generate_level0_clusters(const std::vector<bud::asset::Vertex>& vertices,
+                                         const std::vector<uint32_t>& indices,
+                                         uint32_t material_index,
+                                         std::vector<NaniteClusterBuild>& out) {
+        const uint32_t max_vertices = bud::asset::NANITE_MAX_CLUSTER_VERTICES;
+        const uint32_t max_triangles = bud::asset::NANITE_MAX_CLUSTER_TRIANGLES;
+        // meshopt_buildMeshlets（1.0.1）按空间范围生长 meshlet，对密集网格会生成
+        // “散装云团”（每三角形 ~3 个独立顶点，~42 三角形就触顶 128 顶点上限），
+        // 导致后续合并/简化输入退化。改用基于连接性的 buildMeshletsScan：
+        // 先做顶点缓存优化，再按索引流连接性切出紧凑 meshlet（填满 128 三角形）。
+        std::vector<unsigned int> cached_indices(indices.size());
+        meshopt_optimizeVertexCache(cached_indices.data(), indices.data(), indices.size(), vertices.size());
+        size_t max_meshlets = meshopt_buildMeshletsBound(cached_indices.size(), max_vertices, max_triangles);
+        std::vector<meshopt_Meshlet> meshlets(max_meshlets);
+        std::vector<unsigned int> mv(max_meshlets * max_vertices);
+        std::vector<unsigned char> mt(max_meshlets * max_triangles * 3);
+        size_t count = meshopt_buildMeshletsScan(meshlets.data(), mv.data(), mt.data(),
+                                                 cached_indices.data(), cached_indices.size(),
+                                                 vertices.size(),
+                                                 max_vertices, max_triangles);
+        for (size_t i = 0; i < count; ++i) {
+            auto& m = meshlets[i];
+            meshopt_optimizeMeshlet(&mv[m.vertex_offset], &mt[m.triangle_offset], m.triangle_count, m.vertex_count);
+            NaniteClusterBuild cb;
+            cb.material_index = material_index;
+            cb.level = 0;
+            cb.vertices.reserve(m.vertex_count);
+            cb.indices.reserve(m.triangle_count * 3);
+            for (uint32_t v = 0; v < m.vertex_count; ++v)
+                cb.vertices.push_back(vertices[mv[m.vertex_offset + v]]);
+            for (uint32_t t = 0; t < m.triangle_count * 3; ++t)
+                cb.indices.push_back(mt[m.triangle_offset + t]);
+            compute_cluster_bounds(cb);
+            out.push_back(std::move(cb));
+        }
+    }
+
+    // 构建诊断统计（每组走的路径：直接合并 / 简化 / 拆分 / 跳过）
+    struct NaniteBuildStats {
+        uint64_t direct = 0;
+        uint64_t simplified = 0;
+        uint64_t split = 0;
+        uint64_t skipped = 0;
+    };
+
+    // 合并 group 内子 cluster 几何并简化成一个（或拆分多个）父 cluster
+    static std::vector<NaniteClusterBuild> simplify_group(const NaniteGroupBuild& g,
+                                                          const std::vector<NaniteClusterBuild>& clusters,
+                                                          uint32_t level, uint32_t material_index,
+                                                          NaniteBuildStats& stats) {
+        std::vector<bud::asset::Vertex> merged_v;
+        std::vector<uint32_t> merged_i;
+        size_t base = 0;
+        for (uint32_t k = 0; k < g.cluster_count; ++k) {
+            const auto& c = clusters[g.cluster_start + k];
+            for (const auto& v : c.vertices)
+                merged_v.push_back(v);
+            for (uint32_t idx : c.indices)
+                merged_i.push_back((uint32_t)(base + idx));
+            base += c.vertices.size();
+        }
+
+        // 防御：子 cluster 几何为空时无法构建父 cluster，跳过该组（父 cluster 缺失
+        // 时该组子 clusters 保持无父，DAG 收敛检查会将其归入根层）。
+        if (merged_v.empty() || merged_i.empty()) {
+            stats.skipped++;
+            return {};
+        }
+
+        NaniteClusterBuild cb;
+        cb.material_index = material_index;
+        cb.level = level;
+
+        // 组内子 cluster 的累计 LOD 误差（相对 LOD0）——父 cluster 的误差 = 子
+        // 误差 + 本次简化新增误差。
+        float max_child_lod_error = 0.0f;
+        for (uint32_t k = 0; k < g.cluster_count; ++k)
+            max_child_lod_error = std::max(max_child_lod_error, clusters[g.cluster_start + k].lod_error);
+
+        // 两个子 cluster 的顶点是拼接的（边界顶点重复），先按全部属性去重，再根据
+        // 去重结果决定是直接作为父 cluster 还是简化。不先去重会导致父 cluster 顶点
+        // 数超过 128 上限、层级无法收敛。
+        meshopt_Stream streams[4];
+        // meshopt_Stream::size 单位是字节（“Each element takes size bytes”），
+        // 传 float 个数会只比较属性前几个字节，导致不同顶点被误判为相同。
+        streams[0].data = &merged_v[0].position[0];
+        streams[0].size = sizeof(float) * 3;
+        streams[0].stride = sizeof(bud::asset::Vertex);
+        streams[1].data = &merged_v[0].normal[0];
+        streams[1].size = sizeof(float) * 3;
+        streams[1].stride = sizeof(bud::asset::Vertex);
+        streams[2].data = &merged_v[0].uv[0];
+        streams[2].size = sizeof(float) * 2;
+        streams[2].stride = sizeof(bud::asset::Vertex);
+        streams[3].data = &merged_v[0].tangent[0];
+        streams[3].size = sizeof(float) * 4;
+        streams[3].stride = sizeof(bud::asset::Vertex);
+        std::vector<unsigned int> remap(merged_v.size(), ~0u);
+        size_t dedup_count = meshopt_generateVertexRemapMulti(remap.data(), merged_i.data(), merged_i.size(),
+                                                              merged_v.size(), streams, 4);
+        std::vector<bud::asset::Vertex> deduped_v(dedup_count);
+        for (size_t i = 0; i < merged_v.size(); ++i)
+            if (remap[i] != ~0u)
+                deduped_v[remap[i]] = merged_v[i];
+        std::vector<uint32_t> deduped_i(merged_i.size());
+        meshopt_remapIndexBuffer(deduped_i.data(), merged_i.data(), merged_i.size(), remap.data());
+
+        // 边界顶点锁定（防跨 LOD 裂缝）：合并补丁中只被 1 个三角形引用的边是边界
+        // 边，其端点是与相邻 group 共享的边界顶点。简化父 cluster 时锁定这些顶点，
+        // 使父 cluster 的外轮廓与邻居（其他 LOD0 cluster / 其他父 cluster）保持完全
+        // 一致的边和位置，跨 LOD 切换不会出现 T 型接缝/裂缝（对齐 UE5 Nanite）。
+        std::vector<unsigned char> vertex_lock(deduped_v.size(), 0);
+        {
+            std::unordered_map<uint64_t, uint32_t> edge_count;
+            edge_count.reserve(deduped_i.size());
+            auto add_edge = [&](unsigned int x, unsigned int y) {
+                const uint64_t key = (uint64_t)(x < y ? x : y) << 32 | (x < y ? y : x);
+                ++edge_count[key];
+            };
+            for (size_t t = 0; t + 2 < deduped_i.size(); t += 3) {
+                const unsigned int a = deduped_i[t], b = deduped_i[t + 1], c = deduped_i[t + 2];
+                add_edge(a, b);
+                add_edge(b, c);
+                add_edge(c, a);
+            }
+            for (const auto& [key, cnt] : edge_count) {
+                if (cnt == 1) {
+                    const unsigned int x = (unsigned int)(key >> 32);
+                    const unsigned int y = (unsigned int)key;
+                    if (x < deduped_v.size())
+                        vertex_lock[x] = 1;
+                    if (y < deduped_v.size())
+                        vertex_lock[y] = 1;
+                }
+            }
+        }
+
+        const uint32_t max_indices = bud::asset::NANITE_MAX_CLUSTER_TRIANGLES * 3;
+        if (deduped_i.size() <= max_indices && deduped_v.size() <= bud::asset::NANITE_MAX_CLUSTER_VERTICES) {
+            // 去重后已满足 cluster 上限：直接作为父 cluster（不再简化，误差继承子 cluster 最大值）
+            cb.vertices = std::move(deduped_v);
+            cb.indices = std::move(deduped_i);
+            cb.lod_error = max_child_lod_error;
+            stats.direct++;
+        } else {
+            // 需要简化。目标 = 减半（上限 128 三角形，下限 1 三角形），保证父 cluster
+            // 同时满足三角形与顶点上限。若结果仍超限会在重试中收紧目标。
+            std::vector<unsigned int> simplified(deduped_i.size());
+            std::vector<float> attrs(deduped_v.size() * 5);
+            for (size_t i = 0; i < deduped_v.size(); ++i) {
+                attrs[i * 5 + 0] = deduped_v[i].uv[0];
+                attrs[i * 5 + 1] = deduped_v[i].uv[1];
+                attrs[i * 5 + 2] = deduped_v[i].normal[0];
+                attrs[i * 5 + 3] = deduped_v[i].normal[1];
+                attrs[i * 5 + 4] = deduped_v[i].normal[2];
+            }
+            const float weights[5] = { 1e-2f, 1e-2f, 1e-3f, 1e-3f, 1e-3f };
+            float group_radius = 0.0f;
+            for (uint32_t k = 0; k < g.cluster_count; ++k)
+                group_radius = std::max(group_radius, clusters[g.cluster_start + k].lod_bounds_radius);
+            // meshopt target_error 是相对输入网格尺寸的比例（不乘 radius）。
+            // 误差预算随父级层级增长（对齐 UE5：越粗的 LOD 允许越多简化误差），
+            // 否则高层级组（合并 2×128 三角形）会卡在 0.02 的误差墙，无法减到
+            // 能让“边界顶点+内部顶点”落进 128 顶点上限的目标。
+            const float level_scale = 1.0f + 0.5f * (float)(level - 1);
+            const float base_error = NANITE_SIMPLIFY_RELATIVE_ERROR * level_scale;
+
+            // 简化后按全部属性重新去重（位置去重会破坏 UV/法线，需按属性流去重）。
+            // 注意 streams 指向 merged_v（去重前的拼接缓冲区），而简化后的索引引用
+            // 的是 deduped_v（去重后的顶点集），因此这里必须对 deduped_v 重新建流。
+            meshopt_Stream streams2[4];
+            // 同上：size 单位是字节
+            streams2[0].data = &deduped_v[0].position[0];
+            streams2[0].size = sizeof(float) * 3;
+            streams2[0].stride = sizeof(bud::asset::Vertex);
+            streams2[1].data = &deduped_v[0].normal[0];
+            streams2[1].size = sizeof(float) * 3;
+            streams2[1].stride = sizeof(bud::asset::Vertex);
+            streams2[2].data = &deduped_v[0].uv[0];
+            streams2[2].size = sizeof(float) * 2;
+            streams2[2].stride = sizeof(bud::asset::Vertex);
+            streams2[3].data = &deduped_v[0].tangent[0];
+            streams2[3].size = sizeof(float) * 4;
+            streams2[3].stride = sizeof(bud::asset::Vertex);
+
+            // 简化 + 去重，带重试：边界锁定会保留大量边界顶点，若结果仍超
+            // 128 顶点/128 三角形上限，收紧目标重试（而不是直接拆分），保证父
+            // cluster 是单个合法 cluster，层级每层真正减半、能一直构建到单根。
+            // 高层级组的合并片大（2×128 三角形），需多次收紧目标（×2/3，最多
+            // 8 次）才能让“边界顶点 + 内部顶点”落进 128 顶点上限。
+            size_t target = std::max<size_t>(3, std::min<size_t>(max_indices, deduped_i.size() / 2));
+            float result_error = 0.0f;
+            size_t simplified_count = 0;
+            for (unsigned int attempt = 0; attempt < 8; ++attempt) {
+                // 误差预算随目标减幅放大：目标越紧（减幅越大）允许越多误差。
+                // 目标 = 减半时用 base_error，目标再收紧按比例放宽。
+                const float attempt_error = base_error * (float)deduped_i.size()
+                    / (2.0f * (float)std::max<size_t>(3, target));
+                // 边界顶点锁定（防跨 LOD 裂缝）：全层级按 Group 外部边界锁定（对齐 UE5 Nanite）。
+                // 若前 4 次尝试在严格锁下无法收缩至 128 顶点/128 三角形，后 4 次松开锁定以保层级收敛。
+                const unsigned char* lock_ptr = (attempt < 4) ? vertex_lock.data() : nullptr;
+                simplified_count = meshopt_simplifyWithAttributes(
+                    simplified.data(), deduped_i.data(), deduped_i.size(),
+                    &deduped_v[0].position[0], deduped_v.size(), sizeof(bud::asset::Vertex),
+                    attrs.data(), sizeof(float) * 5, weights, 5,
+                    lock_ptr,
+                    target, attempt_error, 0,
+                    &result_error);
+
+                std::vector<unsigned int> remap2(deduped_v.size(), ~0u);
+                const size_t new_count = meshopt_generateVertexRemapMulti(
+                    remap2.data(), simplified.data(), simplified_count, deduped_v.size(), streams2, 4);
+                cb.vertices.resize(new_count);
+                for (size_t i = 0; i < deduped_v.size(); ++i)
+                    if (remap2[i] != ~0u)
+                        cb.vertices[remap2[i]] = deduped_v[i];
+                cb.indices.resize(simplified_count);
+                meshopt_remapIndexBuffer(cb.indices.data(), simplified.data(), simplified_count, remap2.data());
+
+                if (cb.indices.size() >= 3 && cb.vertices.size() >= 3 &&
+                    cb.indices.size() <= max_indices && cb.vertices.size() <= bud::asset::NANITE_MAX_CLUSTER_VERTICES)
+                    break;
+                target = std::max<size_t>(3, target * 2 / 3);
+            }
+            // 累计误差 = 子误差 + 本次简化误差（相对 LOD0）。
+            // meshopt 的 result_error 是相对输入网格尺寸的（相对值），需要乘上本组
+            // 包围盒直径（约 2*group_radius）换算回对象空间绝对误差。
+            cb.lod_error = max_child_lod_error + result_error * (2.0f * group_radius);
+            if (cb.indices.size() < 3 || cb.vertices.size() < 3) {
+                // 简化过度（退化/零面积区域被 meshopt 全折叠）：退回未简化但已去重的
+                // 原几何，由末尾的 meshlet 拆分兜底，避免产生 0 三角形的空 cluster。
+                cb.vertices = std::move(deduped_v);
+                cb.indices = std::move(deduped_i);
+                cb.lod_error = max_child_lod_error;
+            }
+            stats.simplified++;
+        }
+
+        std::vector<NaniteClusterBuild> result;
+        if (cb.indices.size() >= 3 &&
+            cb.indices.size() <= bud::asset::NANITE_MAX_CLUSTER_TRIANGLES * 3 &&
+            cb.vertices.size() <= bud::asset::NANITE_MAX_CLUSTER_VERTICES) {
+            // 仅在 cluster 合法（≤128 三角形/128 顶点）时才计算 bounds——
+            // meshopt_computeClusterBounds 要求 index_count/3 <= 255（固定数组），
+            // 超限的中间结果必须先拆分再计算。
+            compute_cluster_bounds(cb);
+            result.push_back(std::move(cb));
+        } else if (cb.indices.size() >= 3) {
+            stats.split++;
+            // 仍超上限（三角形或顶点 >128）：按 meshlet 拆分，各块同属一个 group
+            const uint32_t max_vertices = bud::asset::NANITE_MAX_CLUSTER_VERTICES;
+            const uint32_t max_triangles = bud::asset::NANITE_MAX_CLUSTER_TRIANGLES;
+            size_t max_meshlets = meshopt_buildMeshletsBound(cb.indices.size(), max_vertices, max_triangles);
+            std::vector<meshopt_Meshlet> meshlets(max_meshlets);
+            std::vector<unsigned int> mv(max_meshlets * max_vertices);
+            std::vector<unsigned char> mt(max_meshlets * max_triangles * 3);
+            size_t count = meshopt_buildMeshlets(meshlets.data(), mv.data(), mt.data(),
+                                                 cb.indices.data(), cb.indices.size(),
+                                                 &cb.vertices[0].position[0], cb.vertices.size(),
+                                                 sizeof(bud::asset::Vertex),
+                                                 max_vertices, max_triangles, 0.5f);
+            for (size_t i = 0; i < count; ++i) {
+                auto& m = meshlets[i];
+                meshopt_optimizeMeshlet(&mv[m.vertex_offset], &mt[m.triangle_offset], m.triangle_count, m.vertex_count);
+                NaniteClusterBuild sub;
+                sub.material_index = material_index;
+                sub.level = level;
+                sub.lod_error = cb.lod_error;
+                sub.vertices.reserve(m.vertex_count);
+                sub.indices.reserve(m.triangle_count * 3);
+                for (uint32_t v = 0; v < m.vertex_count; ++v)
+                    sub.vertices.push_back(cb.vertices[mv[m.vertex_offset + v]]);
+                for (uint32_t t = 0; t < m.triangle_count * 3; ++t)
+                    sub.indices.push_back(mt[m.triangle_offset + t]);
+                compute_cluster_bounds(sub);
+                result.push_back(std::move(sub));
+            }
+        }
+        return result;
+    }
+
+    // 构建一个 mesh 的 Nanite 层次 DAG（LOD0..根）
+    static void build_mesh_nanite_dag(
+        const std::vector<bud::asset::Vertex>& vertices,
+        const std::vector<uint32_t>& indices,
+        uint32_t material_index,
+        std::vector<NaniteClusterBuild>& out_clusters,
+        std::vector<NaniteGroupBuild>& out_groups,
+        std::vector<bud::asset::NaniteHierarchyLevel>& out_levels) {
+
+        // 输入 AABB（Morton 空间归一化范围）
+        float origin[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+        float ext[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+        for (const auto& v : vertices) {
+            for (int k = 0; k < 3; ++k) {
+                origin[k] = std::min(origin[k], v.position[k]);
+                ext[k] = std::max(ext[k], v.position[k]);
+            }
+        }
+        float scale[3];
+        for (int k = 0; k < 3; ++k)
+            scale[k] = (ext[k] > origin[k]) ? (1023.0f / (ext[k] - origin[k])) : 0.0f;
+
+        // Level 0
+        const uint32_t l0_cluster_start = (uint32_t)out_clusters.size();
+        generate_level0_clusters(vertices, indices, material_index, out_clusters);
+
+        uint32_t level = 0;
+        uint32_t level_cluster_start = l0_cluster_start;
+        while (true) {
+            const uint32_t ccount = (uint32_t)out_clusters.size() - level_cluster_start;
+
+            // Level 0 按空间排序；上层按父 group 顺序生成（空间近似有序），
+            // 直接分组即可保证 children 范围连续。
+            if (level == 0 && ccount > 1) {
+                std::sort(out_clusters.begin() + level_cluster_start, out_clusters.end(),
+                    [&](const NaniteClusterBuild& a, const NaniteClusterBuild& b) {
+                        return morton3(a.lod_bounds_center, origin, scale) <
+                               morton3(b.lod_bounds_center, origin, scale);
+                    });
+            }
+
+            // 分组（每 NANITE_GROUP_SIZE 个相邻同材质 cluster 一组；材质不同则拆开）
+            const uint32_t group_start = (uint32_t)out_groups.size();
+            for (uint32_t i = 0; i < ccount;) {
+                NaniteGroupBuild g;
+                g.level = level;
+                g.cluster_start = level_cluster_start + i;
+                const uint32_t mat = out_clusters[g.cluster_start].material_index;
+                g.cluster_count = 1;
+                while (g.cluster_count < NANITE_GROUP_SIZE &&
+                       i + g.cluster_count < ccount &&
+                       out_clusters[level_cluster_start + i + g.cluster_count].material_index == mat)
+                    g.cluster_count++;
+                out_groups.push_back(g);
+                i += g.cluster_count;
+            }
+            const uint32_t group_count = (uint32_t)out_groups.size() - group_start;
+
+            // cluster -> group 链接
+            for (uint32_t g = 0; g < group_count; ++g) {
+                auto& grp = out_groups[group_start + g];
+                for (uint32_t k = 0; k < grp.cluster_count; ++k)
+                    out_clusters[grp.cluster_start + k].group_index = group_start + g;
+            }
+
+            // group bounds + children（level>0 时指向更细层 groups，连续）
+            for (uint32_t g = 0; g < group_count; ++g) {
+                auto& grp = out_groups[group_start + g];
+                uint32_t first_sg = bud::asset::INVALID_INDEX;
+                uint32_t last_sg = bud::asset::INVALID_INDEX;
+                for (uint32_t k = 0; k < grp.cluster_count; ++k) {
+                    const auto& c = out_clusters[grp.cluster_start + k];
+                    if (c.source_group != bud::asset::INVALID_INDEX) {
+                        if (first_sg == bud::asset::INVALID_INDEX)
+                            first_sg = c.source_group;
+                        last_sg = c.source_group;
+                    }
+                    for (int kk = 0; kk < 3; ++kk)
+                        grp.lod_bounds_center[kk] += c.lod_bounds_center[kk];
+                    grp.lod_bounds_radius = std::max(grp.lod_bounds_radius, c.lod_bounds_radius);
+                    grp.lod_error = std::max(grp.lod_error, c.lod_error);
+                }
+                for (int kk = 0; kk < 3; ++kk)
+                    grp.lod_bounds_center[kk] /= (float)grp.cluster_count;
+                if (level > 0 && first_sg != bud::asset::INVALID_INDEX) {
+                    // 子 groups 为成员 cluster 的来源 groups（空间相邻，索引连续）
+                    grp.children_start = first_sg;
+                    grp.children_count = (last_sg != bud::asset::INVALID_INDEX)
+                                             ? (last_sg - first_sg + 1)
+                                             : 1u;
+                }
+            }
+
+            // 记录本层范围
+            out_levels.push_back({ level_cluster_start, ccount, group_start, group_count });
+
+            // 检查是否还能合并：本层需存在至少一个 >1-cluster group。
+            // 多材质网格中相邻 meshlet 材质不同时分组退化为单 cluster 组，
+            // 此时若不终止会无限循环。根层因此允许多个 cluster（对齐 UE5：
+            // 每个材质/子树各有一个根 cluster）。
+            bool can_merge = false;
+            for (uint32_t g = 0; g < group_count; ++g)
+                if (out_groups[group_start + g].cluster_count > 1)
+                    can_merge = true;
+            if (ccount == 1 || !can_merge)
+                break;
+
+            // 生成下一层：每个 group 合并简化成父 cluster
+            NaniteBuildStats stats = {};
+            const uint32_t next_cluster_start = (uint32_t)out_clusters.size();
+            for (uint32_t gi = group_start; gi < group_start + group_count; ++gi) {
+                const auto& grp = out_groups[gi];
+                const uint32_t mat = out_clusters[grp.cluster_start].material_index;
+                auto parents = simplify_group(grp, out_clusters, level + 1, mat, stats);
+                for (auto& p : parents) {
+                    p.source_group = gi;
+                    out_clusters.push_back(std::move(p));
+                }
+                // 子 clusters 的 parent_lod_error = 父 cluster 的 lod_error（累计，相对根）
+                if (!parents.empty()) {
+                    for (uint32_t k = 0; k < grp.cluster_count; ++k)
+                        out_clusters[grp.cluster_start + k].parent_lod_error = parents[0].lod_error;
+                }
+            }
+            std::cout << "    level " << level << "->" << level + 1 << " groups=" << group_count
+                      << " direct=" << stats.direct << " simplified=" << stats.simplified
+                      << " split=" << stats.split << " skipped=" << stats.skipped << std::endl;
+
+            // 收敛检查（对齐 UE5 构建到单根）：仅当本层完全没有减少 cluster 数时
+            // 回滚终止（几何不可继续简化），否则继续向根构建。允许拆分导致的减幅
+            // 低于 50%，层数近似 O(log N)。
+            const uint32_t next_count = (uint32_t)out_clusters.size() - next_cluster_start;
+            if (next_count >= ccount) {
+                out_clusters.resize(next_cluster_start);
+                break;
+            }
+
+            level++;
+            level_cluster_start = next_cluster_start;
+        }
+
+        // 根层（本 mesh 最高层）无更粗父簇：parent_lod_error = 自身 lod_error
+        //（语义：无可用回退，页常驻）。多 mesh 场景每个 mesh 都有自己的根层，
+        // 必须在构建器内逐个设置，序列化侧无法从全局 levels 区分 mesh 边界。
+        if (!out_levels.empty()) {
+            const auto& root = out_levels.back();
+            for (uint32_t k = 0; k < root.cluster_count; ++k) {
+                auto& c = out_clusters[root.cluster_start + k];
+                c.parent_lod_error = c.lod_error;
+            }
+        }
+    }
+
+    // ====================================================================
+    // Per-resource page assignment (UE5-aligned)
+    // 把 DAG 序的 clusters 贪心打包进 128KB 页：
+    //   - 页内顶点为页局部序号（u16 索引引用），位置/属性流按 cluster 连续
+    //   - 每页记录 dependency_page_id = 该页 clusters 的父（更粗）cluster
+    //     所在页中 level 最小者；根 cluster 所在页常驻
+    // ====================================================================
+
+    struct NanitePageAssign {
+        std::vector<uint32_t> clusters;      // 页内 cluster 全局索引（DAG 序）
+        uint32_t dependency_page_id = bud::asset::INVALID_INDEX;
+        uint32_t vertex_count = 0;           // 页内顶点数
+        uint32_t index_count = 0;            // 页内三角形数
+        uint32_t size_in_bytes = 0;          // 页数据总字节（含页头）
+        bool is_root = false;                // 含根 cluster，常驻
+    };
+
+    // 原生 GPU 页容量（对齐 UE5 Nanite 128KB 页位流）
+    constexpr uint32_t NANITE_PAGE_RAW_CAPACITY = bud::asset::NANITE_PAGE_SIZE; // 128 KB
+
+    static void assign_nanite_pages(
+        const std::vector<NaniteClusterBuild>& clusters,
+        const std::vector<NaniteGroupBuild>& groups,
+        std::vector<NanitePageAssign>& out_pages,
+        std::vector<uint32_t>& out_cluster_page,
+        std::vector<uint32_t>& out_cluster_page_vertex_offset,
+        std::vector<uint32_t>& out_cluster_page_index_offset) {
+
+        const uint32_t header_size = sizeof(bud::asset::NanitePageDataHeader);
+        const uint32_t capacity = NANITE_PAGE_RAW_CAPACITY;
+
+        out_pages.clear();
+        out_cluster_page.assign(clusters.size(), bud::asset::INVALID_INDEX);
+        out_cluster_page_vertex_offset.assign(clusters.size(), 0);
+        out_cluster_page_index_offset.assign(clusters.size(), 0);
+
+        uint32_t page_id = bud::asset::INVALID_INDEX;
+        uint32_t page_vertex_count = 0;
+        uint32_t page_tri_count = 0;
+        std::vector<uint32_t> page_clusters;
+
+        auto calc_raw_bytes = [&](uint32_t verts, uint32_t tris) -> uint32_t {
+            const uint32_t bits = bud::asset::NANITE_POSITION_BITS;
+            const uint32_t pos_bytes = (uint32_t)(((uint64_t)verts * bits * 3 + 7) / 8);
+            const uint32_t pos_bytes_aligned = (pos_bytes + 3u) & ~3u;
+            const uint32_t attr_bytes = verts * (uint32_t)sizeof(bud::asset::NanitePackedVertex);
+            const uint32_t idx_bytes = tris * 3u * (uint32_t)sizeof(uint16_t);
+            return header_size + pos_bytes_aligned + attr_bytes + idx_bytes;
+        };
+
+        auto close_page = [&]() {
+            if (page_id == bud::asset::INVALID_INDEX)
+                return;
+            out_pages[page_id].clusters = std::move(page_clusters);
+            out_pages[page_id].vertex_count = page_vertex_count;
+            out_pages[page_id].index_count = page_tri_count;
+            out_pages[page_id].size_in_bytes = calc_raw_bytes(page_vertex_count, page_tri_count);
+        };
+
+        for (uint32_t ci = 0; ci < (uint32_t)clusters.size(); ++ci) {
+            const uint32_t cv = (uint32_t)clusters[ci].vertices.size();
+            const uint32_t ct = (uint32_t)clusters[ci].indices.size() / 3;
+
+            const uint32_t cand_verts = page_vertex_count + cv;
+            const uint32_t cand_tris = page_tri_count + ct;
+            const uint32_t cand_bytes = calc_raw_bytes(cand_verts, cand_tris);
+
+            if (page_id == bud::asset::INVALID_INDEX || cand_bytes > capacity) {
+                close_page();
+                out_pages.push_back({});
+                page_id = (uint32_t)out_pages.size() - 1;
+                page_vertex_count = 0;
+                page_tri_count = 0;
+                page_clusters.clear();
+            }
+            out_cluster_page[ci] = page_id;
+            out_cluster_page_vertex_offset[ci] = page_vertex_count;
+            out_cluster_page_index_offset[ci] = page_tri_count;
+            page_clusters.push_back(ci);
+            page_vertex_count += cv;
+            page_tri_count += ct;
+        }
+        close_page();
+
+        // cluster -> 父 cluster（更粗）映射：level>0 的 cluster 的 source_group
+        // 即其子 clusters 所在的更细 group；该 group 的 clusters 的父 = 它。
+        std::vector<uint32_t> cluster_parent(clusters.size(), bud::asset::INVALID_INDEX);
+        for (uint32_t ci = 0; ci < (uint32_t)clusters.size(); ++ci) {
+            const uint32_t sg = clusters[ci].source_group;
+            if (sg == bud::asset::INVALID_INDEX || sg >= groups.size())
+                continue;
+            for (uint32_t k = 0; k < groups[sg].cluster_count; ++k) {
+                const uint32_t child = groups[sg].cluster_start + k;
+                if (child < clusters.size())
+                    cluster_parent[child] = ci;
+            }
+        }
+
+        // 依赖解析 + 根常驻
+        for (uint32_t pi = 0; pi < (uint32_t)out_pages.size(); ++pi) {
+            auto& page = out_pages[pi];
+            uint32_t dep = bud::asset::INVALID_INDEX;
+            uint32_t dep_level = 0xFFFFFFFFu;
+            bool has_root = false;
+            for (uint32_t ci : page.clusters) {
+                const uint32_t pc = cluster_parent[ci];
+                if (pc == bud::asset::INVALID_INDEX) {
+                    // 无父 cluster = 根 cluster；根 cluster 所在页必须常驻且无依赖
+                    has_root = true;
+                    continue;
+                }
+                const uint32_t pcp = out_cluster_page[pc];
+                // 父 cluster 必须在其他页（本页内既有父又有子的页不可作为依赖）；
+                // 取 level 最小（最粗）的父所在页作为回退依赖。
+                if (pcp != bud::asset::INVALID_INDEX && pcp != pi && clusters[pc].level < dep_level) {
+                    dep = pcp;
+                    dep_level = clusters[pc].level;
+                }
+            }
+            page.is_root = has_root;
+            page.dependency_page_id = has_root ? bud::asset::INVALID_INDEX : dep;
+        }
+    }
+
+    // ====================================================================
+    // Page serialization (UE5-aligned)
+    //   页数据 = 64B 页头 + 页级量化位置位流 + 打包属性流 + u16 页局部索引流
+    //   位置按“页”量化（页头存 position_bits/offset/extent，对齐 UE5 页级
+    //   PositionPrecision/PositionOffset），页内所有顶点统一量化、连续位流
+    // ====================================================================
+
+    // 把整页顶点位置按页 AABB 量化写入连续位流（字节输出）
+    static void write_page_quantized_positions(const std::vector<bud::asset::Vertex>& page_vertices,
+                                               const float offset[3], const float extent[3],
+                                               uint32_t bits, std::vector<uint8_t>& out) {
+        const uint32_t max_q = (1u << bits) - 1;
+        const size_t total_bits = page_vertices.size() * 3ull * bits;
+        out.assign((total_bits + 7) / 8, 0);
+        size_t bit_pos = 0;
+        for (const auto& v : page_vertices) {
+            for (int k = 0; k < 3; ++k) {
+                const float span = extent[k];
+                const float t = (span > 0.0f) ? ((v.position[k] - offset[k]) / span) : 0.0f;
+                const uint32_t q = (uint32_t)(std::clamp(t, 0.0f, 1.0f) * (float)max_q + 0.5f);
+                for (uint32_t b = 0; b < bits; ++b) {
+                    if (q & (1u << b)) {
+                        const size_t byte = bit_pos >> 3;
+                        const size_t bit = bit_pos & 7;
+                        out[byte] |= (uint8_t)(1u << bit);
+                    }
+                    ++bit_pos;
+                }
+            }
+        }
+    }
+
+    // 打包顶点属性（对齐 UE5 FPackedNormal / FPackedRGBA16N）
+    static bud::asset::NanitePackedVertex pack_vertex_attributes(const bud::asset::Vertex& v) {
+        bud::asset::NanitePackedVertex p = {};
+        auto pack_snorm8 = [](float x) -> uint8_t {
+            return (uint8_t)(int8_t)(std::clamp(x, -1.0f, 1.0f) * 127.0f);
+        };
+        auto pack_u16 = [](float x) -> uint16_t {
+            return meshopt_quantizeHalf(x);
+        };
+        p.normal[0] = pack_snorm8(v.normal[0]);
+        p.normal[1] = pack_snorm8(v.normal[1]);
+        p.normal[2] = pack_snorm8(v.normal[2]);
+        p.normal[3] = 0;
+        p.tangent[0] = pack_snorm8(v.tangent[0]);
+        p.tangent[1] = pack_snorm8(v.tangent[1]);
+        p.tangent[2] = pack_snorm8(v.tangent[2]);
+        p.tangent[3] = pack_snorm8(v.tangent[3]);
+        p.uv[0] = pack_u16(v.uv[0]);
+        p.uv[1] = pack_u16(v.uv[1]);
+        p.color = 0;
+        return p;
+    }
+
+    // 写 .budmesh 文件
+    static bool write_nanite_file(
+        const std::string& output_path,
+        const std::vector<NaniteClusterBuild>& clusters,
+        const std::vector<NaniteGroupBuild>& groups,
+        const std::vector<bud::asset::NaniteHierarchyLevel>& levels,
+        const std::vector<NanitePageAssign>& pages,
+        const std::vector<uint32_t>& cluster_page,
+        const std::vector<uint32_t>& cluster_page_vertex_offset,
+        const std::vector<uint32_t>& cluster_page_index_offset,
+        const std::vector<bud::asset::MaterialDescriptor>& materials,
+        const std::vector<std::string>& texture_paths) {
+
+        // ---- 序列化常驻表（字段布局对齐 UE5 FCluster）----
+        std::vector<bud::asset::NaniteCluster> ser_clusters(clusters.size());
+        for (uint32_t ci = 0; ci < (uint32_t)clusters.size(); ++ci) {
+            const auto& cb = clusters[ci];
+            auto& sc = ser_clusters[ci];
+            sc.num_verts = (uint32_t)cb.vertices.size();
+            sc.num_tris = (uint32_t)cb.indices.size() / 3;
+            sc.material_index = cb.material_index;
+            sc.position_offset = cluster_page_vertex_offset[ci];
+            sc.position_page_offset = cluster_page[ci];
+            sc.index_offset = cluster_page_index_offset[ci];
+            sc.index_page_offset = cluster_page[ci];
+            sc.group_index = cb.group_index;
+            // LOD 误差：f32 -> u32 有序编码（对齐 UE5，保持单调序）。
+            // 每个 mesh 根簇的 parent_lod_error 已在 build_mesh_nanite_dag 设为自身。
+            sc.lod_error = bud::asset::nanite_encode_lod_error(cb.lod_error);
+            sc.parent_lod_error = bud::asset::nanite_encode_lod_error(cb.parent_lod_error);
+            for (int k = 0; k < 3; ++k) {
+                sc.position_bounds_center[k] = (cb.bounds_min[k] + cb.bounds_max[k]) * 0.5f;
+                sc.position_bounds_extent[k] = (cb.bounds_max[k] - cb.bounds_min[k]) * 0.5f;
+                sc.lod_bounds_center[k] = cb.lod_bounds_center[k];
+            }
+            sc.lod_bounds_radius = cb.lod_bounds_radius;
+            sc.cone_axis[0] = cb.cone_axis[0];
+            sc.cone_axis[1] = cb.cone_axis[1];
+            sc.cone_axis[2] = cb.cone_axis[2];
+            sc.cone_cutoff = cb.cone_cutoff;
+        }
+
+        std::vector<bud::asset::NaniteClusterGroup> ser_groups(groups.size());
+        for (uint32_t gi = 0; gi < (uint32_t)groups.size(); ++gi) {
+            const auto& gb = groups[gi];
+            auto& sg = ser_groups[gi];
+            uint32_t pmin = ~0u, pmax = 0;
+            for (uint32_t k = 0; k < gb.cluster_count; ++k) {
+                const uint32_t p = cluster_page[gb.cluster_start + k];
+                pmin = std::min(pmin, p);
+                pmax = std::max(pmax, p);
+            }
+            sg.page_index_start = (pmin == ~0u) ? bud::asset::INVALID_INDEX : pmin;
+            sg.page_index_num = (pmin == ~0u) ? 0 : (pmax - pmin + 1);
+            sg.children_start = gb.children_start;
+            sg.children_num = gb.children_count;
+            sg.lod_bounds_center[0] = gb.lod_bounds_center[0];
+            sg.lod_bounds_center[1] = gb.lod_bounds_center[1];
+            sg.lod_bounds_center[2] = gb.lod_bounds_center[2];
+            sg.lod_bounds_radius = gb.lod_bounds_radius;
+            sg.lod_error = gb.lod_error;
+        }
+
+        std::vector<bud::asset::NanitePageStreamingState> ser_pages(pages.size());
+        for (uint32_t pi = 0; pi < (uint32_t)pages.size(); ++pi) {
+            // 页级布局：64B 页头 + 页级量化位置位流 + 打包属性 + u16 页局部索引
+            const uint32_t bits = bud::asset::NANITE_POSITION_BITS;
+            const uint32_t pos_bytes = (uint32_t)(((uint64_t)pages[pi].vertex_count * bits * 3 + 7) / 8);
+            const uint32_t pos_bytes_aligned = (pos_bytes + 3u) & ~3u;
+            const uint32_t attr_bytes = pages[pi].vertex_count * (uint32_t)sizeof(bud::asset::NanitePackedVertex);
+            const uint32_t idx_bytes = pages[pi].index_count * 3u * (uint32_t)sizeof(uint16_t);
+            auto& sp = ser_pages[pi];
+            sp.raw_vertex_offset = sizeof(bud::asset::NanitePageDataHeader);
+            sp.raw_vertex_count = pages[pi].vertex_count;
+            sp.raw_index_offset = sizeof(bud::asset::NanitePageDataHeader) + pos_bytes_aligned + attr_bytes;
+            sp.raw_index_count = pages[pi].index_count;
+            sp.imposter_offset = 0;
+            sp.imposter_count = 0;
+            sp.flags = pages[pi].is_root ? 1u : 0u;
+            // --- BudEngine 扩展 ---
+            sp.dependency_page_id = pages[pi].dependency_page_id;
+            sp.size_in_bytes = (uint32_t)sizeof(bud::asset::NanitePageDataHeader) + pos_bytes_aligned + attr_bytes + idx_bytes;
+        }
+
+        std::vector<bud::asset::NanitePageDependency> ser_deps;
+        for (uint32_t pi = 0; pi < (uint32_t)pages.size(); ++pi) {
+            const uint32_t dep = pages[pi].dependency_page_id;
+            if (dep == bud::asset::INVALID_INDEX || dep >= pages.size())
+                continue;
+            uint32_t gs = ~0u, ge = 0;
+            for (uint32_t ci : pages[dep].clusters) {
+                const uint32_t g = ser_clusters[ci].group_index;
+                if (g != bud::asset::INVALID_INDEX) {
+                    gs = std::min(gs, g);
+                    ge = std::max(ge, g);
+                }
+            }
+            if (gs != ~0u) {
+                bud::asset::NanitePageDependency d = {};
+                d.page_id = dep;
+                d.start_group_index = gs;
+                d.num_groups = ge - gs + 1;
+                ser_deps.push_back(d);
+            }
+        }
+
+        // ---- 文件布局 ----
+        std::ofstream out(output_path, std::ios::binary);
+        if (!out.is_open()) {
+            std::cerr << "[BudNanite] Failed to open output: " << output_path << std::endl;
+            return false;
+        }
+
+        uint64_t off = sizeof(bud::asset::NaniteHeader);
+        const uint64_t cluster_offset = off;
+        off += ser_clusters.size() * sizeof(bud::asset::NaniteCluster);
+        const uint64_t group_offset = off;
+        off += ser_groups.size() * sizeof(bud::asset::NaniteClusterGroup);
+        const uint64_t hierarchy_offset = off;
+        off += levels.size() * sizeof(bud::asset::NaniteHierarchyLevel);
+        const uint64_t page_state_offset = off;
+        off += ser_pages.size() * sizeof(bud::asset::NanitePageStreamingState);
+        const uint64_t dependency_offset = off;
+        off += ser_deps.size() * sizeof(bud::asset::NanitePageDependency);
+        const uint64_t material_offset = off;
+        off += materials.size() * sizeof(bud::asset::MaterialDescriptor);
+        const uint64_t texture_offset = off;
+        for (const auto& p : texture_paths)
+            off += p.length() + 1;
+        const uint64_t page_data_offset = off;
+
+        // 全局 AABB
+        float aabb_min[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+        float aabb_max[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+        for (const auto& cb : clusters) {
+            for (int k = 0; k < 3; ++k) {
+                aabb_min[k] = std::min(aabb_min[k], cb.bounds_min[k]);
+                aabb_max[k] = std::max(aabb_max[k], cb.bounds_max[k]);
+            }
+        }
+
+        bud::asset::NaniteHeader h = {};
+        h.magic = bud::asset::NANITE_MAGIC;
+        h.version = bud::asset::NANITE_VERSION;
+        h.flags = 0;
+        h.cluster_count = (uint32_t)ser_clusters.size();
+        h.group_count = (uint32_t)ser_groups.size();
+        h.hierarchy_level_count = (uint32_t)levels.size();
+        h.page_count = (uint32_t)ser_pages.size();
+        h.dependency_count = (uint32_t)ser_deps.size();
+        h.material_count = (uint32_t)materials.size();
+        h.texture_count = (uint32_t)texture_paths.size();
+        h.cluster_offset = cluster_offset;
+        h.group_offset = group_offset;
+        h.hierarchy_offset = hierarchy_offset;
+        h.page_state_offset = page_state_offset;
+        h.dependency_offset = dependency_offset;
+        h.material_offset = material_offset;
+        h.texture_offset = texture_offset;
+        h.page_data_offset = page_data_offset;
+        for (int k = 0; k < 3; ++k) {
+            h.aabb_min[k] = aabb_min[k];
+            h.aabb_max[k] = aabb_max[k];
+        }
+
+        out.write(reinterpret_cast<const char*>(&h), sizeof(h));
+        if (!ser_clusters.empty())
+            out.write(reinterpret_cast<const char*>(ser_clusters.data()), ser_clusters.size() * sizeof(bud::asset::NaniteCluster));
+        if (!ser_groups.empty())
+            out.write(reinterpret_cast<const char*>(ser_groups.data()), ser_groups.size() * sizeof(bud::asset::NaniteClusterGroup));
+        if (!levels.empty())
+            out.write(reinterpret_cast<const char*>(levels.data()), levels.size() * sizeof(bud::asset::NaniteHierarchyLevel));
+        if (!ser_pages.empty())
+            out.write(reinterpret_cast<const char*>(ser_pages.data()), ser_pages.size() * sizeof(bud::asset::NanitePageStreamingState));
+        if (!ser_deps.empty())
+            out.write(reinterpret_cast<const char*>(ser_deps.data()), ser_deps.size() * sizeof(bud::asset::NanitePageDependency));
+        if (!materials.empty())
+            out.write(reinterpret_cast<const char*>(materials.data()), materials.size() * sizeof(bud::asset::MaterialDescriptor));
+        for (const auto& p : texture_paths)
+            out.write(p.c_str(), (std::streamsize)p.length() + 1);
+
+        // ---- 页数据区 ----
+        // 先在内存中组装每页的 页级量化位置位流 / 打包属性 / 页局部 u16 索引 三条流，
+        // 再整块写入，避免逐元素小写拖慢导出。
+        for (uint32_t pi = 0; pi < (uint32_t)pages.size(); ++pi) {
+            // 收集页内全部顶点（按 cluster 顺序），并求页级 AABB（量化原点/范围）
+            std::vector<bud::asset::Vertex> page_vertices;
+            page_vertices.reserve(pages[pi].vertex_count);
+            float poff[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+            float pext[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+            for (uint32_t ci : pages[pi].clusters) {
+                const auto& cb = clusters[ci];
+                for (const auto& v : cb.vertices) {
+                    page_vertices.push_back(v);
+                    for (int k = 0; k < 3; ++k) {
+                        poff[k] = std::min(poff[k], v.position[k]);
+                        pext[k] = std::max(pext[k], v.position[k]);
+                    }
+                }
+            }
+            for (int k = 0; k < 3; ++k) {
+                pext[k] = (pext[k] > poff[k]) ? (pext[k] - poff[k]) : 1.0f;
+            }
+
+            const uint32_t bits = bud::asset::NANITE_POSITION_BITS;
+            std::vector<uint8_t> pos_stream;
+            write_page_quantized_positions(page_vertices, poff, pext, bits, pos_stream);
+
+            std::vector<bud::asset::NanitePackedVertex> attr_stream;
+            attr_stream.reserve(pages[pi].vertex_count);
+            for (uint32_t ci : pages[pi].clusters)
+                for (const auto& v : clusters[ci].vertices)
+                    attr_stream.push_back(pack_vertex_attributes(v));
+
+            std::vector<uint16_t> idx_stream;
+            idx_stream.reserve(pages[pi].index_count * 3u);
+            for (uint32_t ci : pages[pi].clusters) {
+                const auto& cb = clusters[ci];
+                const uint32_t vbase = cluster_page_vertex_offset[ci];
+                for (uint32_t idx : cb.indices)
+                    idx_stream.push_back((uint16_t)(vbase + idx));
+            }
+
+            const uint32_t pos_bytes = (uint32_t)pos_stream.size();
+            const uint32_t pos_bytes_aligned = (pos_bytes + 3u) & ~3u;
+            const uint32_t attr_bytes = (uint32_t)(attr_stream.size() * sizeof(bud::asset::NanitePackedVertex));
+            const uint32_t idx_bytes = (uint32_t)(idx_stream.size() * sizeof(uint16_t));
+
+            const uint64_t pg_start = (uint64_t)out.tellp();
+            bud::asset::NanitePageDataHeader pd = {};
+            pd.magic = bud::asset::NANITE_PAGE_DATA_MAGIC;
+            pd.version = bud::asset::NANITE_VERSION;
+            pd.cluster_count = (uint32_t)pages[pi].clusters.size();
+            pd.vertex_count = pages[pi].vertex_count;
+            pd.index_count = pages[pi].index_count;
+            pd.vertex_stream_offset = sizeof(bud::asset::NanitePageDataHeader);
+            pd.index_stream_offset = sizeof(bud::asset::NanitePageDataHeader) + pos_bytes_aligned + attr_bytes;
+            pd.total_size = pages[pi].size_in_bytes;
+            pd.flags = pages[pi].is_root ? 1u : 0u;
+            pd.position_bits = bits;
+            for (int k = 0; k < 3; ++k) {
+                pd.position_offset[k] = poff[k];
+                pd.position_extent[k] = pext[k];
+            }
+            out.write(reinterpret_cast<const char*>(&pd), sizeof(pd));
+            if (!pos_stream.empty()) {
+                out.write(reinterpret_cast<const char*>(pos_stream.data()), (std::streamsize)pos_bytes);
+                if (pos_bytes_aligned > pos_bytes) {
+                    static const uint32_t pad = 0;
+                    out.write(reinterpret_cast<const char*>(&pad), pos_bytes_aligned - pos_bytes);
+                }
+            }
+            if (!attr_stream.empty())
+                out.write(reinterpret_cast<const char*>(attr_stream.data()), (std::streamsize)attr_bytes);
+            if (!idx_stream.empty())
+                out.write(reinterpret_cast<const char*>(idx_stream.data()), (std::streamsize)idx_bytes);
+
+            const uint64_t pg_size = (uint64_t)out.tellp() - pg_start;
+            if (pg_size != pages[pi].size_in_bytes) {
+                std::cerr << "[BudNanite] Page " << pi << " size mismatch: wrote=" << pg_size
+                          << " expected=" << pages[pi].size_in_bytes << std::endl;
+                return false;
+            }
+        }
+        out.close();
+        return true;
+    }
+
+} // namespace
+
 namespace bud::tool {
 
     bool AssetProcessor::process_gltf_to_budmesh(const std::string& input_path, const std::string& output_path,
                                                  size_t max_vertices, size_t max_triangles, float cone_weight,
                                                  size_t page_size) {
-        Assimp::Importer importer;
-        const aiScene* scene = importer.ReadFile(input_path, 
-            aiProcess_Triangulate | 
-            aiProcess_FlipUVs | 
-            aiProcess_GenNormals | 
-            aiProcess_CalcTangentSpace |
-            aiProcess_JoinIdenticalVertices);
-
-        if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
-            std::cerr << "[Assimp Error]: " << importer.GetErrorString() << std::endl;
-            return false;
-        }
-
-        if (scene->mNumMeshes == 0) {
-            std::cerr << "[BudAssetTool] No meshes found in file." << std::endl;
-            return false;
-        }
-
-        std::cout << "[BudAssetTool] Original Assimp Submesh Count: " << scene->mNumMeshes << std::endl;
-
-        // 1. Process all meshes and generate meshlets per submesh
-        std::vector<asset::Vertex> all_vertices;
-        std::vector<uint32_t> all_indices;
-        std::vector<asset::MeshletDescriptor> all_meshlets;
-        std::vector<asset::MeshletCullData> all_cull_data;
-        std::vector<uint32_t> all_meshlet_vertices;
-        std::vector<uint32_t> all_meshlet_triangles;
-        std::vector<asset::SubMeshDescriptor> submeshes;
-        // Parallel per-cluster LOD metadata (Nanite-style): emitted alongside
-        // all_meshlets so page writing can build PageClusterDesc.
-        std::vector<uint32_t> all_cluster_lod;
-        std::vector<float> all_cluster_error;
-        // Which source mesh each cluster belongs to. Nanite-style LOD is a
-        // per-mesh DAG (a mesh's LOD0..LOD2 clusters are one simplification
-        // chain); coarse pages must therefore only group clusters of a SINGLE
-        // mesh, never stitch clusters from different meshes.
-        std::vector<uint32_t> all_cluster_mesh;
+        // v5 Nanite format is the standard format for .budmesh
+        return process_gltf_to_budnanite(input_path, output_path);
+    }
 
 
-        std::string input_path_str = std::string(input_path);
-        std::string base_dir = "";
-        size_t last_slash = input_path_str.find_last_of("\\/");
-        if (last_slash != std::string::npos) {
-            base_dir = input_path_str.substr(0, last_slash + 1);
-        }
-
-        std::vector<std::string> texture_paths;
-        std::map<unsigned int, uint32_t> mat_to_tex_idx;
-        std::map<unsigned int, uint32_t> mat_to_mat_idx;
-        std::vector<asset::MaterialDescriptor> materials;
-
-        uint32_t default_tex_idx = 0;
-        texture_paths.push_back("data/textures/default.png");
-
-        for (unsigned int i = 0; i < scene->mNumMaterials; ++i) {
-            aiMaterial* mat = scene->mMaterials[i];
-            aiString tex_path;
-
-            uint32_t base_tex = default_tex_idx;
-            if (mat->GetTexture(aiTextureType_DIFFUSE, 0, &tex_path) == AI_SUCCESS) {
-                std::string p = tex_path.C_Str();
-                if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) {
-                    p = base_dir + p;
-                }
-                base_tex = (uint32_t)texture_paths.size();
-                texture_paths.push_back(p);
-            }
-
-            // Default material descriptor
-            asset::MaterialDescriptor md = {};
-            md.base_color_texture = base_tex;
-			md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::Opaque);
-            md.double_sided = 0;
-            md.alpha_cutoff = 0.5f;
-
+#if 0 // Legacy v4 exporter disabled; v5 Nanite format is standard for .budmesh
             // Try to query two-sided and opacity from Assimp material (best-effort)
             int two_sided = 0;
             float opacity = 1.0f;
@@ -825,6 +1755,7 @@ namespace bud::tool {
         std::cout << "[BudAssetTool] Successfully exported " << header.submesh_count << " submeshes, " << header.meshlet_count << " meshlets, " << header.material_count << " materials and " << header.texture_count << " textures to " << output_path << std::endl;
         return true;
     }
+#endif // Legacy v4 exporter disabled
 
 } // namespace bud::tool
 
@@ -1051,6 +1982,198 @@ bool bud::tool::AssetProcessor::validate_shaders_in_directory(const std::string&
     return all_ok.load();
 }
 #endif
+
+bool bud::tool::AssetProcessor::process_gltf_to_budnanite(const std::string& input_path, const std::string& output_path) {
+    Assimp::Importer importer;
+    // 注意：不要用 aiProcess_CalcTangentSpace / aiProcess_GenNormals——它们会在 UV/法线
+    // 接缝处拆分顶点，把原本共享的网格拆成每面独立顶点（1.5M 顶点），导致后续
+    // meshlet 化/简化全部退化。OBJ/glTF 自带的法线直接使用即可。
+    const aiScene* scene = importer.ReadFile(input_path,
+        aiProcess_Triangulate |
+        aiProcess_FlipUVs |
+        aiProcess_JoinIdenticalVertices);
+
+    if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
+        std::cerr << "[Assimp Error]: " << importer.GetErrorString() << std::endl;
+        return false;
+    }
+    if (scene->mNumMeshes == 0) {
+        std::cerr << "[BudAssetTool] No meshes found in file." << std::endl;
+        return false;
+    }
+
+    // 材质与纹理表（与 .budmesh 路径一致，按 aiMaterial 索引对齐）
+    std::vector<asset::MaterialDescriptor> materials;
+    std::vector<std::string> texture_paths;
+    texture_paths.push_back("data/textures/default.png");
+    {
+        std::string input_path_str = std::string(input_path);
+        std::string base_dir = "";
+        size_t last_slash = input_path_str.find_last_of("\\/");
+        if (last_slash != std::string::npos)
+            base_dir = input_path_str.substr(0, last_slash + 1);
+        for (unsigned int i = 0; i < scene->mNumMaterials; ++i) {
+            aiMaterial* mat = scene->mMaterials[i];
+            asset::MaterialDescriptor md = {};
+            aiString tex_path;
+            if (mat->GetTexture(aiTextureType_DIFFUSE, 0, &tex_path) == AI_SUCCESS) {
+                std::string p = tex_path.C_Str();
+                if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0)
+                    p = base_dir + p;
+                md.base_color_texture = (uint32_t)texture_paths.size();
+                texture_paths.push_back(p);
+            } else {
+                md.base_color_texture = 0;
+            }
+            md.alpha_mode = static_cast<uint8_t>(asset::AlphaMode::Opaque);
+            md.double_sided = 0;
+            md.alpha_cutoff = 0.5f;
+            materials.push_back(md);
+        }
+    }
+
+    // 收集 mesh instances（世界变换，保证 cluster 在对象空间）
+    struct MeshInstanceXf {
+        unsigned int mesh_index;
+        aiMatrix4x4 transform;
+    };
+    std::vector<MeshInstanceXf> instances;
+    std::function<void(aiNode*, aiMatrix4x4)> collect_instances_xf = [&](aiNode* node, aiMatrix4x4 parent) {
+        aiMatrix4x4 cur = parent * node->mTransformation;
+        for (unsigned int i = 0; i < node->mNumMeshes; ++i)
+            instances.push_back({ node->mMeshes[i], cur });
+        for (unsigned int i = 0; i < node->mNumChildren; ++i)
+            collect_instances_xf(node->mChildren[i], cur);
+    };
+    collect_instances_xf(scene->mRootNode, aiMatrix4x4());
+
+    // 全局构建结果（多 mesh 合并，偏移按追加顺序调整）
+    std::vector<NaniteClusterBuild> all_clusters;
+    std::vector<NaniteGroupBuild> all_groups;
+    std::vector<asset::NaniteHierarchyLevel> all_levels;
+    uint32_t cluster_base = 0;
+    uint32_t group_base = 0;
+
+    auto t_start = std::chrono::steady_clock::now();
+    std::cout << "[BudNanite] processing " << instances.size() << " instances..." << std::endl;
+
+    for (const auto& inst : instances) {
+        const aiMesh* mesh = scene->mMeshes[inst.mesh_index];
+        std::vector<asset::Vertex> verts(mesh->mNumVertices);
+        for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
+            aiVector3D pos = inst.transform * mesh->mVertices[v];
+            verts[v].position[0] = pos.x;
+            verts[v].position[1] = pos.y;
+            verts[v].position[2] = pos.z;
+            if (mesh->HasNormals()) {
+                aiMatrix3x3 nm(inst.transform);
+                aiVector3D n = nm * mesh->mNormals[v];
+                n.Normalize();
+                verts[v].normal[0] = n.x;
+                verts[v].normal[1] = n.y;
+                verts[v].normal[2] = n.z;
+            }
+            if (mesh->HasTextureCoords(0)) {
+                verts[v].uv[0] = mesh->mTextureCoords[0][v].x;
+                verts[v].uv[1] = mesh->mTextureCoords[0][v].y;
+            }
+        }
+        std::vector<uint32_t> idx;
+        for (unsigned int f = 0; f < mesh->mNumFaces; ++f) {
+            if (mesh->mFaces[f].mNumIndices != 3)
+                continue;
+            idx.push_back(mesh->mFaces[f].mIndices[0]);
+            idx.push_back(mesh->mFaces[f].mIndices[1]);
+            idx.push_back(mesh->mFaces[f].mIndices[2]);
+        }
+        if (idx.empty())
+            continue;
+
+        std::vector<NaniteClusterBuild> mesh_clusters;
+        std::vector<NaniteGroupBuild> mesh_groups;
+        std::vector<asset::NaniteHierarchyLevel> mesh_levels;
+        build_mesh_nanite_dag(verts, idx, mesh->mMaterialIndex, mesh_clusters, mesh_groups, mesh_levels);
+
+        // 偏移调整（局部 -> 全局）
+        for (auto& g : mesh_groups)
+            if (g.children_start != asset::INVALID_INDEX)
+                g.children_start += group_base;
+        for (auto& c : mesh_clusters) {
+            if (c.group_index != asset::INVALID_INDEX)
+                c.group_index += group_base;
+            if (c.source_group != asset::INVALID_INDEX)
+                c.source_group += group_base;
+        }
+        for (auto& lv : mesh_levels) {
+            lv.cluster_start += cluster_base;
+            lv.group_start += group_base;
+        }
+        for (auto& c : mesh_clusters)
+            all_clusters.push_back(std::move(c));
+        for (auto& g : mesh_groups)
+            all_groups.push_back(std::move(g));
+        for (auto& lv : mesh_levels)
+            all_levels.push_back(std::move(lv));
+
+        cluster_base = (uint32_t)all_clusters.size();
+        group_base = (uint32_t)all_groups.size();
+    }
+
+    const auto t_dag = std::chrono::steady_clock::now();
+    std::cout << "[BudNanite] DAG build took "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(t_dag - t_start).count()
+              << " ms" << std::endl;
+
+    // 统计输出（验证 DAG 构建）
+    std::cout << "[BudNanite] instances=" << instances.size()
+              << " clusters=" << all_clusters.size()
+              << " groups=" << all_groups.size()
+              << " levels=" << all_levels.size() << std::endl;
+    for (size_t li = 0; li < all_levels.size(); ++li) {
+        const auto& lv = all_levels[li];
+        std::cout << "  level " << li << ": clusters=" << lv.cluster_count
+                  << " groups=" << lv.group_count << std::endl;
+    }
+
+    // 页分配（DAG 序贪心打包 128KB 页）
+    std::vector<NanitePageAssign> pages;
+    std::vector<uint32_t> cluster_page;
+    std::vector<uint32_t> cluster_page_vertex_offset;
+    std::vector<uint32_t> cluster_page_index_offset;
+    const auto t_pages = std::chrono::steady_clock::now();
+    assign_nanite_pages(all_clusters, all_groups, pages,
+                        cluster_page, cluster_page_vertex_offset, cluster_page_index_offset);
+    std::cout << "[BudNanite] page assignment took "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_pages).count()
+              << " ms" << std::endl;
+
+    std::cout << "[BudNanite] pages=" << pages.size()
+              << " (page_size=" << bud::asset::NANITE_PAGE_SIZE << ")" << std::endl;
+    uint32_t total_data = 0;
+    for (size_t pi = 0; pi < pages.size(); ++pi) {
+        const auto& p = pages[pi];
+        total_data += p.size_in_bytes;
+        std::cout << "  page " << pi << ": clusters=" << p.clusters.size()
+                  << " verts=" << p.vertex_count << " tris=" << p.index_count
+                  << " bytes=" << p.size_in_bytes
+                  << " dep=" << (p.dependency_page_id == asset::INVALID_INDEX ? -1 : (int)p.dependency_page_id)
+                  << (p.is_root ? " [ROOT]" : "") << std::endl;
+    }
+    std::cout << "[BudNanite] total page data=" << total_data << " bytes" << std::endl;
+
+    // 序列化 .budmesh
+    const auto t_write = std::chrono::steady_clock::now();
+    const bool ok = write_nanite_file(output_path, all_clusters, all_groups, all_levels,
+                                      pages, cluster_page,
+                                      cluster_page_vertex_offset, cluster_page_index_offset,
+                                      materials, texture_paths);
+    std::cout << "[BudNanite] serialization took "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_write).count()
+              << " ms" << std::endl;
+    if (ok)
+        std::cout << "[BudNanite] wrote " << output_path << std::endl;
+    return ok;
+}
 
 
 // end of file

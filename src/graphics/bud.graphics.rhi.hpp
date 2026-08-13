@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <string>
 #include <vector>
@@ -94,7 +94,7 @@ namespace bud::graphics {
 		virtual void cmd_end_render_pass(CommandHandle cmd) = 0;
 
 		virtual void cmd_bind_vertex_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer) = 0;
-		virtual void cmd_bind_index_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer) = 0;
+		virtual void cmd_bind_index_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer, bool is_u16 = false) = 0;
 		virtual void cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset, uint32_t first_instance) = 0;
 		virtual void cmd_set_viewport(CommandHandle cmd, float width, float height) = 0;
 		virtual void cmd_set_scissor(CommandHandle cmd, int32_t x, int32_t y, uint32_t width, uint32_t height) = 0;

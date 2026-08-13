@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <memory>
 #include <atomic>
@@ -63,7 +63,8 @@ namespace bud::graphics {
 				uint32_t index_count, const bud::math::AABB& aabb,
 				uint32_t vertex_data_offset = 0, uint32_t index_data_offset = 0,
 				const std::vector<PageSubMesh>& submeshes = {},
-				const std::vector<std::pair<uint32_t, uint32_t>>& lod_index_ranges = {});
+				const std::vector<std::pair<uint32_t, uint32_t>>& lod_index_ranges = {},
+				const float lod_errors[3] = nullptr);
 
 			// Reserves a bindless texture slot, binds the fallback immediately, and
 			// queues an async texture upload. Returns the bindless slot (>= 1) to use
@@ -127,7 +128,8 @@ namespace bud::graphics {
 		struct InstanceData {
 			bud::math::mat4 model;
 			uint32_t material_id;
-			uint32_t padding[3];
+			uint32_t page_slot;
+			uint32_t padding[2];
 		};
 
 		std::shared_ptr<UploadQueue> upload_queue;

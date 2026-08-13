@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <atomic>
 #include <cstdint>
@@ -30,9 +30,14 @@ namespace bud::graphics {
 		};
 
 		struct PagePool {
-			static constexpr uint64_t kPagePoolSize = 512ull * 1024 * 1024;
-			// 131040 is an exact multiple of 48 (sizeof asset::Vertex), 24, 16, and 4
-			static constexpr uint32_t kPageSize = 131040;
+			// 1 GB holds ~8000 fixed 128 KB slots: enough for the resident set of
+			// a full San-Miguel-class scene (~5100 pages) in the CPU-driven path.
+			static constexpr uint64_t kPagePoolSize = 1024ull * 1024 * 1024;
+			// 131040 is an exact multiple of 48 (sizeof asset::Vertex), 24, 16, and 4.
+			// Fixed 128 KB slots keep page-pool memory management simple. The tool
+			// constrains each .budmesh page so its CPU-decoded legacy layout (48B
+			// vertices + u32 indices) fits this slot.
+			static constexpr uint32_t kPageSize = 128 * 1024; // 131072 bytes (UE5 Nanite 128 KB exact)
 			static constexpr uint32_t kMaxPages = kPagePoolSize / kPageSize;
 
 			BufferHandle page_pool_buffer;
@@ -106,7 +111,7 @@ namespace bud::graphics {
 		const PagePool& get_page_pool() const;
 		BufferHandle get_page_pool_buffer() const;
 		BufferHandle get_page_table_buffer() const;
-		void update_page_table_entry(uint32_t page_index, uint32_t pool_offset);
+		void update_page_table_entry(uint32_t page_index, uint32_t pool_offset, uint32_t valid = 1);
 
 		void set_mesh_geometry(uint32_t mesh_id, uint32_t first_index, int32_t vertex_offset);
 		const MeshGeometry& mesh_geometry(uint32_t mesh_id) const;

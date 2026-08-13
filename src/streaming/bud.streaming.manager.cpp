@@ -1,9 +1,27 @@
-﻿#include "src/streaming/bud.streaming.manager.hpp"
+#include "src/streaming/bud.streaming.manager.hpp"
 #include "src/core/bud.logger.hpp"
 #include "src/core/bud.asset.types.hpp"
 #include "src/graphics/bud.graphics.renderer.hpp"
 #include "src/graphics/bud.graphics.rhi.hpp"
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <cfloat>
+#include <cstring>
+
+namespace {
+
+// Cluster -> LOD level via the hierarchy level ranges (levels are contiguous
+// cluster ranges appended LOD0 first).
+uint32_t budnanite_cluster_level(const bud::asset::NaniteHierarchyLevel* levels, uint32_t level_count, uint32_t cluster_index) {
+	for (uint32_t l = 0; l < level_count; ++l) {
+		const auto& lv = levels[l];
+		if (cluster_index >= lv.cluster_start && cluster_index < lv.cluster_start + lv.cluster_count)
+			return l;
+	}
+	return 0;
+}
+
+} // namespace
 
 namespace bud::streaming {
 
@@ -18,6 +36,176 @@ StreamingManager::StreamingManager(bud::io::AssetManager* asset_manager,
 void StreamingManager::register_region(const RegionManifest& region) {
 	std::scoped_lock lock(mutex_);
 	regions_.push_back(region);
+}
+
+void StreamingManager::register_budnanite_async(const std::string& path) {
+	asset_manager_->load_file_async(path, [this, path](std::vector<char> data) {
+		if (data.size() < sizeof(bud::asset::NaniteHeader)) {
+			bud::eprint("[Streaming] Invalid .budmesh (UE5-aligned layout, too small): {}", path);
+			return;
+		}
+		const auto* h = reinterpret_cast<const bud::asset::NaniteHeader*>(data.data());
+		if (h->magic != bud::asset::NANITE_MAGIC) {
+			bud::eprint("[Streaming] Bad .budmesh magic 0x{:X} (expected BNNT layout) for: {}", h->magic, path);
+			return;
+		}
+		if (h->version != bud::asset::NANITE_VERSION) {
+			bud::eprint("[Streaming] Unsupported .budmesh version {} for: {} (expected {})",
+				h->version, path, bud::asset::NANITE_VERSION);
+			return;
+		}
+
+		BudNaniteAsset asset;
+		asset.path = path;
+		asset.page_data_offset = h->page_data_offset;
+		const auto* base = data.data();
+		const auto* cluster_ptr = reinterpret_cast<const bud::asset::NaniteCluster*>(base + h->cluster_offset);
+		asset.clusters.assign(cluster_ptr, cluster_ptr + h->cluster_count);
+		const auto* group_ptr = reinterpret_cast<const bud::asset::NaniteClusterGroup*>(base + h->group_offset);
+		asset.groups.assign(group_ptr, group_ptr + h->group_count);
+		const auto* level_ptr = reinterpret_cast<const bud::asset::NaniteHierarchyLevel*>(base + h->hierarchy_offset);
+		asset.levels.assign(level_ptr, level_ptr + h->hierarchy_level_count);
+		const auto* page_ptr = reinterpret_cast<const bud::asset::NanitePageStreamingState*>(base + h->page_state_offset);
+		asset.pages.assign(page_ptr, page_ptr + h->page_count);
+		if (h->material_count > 0 && h->material_offset > 0) {
+			const auto* mat_ptr = reinterpret_cast<const bud::asset::MaterialDescriptor*>(base + h->material_offset);
+			asset.materials.assign(mat_ptr, mat_ptr + h->material_count);
+		}
+		{
+			const char* p = base + h->texture_offset;
+			for (uint32_t t = 0; t < h->texture_count; ++t) {
+				asset.textures.push_back(std::string(p));
+				p += asset.textures.back().size() + 1;
+			}
+		}
+
+		// Per-page cluster range: derive from each cluster's position_page_offset
+		// (pages are contiguous in the cluster table under greedy DAG packing).
+		asset.page_cluster_start.assign(asset.pages.size(), 0);
+		asset.page_cluster_count.assign(asset.pages.size(), 0);
+		for (uint32_t ci = 0; ci < asset.clusters.size(); ++ci) {
+			const uint32_t p = asset.clusters[ci].position_page_offset;
+			if (p >= asset.pages.size())
+				continue;
+			if (asset.page_cluster_count[p] == 0)
+				asset.page_cluster_start[p] = ci;
+			asset.page_cluster_count[p]++;
+		}
+
+		// Per-page world AABB from the cluster position bounds (the file header
+		// only carries a global AABB; distance-based streaming needs per-page).
+		asset.page_aabbs.resize(asset.pages.size());
+		for (uint32_t i = 0; i < asset.pages.size(); ++i) {
+			bud::math::AABB aabb;
+			const uint32_t cs = asset.page_cluster_start[i];
+			for (uint32_t k = 0; k < asset.page_cluster_count[i]; ++k) {
+				const auto& c = asset.clusters[cs + k];
+				bud::math::vec3 cmin(
+					c.position_bounds_center[0] - c.position_bounds_extent[0],
+					c.position_bounds_center[1] - c.position_bounds_extent[1],
+					c.position_bounds_center[2] - c.position_bounds_extent[2]);
+				bud::math::vec3 cmax(
+					c.position_bounds_center[0] + c.position_bounds_extent[0],
+					c.position_bounds_center[1] + c.position_bounds_extent[1],
+					c.position_bounds_center[2] + c.position_bounds_extent[2]);
+				aabb.merge(cmin);
+				aabb.merge(cmax);
+			}
+			asset.page_aabbs[i] = aabb;
+		}
+
+		auto asset_ptr = std::make_shared<BudNaniteAsset>(std::move(asset));
+		{
+			std::scoped_lock lock(mutex_);
+			// Page raw data region is sequential: file offset = page_data_offset
+			// + cumulative sizes.
+			uint64_t off = asset_ptr->page_data_offset;
+			for (uint32_t i = 0; i < asset_ptr->pages.size(); ++i) {
+				StreamingPage sp;
+				sp.asset_id = path;
+				sp.page_id = i;
+				sp.file_page_index = i;
+				sp.file_offset = off;
+				sp.capacity = asset_ptr->pages[i].size_in_bytes;
+				sp.bin_path = path;
+				sp.is_budnanite = true;
+				sp.aabb = asset_ptr->page_aabbs[i];
+				sp.has_aabb = true;
+				sp.material_id = 0;
+				sp.parent_page_id = asset_ptr->pages[i].dependency_page_id;
+
+				uint32_t cs = asset_ptr->page_cluster_start[i];
+				uint32_t cc = asset_ptr->page_cluster_count[i];
+				if (cc > 0) {
+				uint32_t current_mat = asset_ptr->clusters[cs].material_index;
+					uint32_t current_lod = (bud::asset::nanite_decode_lod_error(asset_ptr->clusters[cs].lod_error) == 0.0f) ? 0 : 1;
+					sp.lod_errors[0] = 0.0f;
+					sp.lod_errors[1] = 0.0f;
+					sp.lod_errors[2] = 0.0f;
+
+					uint32_t run_start = cs;
+					uint32_t run_indices = 0;
+					uint32_t index_offset = 0;
+					for (uint32_t k = 0; k < cc; ++k) {
+						const auto& c = asset_ptr->clusters[cs + k];
+						float err = bud::asset::nanite_decode_lod_error(c.lod_error);
+						float parent_err = bud::asset::nanite_decode_lod_error(c.parent_lod_error);
+						uint32_t c_lod = (err == 0.0f) ? 0 : ((err < parent_err && parent_err < FLT_MAX) ? 1 : 2); // heuristic map
+						
+						if (err == 0.0f) {
+							sp.lod_errors[1] = std::max(sp.lod_errors[1], parent_err);
+						} else {
+							sp.lod_errors[2] = std::max(sp.lod_errors[2], parent_err);
+						}
+
+						if (c.material_index != current_mat || c_lod != current_lod) {
+							bud::graphics::PageSubMesh psm;
+							psm.index_start = index_offset;
+							psm.index_count = run_indices;
+							psm.material_id = current_mat;
+							psm.lod_level = current_lod;
+							psm.cluster_start = run_start - cs;
+							psm.cluster_count = (cs + k) - run_start;
+							sp.submeshes.push_back(psm);
+
+							index_offset += run_indices;
+							current_mat = c.material_index;
+							current_lod = c_lod;
+							run_start = cs + k;
+							run_indices = 0;
+						}
+						run_indices += c.num_tris * 3;
+					}
+					bud::graphics::PageSubMesh psm;
+					psm.index_start = index_offset;
+					psm.index_count = run_indices;
+					psm.material_id = current_mat;
+					psm.lod_level = current_lod;
+					psm.cluster_start = run_start - cs;
+					psm.cluster_count = (cs + cc) - run_start;
+					sp.submeshes.push_back(psm);
+				}
+
+				off += asset_ptr->pages[i].size_in_bytes;
+				all_pages_.emplace(sp.get_unique_id(), std::move(sp));
+			}
+			budnanite_assets_[path] = asset_ptr;
+
+			// Auto-register a bounding region covering all pages of this asset.
+			RegionManifest region;
+			region.id = path;
+			region.aabb = bud::math::AABB(bud::math::vec3(-1e6f), bud::math::vec3(1e6f));
+			for (uint32_t i = 0; i < asset_ptr->pages.size(); ++i)
+				region.pages.push_back(path + ":page_" + std::to_string(i));
+			regions_.push_back(std::move(region));
+
+			bud::print("[Streaming] Registered .budmesh (UE5 layout): {} ({} pages, {} clusters, {} groups, {} levels)",
+				path, asset_ptr->pages.size(),
+				asset_ptr->clusters.size(),
+				asset_ptr->groups.size(),
+				asset_ptr->levels.size());
+		}
+	});
 }
 
 void StreamingManager::register_budmesh_async(const std::string& json_path) {
@@ -161,6 +349,7 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 				to_load.push_back(page_key);
 			if (resident && d > unload_radius_) {
 				if (auto it = page_gpu_slots_.find(page_key); it != page_gpu_slots_.end()) {
+					gpu_scene_->update_page_table_entry(it->second, 0, 0);
 					gpu_scene_->get_page_pool().free_page(it->second);
 					page_gpu_slots_.erase(it);
 				}
@@ -186,9 +375,16 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 
 		if (auto it = all_pages_.find(p); it != all_pages_.end()) {
 			const auto& sp = it->second;
-				uint64_t offset = sp.file_offset;
+			// .budmesh pages need the resident tables to decode; keep a
+			// shared_ptr so the async callback stays safe.
+			std::shared_ptr<BudNaniteAsset> nanite_asset;
+			if (sp.is_budnanite) {
+				if (auto ait = budnanite_assets_.find(sp.asset_id); ait != budnanite_assets_.end())
+					nanite_asset = ait->second;
+			}
+			uint64_t offset = sp.file_offset;
 			asset_manager_->load_file_chunk_async(sp.bin_path, offset, sp.capacity,
-				[this, p, sp](std::vector<char> data) {
+				[this, p, sp, nanite_asset](std::vector<char> data) {
 					if (data.empty()) {
 						std::scoped_lock lock(mutex_);
 						pending_loads_.erase(p);
@@ -199,19 +395,28 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 					uint32_t index_count = 0;
 					uint32_t vertex_data_offset = 0;
 					uint32_t index_data_offset = 0;
-					bud::math::AABB page_aabb;
-					if (data.size() >= sizeof(bud::asset::PageBinaryHeader)) {
-						auto* hdr = reinterpret_cast<const bud::asset::PageBinaryHeader*>(data.data());
-						if (hdr->magic == bud::asset::PageBinaryHeader::MAGIC) {
-								meshlet_count = hdr->cluster_count; // v2: cluster_count
-								index_count = hdr->index_count;
-								vertex_data_offset = hdr->vertex_data_offset;
-								index_data_offset = hdr->index_data_offset;
-								page_aabb.min = bud::math::vec3(hdr->aabb_min[0], hdr->aabb_min[1], hdr->aabb_min[2]);
-								page_aabb.max = bud::math::vec3(hdr->aabb_max[0], hdr->aabb_max[1], hdr->aabb_max[2]);
-							} else {
-								bud::eprint("[Streaming] Bad page header magic=0x{:X} size={}", hdr->magic, data.size());
-							}
+					bud::math::AABB page_aabb = sp.aabb;
+					const std::vector<bud::graphics::PageSubMesh>* submeshes_ptr = &sp.submeshes;
+					const std::vector<std::pair<uint32_t, uint32_t>>* lod_ranges_ptr = &sp.lod_ranges;
+
+					if (sp.is_budnanite) {
+						if (data.size() < sizeof(bud::asset::NanitePageDataHeader)) {
+							std::scoped_lock lock(mutex_);
+							pending_loads_.erase(p);
+							bud::eprint("[Streaming] .budmesh raw page chunk too small: {}", p);
+							return;
+						}
+						const auto& ph = *reinterpret_cast<const bud::asset::NanitePageDataHeader*>(data.data());
+						if (ph.magic != bud::asset::NANITE_PAGE_DATA_MAGIC) {
+							std::scoped_lock lock(mutex_);
+							pending_loads_.erase(p);
+							bud::eprint("[Streaming] Bad .budmesh page magic 0x{:X} for: {}", ph.magic, p);
+							return;
+						}
+						meshlet_count = ph.cluster_count;
+						index_count = ph.index_count * 3u;
+						vertex_data_offset = ph.vertex_stream_offset;
+						index_data_offset = ph.index_stream_offset;
 					}
 
 					uint32_t slot = gpu_scene_->get_page_pool().allocate_page();
@@ -222,24 +427,35 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 					uint32_t gpu_offset = gpu_scene_->get_page_pool().get_page_offset(slot);
 
 					// Copy data to page pool via staging upload
+					const char* src = data.data();
+					const size_t src_size = data.size();
+					if (src_size > bud::graphics::GPUScene::PagePool::kPageSize) {
+						bud::eprint("[Streaming] Page {} data {} bytes exceeds page slot {}; freeing slot",
+							p, src_size, bud::graphics::GPUScene::PagePool::kPageSize);
+						gpu_scene_->get_page_pool().free_page(slot);
+						std::scoped_lock lock(mutex_);
+						pending_loads_.erase(p);
+						return;
+					}
 					if (rhi_) {
-							auto* mapped = static_cast<uint8_t*>(gpu_scene_->get_page_pool_buffer().mapped_ptr);
-							if (mapped) {
-								std::memcpy(mapped + gpu_offset, data.data(), data.size());
-								//bud::print("[Streaming] Copied {} bytes to page pool offset {}", data.size(), gpu_offset);
-							} else {
-								bud::eprint("[Streaming] page_pool_buffer mapped_ptr is NULL!");
-							}
+						auto* mapped = static_cast<uint8_t*>(gpu_scene_->get_page_pool_buffer().mapped_ptr);
+						if (mapped) {
+							std::memcpy(mapped + gpu_offset, src, src_size);
+							//bud::print("[Streaming] Copied {} bytes to page pool offset {}", src_size, gpu_offset);
 						}
+						else {
+							bud::eprint("[Streaming] page_pool_buffer mapped_ptr is NULL!");
+						}
+					}
 
 					gpu_scene_->update_page_table_entry(slot, gpu_offset);
 
 					uint32_t mesh_id = ~0u;
 					if (renderer_ && meshlet_count > 0) {
 						std::vector<bud::graphics::PageSubMesh> resolved_submeshes;
-						if (!sp.submeshes.empty()) {
-							resolved_submeshes.reserve(sp.submeshes.size());
-							for (const auto& sm : sp.submeshes) {
+						if (!submeshes_ptr->empty()) {
+							resolved_submeshes.reserve(submeshes_ptr->size());
+							for (const auto& sm : *submeshes_ptr) {
 								bud::graphics::PageSubMesh rs;
 								rs.index_start = sm.index_start;
 								rs.index_count = sm.index_count;
@@ -263,7 +479,7 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 							resolved_submeshes.push_back(rs);
 						}
 						mesh_id = renderer_->register_page_backed_mesh(slot, meshlet_count, index_count, page_aabb,
-							vertex_data_offset, index_data_offset, resolved_submeshes, sp.lod_ranges);
+							vertex_data_offset, index_data_offset, resolved_submeshes, *lod_ranges_ptr, sp.lod_errors);
 					}
 
 					if (mesh_id != ~0u && page_registered_cb_)
@@ -277,8 +493,8 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 							pending_loads_.erase(p);
 						}
 
-						//bud::print("[Streaming] Page resident: {} slot={} mesh_id={} meshlets={}",
-						//	p, slot, mesh_id, meshlet_count);
+						//bud::print("[Streaming] Page resident: {} slot={} mesh_id={} meshlets={} idx={}",
+						//	p, slot, mesh_id, meshlet_count, index_count);
 					});
 		}
 	}
@@ -290,26 +506,51 @@ bool StreamingManager::is_page_resident(const std::string& page_key) const {
 	return it != residency_.end() && it->second;
 }
 
-uint32_t StreamingManager::resolve_texture_slot(const std::string& asset_key, uint32_t tex_index) {
+uint32_t StreamingManager::resolve_texture_slot(const std::string& asset_key, uint32_t material_index) {
 	std::scoped_lock lock(mutex_);
 
-	auto it = managed_assets_.find(asset_key);
-	if (it == managed_assets_.end() || tex_index >= it->second.textures.size())
-		return 0;
-
-	auto& asset = it->second;
-	if (asset.texture_slots.empty())
-		asset.texture_slots.resize(asset.textures.size(), 0);
-
-	uint32_t& slot = asset.texture_slots[tex_index];
-	if (slot == 0) {
-		if (!renderer_) {
-			bud::eprint("[Streaming] resolve_texture_slot called but renderer is null!");
+	// .budmesh assets
+	if (auto it = managed_assets_.find(asset_key); it != managed_assets_.end()) {
+		auto& asset = it->second;
+		if (material_index >= asset.textures.size())
 			return 0;
+		if (asset.texture_slots.empty())
+			asset.texture_slots.resize(asset.textures.size(), 0);
+		uint32_t& slot = asset.texture_slots[material_index];
+		if (slot == 0) {
+			if (!renderer_) {
+				bud::eprint("[Streaming] resolve_texture_slot called but renderer is null!");
+				return 0;
+			}
+			slot = renderer_->bind_texture_async(asset.textures[material_index]);
 		}
-		slot = renderer_->bind_texture_async(asset.textures[tex_index]);
+		return slot;
 	}
-	return slot;
+
+	// .budmesh assets
+	if (auto it = budnanite_assets_.find(asset_key); it != budnanite_assets_.end()) {
+		auto& asset = *it->second;
+		uint32_t tex_index = bud::asset::INVALID_INDEX;
+		if (material_index < asset.materials.size()) {
+			tex_index = asset.materials[material_index].base_color_texture;
+		}
+		if (tex_index == bud::asset::INVALID_INDEX || tex_index >= asset.textures.size())
+			return 0;
+
+		if (asset.texture_slots.empty())
+			asset.texture_slots.resize(asset.textures.size(), 0);
+		uint32_t& slot = asset.texture_slots[tex_index];
+		if (slot == 0) {
+			if (!renderer_) {
+				bud::eprint("[Streaming] resolve_texture_slot called but renderer is null!");
+				return 0;
+			}
+			slot = renderer_->bind_texture_async(asset.textures[tex_index]);
+		}
+		return slot;
+	}
+
+	return 0;
 }
 
 } // namespace bud::streaming

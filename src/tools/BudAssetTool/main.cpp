@@ -4,7 +4,9 @@
 #include "bud.asset.processor.hpp"
 
 void print_usage() {
-    std::cout << "Usage: BudAssetTool --input <file.gltf> --output <file.budmesh>" << std::endl;
+    std::cout << "Usage: BudAssetTool --input <file.gltf> --output <file.budmesh> [--nanite]" << std::endl;
+    std::cout << "       --nanite: export UE5-aligned .budmesh (new layout, magic \"BNNT\")" << std::endl;
+    std::cout << "                 with cluster DAG + fixed 128KB pages" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -15,6 +17,7 @@ int main(int argc, char* argv[]) {
     size_t max_triangles = 128;
     float cone_weight = 0.5f;
     size_t page_size = 0;
+    bool nanite_mode = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -22,6 +25,8 @@ int main(int argc, char* argv[]) {
             input_path = argv[++i];
         } else if (arg == "--output" && i + 1 < argc) {
             output_path = argv[++i];
+        } else if (arg == "--nanite") {
+            nanite_mode = true;
         } else if (arg == "--max-vertices" && i + 1 < argc) {
             try { max_vertices = std::stoul(argv[++i]); } catch(...) { max_vertices = 64; }
         } else if (arg == "--max-triangles" && i + 1 < argc) {
@@ -76,6 +81,15 @@ int main(int argc, char* argv[]) {
 
     std::cout << "[BudAssetTool] Processing glTF: " << input_path << " -> " << output_path << std::endl;
     std::cout << "[BudAssetTool] Meshlet params: max_vertices=" << max_vertices << " max_triangles=" << max_triangles << " cone_weight=" << cone_weight << " page_size=" << page_size << std::endl;
+
+    if (nanite_mode) {
+        if (bud::tool::AssetProcessor::process_gltf_to_budnanite(input_path, output_path)) {
+            std::cout << "[BudAssetTool] .budmesh (UE5-aligned layout) processed successfully." << std::endl;
+            return 0;
+        }
+        std::cerr << "[BudAssetTool] .budmesh (UE5-aligned layout) processing failed." << std::endl;
+        return 1;
+    }
 
     if (bud::tool::AssetProcessor::process_gltf_to_budmesh(input_path, output_path, max_vertices, max_triangles, cone_weight, page_size)) {
         std::cout << "[BudAssetTool] Processed successfully." << std::endl;

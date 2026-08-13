@@ -1,4 +1,4 @@
-﻿#include <vector>
+#include <vector>
 #include <iostream>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -242,6 +242,10 @@ namespace bud::graphics {
 					},
 					[=, csm_vis = csm_visible_instances, &render_graph, &render_scene, &meshes, &view, &gpu_scene](RHI* rhi, CommandHandle cmd) {
 						if (!pipeline) return;
+						auto& frame = gpu_scene.frame_resources(rhi->get_current_frame_index());
+						if (frame.csm_instance_models.is_valid()) {
+							rhi->update_global_csm_instance_data(frame.csm_instance_models);
+						}
 
 						for (uint32_t i = 0; i < cascade_count; ++i) {
 							auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
@@ -284,12 +288,14 @@ namespace bud::graphics {
 								bud::math::mat4 model;
 								uint32_t material_id;
 								uint32_t use_gpu_driven;
+								uint32_t page_slot;
 							} push_consts;
 
 							push_consts.light_view_proj = cascade_light_view_proj;
 							push_consts.model = bud::math::mat4(1.0f);
 							push_consts.material_id = 0;
 							push_consts.use_gpu_driven = config.enable_gpu_driven ? 1 : 0;
+							push_consts.page_slot = ~0u;
 
 							const auto pp_buf = gpu_scene.get_page_pool_buffer();
 							if (config.enable_gpu_driven) {
@@ -302,9 +308,6 @@ namespace bud::graphics {
 									// shadow.vert reads the FULL-scene CSM instance
 									// models from binding 6 (dedicated to CSM), so
 									// the main pass's binding 3 is never touched.
-									if (frame.csm_instance_models.is_valid())
-										rhi->update_global_csm_instance_data(frame.csm_instance_models);
-
 									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
 
 									if (split_index > 0) {
@@ -315,7 +318,7 @@ namespace bud::graphics {
 
 									if (split_index < instance_count && pp_buf.is_valid()) {
 										rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-										rhi->cmd_bind_index_buffer(cmd, pp_buf);
+										rhi->cmd_bind_index_buffer(cmd, pp_buf, true);
 										rhi->cmd_draw_indexed_indirect(cmd, frame.csm_static_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
 									}
 
@@ -348,23 +351,26 @@ namespace bud::graphics {
 
 									// 3. Draw
 									push_consts.model = model_matrix;
-
 									const bool is_paged = mesh.is_page_backed && pp_buf.is_valid();
+									push_consts.page_slot = is_paged ? mesh.page_index : ~0u;
 
 									uint32_t sub_idx = render_scene.submesh_indices[idx];
-									if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
+									// Page-backed meshes carry one submesh per LOD run; always
+									// rasterize the LOD-selected range (else branch), never
+									// lock to submesh[0] (their entity submesh_indices=0).
+									if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size() && !mesh.is_page_backed) {
 										const auto& sub = mesh.submeshes[sub_idx];
 										push_consts.material_id = sub.material_id;
 										rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
 										if (is_paged) {
 											rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-											rhi->cmd_bind_index_buffer(cmd, pp_buf);
-											rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+											rhi->cmd_bind_index_buffer(cmd, pp_buf, true);
+											rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)idx);
 										}
 										else {
 											rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 											rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-											rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+											rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)idx);
 										}
 									}
 									else {
@@ -372,7 +378,7 @@ namespace bud::graphics {
 										rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
 										if (is_paged) {
 											rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-											rhi->cmd_bind_index_buffer(cmd, pp_buf);
+											rhi->cmd_bind_index_buffer(cmd, pp_buf, true);
 											// Rasterize only the selected LOD level into
 											// the shadow map; pages carry all LOD levels
 											// and drawing the whole page triples the CSM
@@ -382,22 +388,22 @@ namespace bud::graphics {
 											float lod_dist = bud::math::length(view.camera_position - mesh.sphere.center);
 											float focal = view.proj_matrix[1][1] * view.viewport_height * 0.5f;
 											uint32_t lod = bud::graphics::select_page_lod(lod_dist, mesh.sphere.radius, focal,
-												config.lod_error_lod1, config.lod_error_lod2, config.lod_error_threshold_px);
+												mesh.lod_error[1], mesh.lod_error[2], config.lod_error_threshold_px);
 											if (lod < 3 && mesh.lod_index_count[lod] > 0) {
 												index_start = mesh.lod_index_start[lod];
 												index_count = mesh.lod_index_count[lod];
 											}
-											rhi->cmd_draw_indexed(cmd, index_count, 1, mesh_geometry.first_index + index_start, mesh_geometry.vertex_offset, 0);
+											rhi->cmd_draw_indexed(cmd, index_count, 1, mesh_geometry.first_index + index_start, mesh_geometry.vertex_offset, (uint32_t)idx);
 										}
 										else if (kUseBindVertexByteOffset) {
 											auto vb = mega_vertex_buffer;
 											vb.offset = static_cast<uint64_t>(mesh_geometry.vertex_offset) * sizeof(bud::io::MeshData::Vertex);
 											rhi->cmd_bind_vertex_buffer(cmd, vb);
-											rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, 0, 0);
+											rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, 0, (uint32_t)idx);
 										}
 										else {
 											rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-											rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, 0);
+											rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)idx);
 										}
 									}
 								}
@@ -422,6 +428,10 @@ namespace bud::graphics {
 			},
 			[=, csm_vis = std::move(csm_visible_instances), &render_graph, &render_scene, &meshes, &view, &gpu_scene](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) return;
+				auto& frame = gpu_scene.frame_resources(rhi->get_current_frame_index());
+				if (frame.csm_instance_models.is_valid()) {
+					rhi->update_global_csm_instance_data(frame.csm_instance_models);
+				}
 
 				auto active_map = render_graph.get_texture(*shadow_map_h);
 				bool did_copy = false;
@@ -474,12 +484,14 @@ namespace bud::graphics {
 						bud::math::mat4 model;
 						uint32_t material_id;
 						uint32_t use_gpu_driven;
+						uint32_t page_slot;
 					} push_consts;
 
 					push_consts.light_view_proj = cascade_light_view_proj;
 					push_consts.model = bud::math::mat4(1.0f);
 					push_consts.material_id = 0;
 					push_consts.use_gpu_driven = config.enable_gpu_driven ? 1 : 0;
+					push_consts.page_slot = ~0u;
 
 					// Draw a single shadow caster on the CPU path. The GPU-driven
 					// path also uses it to fill casters the GPU cull cannot see
@@ -505,12 +517,13 @@ namespace bud::graphics {
 						// push_consts.model instead of the GPU instance buffer.
 						push_consts.use_gpu_driven = 0;
 						push_consts.model = model_matrix;
+						push_consts.page_slot = (mesh.is_page_backed && pp_buf.is_valid()) ? mesh.page_index : ~0u;
 
 						// Page-backed meshes live in the GPU page pool, not the
 						// mega geometry pool, so rebind the buffers per draw.
 						if (mesh.is_page_backed && pp_buf.is_valid()) {
 							rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-							rhi->cmd_bind_index_buffer(cmd, pp_buf);
+							rhi->cmd_bind_index_buffer(cmd, pp_buf, true);
 						}
 						else {
 							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
@@ -518,11 +531,14 @@ namespace bud::graphics {
 						}
 
 						uint32_t sub_idx = render_scene.submesh_indices[idx];
-						if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
+						// Page-backed meshes always draw the LOD-selected range via the
+						// else branch; their entity submesh_indices=0 must not lock them
+						// to a single LOD run.
+						if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size() && !mesh.is_page_backed) {
 							const auto& sub = mesh.submeshes[sub_idx];
 							push_consts.material_id = sub.material_id;
 							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)idx);
 						}
 						else {
 							push_consts.material_id = render_scene.material_indices[idx];
@@ -540,8 +556,6 @@ namespace bud::graphics {
 							// commands carry gl_InstanceIndex into the full-scene
 							// instance data, read from binding 6 (dedicated to
 							// CSM), so the main pass's binding 3 is untouched.
-							if (frame.csm_instance_models.is_valid())
-								rhi->update_global_csm_instance_data(frame.csm_instance_models);
 
 							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
 
@@ -553,7 +567,7 @@ namespace bud::graphics {
 
 							if (split_index < instance_count && pp_buf.is_valid()) {
 								rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-								rhi->cmd_bind_index_buffer(cmd, pp_buf);
+								rhi->cmd_bind_index_buffer(cmd, pp_buf, true);
 								rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
 							}
 						}
@@ -1364,7 +1378,7 @@ namespace bud::graphics {
 
 							if (split_index < draw_count && pp_buf.is_valid()) {
 								rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-								rhi->cmd_bind_index_buffer(cmd, pp_buf);
+								rhi->cmd_bind_index_buffer(cmd, pp_buf, true);
 								rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), split_index * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(draw_count - split_index), sizeof(bud::graphics::IndirectCommand));
 							}
 						}
@@ -1388,19 +1402,20 @@ namespace bud::graphics {
 						// geometry pool, so rebind the buffers before issuing the draw.
 						if (mesh.is_page_backed && gpu_scene.get_page_pool_buffer().is_valid()) {
 							rhi->cmd_bind_vertex_buffer(cmd, gpu_scene.get_page_pool_buffer());
-							rhi->cmd_bind_index_buffer(cmd, gpu_scene.get_page_pool_buffer());
+							rhi->cmd_bind_index_buffer(cmd, gpu_scene.get_page_pool_buffer(), true);
 						}
 						else {
 							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 						}
 
+						uint32_t vtx_off = (mesh.is_page_backed && gpu_scene.get_page_pool_buffer().is_valid()) ? 0 : mesh_geometry.vertex_offset;
 						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
 							const auto& sub = mesh.submeshes[item.submesh_index];
-							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
+							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, vtx_off, (uint32_t)i);
 						}
 						else {
-							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
+							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, vtx_off, (uint32_t)i);
 						}
 					}
 				}
@@ -1664,10 +1679,21 @@ namespace bud::graphics {
 			desc.vertex_layout = VertexLayoutType::Default;
 
 			pipeline = rhi->create_graphics_pipeline(desc);
-			if (pipeline) {
-				bud::print("[MainPass] Shaders loaded and pipeline created.");
+
+			desc.wireframe = true;
+			pipeline_wireframe = rhi->create_graphics_pipeline(desc);
+
+			if (pipeline && pipeline_wireframe) {
+				bud::print("[MainPass] Shaders loaded and pipelines created.");
 			}
 			});
+	}
+
+	void MainPass::shutdown(RHI* rhi) {
+		if (pipeline) rhi->destroy_pipeline(pipeline);
+		if (pipeline_wireframe) rhi->destroy_pipeline(pipeline_wireframe);
+		pipeline = nullptr;
+		pipeline_wireframe = nullptr;
 	}
 
 	void MainPass::add_to_graph(RenderGraph& render_graph, RGHandle shadow_map, RGHandle backbuffer, RGHandle depth_buffer,
@@ -1724,10 +1750,12 @@ namespace bud::graphics {
 			},
 
 			[=, &render_graph, &render_scene, &meshes, &sort_list, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
-				if (!pipeline) {
+				if (!pipeline || !pipeline_wireframe) {
 					bud::eprint("[MainPass] ERROR: Pipeline is null.");
 					return;
 				}
+
+				void* active_pipeline = config.enable_wireframe ? pipeline_wireframe : pipeline;
 
 				if (ao_map.is_valid()) {
 					Texture* ao_tex = render_graph.get_texture(ao_map);
@@ -1751,7 +1779,7 @@ namespace bud::graphics {
 				info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
 
 				rhi->cmd_begin_render_pass(cmd, info);
-				rhi->cmd_bind_pipeline(cmd, pipeline);
+				rhi->cmd_bind_pipeline(cmd, active_pipeline);
 				rhi->cmd_set_viewport(cmd, (float)target_width, (float)target_height);
 				rhi->cmd_set_scissor(cmd, target_width, target_height);
 
@@ -1759,7 +1787,7 @@ namespace bud::graphics {
 				rhi->update_global_shadow_map(render_graph.get_texture(shadow_map));
 				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
 				// Instance Data is already bound to Set 0, Binding 3 by Renderer calling rhi->update_global_instance_data
-				rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
+				rhi->cmd_bind_descriptor_set(cmd, active_pipeline, 0);
 
 				// Bind global Mega-Buffer once for the entire pass
 				rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
@@ -1776,7 +1804,7 @@ namespace bud::graphics {
 
 							if (split_index < draw_count && pp_buf.is_valid()) {
 								rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-								rhi->cmd_bind_index_buffer(cmd, pp_buf);
+								rhi->cmd_bind_index_buffer(cmd, pp_buf, true);
 								rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), split_index * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(draw_count - split_index), sizeof(bud::graphics::IndirectCommand));
 							}
 						}
@@ -1797,15 +1825,15 @@ namespace bud::graphics {
 
 						if (mesh.is_page_backed && pp_buf.is_valid()) {
 							rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-							rhi->cmd_bind_index_buffer(cmd, pp_buf);
+							rhi->cmd_bind_index_buffer(cmd, pp_buf, true);
 							// Multi-material pages carry per-material submeshes; draw the
 							// specific one when the sort item selects it.
 							if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
 								const auto& sub = mesh.submeshes[item.submesh_index];
-								rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
+								rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, 0, (uint32_t)i);
 							}
 							else {
-								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
+								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, 0, (uint32_t)i);
 							}
 							page_backed_draws++;
 						}
@@ -2179,7 +2207,7 @@ namespace bud::graphics {
 
 					if (split_index < draw_count && pp_buf.is_valid()) {
 						rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
-						rhi->cmd_bind_index_buffer(cmd, pp_buf);
+						rhi->cmd_bind_index_buffer(cmd, pp_buf, true);
 						rhi->cmd_draw_indexed_indirect(cmd, ind_buf_handle, split_index * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(draw_count - split_index), sizeof(bud::graphics::IndirectCommand));
 					}
 				}
@@ -2193,6 +2221,15 @@ namespace bud::graphics {
 						const auto& mesh = meshes[mesh_id];
 						if (!mesh.is_valid()) continue;
 						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+
+						if (mesh.is_page_backed && gpu_scene.get_page_pool_buffer().is_valid()) {
+							rhi->cmd_bind_vertex_buffer(cmd, gpu_scene.get_page_pool_buffer());
+							rhi->cmd_bind_index_buffer(cmd, gpu_scene.get_page_pool_buffer(), true);
+						}
+						else {
+							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+						}
 
 						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
 							const auto& sub = mesh.submeshes[item.submesh_index];

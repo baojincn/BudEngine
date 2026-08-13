@@ -20,8 +20,9 @@ vec3 get_random_color(uint seed) {
 }
 
 void main() {
-    // Mix instance_seed and cluster_seed for stable color
-    uint seed = instance_seed * 1337u + cluster_seed;
+    // Mix instance_seed, page_slot (cluster_seed), and approx cluster ID (gl_PrimitiveID / 128)
+    uint cluster_id = uint(gl_PrimitiveID) / 128u;
+    uint seed = instance_seed * 1337u + cluster_seed * 73u + cluster_id;
     
     vec3 debug_color = get_random_color(seed);
 

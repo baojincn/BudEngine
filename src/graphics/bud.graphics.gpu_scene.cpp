@@ -1,4 +1,4 @@
-﻿#include "src/graphics/bud.graphics.gpu_scene.hpp"
+#include "src/graphics/bud.graphics.gpu_scene.hpp"
 
 #include <algorithm>
 
@@ -28,6 +28,9 @@ namespace bud::graphics {
 
 		if (!page_table_buffer_.is_valid()) {
 			page_table_buffer_ = rhi->create_gpu_buffer(kMaxPageTableEntries * sizeof(PageTableEntry), ResourceState::UnorderedAccess);
+			if (page_table_buffer_.mapped_ptr) {
+				std::memset(page_table_buffer_.mapped_ptr, 0, kMaxPageTableEntries * sizeof(PageTableEntry));
+			}
 		}
 	}
 
@@ -138,13 +141,13 @@ namespace bud::graphics {
 
 		auto& frame_resource = frame_resources_[frame_index];
 		const uint32_t desired_instance_capacity = std::max(required_instance_count + 1024u, 1024u);
-		const uint32_t desired_indirect_capacity = std::max(required_draw_count + 1024u, 1024u);
-		// The CSM cull now processes every scene instance, so its buffers must
-		// cover the full scene (casters outside the main view included).
-		// Use a 2x margin: scene entity count can fluctuate within a frame
-		// (coarse placeholders register/unregister asynchronously) while the
-		// per-frame buffer is reused, so a tight +1024 margin can overflow.
-		const uint32_t desired_scene_capacity = std::max(required_scene_instance_count * 2u + 2048u, 2048u);
+		// Generous margins: page-backed meshes register asynchronously, so the
+		// draw/instance counts passed this frame can lag behind the actual counts
+		// recorded later in the same frame (a +1024 margin overflowed on a
+		// San-Miguel-class scene where ~5k pages stream in). 2x/4x + 8192 keeps
+		// the indirect buffers safe while the scene set settles.
+		const uint32_t desired_indirect_capacity = std::max(required_draw_count * 2u + 8192u, 8192u);
+		const uint32_t desired_scene_capacity = std::max(required_scene_instance_count * 4u + 8192u, 8192u);
 		const uint32_t desired_meshlet_capacity = std::max(required_meshlet_count, 1024u);
 
 		if (!frame_resource.instance_data.is_valid() || frame_resource.instance_capacity < desired_instance_capacity) {
@@ -241,12 +244,12 @@ namespace bud::graphics {
 	BufferHandle GPUScene::get_page_pool_buffer() const { return page_pool_.page_pool_buffer; }
 	BufferHandle GPUScene::get_page_table_buffer() const { return page_table_buffer_; }
 
-	void GPUScene::update_page_table_entry(uint32_t page_index, uint32_t pool_offset) {
+	void GPUScene::update_page_table_entry(uint32_t page_index, uint32_t pool_offset, uint32_t valid) {
 		if (!page_table_buffer_.is_valid() || page_index >= kMaxPageTableEntries)
 			return;
 		if (!page_table_buffer_.mapped_ptr) return;
 		auto* entries = static_cast<PageTableEntry*>(page_table_buffer_.mapped_ptr);
-		entries[page_index].valid = 1;
+		entries[page_index].valid = valid;
 		entries[page_index].pool_offset = pool_offset;
 	}
 
