@@ -172,13 +172,13 @@ namespace bud::graphics {
 					// via the compute timeline at submission.
 					builder.set_async_compute();
 					builder.read(rg_instance_data, ResourceState::ShaderResource);
-					auto& frame = gpu_scene.frame_resources(stored_rhi->get_current_frame_index());
+					auto& frame = gpu_scene.get_frame_resources(stored_rhi->get_current_frame_index());
 					if (frame.csm_indirect_draw.is_valid()) {
 						builder.write(render_graph.import_buffer("CSMIndirect", frame.csm_indirect_draw, ResourceState::UnorderedAccess), ResourceState::UnorderedAccess);
 					}
 				},
 				[=, &gpu_scene, &view, &config](RHI* rhi, CommandHandle cmd) {
-					auto& frame = gpu_scene.frame_resources(rhi->get_current_frame_index());
+					auto& frame = gpu_scene.get_frame_resources(rhi->get_current_frame_index());
 					if (!frame.csm_indirect_draw.is_valid() || instance_count == 0) return;
 
 					// CRITICAL: the cull shader reads the cascade matrices from
@@ -242,7 +242,7 @@ namespace bud::graphics {
 					},
 					[=, csm_vis = csm_visible_instances, &render_graph, &render_scene, &meshes, &view, &gpu_scene](RHI* rhi, CommandHandle cmd) {
 						if (!pipeline) return;
-						auto& frame = gpu_scene.frame_resources(rhi->get_current_frame_index());
+						auto& frame = gpu_scene.get_frame_resources(rhi->get_current_frame_index());
 						if (frame.csm_instance_models.is_valid()) {
 							rhi->update_global_csm_instance_data(frame.csm_instance_models);
 						}
@@ -299,7 +299,7 @@ namespace bud::graphics {
 
 							const auto pp_buf = gpu_scene.get_page_pool_buffer();
 							if (config.enable_gpu_driven) {
-								auto& frame = gpu_scene.frame_resources(rhi->get_current_frame_index());
+								auto& frame = gpu_scene.get_frame_resources(rhi->get_current_frame_index());
 								// Static cache: draw ONLY the static casters from
 								// csm_static_indirect_draw (written by csm_cull
 								// with static_only=1), so dynamic objects are never
@@ -340,7 +340,7 @@ namespace bud::graphics {
 									if (mesh_id >= meshes.size()) continue;
 									const auto& mesh = meshes[mesh_id];
 									if (!mesh.is_valid()) continue;
-									const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+									const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
 
 
 									// 2. Culling
@@ -428,7 +428,7 @@ namespace bud::graphics {
 			},
 			[=, csm_vis = std::move(csm_visible_instances), &render_graph, &render_scene, &meshes, &view, &gpu_scene](RHI* rhi, CommandHandle cmd) {
 				if (!pipeline) return;
-				auto& frame = gpu_scene.frame_resources(rhi->get_current_frame_index());
+				auto& frame = gpu_scene.get_frame_resources(rhi->get_current_frame_index());
 				if (frame.csm_instance_models.is_valid()) {
 					rhi->update_global_csm_instance_data(frame.csm_instance_models);
 				}
@@ -511,7 +511,7 @@ namespace bud::graphics {
 						const auto& model_matrix = render_scene.world_matrices[idx];
 						bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
 						if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) return;
-						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+						const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
 
 						// These are CPU-issued draws: make the vertex shader use
 						// push_consts.model instead of the GPU instance buffer.
@@ -548,7 +548,7 @@ namespace bud::graphics {
 					};
 
 					if (config.enable_gpu_driven) {
-						auto& frame = gpu_scene.frame_resources(rhi->get_current_frame_index());
+						auto& frame = gpu_scene.get_frame_resources(rhi->get_current_frame_index());
 						if (frame.csm_indirect_draw.is_valid()) {
 							// csm_cull.comp's second dispatch wrote the DYNAMIC
 							// commands (statics skipped because the static cache
@@ -1396,7 +1396,7 @@ namespace bud::graphics {
 						if (mesh_id >= meshes.size()) continue;
 						const auto& mesh = meshes[mesh_id];
 						if (!mesh.is_valid()) continue;
-						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+						const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
 
 						// Page-backed meshes are backed by the GPU page pool, not the mega
 						// geometry pool, so rebind the buffers before issuing the draw.
@@ -1821,7 +1821,7 @@ namespace bud::graphics {
 
 						const auto& mesh = meshes[mesh_id];
 						if (!mesh.is_valid()) continue;
-						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+						const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
 
 						if (mesh.is_page_backed && pp_buf.is_valid()) {
 							rhi->cmd_bind_vertex_buffer(cmd, pp_buf);
@@ -1851,7 +1851,7 @@ namespace bud::graphics {
 						}
 					}
 					if (page_backed_draws > 0) {
-						const auto& first_mesh_geom = gpu_scene.mesh_geometry(0);
+						const auto& first_mesh_geom = gpu_scene.get_mesh_geometry(0);
 						//bud::print("[MainPass] page_backed_draws={} first_index={} vertex_offset={} pp_buf_valid={}",
 						//	page_backed_draws, first_mesh_geom.first_index, first_mesh_geom.vertex_offset, pp_buf.is_valid());
 					}
@@ -2220,7 +2220,7 @@ namespace bud::graphics {
 						if (mesh_id >= meshes.size()) continue;
 						const auto& mesh = meshes[mesh_id];
 						if (!mesh.is_valid()) continue;
-						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+						const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
 
 						if (mesh.is_page_backed && gpu_scene.get_page_pool_buffer().is_valid()) {
 							rhi->cmd_bind_vertex_buffer(cmd, gpu_scene.get_page_pool_buffer());

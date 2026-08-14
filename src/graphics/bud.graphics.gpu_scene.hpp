@@ -19,8 +19,8 @@ namespace bud::graphics {
 		};
 
 		struct GeometryPool {
-			static constexpr uint64_t kVertexPoolSize = 256ull * 1024 * 1024;
-			static constexpr uint64_t kIndexPoolSize = 128ull * 1024 * 1024;
+			static constexpr uint64_t vertex_pool_size = 256ull * 1024 * 1024;
+			static constexpr uint64_t index_pool_size = 128ull * 1024 * 1024;
 
 			BufferHandle vertex_buffer;
 			BufferHandle index_buffer;
@@ -32,13 +32,13 @@ namespace bud::graphics {
 		struct PagePool {
 			// 1 GB holds ~8000 fixed 128 KB slots: enough for the resident set of
 			// a full San-Miguel-class scene (~5100 pages) in the CPU-driven path.
-			static constexpr uint64_t kPagePoolSize = 1024ull * 1024 * 1024;
+			static constexpr uint64_t page_pool_size = 1024ull * 1024 * 1024;
 			// 131040 is an exact multiple of 48 (sizeof asset::Vertex), 24, 16, and 4.
 			// Fixed 128 KB slots keep page-pool memory management simple. The tool
 			// constrains each .budmesh page so its CPU-decoded legacy layout (48B
 			// vertices + u32 indices) fits this slot.
-			static constexpr uint32_t kPageSize = 128 * 1024; // 131072 bytes (UE5 Nanite 128 KB exact)
-			static constexpr uint32_t kMaxPages = kPagePoolSize / kPageSize;
+			static constexpr uint32_t page_size = 128 * 1024; // 131072 bytes (UE5 Nanite 128 KB exact)
+			static constexpr uint32_t max_pages = page_pool_size / page_size;
 
 			BufferHandle page_pool_buffer;
 			std::vector<uint32_t> free_slots;
@@ -47,7 +47,7 @@ namespace bud::graphics {
 
 			uint32_t allocate_page();
 			void free_page(uint32_t page_index);
-			uint32_t get_page_offset(uint32_t page_index) const { return page_index * kPageSize; }
+			uint32_t get_page_offset(uint32_t page_index) const { return page_index * page_size; }
 		};
 
 		struct PageTableEntry {
@@ -57,7 +57,7 @@ namespace bud::graphics {
 		};
 		// 64K entries for large-world scenes (Nanite-like virtual geometry).
 		// 65536 * 12 B = 786 KB on the GPU, acceptable for a streaming pool.
-		static constexpr uint32_t kMaxPageTableEntries = 65536;
+		static constexpr uint32_t max_page_table_entries = 65536;
 
 		struct FrameResources {
 			BufferHandle instance_data;
@@ -101,8 +101,8 @@ namespace bud::graphics {
 		void init(RHI* rhi, uint32_t inflight_frame_count);
 		void shutdown(RHI* rhi);
 
-		GeometryPool& geometry_pool();
-		const GeometryPool& geometry_pool() const;
+		GeometryPool& get_geometry_pool();
+		const GeometryPool& get_geometry_pool() const;
 
 		BufferHandle get_vertex_buffer() const;
 		BufferHandle get_index_buffer() const;
@@ -114,10 +114,10 @@ namespace bud::graphics {
 		void update_page_table_entry(uint32_t page_index, uint32_t pool_offset, uint32_t valid = 1);
 
 		void set_mesh_geometry(uint32_t mesh_id, uint32_t first_index, int32_t vertex_offset);
-		const MeshGeometry& mesh_geometry(uint32_t mesh_id) const;
+		const MeshGeometry& get_mesh_geometry(uint32_t mesh_id) const;
 
-		FrameResources& frame_resources(uint32_t frame_index);
-		const FrameResources& frame_resources(uint32_t frame_index) const;
+		FrameResources& get_frame_resources(uint32_t frame_index);
+		const FrameResources& get_frame_resources(uint32_t frame_index) const;
 
 		void ensure_frame_resources(RHI* rhi,
 			uint32_t frame_index,
@@ -133,10 +133,10 @@ namespace bud::graphics {
 			bool enable_meshlets);
 
 	private:
-		GeometryPool geometry_pool_;
-		PagePool page_pool_;
-		BufferHandle page_table_buffer_;
-		std::vector<MeshGeometry> mesh_geometry_;
-		std::vector<FrameResources> frame_resources_;
+		GeometryPool geometry_pool;
+		PagePool page_pool;
+		BufferHandle page_table_buffer;
+		std::vector<MeshGeometry> mesh_geometries;
+		std::vector<FrameResources> frame_resources;
 	};
 }

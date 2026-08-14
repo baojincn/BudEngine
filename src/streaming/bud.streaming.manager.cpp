@@ -113,6 +113,14 @@ void StreamingManager::register_budnanite_async(const std::string& path) {
 			}
 			asset.page_aabbs[i] = aabb;
 		}
+		
+		bud::math::AABB global_aabb;
+		global_aabb.min = bud::math::vec3(FLT_MAX, FLT_MAX, FLT_MAX);
+		global_aabb.max = bud::math::vec3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+		for (const auto& aabb : asset.page_aabbs) {
+			global_aabb.merge(aabb.min);
+			global_aabb.merge(aabb.max);
+		}
 
 		auto asset_ptr = std::make_shared<BudNaniteAsset>(std::move(asset));
 		{
@@ -120,6 +128,8 @@ void StreamingManager::register_budnanite_async(const std::string& path) {
 			// Page raw data region is sequential: file offset = page_data_offset
 			// + cumulative sizes.
 			uint64_t off = asset_ptr->page_data_offset;
+			std::vector<StreamingPage> temp_pages;
+			temp_pages.reserve(asset_ptr->pages.size());
 			for (uint32_t i = 0; i < asset_ptr->pages.size(); ++i) {
 				StreamingPage sp;
 				sp.asset_id = path;
@@ -130,6 +140,7 @@ void StreamingManager::register_budnanite_async(const std::string& path) {
 				sp.bin_path = path;
 				sp.is_budnanite = true;
 				sp.aabb = asset_ptr->page_aabbs[i];
+				sp.global_aabb = global_aabb;
 				sp.has_aabb = true;
 				sp.material_id = 0;
 				sp.parent_page_id = asset_ptr->pages[i].dependency_page_id;
@@ -187,8 +198,22 @@ void StreamingManager::register_budnanite_async(const std::string& path) {
 				}
 
 				off += asset_ptr->pages[i].size_in_bytes;
+				temp_pages.push_back(std::move(sp));
+			}
+			
+			float global_lod_errors[3] = { 0.0f, 0.0f, 0.0f };
+			for (const auto& sp : temp_pages) {
+				global_lod_errors[1] = std::max(global_lod_errors[1], sp.lod_errors[1]);
+				global_lod_errors[2] = std::max(global_lod_errors[2], sp.lod_errors[2]);
+			}
+			
+			for (auto& sp : temp_pages) {
+				sp.global_lod_errors[0] = global_lod_errors[0];
+				sp.global_lod_errors[1] = global_lod_errors[1];
+				sp.global_lod_errors[2] = global_lod_errors[2];
 				all_pages_.emplace(sp.get_unique_id(), std::move(sp));
 			}
+			
 			budnanite_assets_[path] = asset_ptr;
 
 			// Auto-register a bounding region covering all pages of this asset.
@@ -241,7 +266,7 @@ void StreamingManager::register_budmesh_async(const std::string& json_path) {
 				sp.page_id = pj.value("page_id", 0u);
 				sp.file_page_index = idx++;
 				sp.file_offset = pj.value("file_offset", 0ull);
-				sp.capacity = pj.value("capacity", static_cast<uint64_t>(bud::graphics::GPUScene::PagePool::kPageSize));
+				sp.capacity = pj.value("capacity", static_cast<uint64_t>(bud::graphics::GPUScene::PagePool::page_size));
 				sp.bin_path = bin_path;
 				sp.material_id = pj.value("material_id", 0u);
 				if (pj.contains("aabb_min") && pj.contains("aabb_max")) {
@@ -286,6 +311,19 @@ void StreamingManager::register_budmesh_async(const std::string& json_path) {
 			}
 		}
 
+		bud::math::AABB global_aabb;
+		global_aabb.min = bud::math::vec3(FLT_MAX, FLT_MAX, FLT_MAX);
+		global_aabb.max = bud::math::vec3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+		for (const auto& sp : asset.pages) {
+			if (sp.has_aabb) {
+				global_aabb.merge(sp.aabb.min);
+				global_aabb.merge(sp.aabb.max);
+			}
+		}
+		for (auto& sp : asset.pages) {
+			sp.global_aabb = global_aabb;
+		}
+
 		if (j.contains("textures") && j["textures"].is_array()) {
 			for (const auto& t : j["textures"])
 				asset.textures.push_back(t.get<std::string>());
@@ -293,13 +331,8 @@ void StreamingManager::register_budmesh_async(const std::string& json_path) {
 
 		{
 				std::scoped_lock lock(mutex_);
-				// CPU-driven path: register LEAF pages only. Coarse pages are
-				// Nanite-style parent placeholders; leaves already contain all
-				// LODs (selected by screen error), so drawing coarse pages too
-				// would duplicate geometry.
 				uint32_t leaf_count = 0;
 				for (const auto& sp : asset.pages) {
-					if (sp.is_coarse) continue;
 					all_pages_.emplace(sp.get_unique_id(), sp);
 					++leaf_count;
 				}
@@ -310,7 +343,6 @@ void StreamingManager::register_budmesh_async(const std::string& json_path) {
 				region.id = json_path;
 				region.aabb = bud::math::AABB(bud::math::vec3(-1e6f), bud::math::vec3(1e6f));
 				for (const auto& sp : managed_assets_[json_path].pages) {
-					if (sp.is_coarse) continue;
 					region.pages.push_back(sp.get_unique_id());
 				}
 				regions_.push_back(std::move(region));
@@ -429,9 +461,9 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 					// Copy data to page pool via staging upload
 					const char* src = data.data();
 					const size_t src_size = data.size();
-					if (src_size > bud::graphics::GPUScene::PagePool::kPageSize) {
+					if (src_size > bud::graphics::GPUScene::PagePool::page_size) {
 						bud::eprint("[Streaming] Page {} data {} bytes exceeds page slot {}; freeing slot",
-							p, src_size, bud::graphics::GPUScene::PagePool::kPageSize);
+							p, src_size, bud::graphics::GPUScene::PagePool::page_size);
 						gpu_scene_->get_page_pool().free_page(slot);
 						std::scoped_lock lock(mutex_);
 						pending_loads_.erase(p);
@@ -478,8 +510,8 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 							rs.cluster_count = meshlet_count;
 							resolved_submeshes.push_back(rs);
 						}
-						mesh_id = renderer_->register_page_backed_mesh(slot, meshlet_count, index_count, page_aabb,
-							vertex_data_offset, index_data_offset, resolved_submeshes, *lod_ranges_ptr, sp.lod_errors);
+						mesh_id = renderer_->register_page_backed_mesh(slot, meshlet_count, index_count, page_aabb, sp.global_aabb,
+							vertex_data_offset, index_data_offset, resolved_submeshes, *lod_ranges_ptr, sp.global_lod_errors);
 					}
 
 					if (mesh_id != ~0u && page_registered_cb_)

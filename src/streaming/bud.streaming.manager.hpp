@@ -32,17 +32,16 @@ struct StreamingPage {
 	// World-space AABB of the page's geometry, exported by BudAssetTool and
 	// used for distance-based on-demand streaming.
 	bud::math::AABB aabb;
+	bud::math::AABB global_aabb;
 	bool has_aabb = false;
 	std::vector<bud::graphics::PageSubMesh> submeshes; // per-(LOD, material) runs
 	// Per-LOD index ranges [start, count] inside the page's index data
 	// (from the JSON lod_ranges). The page index stream is ordered LOD0->LOD2.
 	std::vector<std::pair<uint32_t, uint32_t>> lod_ranges;
-	// Nanite-like hierarchy (v3): coarse pages aggregate a subtree's LOD2
-	// clusters. In the CPU-driven path they are skipped (leaves already contain
-	// all LODs and select LOD by screen error); kept for future GPU-driven
-	// hierarchy traversal.
+	// Nanite-like hierarchy (v3): coarse pages aggregate a subtree's LOD2 clusters.
 	bool is_coarse = false;
 	float lod_errors[3] = { 0.0f, FLT_MAX, FLT_MAX };
+	float global_lod_errors[3] = { 0.0f, FLT_MAX, FLT_MAX };
 	uint32_t parent_page_id = bud::asset::INVALID_INDEX;
 	std::vector<uint32_t> children;
 	std::string get_unique_id() const { return asset_id + ":page_" + std::to_string(page_id); }

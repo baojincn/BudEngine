@@ -60,10 +60,10 @@ namespace bud::graphics {
 			GPUScene& get_gpu_scene() { return gpu_scene; }
 			RHI* get_rhi() { return rhi; }
 			uint32_t register_page_backed_mesh(uint32_t page_index, uint32_t meshlet_count,
-				uint32_t index_count, const bud::math::AABB& aabb,
-				uint32_t vertex_data_offset = 0, uint32_t index_data_offset = 0,
-				const std::vector<PageSubMesh>& submeshes = {},
-				const std::vector<std::pair<uint32_t, uint32_t>>& lod_index_ranges = {},
+				uint32_t index_count, const bud::math::AABB& aabb, const bud::math::AABB& global_aabb,
+				uint32_t vertex_data_offset, uint32_t index_data_offset,
+				const std::vector<PageSubMesh>& page_submeshes,
+				const std::vector<std::pair<uint32_t, uint32_t>>& lod_index_ranges,
 				const float lod_errors[3] = nullptr);
 
 			// Reserves a bindless texture slot, binds the fallback immediately, and

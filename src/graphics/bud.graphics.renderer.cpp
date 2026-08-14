@@ -119,7 +119,7 @@ namespace bud::graphics {
 	}
 
 	uint32_t Renderer::register_page_backed_mesh(uint32_t page_index, uint32_t meshlet_count,
-		uint32_t index_count, const bud::math::AABB& aabb,
+		uint32_t index_count, const bud::math::AABB& aabb, const bud::math::AABB& global_aabb,
 		uint32_t vertex_data_offset, uint32_t index_data_offset,
 		const std::vector<PageSubMesh>& page_submeshes,
 		const std::vector<std::pair<uint32_t, uint32_t>>& lod_index_ranges,
@@ -141,6 +141,11 @@ namespace bud::graphics {
 			bud::math::vec3 center = (aabb.min + aabb.max) * 0.5f;
 			float radius = bud::math::length(aabb.max - center);
 			mesh.sphere = bud::math::BoundingSphere(center, radius);
+		}
+		{
+			bud::math::vec3 global_center = (global_aabb.min + global_aabb.max) * 0.5f;
+			float global_radius = bud::math::length(global_aabb.max - global_center);
+			mesh.global_sphere = bud::math::BoundingSphere(global_center, global_radius);
 		}
 
 		// Per-LOD object-space error for CPU-driven screen-space LOD selection.
@@ -208,14 +213,14 @@ namespace bud::graphics {
 			mesh_bounds.resize(mesh_id + 1);
 		mesh_bounds[mesh_id] = aabb;
 
-		gpu_scene.set_mesh_geometry(mesh_id, static_cast<uint32_t>((page_index * GPUScene::PagePool::kPageSize + index_data_offset) / sizeof(uint16_t)), 0);
+		gpu_scene.set_mesh_geometry(mesh_id, static_cast<uint32_t>((page_index * GPUScene::PagePool::page_size + index_data_offset) / sizeof(uint16_t)), 0);
 
 		// TEMP DIAGNOSTIC: first few page meshes
 		//if (mesh_id < 4) {
 		//	bud::print("[Reg dbg] mesh {} page {} vcnt={} voff={} ioff={} first_idx={} vert_off={} submeshes={}",
 		//		mesh_id, page_index, meshlet_count, vertex_data_offset, index_data_offset,
-		//		(page_index * GPUScene::PagePool::kPageSize + index_data_offset) / 4,
-		//		(page_index * GPUScene::PagePool::kPageSize + vertex_data_offset) / 48,
+		//		(page_index * GPUScene::PagePool::page_size + index_data_offset) / 4,
+		//		(page_index * GPUScene::PagePool::page_size + vertex_data_offset) / 48,
 		//		mesh.submeshes.size());
 		//	for (const auto& s : mesh.submeshes) {
 		//		if (s.lod_level < 3)
@@ -403,16 +408,16 @@ namespace bud::graphics {
 				const uint64_t i_size = index_count * sizeof(uint32_t);
 
 				// Initialize GPUScene geometry pool on first use
-				auto& geometry_pool = gpu_scene.geometry_pool();
+				auto& geometry_pool = gpu_scene.get_geometry_pool();
 				if (!geometry_pool.initialized) {
-					geometry_pool.vertex_buffer = rhi->create_gpu_buffer(GPUScene::GeometryPool::kVertexPoolSize, ResourceState::VertexBuffer);
-					geometry_pool.index_buffer = rhi->create_gpu_buffer(GPUScene::GeometryPool::kIndexPoolSize, ResourceState::IndexBuffer);
+					geometry_pool.vertex_buffer = rhi->create_gpu_buffer(GPUScene::GeometryPool::vertex_pool_size, ResourceState::VertexBuffer);
+					geometry_pool.index_buffer = rhi->create_gpu_buffer(GPUScene::GeometryPool::index_pool_size, ResourceState::IndexBuffer);
 					rhi->set_debug_name(geometry_pool.vertex_buffer, ObjectType::Buffer, "GeometryPool_Vertices");
 					rhi->set_debug_name(geometry_pool.index_buffer, ObjectType::Buffer, "GeometryPool_Indices");
 					geometry_pool.initialized = true;
 					bud::print("[GeometryPool] Initialized: vertex={}MB index={}MB",
-						GPUScene::GeometryPool::kVertexPoolSize / (1024 * 1024),
-						GPUScene::GeometryPool::kIndexPoolSize / (1024 * 1024));
+						GPUScene::GeometryPool::vertex_pool_size / (1024 * 1024),
+						GPUScene::GeometryPool::index_pool_size / (1024 * 1024));
 				}
 
 				// Atomically reserve contiguous region inside the pool
@@ -676,7 +681,7 @@ namespace bud::graphics {
 				uint32_t sub_idx = render_scene.submesh_indices[i];
 
 				draw_offsets[k] = (uint32_t)total_draw_count;
-				if (sub_idx == bud::asset::INVALID_INDEX) {
+				if (sub_idx == bud::asset::INVALID_INDEX || mesh.is_page_backed) {
 					total_draw_count += (uint32_t)mesh.submeshes.size();
 				}
 				else {
@@ -730,9 +735,9 @@ namespace bud::graphics {
 						// coarsest level on large scenes).
 						uint32_t page_lod = 0;
 						if (mesh.is_page_backed) {
-							float dist = bud::math::length(scene_view.camera_position - mesh.sphere.center);
+							float dist = bud::math::length(scene_view.camera_position - mesh.global_sphere.center);
 							float focal = scene_view.proj_matrix[1][1] * scene_view.viewport_height * 0.5f;
-							page_lod = select_page_lod(dist, mesh.sphere.radius, focal,
+							page_lod = select_page_lod(dist, mesh.global_sphere.radius, focal,
 								mesh.lod_error[1], mesh.lod_error[2], render_config.lod_error_threshold_px);
 						}
 
@@ -765,19 +770,7 @@ namespace bud::graphics {
 						}
 						else {
 							// Explode!
-							// Clamp the target LOD to the levels actually present
-							// in this page so geometry never disappears when a
-							// page lacks the exact requested level.
 							uint32_t target_lod = page_lod;
-							if (mesh.is_page_backed) {
-								uint32_t min_avail = UINT32_MAX, max_avail = 0;
-								for (const auto& sub : mesh.submeshes) {
-									min_avail = std::min(min_avail, sub.lod_level);
-									max_avail = std::max(max_avail, sub.lod_level);
-								}
-								if (min_avail > max_avail) { min_avail = 0; max_avail = 0; }
-								target_lod = std::clamp(target_lod, min_avail, max_avail);
-							}
 							for (uint32_t s = 0; s < (uint32_t)mesh.submeshes.size(); ++s) {
 								auto& item = sort_list[draw_start + s];
 								const auto& sub = mesh.submeshes[s];
@@ -923,7 +916,7 @@ namespace bud::graphics {
 				render_config.enable_gpu_driven,
 				render_config.enable_meshlets);
 
-			auto& frame = gpu_scene.frame_resources(current_idx);
+			auto& frame = gpu_scene.get_frame_resources(current_idx);
 
 			auto& render_stats = rhi->get_render_stats();
 			const bool meshlet_pass_ready = meshlet_frustum_pass && meshlet_frustum_pass->is_ready()
@@ -1005,7 +998,7 @@ namespace bud::graphics {
 						uint32_t entity_idx = item.entity_index;
 						uint32_t mesh_id = render_scene.mesh_indices[entity_idx];
 						const auto& mesh = meshes[mesh_id];
-						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+						const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
 
 						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
 							const auto& sub = mesh.submeshes[item.submesh_index];
@@ -1101,7 +1094,7 @@ namespace bud::graphics {
 						if (mesh_id >= meshes.size() || !meshes[mesh_id].is_valid()) continue;
 						
 						const auto& mesh = meshes[mesh_id];
-						const auto& mesh_geometry = gpu_scene.mesh_geometry(mesh_id);
+						const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
 
 						uint32_t write_idx = mesh.is_page_backed ? page_idx++ : static_idx++;
 
@@ -1116,13 +1109,15 @@ namespace bud::graphics {
 						uint32_t index_start = 0;
 						uint32_t index_count = mesh.index_count;
 						if (mesh.is_page_backed) {
-							float lod_dist = bud::math::length(scene_view.camera_position - mesh.sphere.center);
+							float lod_dist = bud::math::length(scene_view.camera_position - mesh.global_sphere.center);
 							float focal = scene_view.proj_matrix[1][1] * scene_view.viewport_height * 0.5f;
-							uint32_t lod = select_page_lod(lod_dist, mesh.sphere.radius, focal,
+							uint32_t lod = select_page_lod(lod_dist, mesh.global_sphere.radius, focal,
 								mesh.lod_error[1], mesh.lod_error[2], render_config.lod_error_threshold_px);
 							if (lod < 3 && mesh.lod_index_count[lod] > 0) {
 								index_start = mesh.lod_index_start[lod];
 								index_count = mesh.lod_index_count[lod];
+							} else {
+								index_count = 0; // Drop draw call, let coarse page handle it
 							}
 						}
 						d.indexCount = index_count;

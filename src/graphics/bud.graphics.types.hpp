@@ -418,6 +418,7 @@ namespace bud::graphics {
 
 		bud::math::AABB aabb;
 		bud::math::BoundingSphere sphere;
+		bud::math::BoundingSphere global_sphere;
 		std::vector<SubMesh> submeshes;
 
 		bool is_valid() const { return index_count > 0; }

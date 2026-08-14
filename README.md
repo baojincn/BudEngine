@@ -23,7 +23,7 @@ A full fiber-based task driven lightweight 3D Game Engine.
     * **RL-Driven Concurrent Hi-Z Occlusion Culling**: Reinforcement learning (`ml_perception`) occluder selection for zero-latency current-frame Z-Prepass and Hi-Z pyramid generation.
     * **Indirect Draw Emission**: Fully GPU-driven draw command generation (`MeshletIndirectEmissionPass`) executing via `vkCmdDrawIndexedIndirect`, condensing main camera and depth prepass rendering into a single indirect draw call per pass.
 * **Virtual Geometry & Page Streaming**:
-    * **Virtual Memory Paging for GPU Geometry**: Large scenes are sliced into uniform 128KB memory pages (`kPageSize = 131,040 Bytes`) and streamed asynchronously (`StreamingManager`) via non-blocking `bud::io` operations.
+    * **Virtual Memory Paging for GPU Geometry**: Large scenes are sliced into uniform 128KB memory pages (`page_size = 131,040 Bytes`) and streamed asynchronously (`StreamingManager`) via non-blocking `bud::io` operations.
     * **Bindless Slot-Based Page Pool & Page Table**: Global GPU storage buffer partitioned into 128KB slots with an indirect SSBO Page Table (`valid` / `pool_offset`), allowing zero-rebind single-buffer rendering across disjoint pages.
     * **Per-Draw Visibility Offsets**: Safe multi-instance and multi-page culling inside shared compute pipelines (`meshlet_frustum_cull.comp` / `meshlet_hiz_cull.comp`).
 * **Offline Asset Pipeline & Blender DCC Integration (`BudAssetTool` & `pybind11`)**:
