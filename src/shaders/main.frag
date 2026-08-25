@@ -1,4 +1,4 @@
-#version 450
+#version 460
 #extension GL_EXT_nonuniform_qualifier : enable
 
 layout(location = 0) in vec3 frag_world_pos;
@@ -31,6 +31,22 @@ layout(binding = 0) uniform UniformBufferObject {
 
 layout(binding = 1) uniform sampler2D tex_samplers[];
 layout(binding = 2) uniform sampler2DArrayShadow shadow_map;
+
+struct GPUMaterialData {
+    vec4 base_color_factor;
+    uint albedo_texture_id;
+    uint normal_texture_id;
+    uint metallic_roughness_id;
+    uint emissive_texture_id;
+    float metallic_factor;
+    float roughness_factor;
+    float alpha_cutoff;
+    uint alpha_mode;
+};
+
+layout(std430, set = 0, binding = 7) readonly buffer MaterialBuffer {
+    GPUMaterialData materials[];
+};
 
 const float PI = 3.14159265359;
 
@@ -104,7 +120,7 @@ float SampleCascade(int layer, vec3 world_pos, vec3 N, vec3 L) {
 
     // 超出视锥体范围，视作无阴影
     if(proj_coords.z > 1.0 || proj_coords.z < 0.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 || proj_coords.y < 0.0 || proj_coords.y > 1.0)
-        return 1.0;
+        return 0.0;
 
     // Dynamic Bias based on slope and constant
     // shadow_bias_constant is usually ~0.005, shadow_bias_slope is ~1.25
@@ -177,29 +193,40 @@ float ShadowCalculation(vec3 world_pos, vec3 N, vec3 L) {
 }
 
 void main() {
-    //int tex_id = int(frag_tex_index + 0.5);
-	uint tex_id = frag_material_id;
-    vec4 albedo_sample;
-    
-	// Handle unbound texture index 0 or missing textures
-	if (tex_id <= 0) {
-		albedo_sample = vec4(0.7, 0.7, 0.7, 1.0); // Grey for non-textured (page-streamed) meshes
-	} else {
-		// Page-streamed meshes may reference textures that aren't bound yet; fall back to grey
-		if (tex_id >= 1000u) {
-			albedo_sample = vec4(0.7, 0.7, 0.7, 1.0);
-		} else {
-			albedo_sample = texture(tex_samplers[nonuniformEXT(tex_id)], frag_tex_coord);
-		}
-	}
+    GPUMaterialData mat;
+    if (frag_material_id < materials.length())
+        mat = materials[frag_material_id];
+    else {
+        mat.base_color_factor = vec4(0.8, 0.8, 0.8, 1.0);
+        mat.albedo_texture_id = 0u;
+        mat.normal_texture_id = 0u;
+        mat.metallic_roughness_id = 0u;
+        mat.emissive_texture_id = 0u;
+        mat.metallic_factor = 0.0;
+        mat.roughness_factor = 0.5;
+        mat.alpha_cutoff = 0.5;
+        mat.alpha_mode = 0u;
+    }
 
-	if (albedo_sample.a < 0.5 && tex_id > 0 && tex_id < 1000u)
-		discard;
+    vec4 albedo_sample = mat.base_color_factor;
+    if (mat.albedo_texture_id > 0u && mat.albedo_texture_id < 1000u)
+        albedo_sample *= texture(tex_samplers[nonuniformEXT(mat.albedo_texture_id)], frag_tex_coord);
 
-	vec3 albedo = albedo_sample.rgb; 
+    if (mat.alpha_mode == 1u && albedo_sample.a < mat.alpha_cutoff)
+        discard;
 
-    float metallic = 0.1; 
-    float roughness = 0.5;
+    vec3 albedo = albedo_sample.rgb; 
+    float metallic = mat.metallic_factor; 
+    float roughness = mat.roughness_factor;
+
+    if (mat.metallic_roughness_id > 0u && mat.metallic_roughness_id < 1000u) {
+        vec4 mr_sample = texture(tex_samplers[nonuniformEXT(mat.metallic_roughness_id)], frag_tex_coord);
+        roughness *= mr_sample.g;
+        metallic *= mr_sample.b;
+    }
+    roughness = clamp(roughness, 0.04, 1.0);
+    metallic = clamp(metallic, 0.0, 1.0);
+
     // Screen-space AO sampling from bindless slot 998 (slot 999 is reserved for ImGui Font Atlas)
     ivec2 ao_tex_size = textureSize(tex_samplers[998], 0);
     float ao = 1.0;
@@ -209,6 +236,18 @@ void main() {
     }
 
     vec3 N = normalize(frag_normal);
+    if (mat.normal_texture_id > 0u && mat.normal_texture_id < 1000u) {
+        vec3 normal_sample = texture(tex_samplers[nonuniformEXT(mat.normal_texture_id)], frag_tex_coord).xyz * 2.0 - 1.0;
+        vec3 Q1 = dFdx(frag_world_pos);
+        vec3 Q2 = dFdy(frag_world_pos);
+        vec2 st1 = dFdx(frag_tex_coord);
+        vec2 st2 = dFdy(frag_tex_coord);
+        vec3 T = normalize(Q1 * st2.t - Q2 * st1.t);
+        vec3 B = -normalize(cross(N, T));
+        mat3 TBN = mat3(T, B, N);
+        N = normalize(TBN * normal_sample);
+    }
+
     vec3 V = normalize(ubo.cam_pos - frag_world_pos);
     vec3 L = normalize(ubo.light_dir); 
     vec3 H = normalize(V + L);

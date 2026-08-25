@@ -1,4 +1,4 @@
-﻿#ifdef _WIN32
+#ifdef _WIN32
 
 #include "src/platform/crash_handler.hpp"
 #include <windows.h>
@@ -108,18 +108,60 @@ static void write_minidump(EXCEPTION_POINTERS* exinfo) {
 }
 
 static LONG WINAPI UnhandledExceptionFilterImpl(EXCEPTION_POINTERS* exinfo) {
+    HANDLE process = GetCurrentProcess();
+    SymInitialize(process, nullptr, TRUE);
+
+    if (exinfo && exinfo->ExceptionRecord) {
+        char buf[256];
+        sprintf_s(buf, "[CRASH] ExceptionCode=0x%08lX at Address=0x%p\n",
+            exinfo->ExceptionRecord->ExceptionCode,
+            exinfo->ExceptionRecord->ExceptionAddress);
+        OutputDebugStringA(buf);
+        fprintf(stderr, "%s", buf);
+        fflush(stderr);
+    }
+
+    void* stack[32];
+    unsigned short frames = CaptureStackBackTrace(0, 32, stack, nullptr);
+    char symbolBuffer[sizeof(SYMBOL_INFO) + 256];
+    SYMBOL_INFO* symbol = (SYMBOL_INFO*)symbolBuffer;
+    symbol->MaxNameLen = 255;
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+
+    for (unsigned int i = 0; i < frames; ++i) {
+        SymFromAddr(process, (DWORD64)(stack[i]), 0, symbol);
+        IMAGEHLP_LINE64 line;
+        line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+        DWORD displacement = 0;
+        if (SymGetLineFromAddr64(process, (DWORD64)(stack[i]), &displacement, &line)) {
+            fprintf(stderr, "  [%u] %s (%s:%lu)\n", i, symbol->Name, line.FileName, line.LineNumber);
+        } else {
+            fprintf(stderr, "  [%u] %s (0x%p)\n", i, symbol->Name, stack[i]);
+        }
+        fflush(stderr);
+    }
+
     write_minidump(exinfo);
-    // Let default handler run after
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
 static void terminate_handler() {
-    // Attempt to capture a dump on std::terminate(). Avoid allocator use and
-    // project logger because the C++ runtime may be in an invalid state.
     const CHAR term_msg[] = "std::terminate called - attempting to write minidump\n";
     OutputDebugStringA(term_msg);
+    fprintf(stderr, "%s", term_msg);
+    try {
+        auto current_ex = std::current_exception();
+        if (current_ex) {
+            std::rethrow_exception(current_ex);
+        }
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[TERMINATE] std::exception: %s\n", e.what());
+        fflush(stderr);
+    } catch (...) {
+        fprintf(stderr, "[TERMINATE] unknown exception\n");
+        fflush(stderr);
+    }
     write_minidump(nullptr);
-    // Ensure termination
     abort();
 }
 

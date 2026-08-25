@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstring>
 #include <exception>
@@ -28,31 +28,21 @@ void TriangleApp::on_init(const AppConfig& config) {
 	streaming_manager = std::make_unique<bud::streaming::StreamingManager>(
 		asset_manager, &renderer->get_gpu_scene(), renderer, renderer->get_rhi());
 
-	streaming_manager->set_page_registered_callback([engine](uint32_t mesh_id, const bud::math::AABB&) {
+	renderer->set_streaming_manager(streaming_manager.get());
+
+	streaming_manager->set_asset_registered_callback([engine](uint32_t mesh_id, const bud::math::AABB&, uint32_t root_group_index, uint32_t base_virtual_page) {
 		auto& s = engine->get_scene();
 		bud::scene::Entity e;
-		e.asset_path = "[page_streaming]";
+		e.asset_path = "[asset_streaming]";
 		e.mesh_index = mesh_id;
 		e.material_index = 0;
 		e.is_active = true;
 		e.is_static = true;
 		e.transform = glm::mat4(1.0f);
+		e.root_group_index = root_group_index;
+		e.base_virtual_page = base_virtual_page;
 		s.entities.push_back(std::move(e));
-		//bud::print("[TriangleApp] Page entity added: mesh_id={} total_entities={}", mesh_id, s.entities.size());
-	});
-
-	// When a page is unloaded, remove the scene entity referencing its mesh so
-	// stale entities do not accumulate and later slot reuse does not corrupt
-	// their geometry (broken vertices collapsing to the origin).
-	streaming_manager->set_page_unregistered_callback([engine](uint32_t mesh_id) {
-		auto& s = engine->get_scene();
-		for (auto it = s.entities.begin(); it != s.entities.end();) {
-			if (it->asset_path == "[page_streaming]" && it->mesh_index == mesh_id) {
-				it = s.entities.erase(it);
-			} else {
-				++it;
-			}
-		}
+		//bud::print("[TriangleApp] Asset entity added: mesh_id={} total_entities={}", mesh_id, s.entities.size());
 	});
 
 	// 1. Initial Render Config
@@ -66,8 +56,8 @@ void TriangleApp::on_init(const AppConfig& config) {
 	// CPU-driven path: page-backed streaming is validated via the CPU indirect
 	// path (GPU-driven meshlet rendering would need per-page meshlet GPU data
 	// that streaming does not upload yet).
-	render_config.enable_gpu_driven = false;
-	render_config.enable_meshlets = false;
+	render_config.enable_gpu_driven = true;
+	render_config.enable_virtual_geometry = true;
 	renderer->set_config(render_config);
 
 	// 2. Load Scene Data-Driven
@@ -79,29 +69,23 @@ void TriangleApp::on_init(const AppConfig& config) {
 
 				bud::print("[TriangleApp] Scene file parsed. Entities found: {}", scene.entities.size());
 
-				// Count pending mesh loads
-				// Route streamed assets: legacy page-streaming uses .budmesh.json
-				// (JSON metadata + .bin); the new UE5-aligned single-file layout also
-				// uses the .budmesh extension (magic "BNNT", distinguished at load).
+				auto is_vg_asset = [](const std::string& p) {
+					return p.ends_with(".budasset") || p.ends_with(".budmesh");
+				};
+
+				// Route Virtual Geometry assets (.budasset / .budmesh) through GPU page streaming;
+				// everything else loads as a traditional dynamic mesh below.
 				for (auto& e : scene.entities) {
-					if (!e.asset_path.empty() && e.asset_path.ends_with(".budmesh.json")) {
+					if (!e.asset_path.empty() && is_vg_asset(e.asset_path)) {
 						if (streaming_manager)
-							streaming_manager->register_budmesh_async(e.asset_path);
-						// The virtual entity's geometry is fully streamed via pages;
-						// clear its mesh index so it is not drawn on top of the
-						// page-registered entity (which would render the same mesh).
-						e.mesh_index = bud::asset::INVALID_INDEX;
-					}
-					else if (!e.asset_path.empty() && e.asset_path.ends_with(".budmesh") && !e.asset_path.ends_with(".budmesh.json")) {
-						if (streaming_manager)
-							streaming_manager->register_budnanite_async(e.asset_path);
+							streaming_manager->register_virtual_geometry_async(e.asset_path);
 						e.mesh_index = bud::asset::INVALID_INDEX;
 					}
 				}
 
 				int count = 0;
 				for (auto& e : scene.entities)
-					if (!e.asset_path.empty() && !e.asset_path.ends_with(".budmesh.json") && !(e.asset_path.ends_with(".budmesh") && !e.asset_path.ends_with(".budmesh.json")))
+					if (!e.asset_path.empty() && !is_vg_asset(e.asset_path))
 						++count;
 
 				pending_mesh_loads->store(count);
@@ -113,7 +97,7 @@ void TriangleApp::on_init(const AppConfig& config) {
 
 				for (size_t i = 0; i < scene.entities.size(); ++i) {
 					const auto asset_path = scene.entities[i].asset_path;
-						if (asset_path.empty() || asset_path.ends_with(".budmesh.json") || (asset_path.ends_with(".budmesh") && !asset_path.ends_with(".budmesh.json"))) continue;
+					if (asset_path.empty() || is_vg_asset(asset_path)) continue;
 
 					asset_manager->load_mesh_async(asset_path, [this, engine, renderer, pending_mesh = pending_mesh_loads, asset_path, i](bud::io::MeshData mesh) mutable {
 						auto mesh_handle = renderer->upload_mesh(mesh);
@@ -189,6 +173,7 @@ void TriangleApp::on_update(float delta_time) {
 
 void TriangleApp::on_shutdown() {
 	bud::print("[TriangleApp] Shutting down.");
+	streaming_manager.reset();
 }
 
 pybind11::array_t<uint8_t> TriangleApp::step(float dt) {

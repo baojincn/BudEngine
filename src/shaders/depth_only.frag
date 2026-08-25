@@ -6,17 +6,33 @@ layout(location = 1) flat in uint frag_material_id;
 
 layout(binding = 1) uniform sampler2D tex_samplers[];
 
-void main() {
-    uint tex_id = frag_material_id;
+struct GPUMaterialData {
+    vec4 base_color_factor;
+    uint albedo_texture_id;
+    uint normal_texture_id;
+    uint metallic_roughness_id;
+    uint emissive_texture_id;
+    float metallic_factor;
+    float roughness_factor;
+    float alpha_cutoff;
+    uint alpha_mode;
+};
 
-    // Page-streamed / untextured meshes (tex_id == 0) are opaque. Skip the
-    // alpha test so the depth prepass doesn't discard occluders based on the
-    // uninitialized fallback texture's alpha.
-    if (tex_id == 0 || tex_id >= 1000u)
+layout(std430, set = 0, binding = 7) readonly buffer MaterialBuffer {
+    GPUMaterialData materials[];
+};
+
+void main() {
+    if (frag_material_id >= materials.length())
         return;
 
-    float alpha = texture(tex_samplers[nonuniformEXT(tex_id)], frag_tex_coord).a;
-    if (alpha < 0.5) {
-        discard;
+    GPUMaterialData mat = materials[frag_material_id];
+    if (mat.alpha_mode == 1u) {
+        if (mat.albedo_texture_id > 0u && mat.albedo_texture_id < 1000u) {
+            float alpha = texture(tex_samplers[nonuniformEXT(mat.albedo_texture_id)], frag_tex_coord).a;
+            if (alpha < mat.alpha_cutoff) {
+                discard;
+            }
+        }
     }
 }

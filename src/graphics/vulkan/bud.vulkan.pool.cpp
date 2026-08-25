@@ -1,4 +1,4 @@
-﻿#include <vulkan/vulkan.h>
+#include <vulkan/vulkan.h>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -23,92 +23,174 @@ namespace bud::graphics::vulkan {
     }
 
     void VulkanResourcePool::cleanup() {
-        // [FIX] Clean up any acquired textures that weren't released
-        for (auto& sp : acquired_textures_shared) {
-            if (sp) {
-                destroy_vulkan_objects(static_cast<VulkanTexture*>(sp.get()));
+        std::lock_guard lock(mutex);
+        for (auto& slot : texture_slots) {
+            if (slot.in_use && slot.texture) {
+                destroy_vulkan_objects(slot.texture.get());
+                slot.texture.reset();
+                slot.in_use = false;
             }
         }
-        acquired_textures_shared.clear();
+        texture_slots.clear();
+        free_texture_indices.clear();
 
         for (auto& [hash, list] : image_pool) {
-            // list 是 vector<shared_ptr<VulkanTexture>>
             for (auto& tex : list) {
                 if (tex) destroy_vulkan_objects(tex.get());
             }
             list.clear();
         }
+
+        for (auto& slot : buffer_slots) {
+            if (slot.in_use && slot.buffer) {
+                destroy_vulkan_objects(slot.buffer.get());
+                slot.buffer.reset();
+                slot.in_use = false;
+            }
+        }
+        buffer_slots.clear();
+        free_buffer_indices.clear();
+
+        for (auto& [hash, list] : buffer_pool) {
+            for (auto& buf : list) {
+                if (buf) destroy_vulkan_objects(buf.get());
+            }
+            list.clear();
+        }
     }
 
-    Texture* VulkanResourcePool::acquire_texture(const TextureDesc& desc) {
-        // Backward-compatible raw API that returns a raw pointer but keeps a
-        // managed shared_ptr internally. Prefer using acquire_texture_shared.
-        auto sp = acquire_texture_shared(desc);
-        return sp.get();
-    }
-
-    std::shared_ptr<Texture> VulkanResourcePool::acquire_texture_shared(const TextureDesc& desc) {
+    TextureHandle VulkanResourcePool::acquire_texture(const TextureDesc& desc) {
+        std::lock_guard lock(mutex);
         size_t hash = hash_desc(desc);
-
         std::shared_ptr<VulkanTexture> tex;
 
-        // 1. 尝试复用
+        // 1. Try reusing from cache
         if (!image_pool[hash].empty()) {
             tex = image_pool[hash].back();
             image_pool[hash].pop_back();
         }
         else {
-            // 2. 新建
+            // 2. Create new texture
             tex = create_texture_smart(desc);
         }
 
-        // Track acquired textures
-        acquired_textures_shared.push_back(tex);
+        if (!tex) {
+            return TextureHandle{};
+        }
 
-        return tex;
+        // 3. Allocate slot
+        uint32_t slot_idx = 0;
+        if (!free_texture_indices.empty()) {
+            slot_idx = free_texture_indices.back();
+            free_texture_indices.pop_back();
+        }
+        else {
+            slot_idx = static_cast<uint32_t>(texture_slots.size());
+            texture_slots.emplace_back();
+        }
+
+        auto& slot = texture_slots[slot_idx];
+        slot.texture = tex;
+        slot.in_use = true;
+
+        return TextureHandle{ slot_idx };
     }
 
-    void VulkanResourcePool::release_texture(Texture* texture) {
-        // Keep backward compat: convert to shared_ptr release
-        if (!texture) return;
-        // Find shared_ptr in acquired_textures_shared
-        for (auto it = acquired_textures_shared.begin(); it != acquired_textures_shared.end(); ++it) {
-            if (it->get() == texture) {
-                // Move ownership back into pool or destroy
-                auto sp = *it;
-                acquired_textures_shared.erase(it);
-                // recycle into pool
-                size_t hash = sp->desc_hash;
-                if (hash != 0) {
-                    image_pool[hash].push_back(sp);
-                } else {
-                    destroy_vulkan_objects(static_cast<VulkanTexture*>(sp.get()));
-                }
-                return;
+    void VulkanResourcePool::release_texture(TextureHandle handle) {
+        std::lock_guard lock(mutex);
+        if (!handle.is_valid() || handle.id >= texture_slots.size()) {
+            return;
+        }
+
+        auto& slot = texture_slots[handle.id];
+        if (!slot.in_use) {
+            return;
+        }
+
+        auto tex = std::move(slot.texture);
+        slot.texture.reset();
+        slot.in_use = false;
+        free_texture_indices.push_back(handle.id);
+
+        if (tex) {
+            size_t hash = tex->desc_hash;
+            if (hash != 0) {
+                image_pool[hash].push_back(std::move(tex));
+            }
+            else {
+                destroy_vulkan_objects(tex.get());
             }
         }
     }
 
-    void VulkanResourcePool::release_texture_shared(std::shared_ptr<Texture> texture) {
-        if (!texture) return;
-        // Find and remove from acquired list
-        for (auto it = acquired_textures_shared.begin(); it != acquired_textures_shared.end(); ++it) {
-            if (it->get() == texture.get()) {
-                auto sp = *it;
-                acquired_textures_shared.erase(it);
-                size_t hash = sp->desc_hash;
-                if (hash != 0) {
-                    image_pool[hash].push_back(sp);
-                } else {
-                    destroy_vulkan_objects(static_cast<VulkanTexture*>(sp.get()));
-                }
-                return;
-            }
+    Texture* VulkanResourcePool::get_texture(TextureHandle handle) {
+        std::lock_guard lock(mutex);
+        if (!handle.is_valid() || handle.id >= texture_slots.size()) {
+            return nullptr;
         }
+        const auto& slot = texture_slots[handle.id];
+        if (!slot.in_use) {
+            return nullptr;
+        }
+        return slot.texture.get();
+    }
+
+    const Texture* VulkanResourcePool::get_texture(TextureHandle handle) const {
+        std::lock_guard lock(mutex);
+        if (!handle.is_valid() || handle.id >= texture_slots.size()) {
+            return nullptr;
+        }
+        const auto& slot = texture_slots[handle.id];
+        if (!slot.in_use) {
+            return nullptr;
+        }
+        return slot.texture.get();
+    }
+
+    TextureDesc VulkanResourcePool::get_texture_desc(TextureHandle handle) const {
+        std::lock_guard lock(mutex);
+        if (!handle.is_valid() || handle.id >= texture_slots.size()) {
+            return TextureDesc{};
+        }
+        const auto& slot = texture_slots[handle.id];
+        if (!slot.in_use || !slot.texture) {
+            return TextureDesc{};
+        }
+        const Texture* tex = slot.texture.get();
+        TextureDesc desc;
+        desc.width = tex->width;
+        desc.height = tex->height;
+        desc.format = tex->format;
+        desc.mips = tex->mips;
+        desc.array_layers = tex->array_layers;
+        desc.type = tex->type;
+        return desc;
+    }
+
+    TextureHandle VulkanResourcePool::register_texture(std::shared_ptr<VulkanTexture> tex) {
+        if (!tex) {
+            return TextureHandle{};
+        }
+        std::lock_guard lock(mutex);
+        uint32_t slot_idx = 0;
+        if (!free_texture_indices.empty()) {
+            slot_idx = free_texture_indices.back();
+            free_texture_indices.pop_back();
+        }
+        else {
+            slot_idx = static_cast<uint32_t>(texture_slots.size());
+            texture_slots.emplace_back();
+        }
+
+        auto& slot = texture_slots[slot_idx];
+        slot.texture = std::move(tex);
+        slot.in_use = true;
+
+        return TextureHandle{ slot_idx };
     }
 
     void VulkanResourcePool::tick() {
-        // 定期清理过久的资源
+        // Periodic pool cleanup
     }
 
     size_t VulkanResourcePool::hash_desc(const TextureDesc& desc) {
@@ -131,11 +213,12 @@ namespace bud::graphics::vulkan {
         if (tex->view) vkDestroyImageView(device, tex->view, nullptr);
         
         if (tex->image) {
-            // bud::print("[Pool] Destroying VkImage {} ({}x{} fmt={})", (void*)tex->image, tex->width, tex->height, (int)tex->format);
-            // Unregister from allocator tracking then destroy
-            // Unregister wrapper (if tracked) and destroy image
             allocator->unregister_allocation_image(tex);
-            vmaDestroyImage(allocator->get_vma_allocator(), tex->image, tex->allocation);
+            if (tex->allocation != VK_NULL_HANDLE) {
+                vmaDestroyImage(allocator->get_vma_allocator(), tex->image, tex->allocation);
+            }
+            tex->image = VK_NULL_HANDLE;
+            tex->allocation = VK_NULL_HANDLE;
         }
     }
 
@@ -273,6 +356,206 @@ namespace bud::graphics::vulkan {
         }
 
         return tex;
+    }
+
+    BufferHandle VulkanResourcePool::acquire_buffer(const BufferDesc& desc) {
+        std::lock_guard lock(mutex);
+        size_t hash = hash_desc(desc);
+        std::shared_ptr<VulkanBuffer> buf;
+
+        // 1. Try reusing from cache
+        if (!buffer_pool[hash].empty()) {
+            buf = buffer_pool[hash].back();
+            buffer_pool[hash].pop_back();
+        }
+        else {
+            // 2. Create new buffer
+            buf = create_buffer_smart(desc);
+        }
+
+        if (!buf) {
+            return BufferHandle{};
+        }
+
+        // 3. Allocate slot
+        uint32_t slot_idx = 0;
+        if (!free_buffer_indices.empty()) {
+            slot_idx = free_buffer_indices.back();
+            free_buffer_indices.pop_back();
+        }
+        else {
+            slot_idx = static_cast<uint32_t>(buffer_slots.size());
+            buffer_slots.emplace_back();
+        }
+
+        auto& slot = buffer_slots[slot_idx];
+        slot.buffer = buf;
+        slot.in_use = true;
+
+        return BufferHandle{ slot_idx };
+    }
+
+    void VulkanResourcePool::release_buffer(BufferHandle handle) {
+        std::lock_guard lock(mutex);
+        if (!handle.is_valid() || handle.id >= buffer_slots.size()) {
+            return;
+        }
+
+        auto& slot = buffer_slots[handle.id];
+        if (!slot.in_use) {
+            return;
+        }
+
+        auto buf = std::move(slot.buffer);
+        slot.buffer.reset();
+        slot.in_use = false;
+        free_buffer_indices.push_back(handle.id);
+
+        if (buf) {
+            size_t hash = buf->desc_hash;
+            if (hash != 0) {
+                buffer_pool[hash].push_back(std::move(buf));
+            }
+            else {
+                destroy_vulkan_objects(buf.get());
+            }
+        }
+    }
+
+    Buffer* VulkanResourcePool::get_buffer(BufferHandle handle) {
+        std::lock_guard lock(mutex);
+        if (!handle.is_valid() || handle.id >= buffer_slots.size()) {
+            return nullptr;
+        }
+        const auto& slot = buffer_slots[handle.id];
+        if (!slot.in_use) {
+            return nullptr;
+        }
+        return slot.buffer.get();
+    }
+
+    const Buffer* VulkanResourcePool::get_buffer(BufferHandle handle) const {
+        std::lock_guard lock(mutex);
+        if (!handle.is_valid() || handle.id >= buffer_slots.size()) {
+            return nullptr;
+        }
+        const auto& slot = buffer_slots[handle.id];
+        if (!slot.in_use) {
+            return nullptr;
+        }
+        return slot.buffer.get();
+    }
+
+    BufferDesc VulkanResourcePool::get_buffer_desc(BufferHandle handle) const {
+        std::lock_guard lock(mutex);
+        if (!handle.is_valid() || handle.id >= buffer_slots.size()) {
+            return BufferDesc{};
+        }
+        const auto& slot = buffer_slots[handle.id];
+        if (!slot.in_use || !slot.buffer) {
+            return BufferDesc{};
+        }
+        const Buffer* buf = slot.buffer.get();
+        BufferDesc desc;
+        desc.size = buf->size;
+        desc.usage = buf->usage;
+        desc.memory_usage = buf->memory_usage;
+        return desc;
+    }
+
+    BufferHandle VulkanResourcePool::register_buffer(std::shared_ptr<VulkanBuffer> buf) {
+        if (!buf) {
+            return BufferHandle{};
+        }
+        std::lock_guard lock(mutex);
+        uint32_t slot_idx = 0;
+        if (!free_buffer_indices.empty()) {
+            slot_idx = free_buffer_indices.back();
+            free_buffer_indices.pop_back();
+        }
+        else {
+            slot_idx = static_cast<uint32_t>(buffer_slots.size());
+            buffer_slots.emplace_back();
+        }
+
+        auto& slot = buffer_slots[slot_idx];
+        slot.buffer = std::move(buf);
+        slot.in_use = true;
+
+        return BufferHandle{ slot_idx };
+    }
+
+    size_t VulkanResourcePool::hash_desc(const BufferDesc& desc) {
+        size_t h = std::hash<uint64_t>{}(desc.size) ^ (static_cast<size_t>(desc.usage) << 1) ^ (static_cast<size_t>(desc.memory_usage) << 4);
+        return h;
+    }
+
+    void VulkanResourcePool::destroy_vulkan_objects(VulkanBuffer* buf) {
+        if (!buf) {
+            return;
+        }
+        if (buf->buffer != VK_NULL_HANDLE) {
+            if (allocator) {
+                allocator->unregister_allocation_buffer(buf);
+            }
+            if (buf->owns_allocation && buf->allocation != VK_NULL_HANDLE && allocator) {
+                vmaDestroyBuffer(allocator->get_vma_allocator(), buf->buffer, buf->allocation);
+            }
+            buf->buffer = VK_NULL_HANDLE;
+            buf->allocation = VK_NULL_HANDLE;
+            buf->mapped_ptr = nullptr;
+        }
+    }
+
+    std::shared_ptr<VulkanBuffer> VulkanResourcePool::create_buffer_smart(const BufferDesc& desc) {
+        auto buf = std::make_shared<VulkanBuffer>();
+        buf->size = desc.size;
+        buf->usage = desc.usage;
+        buf->memory_usage = desc.memory_usage;
+        buf->desc_hash = hash_desc(desc);
+
+        VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        buffer_info.size = desc.size;
+        buffer_info.usage = get_vk_buffer_usage(desc.usage);
+        if (desc.memory_usage == MemoryUsage::PersistentMapped || desc.memory_usage == MemoryUsage::StagingRing) {
+            buffer_info.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+        }
+        else if (desc.memory_usage == MemoryUsage::Readback) {
+            buffer_info.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        }
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        VmaAllocationCreateInfo alloc_info = {};
+        if (desc.memory_usage == MemoryUsage::GpuOnly) {
+            alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        }
+        else if (desc.memory_usage == MemoryUsage::PersistentMapped || desc.memory_usage == MemoryUsage::StagingRing) {
+            alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+            alloc_info.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+            alloc_info.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        }
+        else if (desc.memory_usage == MemoryUsage::Readback) {
+            alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+            alloc_info.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+            alloc_info.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        }
+
+        VmaAllocationInfo alloc_result_info;
+        if (vmaCreateBuffer(allocator->get_vma_allocator(), &buffer_info, &alloc_info, &buf->buffer, &buf->allocation, &alloc_result_info) != VK_SUCCESS) {
+            std::string err = std::format("VulkanResourcePool::create_buffer_smart failed: size={} usage={}", desc.size, (int)desc.usage);
+            bud::eprint("{}", err);
+#if defined(_DEBUG)
+            throw std::runtime_error(err);
+#else
+            return nullptr;
+#endif
+        }
+
+        buf->mapped_ptr = alloc_result_info.pMappedData;
+        buf->allocator = allocator->get_vma_allocator();
+        buf->owning_allocator = allocator;
+        allocator->register_allocation_buffer(buf.get());
+        return buf;
     }
 
 }

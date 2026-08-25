@@ -1,4 +1,4 @@
-﻿#include "src/graphics/bud.ml_passes.hpp"
+#include "src/graphics/bud.ml_passes.hpp"
 #include "src/io/bud.io.hpp"
 #include <iostream>
 
@@ -14,19 +14,19 @@ namespace bud::graphics {
 #endif
         }
         
-        load_shaders_async(asset_manager, { "src/shaders/ml_identity.comp.spv" }, [this, rhi](const auto& shaders) {
+        load_shaders_async(asset_manager, { "src/shaders/ml_identity.comp.spv" }, [this, rhi](const std::vector<std::vector<char>>& shaders) {
             ComputePipelineDesc desc{};
 			desc.layout_kind = ComputePipelineDesc::LayoutKind::MlIdentity;
             desc.cs.code = shaders[0];
             pipeline = rhi->create_compute_pipeline(desc);
-            if (pipeline) {
+            if (pipeline.is_valid()) {
                 std::cout << "[NeuralOccluderPass] Shader loaded and pipeline created.\n";
             }
         });
     }
 
     void NeuralOccluderPass::add_to_graph(RenderGraph& rg, RGHandle input_buffer, RGHandle output_buffer, uint32_t count) {
-        if (!pipeline) {
+        if (!pipeline.is_valid()) {
             std::string err = "NeuralOccluderPass::add_to_graph called with null pipeline";
             bud::eprint("{}", err);
 #if defined(_DEBUG)
@@ -43,7 +43,7 @@ namespace bud::graphics {
                 builder.set_side_effect(true); // Prevent culling
             },
             [=, rg_ptr = &rg](RHI* rhi, CommandHandle cmd) {
-                if (!pipeline) return;
+                if (!pipeline.is_valid()) return;
                 rhi->cmd_bind_pipeline(cmd, pipeline);
 
                 rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, rg_ptr->get_buffer(input_buffer));

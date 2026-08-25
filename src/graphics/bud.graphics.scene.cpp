@@ -1,4 +1,4 @@
-﻿#include "src/graphics/bud.graphics.scene.hpp"
+#include "src/graphics/bud.graphics.scene.hpp"
 #include <bit>
 
 #include "src/threading/bud.threading.hpp"
@@ -16,6 +16,8 @@ namespace bud::graphics {
 			mesh_indices = std::move(other.mesh_indices);
 			submesh_indices = std::move(other.submesh_indices);
 			material_indices = std::move(other.material_indices);
+			root_group_indices = std::move(other.root_group_indices);
+			base_virtual_pages = std::move(other.base_virtual_pages);
 			flags = std::move(other.flags);
 			lbvh_nodes = std::move(other.lbvh_nodes);
 			bvh_nodes = std::move(other.bvh_nodes);

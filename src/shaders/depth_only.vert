@@ -1,9 +1,7 @@
 #version 450
 
 layout(location = 0) in vec3 in_position;
-//layout(location = 1) in vec3 in_color;
-//layout(location = 2) in vec3 in_normal;
-layout(location = 3) in vec2 in_tex_coord;
+layout(location = 2) in vec2 in_tex_coord;
 
 layout(location = 0) out vec2 frag_tex_coord;
 layout(location = 1) flat out uint frag_material_id;
@@ -50,7 +48,7 @@ layout(std430, binding = 5) readonly buffer PagePoolBuffer {
 	uint data[];
 } page_pool;
 
-uint nanite_read_bits(uint base_word_idx, uint bit_offset, uint num_bits) {
+uint vg_read_bits(uint base_word_idx, uint bit_offset, uint num_bits) {
 	uint word_idx = base_word_idx + (bit_offset >> 5);
 	uint bit_in_word = bit_offset & 31u;
 	uint w0 = page_pool.data[word_idx];
@@ -73,12 +71,12 @@ void main() {
 	vec2 uv = in_tex_coord;
 
 	uint page_slot = instance.page_slot;
-	if (page_slot != 0xFFFFFFFFu && page_slot < page_table.data.length() && page_table.data[page_slot].valid != 0u) {
-		uint pool_bytes = page_table.data[page_slot].pool_offset;
+	if (page_slot != 0xFFFFFFFFu) {
+		uint pool_bytes = page_slot * 131072u;
 		uint base_word = pool_bytes / 4u;
 		uint magic = page_pool.data[base_word + 0u];
 
-		if (magic == 0x50474142u) { // "BAGP" Nanite Page Data Magic
+		if (magic == 0x50475642u) { // "BVGP" Virtual Geometry Page Data Magic
 			uint vertex_count = page_pool.data[base_word + 3u];
 			uint v_stream_off = page_pool.data[base_word + 5u];
 			uint bits = page_pool.data[base_word + 9u];
@@ -96,9 +94,9 @@ void main() {
 					uintBitsToFloat(page_pool.data[base_word + 15u]));
 
 				uint bit_offset = v_stream_off * 8u + v_idx * (bits * 3u);
-				uint qx = nanite_read_bits(base_word, bit_offset, bits);
-				uint qy = nanite_read_bits(base_word, bit_offset + bits, bits);
-				uint qz = nanite_read_bits(base_word, bit_offset + bits * 2u, bits);
+				uint qx = vg_read_bits(base_word, bit_offset, bits);
+				uint qy = vg_read_bits(base_word, bit_offset + bits, bits);
+				uint qz = vg_read_bits(base_word, bit_offset + bits * 2u, bits);
 
 				float max_q = float((1u << bits) - 1u);
 				pos = poff + (vec3(float(qx), float(qy), float(qz)) / max_q) * pext;

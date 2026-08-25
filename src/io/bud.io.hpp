@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vector>
 #include <string>
@@ -26,8 +26,6 @@ namespace bud::io {
 	struct MeshSubset {
 		uint32_t index_start;
 		uint32_t index_count;
-		uint32_t meshlet_start;
-		uint32_t meshlet_count;
 		uint32_t material_index;
 		bud::math::AABB aabb;
 	};
@@ -56,12 +54,6 @@ namespace bud::io {
 		std::vector<std::string> texture_paths;
 		std::vector<Material> materials;
 		std::vector<MeshSubset> subsets;
-
-		// Meshlet data
-		std::vector<bud::asset::MeshletDescriptor> meshlets;
-		std::vector<bud::asset::MeshletCullData> meshlet_cull_data;
-		std::vector<uint32_t> meshlet_vertices;
-		std::vector<uint32_t> meshlet_triangles;
 	};
 }
 
@@ -92,9 +84,6 @@ namespace bud::io {
 		bool write_binary(const std::filesystem::path& path, const std::vector<char>& data);
 		void append_text_async(const std::filesystem::path& path, std::string text, bud::threading::Counter* counter = nullptr, bud::threading::TaskScheduler* scheduler = nullptr);
 		std::filesystem::path get_root_path() const { return root_path; }
-
-		// Synchronous JSON helpers — VFS is the sync layer; use these when you need
-		// to read/write JSON on the calling thread (e.g. startup load, shutdown flush).
 		std::optional<nlohmann::json> read_json(const std::filesystem::path& path);
 		bool                          write_json(const std::filesystem::path& path, const nlohmann::json& json);
 
@@ -103,7 +92,6 @@ namespace bud::io {
 	};
 
 
-	// RAII 封装：自动释放 stbi 内存
 	class Image {
 	public:
 		int width = 0;
@@ -111,7 +99,6 @@ namespace bud::io {
 		int channels = 0;
 		unsigned char* pixels = nullptr;
 
-		// 禁用拷贝，允许移动 (Move-only)
 		Image() = default;
 		Image(const Image&) = delete;
 		Image& operator=(const Image&) = delete;
@@ -153,6 +140,20 @@ private:
 		VirtualFileSystem* virtual_file_system;
 	};
 
+	struct BudAssetPackage {
+		std::string path;
+		bud::asset::BudAssetHeader header{};
+		std::vector<bud::asset::AssetChunkEntry> chunks;
+
+		const bud::asset::AssetChunkEntry* find_chunk(bud::asset::AssetChunkType type) const {
+			for (const auto& c : chunks) {
+				if (c.chunk_type == static_cast<uint32_t>(type))
+					return &c;
+			}
+			return nullptr;
+		}
+	};
+
 	class AssetManager {
 	public:
     AssetManager(VirtualFileSystem* virtual_file_system, bud::threading::TaskScheduler* scheduler);
@@ -162,24 +163,24 @@ private:
 		void load_file_async(const std::string& path, std::function<void(std::vector<char>)> on_loaded);
 		void load_file_chunk_async(const std::string& path, uint64_t offset, uint64_t size,
 			std::function<void(std::vector<char>)> on_loaded);
+		void load_budasset_async(const std::string& path, std::function<void(std::shared_ptr<BudAssetPackage>)> on_loaded);
+		void load_budasset_chunk_async(std::shared_ptr<BudAssetPackage> package, bud::asset::AssetChunkType type,
+			std::function<void(std::vector<char>)> on_loaded);
 		void load_json_async(const std::string& path, std::function<void(nlohmann::json)> on_loaded);
 		void save_json_async(const std::string& path, const nlohmann::json& json, std::function<void(bool)> on_finished = nullptr);
 		void save_file_async(const std::string& path, std::vector<char> data, std::function<void(bool)> on_finished = nullptr);
 
-		// Access the underlying synchronous file system layer.
-		// Use this for operations that must run on the calling thread (startup load, shutdown flush).
 		VirtualFileSystem* get_vfs() { return virtual_file_system; }
 
-		// Synchronous helpers kept for compatibility — prefer async variants where possible.
 		bool save_json_sync(const std::string& path, const nlohmann::json& json);
 		std::optional<nlohmann::json> load_json_sync(const std::string& path);
 
 	private:
-    VirtualFileSystem* virtual_file_system;
-    bud::threading::TaskScheduler* task_scheduler;
+		VirtualFileSystem* virtual_file_system;
+		bud::threading::TaskScheduler* task_scheduler;
 
-    ImageLoader image_loader;
-    ModelLoader model_loader;
+		ImageLoader image_loader;
+		ModelLoader model_loader;
 	};
 }
 

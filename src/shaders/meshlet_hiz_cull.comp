@@ -105,8 +105,13 @@ bool aabb_visible(vec3 bmin, vec3 bmax)
     planes[1] = clip_matrix[3] - clip_matrix[0];
     planes[2] = clip_matrix[3] + clip_matrix[1];
     planes[3] = clip_matrix[3] - clip_matrix[1];
-    planes[4] = clip_matrix[3] + clip_matrix[2];
-    planes[5] = clip_matrix[3] - clip_matrix[2];
+    if (ubo.reversed_z == 1u) {
+        planes[4] = clip_matrix[3] - clip_matrix[2]; // near (z=1)
+        planes[5] = clip_matrix[3];                   // far  (z=0)
+    } else {
+        planes[4] = clip_matrix[3];                   // near (z=0)
+        planes[5] = clip_matrix[3] - clip_matrix[2]; // far  (z=1)
+    }
 
     for (int i = 0; i < 6; ++i) {
         float plane_length = length(planes[i].xyz);

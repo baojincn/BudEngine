@@ -7,14 +7,10 @@ vcpkg/
 vcpkg_installed/
 
 # Generated files
-/data/replays
-/aftermath_dumps
+aftermath_dumps/
+data/
+Cache/
 
-# BudAssetTool exports (DDC, regenerate locally, do not upload)
-*.budmesh
-*.budmesh.json
-*.budnanite
-*.budnanite.json
 
 # IDE files
 .vs/

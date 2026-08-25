@@ -1,4 +1,4 @@
-﻿#include "src/graphics/bud.ml_perception.hpp"
+#include "src/graphics/bud.ml_perception.hpp"
 #include "src/io/bud.io.hpp"
 #include <iostream>
 
@@ -14,18 +14,18 @@ namespace bud::graphics {
 #endif
         }
         
-        load_shaders_async(asset_manager, { "src/shaders/ml_depth_downsample.comp.spv" }, [this, rhi](const auto& shaders) {
+        load_shaders_async(asset_manager, { "src/shaders/ml_depth_downsample.comp.spv" }, [this, rhi](const std::vector<std::vector<char>>& shaders) {
             ComputePipelineDesc desc{};
             desc.cs.code = shaders[0];
             pipeline = rhi->create_compute_pipeline(desc);
-            if (pipeline) {
+            if (pipeline.is_valid()) {
                 std::cout << "[DepthDownsamplePass] Shader loaded and pipeline created.\n";
             }
         });
     }
 
     RGHandle DepthDownsamplePass::add_to_graph(RenderGraph& rg, RGHandle depth_buffer, uint32_t target_width, uint32_t target_height) {
-        if (!pipeline) {
+        if (!pipeline.is_valid()) {
             std::string err = "DepthDownsamplePass::add_to_graph called with null pipeline";
             bud::eprint("{}", err);
 #if defined(_DEBUG)
@@ -51,7 +51,7 @@ namespace bud::graphics {
                 builder.write(output_tex, ResourceState::UnorderedAccess);
             },
             [this, rg_ptr = &rg, depth_buffer, output_tex, target_width, target_height](RHI* rhi, CommandHandle cmd) {
-                if (!pipeline) return;
+                if (!pipeline.is_valid()) return;
                 rhi->cmd_bind_pipeline(cmd, pipeline);
 
                 rhi->cmd_bind_compute_texture(cmd, pipeline, 0, rg_ptr->get_texture(depth_buffer), 0, false, false);

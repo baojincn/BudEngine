@@ -181,14 +181,21 @@ namespace bud::math {
 	struct Frustum {
 		vec4 planes[6];
 
-		inline void update(const mat4& vp) {
+		inline void update(const mat4& vp, bool reversed_z = false) {
 			mat4 m = transpose(vp);
 			planes[0] = m[3] + m[0]; // Left
 			planes[1] = m[3] - m[0]; // Right
 			planes[2] = m[3] + m[1]; // Bottom
 			planes[3] = m[3] - m[1]; // Top
-			planes[4] = m[3] + m[2]; // Near
-			planes[5] = m[3] - m[2]; // Far
+			// Correct near/far plane extraction for Vulkan clip space (z in [0,1]).
+			// With reversed-z, near is at z=1 and far is at z=0.
+			if (reversed_z) {
+				planes[4] = m[3] - m[2]; // Near (z=1)
+				planes[5] = m[2];        // Far  (z=0)
+			} else {
+				planes[4] = m[2];        // Near (z=0)
+				planes[5] = m[3] - m[2]; // Far  (z=1)
+			}
 
 			for (auto& p : planes) {
 				float len = length(vec3(p));

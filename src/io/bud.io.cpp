@@ -1,4 +1,4 @@
-﻿#include "bud.io.hpp"
+#include "bud.io.hpp"
 #include "src/core/bud.core.hpp"
 #include "src/core/bud.asset.types.hpp"
 #include <fstream>
@@ -38,7 +38,7 @@ namespace bud::io {
 		std::error_code ec;
 		root_path = std::filesystem::current_path(ec);
 
-		if (!root_path.empty() && !std::filesystem::exists(root_path / "data", ec)) {
+		if (!root_path.empty() && !std::filesystem::exists(root_path / "Content", ec) && !std::filesystem::exists(root_path / "data", ec)) {
 #if defined(_WIN32)
 			wchar_t buf[MAX_PATH];
 			DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);
@@ -292,6 +292,55 @@ namespace bud::io {
 			return std::nullopt;
 		}
 		std::string path_str = resolved_opt->string();
+
+		// Check if the image file is a .budasset texture container
+		if (path_str.ends_with(".budasset")) {
+			auto data_opt = virtual_file_system->read_binary(path);
+			if (data_opt && data_opt->size() >= sizeof(bud::asset::BudAssetHeader)) {
+				const auto* h = reinterpret_cast<const bud::asset::BudAssetHeader*>(data_opt->data());
+				if (h->magic == bud::asset::BUD_ASSET_MAGIC) {
+					if (h->chunk_table_offset + h->chunk_count * sizeof(bud::asset::AssetChunkEntry) <= data_opt->size()) {
+						const auto* chunks = reinterpret_cast<const bud::asset::AssetChunkEntry*>(data_opt->data() + h->chunk_table_offset);
+						const bud::asset::AssetChunkEntry* tex_chunk = nullptr;
+						const bud::asset::AssetChunkEntry* payload_chunk = nullptr;
+						for (uint32_t c = 0; c < h->chunk_count; ++c) {
+							if (chunks[c].chunk_type == static_cast<uint32_t>(bud::asset::AssetChunkType::Texture))
+								tex_chunk = &chunks[c];
+							if (chunks[c].chunk_type == static_cast<uint32_t>(bud::asset::AssetChunkType::AssetManifest))
+								payload_chunk = &chunks[c];
+						}
+
+						if (tex_chunk && tex_chunk->size >= sizeof(bud::asset::TextureHeader)) {
+							const auto* th = reinterpret_cast<const bud::asset::TextureHeader*>(data_opt->data() + tex_chunk->offset);
+							const auto* mips = reinterpret_cast<const bud::asset::TextureMipEntry*>(data_opt->data() + tex_chunk->offset + sizeof(bud::asset::TextureHeader));
+							
+							if (th->mip_levels > 0) {
+								const auto& mip = mips[0];
+								img.width = mip.width;
+								img.height = mip.height;
+								img.channels = 4;
+								img.pixels = static_cast<unsigned char*>(std::malloc(mip.size_in_bytes));
+								
+								if (payload_chunk && mip.offset_in_payload + mip.size_in_bytes <= payload_chunk->size) {
+									std::memcpy(img.pixels, data_opt->data() + payload_chunk->offset + mip.offset_in_payload, mip.size_in_bytes);
+									return std::move(img);
+								} else {
+									std::filesystem::path bulk_path = std::filesystem::path(path_str).replace_extension(".budbulk");
+									auto bulk_data = virtual_file_system->read_binary(bulk_path);
+									if (bulk_data && mip.size_in_bytes <= bulk_data->size()) {
+										std::memcpy(img.pixels, bulk_data->data(), mip.size_in_bytes);
+										return std::move(img);
+									}
+								}
+								std::free(img.pixels);
+								img.pixels = nullptr;
+							}
+						}
+					}
+				}
+			}
+		}
+
 		img.pixels = stbi_load(path_str.c_str(), &img.width, &img.height, &img.channels, STBI_rgb_alpha);
 		if (!img.pixels) {
 			const char* reason = stbi_failure_reason();
@@ -602,25 +651,15 @@ namespace bud::io {
 
 		const char* ptr = data_opt->data();
 		size_t data_size = data_opt->size();
-		const asset::BudMeshHeader* header = reinterpret_cast<const asset::BudMeshHeader*>(ptr);
+		const asset::BudAssetHeader* header = reinterpret_cast<const asset::BudAssetHeader*>(ptr);
 
-		if (header->magic != asset::MESH_MAGIC) {
-			bud::eprint("[IO] Invalid .budmesh magic: {}", display_path);
+		if (header->magic != asset::BUD_ASSET_MAGIC) {
+			bud::eprint("[IO] Invalid .budasset magic: {}", display_path);
 			return std::nullopt;
 		}
 
-		if (header->version < 2) {
-			bud::eprint("[IO] Version too old: {}, expected at least 2, got {}", display_path, header->version);
-			return std::nullopt;
-		}
 
-		static_assert(sizeof(asset::BudMeshHeader) == asset::MESH_HEADER_SIZE, "BudMeshHeader size mismatch!");
-		static_assert(offsetof(asset::BudMeshHeader, vertex_offset) == asset::MESH_HEADER_VERTEX_OFFSET, "BudMeshHeader alignment mismatch!");
-		static_assert(offsetof(asset::BudMeshHeader, submesh_count) == asset::MESH_HEADER_SUBMESH_COUNT_OFFSET, "BudMeshHeader submesh_count offset mismatch!");
 
-		bud::print("[IO] sizeof(Header)={}, sizeof(Vertex)={}", sizeof(asset::BudMeshHeader), sizeof(asset::Vertex));
-		bud::print("[IO] .budmesh: {}, size={}, v_count={}, i_count={}, m_count={}, s_count=",
-			display_path, data_size, header->total_vertices, header->total_indices, header->meshlet_count, header->submesh_count);
 
 		auto check_offset = [&](uint64_t offset, size_t section_size, const char* name) {
 			if (offset + section_size > data_size) {
@@ -628,126 +667,12 @@ namespace bud::io {
 				return false;
 			}
 			return true;
-			};
+		};
 
-		if (!check_offset(header->vertex_offset, header->total_vertices * sizeof(asset::Vertex), "Vertices") ||
-			!check_offset(header->index_offset, header->total_indices * sizeof(uint32_t), "Indices") ||
-			!check_offset(header->meshlet_offset, header->meshlet_count * sizeof(asset::MeshletDescriptor), "Meshlets") ||
-			!check_offset(header->vertex_index_offset, header->meshlet_index_offset - header->vertex_index_offset, "MeshletVertices") ||
-			!check_offset(header->meshlet_index_offset, header->cull_data_offset - header->meshlet_index_offset, "MeshletTriangles") ||
-			!check_offset(header->cull_data_offset, header->meshlet_count * sizeof(asset::MeshletCullData), "CullData") ||
-			(header->version >= 2 && !check_offset(header->submesh_offset, header->submesh_count * sizeof(asset::SubMeshDescriptor), "Submeshes")) ||
-			(header->version >= 3 && !check_offset(header->texture_offset, 0, "Textures"))) { // check_offset 0 just for existence of start
-			bud::eprint("[IO] .budmesh validation failed for: {}", display_path);
-			return std::nullopt;
-		}
 
 		MeshData mesh;
 
-		// 1. Map Source Vertices
-		const asset::Vertex* src_vertices = reinterpret_cast<const asset::Vertex*>(ptr + header->vertex_offset);
-
-		// 2. Map Meshlet and Submesh Data
-		bud::print("[IO] Offsets: v={}, i={}, m={}, s={}", header->vertex_offset, header->index_offset, header->meshlet_offset, header->submesh_offset);
-		const asset::MeshletDescriptor* descriptors = reinterpret_cast<const asset::MeshletDescriptor*>(ptr + header->meshlet_offset);
-		const uint32_t* meshlet_vertices = reinterpret_cast<const uint32_t*>(ptr + header->vertex_index_offset);
-		const uint32_t* meshlet_triangles = reinterpret_cast<const uint32_t*>(ptr + header->meshlet_index_offset);
-		const asset::SubMeshDescriptor* submesh_descs = reinterpret_cast<const asset::SubMeshDescriptor*>(ptr + header->submesh_offset);
-
-		// 3. Fast load buffers (Convert back to engine-friendly Vertex structure)
-		mesh.vertices.resize(header->total_vertices);
-		for (uint32_t i = 0; i < header->total_vertices; ++i) {
-			MeshData::Vertex v;
-			v.pos = { src_vertices[i].position[0], src_vertices[i].position[1], src_vertices[i].position[2] };
-			v.normal = { src_vertices[i].normal[0], src_vertices[i].normal[1], src_vertices[i].normal[2] };
-			v.texture_uv = { src_vertices[i].uv[0], src_vertices[i].uv[1] };
-			v.color = { 1.0f, 1.0f, 1.0f };
-			v.texture_index = 0.0f;
-			mesh.vertices[i] = v;
-		}
-
-		const uint32_t* src_indices = reinterpret_cast<const uint32_t*>(ptr + header->index_offset);
-		mesh.indices.assign(src_indices, src_indices + header->total_indices);
-
-		// Map Meshlet and Submesh Data
-		const asset::MeshletDescriptor* meshlet_descs = reinterpret_cast<const asset::MeshletDescriptor*>(ptr + header->meshlet_offset);
-		const uint32_t* mv_ptr = reinterpret_cast<const uint32_t*>(ptr + header->vertex_index_offset);
-		const uint32_t* mt_ptr = reinterpret_cast<const uint32_t*>(ptr + header->meshlet_index_offset);
-		const asset::MeshletCullData* mc_ptr = reinterpret_cast<const asset::MeshletCullData*>(ptr + header->cull_data_offset);
-		const asset::SubMeshDescriptor* sm_ptr = reinterpret_cast<const asset::SubMeshDescriptor*>(ptr + header->submesh_offset);
-
-		mesh.meshlets.assign(meshlet_descs, meshlet_descs + header->meshlet_count);
-		mesh.meshlet_cull_data.assign(mc_ptr, mc_ptr + header->meshlet_count);
-
-		uint32_t mv_count = (uint32_t)((header->meshlet_index_offset - header->vertex_index_offset) / sizeof(uint32_t));
-		uint32_t mt_count = (uint32_t)((header->cull_data_offset - header->meshlet_index_offset) / sizeof(uint32_t));
-		mesh.meshlet_vertices.assign(mv_ptr, mv_ptr + mv_count);
-		mesh.meshlet_triangles.assign(mt_ptr, mt_ptr + mt_count);
-
-		for (uint32_t s = 0; s < header->submesh_count; ++s) {
-			const auto& sub = sm_ptr[s];
-			MeshSubset subset;
-			subset.index_start = sub.index_start;
-			subset.index_count = sub.index_count;
-			subset.meshlet_start = sub.meshlet_start;
-			subset.meshlet_count = sub.meshlet_count;
-			subset.material_index = sub.material_id;
-			subset.aabb = bud::math::AABB(
-				bud::math::vec3(sub.aabb_min[0], sub.aabb_min[1], sub.aabb_min[2]),
-				bud::math::vec3(sub.aabb_max[0], sub.aabb_max[1], sub.aabb_max[2])
-			);
-			mesh.subsets.push_back(subset);
-		}
-
-		bud::print("[IO] Loaded mesh: {} (v={}, i={}, m={}, s={})", display_path, (uint32_t)mesh.vertices.size(), (uint32_t)mesh.indices.size(), (uint32_t)mesh.meshlets.size(), (uint32_t)mesh.subsets.size());
-
-		// Texture paths
-		if (header->version >= 3 && header->texture_count > 0) {
-			mesh.texture_paths.clear();
-			const char* tex_ptr = ptr + header->texture_offset;
-			for (uint32_t t = 0; t < header->texture_count; ++t) {
-				std::string tex_path(tex_ptr);
-				// Fix backslashes
-				std::replace(tex_path.begin(), tex_path.end(), '\\', '/');
-
-				// If it's just a filename, we might need a base path?
-				// But for Sponza, we should have exported them correctly in Tool.
-				mesh.texture_paths.push_back(tex_path);
-				tex_ptr += tex_path.length() + 1;
-			}
-		}
-		else {
-			mesh.texture_paths.push_back("data/textures/default.png");
-		}
-
-		// Materials table (version >= 4)
-		if (header->version >= 4 && header->material_count > 0 && header->material_offset != 0) {
-			mesh.materials.clear();
-			const char* mat_ptr = ptr + header->material_offset;
-			for (uint32_t m = 0; m < header->material_count; ++m) {
-				// MaterialDescriptor is packed as: uint32_t, uint8_t, uint8_t, 2 padding, float
-				uint32_t base_tex = *reinterpret_cast<const uint32_t*>(mat_ptr + m * sizeof(bud::asset::MaterialDescriptor));
-				const uint8_t* byte_ptr = reinterpret_cast<const uint8_t*>(mat_ptr + m * sizeof(bud::asset::MaterialDescriptor));
-				uint8_t alpha_mode = *(byte_ptr + 4);
-				uint8_t double_sided = *(byte_ptr + 5);
-				float alpha_cutoff = *reinterpret_cast<const float*>(mat_ptr + m * sizeof(bud::asset::MaterialDescriptor) + 8);
-				MeshData::Material mm;
-				mm.base_color_texture = base_tex;
-				mm.alpha_mode = alpha_mode;
-				mm.double_sided = double_sided;
-				mm.alpha_cutoff = alpha_cutoff;
-				mesh.materials.push_back(mm);
-			}
-		}
-		else {
-			// fallback: create a default material if none present
-			MeshData::Material mm;
-			mm.base_color_texture = 0;
-            mm.alpha_mode = 0; // OPAQUE
-			mm.double_sided = 0;
-			mm.alpha_cutoff = 0.5f;
-			mesh.materials.push_back(mm);
-		}
+		
 
 		return mesh;
 	}
@@ -890,6 +815,72 @@ namespace bud::io {
 				on_loaded(std::move(data));
 			});
 		});
+	}
+
+	void AssetManager::load_budasset_async(const std::string& path,
+		std::function<void(std::shared_ptr<BudAssetPackage>)> on_loaded)
+	{
+		task_scheduler->spawn("AsyncBudAssetLoad", [this, path, on_loaded]() {
+			auto package = std::make_shared<BudAssetPackage>();
+			package->path = path;
+			auto resolved = this->virtual_file_system->resolve_path(path);
+			if (resolved) {
+				std::ifstream file(*resolved, std::ios::binary);
+				if (file.is_open()) {
+					file.read(reinterpret_cast<char*>(&package->header), sizeof(bud::asset::BudAssetHeader));
+					if (file.gcount() == sizeof(bud::asset::BudAssetHeader) &&
+						package->header.magic == bud::asset::BUD_ASSET_MAGIC)
+					{
+						if (package->header.chunk_count > 0 && package->header.chunk_table_offset > 0) {
+							package->chunks.resize(package->header.chunk_count);
+							file.seekg(static_cast<std::streamoff>(package->header.chunk_table_offset));
+							file.read(reinterpret_cast<char*>(package->chunks.data()),
+								static_cast<std::streamsize>(package->header.chunk_count * sizeof(bud::asset::AssetChunkEntry)));
+						}
+					} else {
+						bud::eprint("[IO] load_budasset_async: invalid header or magic in '{}'", path);
+						package = nullptr;
+					}
+				} else {
+					bud::eprint("[IO] load_budasset_async: failed to open '{}'", resolved->string());
+					package = nullptr;
+				}
+			} else {
+				bud::eprint("[IO] load_budasset_async: could not resolve path '{}'", path);
+				package = nullptr;
+			}
+
+			task_scheduler->submit_main_thread_task([on_loaded, package = std::move(package)]() mutable {
+				on_loaded(std::move(package));
+			});
+		});
+	}
+
+	void AssetManager::load_budasset_chunk_async(std::shared_ptr<BudAssetPackage> package,
+		bud::asset::AssetChunkType type, std::function<void(std::vector<char>)> on_loaded)
+	{
+		if (!package) {
+			if (on_loaded) {
+				task_scheduler->submit_main_thread_task([on_loaded]() {
+					on_loaded(std::vector<char>{});
+				});
+			}
+			return;
+		}
+
+		const auto* chunk = package->find_chunk(type);
+		if (!chunk) {
+			bud::eprint("[IO] load_budasset_chunk_async: chunk type {} not found in '{}'",
+				static_cast<uint32_t>(type), package->path);
+			if (on_loaded) {
+				task_scheduler->submit_main_thread_task([on_loaded]() {
+					on_loaded(std::vector<char>{});
+				});
+			}
+			return;
+		}
+
+		load_file_chunk_async(package->path, chunk->offset, chunk->size, on_loaded);
 	}
 
 	void AssetManager::load_json_async(const std::string& path, std::function<void(nlohmann::json)> on_loaded) {

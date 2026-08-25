@@ -1,4 +1,4 @@
-{
+﻿{
     "name":  "Sponza Page-Streaming Test",
     "ambient_strength":  0.35,
     "directional_light":  {
@@ -45,10 +45,10 @@
                         "pitch":  0.0,
                         "position":  [
                                          0,
-                                         100,
+                                         180,
                                          0
                                      ],
-                        "yaw":  -90.0,
+                        "yaw":  0.0,
                         "zoom":  45.0,
                         "speed":  50.0,
                         "sensitivity":  0.1

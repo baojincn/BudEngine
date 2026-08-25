@@ -35,7 +35,7 @@ A full fiber-based task driven lightweight 3D Game Engine.
     * **Automatic Mipmap Generation**: Runtime generation of mip chain using `vkCmdBlitImage` for optimal texture sampling quality.
     * **Descriptor Indexing**: Bindless-style texture management using partially bound descriptor arrays (`runtimeDescriptorArray`).
 * **Parallel Command Recording**: Multithreaded generation of secondary command buffers for high-efficiency draw calls.
-* **Double-Buffered Rendering**: Robust CPU-GPU synchronization (`MAX_FRAMES_IN_FLIGHT = 2`) using Fences and Semaphores.
+* **Multiple-Buffered Rendering**: Robust CPU-GPU synchronization (`MAX_FRAMES_IN_FLIGHT = 3`) using Fences and Semaphores.
 * **Asynchronous Asset Loading**: Non-blocking loading pipelines for Meshes (OBJ), glTF scenes, and Textures to prevent frame stalls.
 * **Hot-Reloading**: Runtime shader recompilation and pipeline state reconstruction.
 

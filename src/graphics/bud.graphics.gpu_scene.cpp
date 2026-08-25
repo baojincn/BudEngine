@@ -1,10 +1,18 @@
 #include "src/graphics/bud.graphics.gpu_scene.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <cstring>
 
 namespace bud::graphics {
 
+	static inline uint32_t next_power_of_two(uint32_t v) {
+		if (v == 0) return 1;
+		return std::bit_ceil(v);
+	}
+
 	void GPUScene::init(RHI* rhi, uint32_t inflight_frame_count) {
+		rhi_ptr = rhi;
 		frame_resources.resize(inflight_frame_count);
 
 		if (!rhi || geometry_pool.initialized) {
@@ -27,14 +35,38 @@ namespace bud::graphics {
 		}
 
 		if (!page_table_buffer.is_valid()) {
-			page_table_buffer = rhi->create_gpu_buffer(max_page_table_entries * sizeof(PageTableEntry), ResourceState::UnorderedAccess);
-			if (page_table_buffer.mapped_ptr) {
-				std::memset(page_table_buffer.mapped_ptr, 0, max_page_table_entries * sizeof(PageTableEntry));
+			page_table_buffer = rhi->create_upload_buffer(static_cast<uint64_t>(max_page_table_entries) * 12);
+		}
+		
+		if (!vg_pool.group_buffer.is_valid()) {
+			// 1024K groups max = 36MB. CPU 写入层次结构，需要 PersistentMapped
+			vg_pool.group_buffer = rhi->create_upload_buffer(1024ull * 1024 * 36);
+			vg_pool.next_group = 0;
+			vg_pool.next_virtual_page = 0;
+		}
+
+		if (auto* buf = rhi->get_buffer(page_table_buffer); buf && buf->mapped_ptr) {
+			std::memset(buf->mapped_ptr, 0, max_page_table_entries * sizeof(PageTableEntry));
+		}
+
+		if (!materials_buffer.is_valid()) {
+			materials_buffer = rhi->create_upload_buffer(static_cast<uint64_t>(max_materials) * sizeof(GPUMaterialData));
+			if (auto* buf = rhi->get_buffer(materials_buffer); buf && buf->mapped_ptr) {
+				std::memset(buf->mapped_ptr, 0, max_materials * sizeof(GPUMaterialData));
 			}
+			// Slot 0 is default fallback material
+			GPUMaterialData default_mat;
+			default_mat.base_color_factor = glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
+			default_mat.metallic_factor = 0.0f;
+			default_mat.roughness_factor = 0.5f;
+			default_mat.alpha_cutoff = 0.5f;
+			default_mat.alpha_mode = 0;
+			register_material(default_mat);
 		}
 	}
 
 	void GPUScene::shutdown(RHI* rhi) {
+		rhi_ptr = nullptr;
 		if (rhi && geometry_pool.initialized) {
 			if (geometry_pool.vertex_buffer.is_valid())
 				rhi->destroy_buffer(geometry_pool.vertex_buffer);
@@ -64,25 +96,69 @@ namespace bud::graphics {
 		}
 		page_table_buffer = {};
 
+		if (rhi && materials_buffer.is_valid()) {
+			rhi->destroy_buffer(materials_buffer);
+		}
+		materials_buffer = {};
+		{
+			std::lock_guard lock(materials_mutex);
+			cpu_materials.clear();
+		}
+		
+		if (rhi && vg_pool.group_buffer.is_valid()) {
+			rhi->destroy_buffer(vg_pool.group_buffer);
+		}
+		vg_pool.group_buffer = {};
+
 		if (rhi) {
 			for (auto& frame_resource : frame_resources) {
 				if (frame_resource.instance_data.is_valid()) rhi->destroy_buffer(frame_resource.instance_data);
 				if (frame_resource.indirect_instance.is_valid()) rhi->destroy_buffer(frame_resource.indirect_instance);
 				if (frame_resource.indirect_draw.is_valid()) rhi->destroy_buffer(frame_resource.indirect_draw);
 				if (frame_resource.stats_readback.is_valid()) rhi->destroy_buffer(frame_resource.stats_readback);
-				if (frame_resource.meshlet_frustum_stats.is_valid()) rhi->destroy_buffer(frame_resource.meshlet_frustum_stats);
-				if (frame_resource.meshlet_hiz_stats.is_valid()) rhi->destroy_buffer(frame_resource.meshlet_hiz_stats);
-				if (frame_resource.meshlet_visibility.is_valid()) rhi->destroy_buffer(frame_resource.meshlet_visibility);
-				if (frame_resource.meshlet_hiz_visibility.is_valid()) rhi->destroy_buffer(frame_resource.meshlet_hiz_visibility);
+				if (frame_resource.page_request_buffer.is_valid()) rhi->destroy_buffer(frame_resource.page_request_buffer);
+				if (frame_resource.page_request_readback.is_valid()) rhi->destroy_buffer(frame_resource.page_request_readback);
 				if (frame_resource.csm_static_indirect_draw.is_valid()) rhi->destroy_buffer(frame_resource.csm_static_indirect_draw);
 				if (frame_resource.csm_instance_data.is_valid()) rhi->destroy_buffer(frame_resource.csm_instance_data);
-				if (frame_resource.csm_instance_models.is_valid()) rhi->destroy_buffer(frame_resource.csm_instance_models);
+				if (frame_resource.visible_pages.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages);
+				if (frame_resource.visible_clusters.is_valid()) rhi->destroy_buffer(frame_resource.visible_clusters);
+				if (frame_resource.dynamic_instances.is_valid()) rhi->destroy_buffer(frame_resource.dynamic_instances);
 				frame_resource = {};
 			}
 		}
 
 		mesh_geometries.clear();
 		frame_resources.clear();
+	}
+
+	uint32_t GPUScene::register_material(const GPUMaterialData& material) {
+		std::lock_guard lock(materials_mutex);
+		uint32_t id = static_cast<uint32_t>(cpu_materials.size());
+		if (id >= max_materials) {
+			return 0; // fallback to default
+		}
+		cpu_materials.push_back(material);
+		if (rhi_ptr) {
+			if (auto* buf = rhi_ptr->get_buffer(materials_buffer); buf && buf->mapped_ptr) {
+				auto* dest = reinterpret_cast<GPUMaterialData*>(buf->mapped_ptr);
+				dest[id] = material;
+			}
+		}
+		return id;
+	}
+
+	void GPUScene::update_material(uint32_t material_id, const GPUMaterialData& material) {
+		std::lock_guard lock(materials_mutex);
+		if (material_id >= cpu_materials.size()) {
+			return;
+		}
+		cpu_materials[material_id] = material;
+		if (rhi_ptr) {
+			if (auto* buf = rhi_ptr->get_buffer(materials_buffer); buf && buf->mapped_ptr) {
+				auto* dest = reinterpret_cast<GPUMaterialData*>(buf->mapped_ptr);
+				dest[material_id] = material;
+			}
+		}
 	}
 
 	GPUScene::GeometryPool& GPUScene::get_geometry_pool() {
@@ -127,58 +203,59 @@ namespace bud::graphics {
 		uint32_t required_instance_count,
 		uint32_t required_draw_count,
 		uint32_t required_scene_instance_count,
-		uint32_t required_meshlet_count,
 		uint64_t instance_data_stride,
 		uint64_t indirect_instance_stride,
 		uint64_t indirect_draw_stride,
 		uint64_t stats_buffer_size,
-		bool enable_gpu_driven,
-		bool enable_meshlets)
+		bool enable_gpu_driven)
 	{
 		if (!rhi || frame_index >= frame_resources.size()) {
 			return;
 		}
 
 		auto& frame_resource = frame_resources[frame_index];
-		const uint32_t desired_instance_capacity = std::max(required_instance_count + 1024u, 1024u);
-		// Generous margins: page-backed meshes register asynchronously, so the
-		// draw/instance counts passed this frame can lag behind the actual counts
-		// recorded later in the same frame (a +1024 margin overflowed on a
-		// San-Miguel-class scene where ~5k pages stream in). 2x/4x + 8192 keeps
-		// the indirect buffers safe while the scene set settles.
-		const uint32_t desired_indirect_capacity = std::max(required_draw_count * 2u + 8192u, 8192u);
-		const uint32_t desired_scene_capacity = std::max(required_scene_instance_count * 4u + 8192u, 8192u);
-		const uint32_t desired_meshlet_capacity = std::max(required_meshlet_count, 1024u);
 
-		if (!frame_resource.instance_data.is_valid() || frame_resource.instance_capacity < desired_instance_capacity) {
+		uint32_t desired_instance_capacity = std::max(64u, next_power_of_two(required_instance_count));
+		uint32_t desired_indirect_capacity = std::max(64u, next_power_of_two(required_draw_count));
+		uint32_t desired_scene_capacity = std::max(64u, next_power_of_two(required_scene_instance_count));
+		uint32_t desired_cluster_capacity = 65536u; // Capacity for GPU-driven Virtual Geometry clusters
+
+		// When GPU-driven rendering is enabled, the indirect draw buffer must be
+		// large enough to hold commands emitted by cluster_cull.comp (one per
+		// visible cluster, up to desired_cluster_capacity).
+		if (enable_gpu_driven) {
+			desired_indirect_capacity = std::max(desired_indirect_capacity, desired_cluster_capacity);
+		}
+
+		if (frame_resource.instance_capacity < desired_instance_capacity || !frame_resource.instance_data.is_valid()) {
 			if (frame_resource.instance_data.is_valid())
 				rhi->destroy_buffer(frame_resource.instance_data);
-			// Host-visible + mapped (UnorderedAccess) so the per-frame instance
-			// data can be written directly from the CPU, bypassing the async
-			// staging/upload path that caused texture flicker.
-			frame_resource.instance_data = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_instance_capacity) * instance_data_stride, ResourceState::UnorderedAccess);
+			// CPU 每帧直接 memcpy 写入，需要 PersistentMapped（host-visible）以保证 mapped_ptr 有效
+			frame_resource.instance_data = rhi->create_upload_buffer(static_cast<uint64_t>(desired_instance_capacity) * instance_data_stride);
 			frame_resource.instance_capacity = desired_instance_capacity;
 		}
 
 		if (enable_gpu_driven) {
-			if (!frame_resource.indirect_instance.is_valid() || frame_resource.indirect_capacity < desired_indirect_capacity) {
+			if (frame_resource.indirect_capacity < desired_indirect_capacity || !frame_resource.indirect_instance.is_valid()) {
 				if (frame_resource.indirect_instance.is_valid())
 					rhi->destroy_buffer(frame_resource.indirect_instance);
-				frame_resource.indirect_instance = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_indirect_capacity) * indirect_instance_stride, ResourceState::UnorderedAccess);
+				// CPU 每帧 memcpy 写入 DrawData，需要 PersistentMapped
+				frame_resource.indirect_instance = rhi->create_upload_buffer(static_cast<uint64_t>(desired_indirect_capacity) * indirect_instance_stride);
 			}
 
-			if (!frame_resource.indirect_draw.is_valid() || frame_resource.indirect_capacity < desired_indirect_capacity) {
+			if (frame_resource.indirect_capacity < desired_indirect_capacity || !frame_resource.indirect_draw.is_valid()) {
 				if (frame_resource.indirect_draw.is_valid())
 					rhi->destroy_buffer(frame_resource.indirect_draw);
 				frame_resource.indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_indirect_capacity) * indirect_draw_stride, ResourceState::IndirectArgument);
 			}
 
+			// Full-scene CSM indirect draw buffer for GPU-driven shadow culling.
+			// Size: cascade_count * scene_capacity entries.
 			if (!frame_resource.csm_indirect_draw.is_valid() || frame_resource.csm_indirect_capacity < desired_scene_capacity) {
 				if (frame_resource.csm_indirect_draw.is_valid())
 					rhi->destroy_buffer(frame_resource.csm_indirect_draw);
-				// MAX_CASCADES is 4, we allocate 4x capacity.
 				frame_resource.csm_indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * 4 * indirect_draw_stride, ResourceState::IndirectArgument);
-				frame_resource.csm_indirect_capacity = desired_scene_capacity;
+				frame_resource.csm_indirect_capacity = static_cast<uint32_t>(desired_scene_capacity);
 			}
 
 			// Static-only indirect commands for the CSM static cache update.
@@ -192,50 +269,58 @@ namespace bud::graphics {
 			if (!frame_resource.csm_instance_data.is_valid() || frame_resource.csm_instance_capacity < desired_scene_capacity) {
 				if (frame_resource.csm_instance_data.is_valid())
 					rhi->destroy_buffer(frame_resource.csm_instance_data);
-				frame_resource.csm_instance_data = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * indirect_instance_stride, ResourceState::UnorderedAccess);
+				// MAX_CASCADES is 4, we allocate 4x capacity. CPU 每帧写入，需要 PersistentMapped
+				frame_resource.csm_instance_data = rhi->create_upload_buffer(static_cast<uint64_t>(desired_scene_capacity) * 4 * indirect_instance_stride);
 				frame_resource.csm_instance_capacity = desired_scene_capacity;
 			}
 
 			// Full-scene InstanceData (model+material) matching the reordered
 			// full-scene DrawData, used by shadow.vert during CSM GPU draws.
-			// Created as UnorderedAccess so it is host-visible+mapped (CPU can
-			// write the reordered models directly, bypassing async staging).
 			if (!frame_resource.csm_instance_models.is_valid() || frame_resource.csm_instance_models_capacity < desired_scene_capacity) {
 				if (frame_resource.csm_instance_models.is_valid())
 					rhi->destroy_buffer(frame_resource.csm_instance_models);
-				frame_resource.csm_instance_models = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * instance_data_stride, ResourceState::UnorderedAccess);
+				// CPU 每帧写入，需要 PersistentMapped
+				frame_resource.csm_instance_models = rhi->create_upload_buffer(static_cast<uint64_t>(desired_scene_capacity) * instance_data_stride);
 				frame_resource.csm_instance_models_capacity = desired_scene_capacity;
 			}
 
 			if (!frame_resource.stats_readback.is_valid()) {
-				frame_resource.stats_readback = rhi->create_gpu_buffer(stats_buffer_size, ResourceState::UnorderedAccess);
+				frame_resource.stats_readback = rhi->create_readback_buffer(stats_buffer_size);
 			}
 
-			if (!frame_resource.meshlet_frustum_stats.is_valid()) {
-				frame_resource.meshlet_frustum_stats = rhi->create_gpu_buffer(stats_buffer_size, ResourceState::UnorderedAccess);
+			if (!frame_resource.page_request_buffer.is_valid()) {
+				constexpr uint32_t page_request_size = 16384; // 1 counter + ~4K page requests
+				frame_resource.page_request_buffer = rhi->create_gpu_buffer(page_request_size, ResourceState::UnorderedAccess);
+				frame_resource.page_request_readback = rhi->create_readback_buffer(page_request_size);
+				if (auto* buf = rhi->get_buffer(frame_resource.page_request_readback); buf && buf->mapped_ptr)
+					std::memset(buf->mapped_ptr, 0, page_request_size);
 			}
 
-			if (!frame_resource.meshlet_hiz_stats.is_valid()) {
-				frame_resource.meshlet_hiz_stats = rhi->create_gpu_buffer(stats_buffer_size, ResourceState::UnorderedAccess);
+			if (!frame_resource.visible_pages.is_valid()) {
+				constexpr uint32_t max_visible_pages = 65536;
+				uint64_t vp_size = 4 + static_cast<uint64_t>(max_visible_pages) * sizeof(uint32_t);
+				frame_resource.visible_pages = rhi->create_gpu_buffer(vp_size, ResourceState::UnorderedAccess);
+				frame_resource.visible_page_capacity = max_visible_pages;
 			}
+
+			if (!frame_resource.visible_clusters.is_valid() || frame_resource.visible_cluster_capacity < desired_cluster_capacity) {
+				if (frame_resource.visible_clusters.is_valid())
+					rhi->destroy_buffer(frame_resource.visible_clusters);
+				// 1 uint for count + N * 8 bytes (VisibleCluster struct is 8 bytes)
+				uint64_t vc_size = 4 + static_cast<uint64_t>(desired_cluster_capacity) * 8;
+				frame_resource.visible_clusters = rhi->create_gpu_buffer(vc_size, ResourceState::UnorderedAccess);
+			}
+
+			if (!frame_resource.dynamic_instances.is_valid() || frame_resource.visible_cluster_capacity < desired_cluster_capacity) {
+				if (frame_resource.dynamic_instances.is_valid())
+					rhi->destroy_buffer(frame_resource.dynamic_instances);
+				// 1 uint for count + N * instance_data_stride
+				uint64_t di_size = 4 + static_cast<uint64_t>(desired_cluster_capacity) * instance_data_stride;
+				frame_resource.dynamic_instances = rhi->create_gpu_buffer(di_size, ResourceState::UnorderedAccess);
+			}
+			frame_resource.visible_cluster_capacity = desired_cluster_capacity;
 
 			frame_resource.indirect_capacity = desired_indirect_capacity;
-		}
-
-		if (enable_meshlets) {
-			if (!frame_resource.meshlet_visibility.is_valid() || frame_resource.meshlet_visibility_capacity < desired_meshlet_capacity) {
-				if (frame_resource.meshlet_visibility.is_valid())
-					rhi->destroy_buffer(frame_resource.meshlet_visibility);
-				frame_resource.meshlet_visibility = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_meshlet_capacity) * sizeof(uint32_t), ResourceState::UnorderedAccess);
-			}
-
-			if (!frame_resource.meshlet_hiz_visibility.is_valid() || frame_resource.meshlet_visibility_capacity < desired_meshlet_capacity) {
-				if (frame_resource.meshlet_hiz_visibility.is_valid())
-					rhi->destroy_buffer(frame_resource.meshlet_hiz_visibility);
-				frame_resource.meshlet_hiz_visibility = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_meshlet_capacity) * sizeof(uint32_t), ResourceState::UnorderedAccess);
-			}
-
-			frame_resource.meshlet_visibility_capacity = desired_meshlet_capacity;
 		}
 	}
 
@@ -245,10 +330,11 @@ namespace bud::graphics {
 	BufferHandle GPUScene::get_page_table_buffer() const { return page_table_buffer; }
 
 	void GPUScene::update_page_table_entry(uint32_t page_index, uint32_t pool_offset, uint32_t valid) {
-		if (!page_table_buffer.is_valid() || page_index >= max_page_table_entries)
+		if (!page_table_buffer.is_valid() || page_index >= max_page_table_entries || !rhi_ptr)
 			return;
-		if (!page_table_buffer.mapped_ptr) return;
-		auto* entries = static_cast<PageTableEntry*>(page_table_buffer.mapped_ptr);
+		auto* buf = rhi_ptr->get_buffer(page_table_buffer);
+		if (!buf || !buf->mapped_ptr) return;
+		auto* entries = static_cast<PageTableEntry*>(buf->mapped_ptr);
 		entries[page_index].valid = valid;
 		entries[page_index].pool_offset = pool_offset;
 	}

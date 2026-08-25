@@ -1,49 +1,49 @@
-﻿name: Build Windows Release
+﻿# name: Build Windows Release
 
-on:
-  push:
-    branches:
-      - master
+# on:
+#   push:
+#     branches:
+#       - master
 
-jobs:
-  build:
-    runs-on: windows-latest
+# jobs:
+#   build:
+#     runs-on: windows-latest
 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-        fetch-depth: 0
+#     steps:
+#     - name: Checkout code
+#       uses: actions/checkout@v4
+#       with:
+#         submodules: recursive
+#         fetch-depth: 0
 
-    - name: Setup MSVC Environment
-      uses: ilammy/msvc-dev-cmd@v1  
+#     - name: Setup MSVC Environment
+#       uses: ilammy/msvc-dev-cmd@v1  
 
-    - name: Setup Ninja
-      uses: seanmiddleditch/gha-setup-ninja@v4
+#     - name: Setup Ninja
+#       uses: seanmiddleditch/gha-setup-ninja@v4
 
-    - name: Install Latest Vulkan SDK
-      shell: pwsh
-      run: |
-        $Version = (Invoke-RestMethod -Uri "https://vulkan.lunarg.com/sdk/latest/windows.txt").Trim()
-        $Url = "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe"
-        $Installer = "$env:TEMP\VulkanSDK.exe"
-        Invoke-WebRequest -Uri $Url -OutFile $Installer
-        Start-Process -FilePath $Installer -ArgumentList "--root", "C:\VulkanSDK\$Version", "--accept-licenses", "--default-answer", "--confirm-command", "install" -Wait -NoNewWindow
-        echo "VULKAN_SDK=C:\VulkanSDK\$Version" >> $env:GITHUB_ENV
-        echo "C:\VulkanSDK\$Version\Bin" >> $env:GITHUB_PATH
+#     - name: Install Latest Vulkan SDK
+#       shell: pwsh
+#       run: |
+#         $Version = (Invoke-RestMethod -Uri "https://vulkan.lunarg.com/sdk/latest/windows.txt").Trim()
+#         $Url = "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan_sdk.exe"
+#         $Installer = "$env:TEMP\VulkanSDK.exe"
+#         Invoke-WebRequest -Uri $Url -OutFile $Installer
+#         Start-Process -FilePath $Installer -ArgumentList "--root", "C:\VulkanSDK\$Version", "--accept-licenses", "--default-answer", "--confirm-command", "install" -Wait -NoNewWindow
+#         echo "VULKAN_SDK=C:\VulkanSDK\$Version" >> $env:GITHUB_ENV
+#         echo "C:\VulkanSDK\$Version\Bin" >> $env:GITHUB_PATH
 
-    - name: Set up vcpkg
-      uses: lukka/run-vcpkg@v11
+#     - name: Set up vcpkg
+#       uses: lukka/run-vcpkg@v11
 
-    - name: Configure CMake
-      run: cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUD_ENABLE_PROFILING=OFF -DBUD_ENABLE_AFTERMATH=ON -DBUD_BUILD_SAMPLES=ON -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+#     - name: Configure CMake
+#       run: cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUD_ENABLE_PROFILING=OFF -DBUD_ENABLE_AFTERMATH=ON -DBUD_BUILD_SAMPLES=ON -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 
-    - name: Build
-      run: cmake --build build --config Release
+#     - name: Build
+#       run: cmake --build build --config Release
 
-    - name: Upload Build Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: BudEngine-Windows-Release
-        path: build/bin
+#     - name: Upload Build Artifacts
+#       uses: actions/upload-artifact@v4
+#       with:
+#         name: BudEngine-Windows-Release
+#         path: build/bin

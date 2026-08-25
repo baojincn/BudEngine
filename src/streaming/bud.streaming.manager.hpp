@@ -13,139 +13,99 @@
 #include "src/graphics/bud.graphics.types.hpp"
 #include "src/graphics/bud.graphics.gpu_scene.hpp"
 
-namespace bud::graphics { class Renderer; class RHI; }
+namespace bud::graphics {
+	class Renderer;
+	class RHI;
+}
 
 namespace bud::streaming {
 
 struct StreamingPage {
 	std::string asset_id;
 	uint32_t page_id;
-	uint32_t file_page_index;
 	uint64_t file_offset;
 	uint64_t capacity;
 	std::string bin_path;
-	uint32_t material_id = 0; // base color texture index (into BudMeshAsset::textures)
-	// True when the page raw data comes from a .budnanite file (quantized
-	// positions + packed attributes + u16 indices) and must be CPU-decoded to
-	// the legacy page layout before upload.
-	bool is_budnanite = false;
+	uint32_t virtual_page_index = 0;
+	// True when the page raw data comes from a Virtual Geometry asset
+	// (quantized positions + packed attributes + u16 indices).
+	bool is_virtual_geometry = false;
 	// World-space AABB of the page's geometry, exported by BudAssetTool and
-	// used for distance-based on-demand streaming.
+	// used for distance-based eviction.
 	bud::math::AABB aabb;
 	bud::math::AABB global_aabb;
 	bool has_aabb = false;
-	std::vector<bud::graphics::PageSubMesh> submeshes; // per-(LOD, material) runs
-	// Per-LOD index ranges [start, count] inside the page's index data
-	// (from the JSON lod_ranges). The page index stream is ordered LOD0->LOD2.
-	std::vector<std::pair<uint32_t, uint32_t>> lod_ranges;
-	// Nanite-like hierarchy (v3): coarse pages aggregate a subtree's LOD2 clusters.
-	bool is_coarse = false;
-	float lod_errors[3] = { 0.0f, FLT_MAX, FLT_MAX };
-	float global_lod_errors[3] = { 0.0f, FLT_MAX, FLT_MAX };
-	uint32_t parent_page_id = bud::asset::INVALID_INDEX;
-	std::vector<uint32_t> children;
 	std::string get_unique_id() const { return asset_id + ":page_" + std::to_string(page_id); }
 };
 
-struct BudMeshAsset {
-	std::string metadata_path;
-	std::string data_uri;
-	std::vector<StreamingPage> pages;
-	std::vector<std::string> textures;
-	std::vector<uint32_t> texture_slots; // parallel to textures: resolved bindless slots (0 = unbound)
-};
-
-// Resident tables parsed from a .budnanite file. Clusters/groups/levels are
-// kept on CPU permanently (UE5-style); pages only stream their raw data.
-struct BudNaniteAsset {
+// Resident tables parsed from a Virtual Geometry asset. Clusters/groups/levels are
+// kept on CPU permanently; pages stream their raw data on demand.
+struct VirtualGeometryAsset {
 	std::string path;
 	uint64_t page_data_offset = 0;
-	std::vector<bud::asset::NaniteCluster> clusters;
-	std::vector<bud::asset::NaniteClusterGroup> groups;
-	std::vector<bud::asset::NaniteHierarchyLevel> levels;
-	std::vector<bud::asset::NanitePageStreamingState> pages;
+	uint32_t root_group_index = 0;
+	std::vector<bud::asset::VGCluster> clusters;
+	std::vector<bud::asset::VGClusterGroup> groups;
+	std::vector<bud::asset::VGPageStreamingState> pages;
 	std::vector<bud::asset::MaterialDescriptor> materials;
 	std::vector<std::string> textures;
-	std::vector<uint32_t> texture_slots; // parallel to textures: resolved bindless slots (0 = unbound)
 	// Per-page world-space AABB, computed from the cluster position bounds.
 	std::vector<bud::math::AABB> page_aabbs;
-	// Per-page cluster range in the cluster table. The v2 page state does not
-	// carry cluster_start/count (UE5-aligned); derive it from each cluster's
-	// position_page_offset at registration (clusters are page-contiguous in
-	// DAG order).
+	// Per-page cluster range in the cluster table.
 	std::vector<uint32_t> page_cluster_start;
 	std::vector<uint32_t> page_cluster_count;
 };
 
-struct RegionManifest {
-	std::string id;
-	bud::math::AABB aabb;
-	std::vector<std::string> pages;
-	int priority = 0;
-};
-
 class StreamingManager {
 public:
-	using PageRegisteredCallback = std::function<void(uint32_t mesh_id, const bud::math::AABB& aabb)>;
-	using PageUnregisteredCallback = std::function<void(uint32_t mesh_id)>;
+	using AssetRegisteredCallback = std::function<void(uint32_t mesh_id, const bud::math::AABB& aabb, uint32_t root_group_index, uint32_t base_virtual_page)>;
 
 	StreamingManager(bud::io::AssetManager* asset_manager,
 		bud::graphics::GPUScene* gpu_scene,
 		bud::graphics::Renderer* renderer,
 		bud::graphics::RHI* rhi);
 
-	void set_page_registered_callback(PageRegisteredCallback cb) { page_registered_cb_ = std::move(cb); }
-	// Called when a page is unloaded so the owner can remove the scene entity
-	// referencing its mesh. Without this, unloaded meshes stay in the scene and
-	// later slot reuse overwrites their geometry (broken vertices at origin).
-	void set_page_unregistered_callback(PageUnregisteredCallback cb) { page_unregistered_cb_ = std::move(cb); }
+	void set_asset_registered_callback(AssetRegisteredCallback cb) { asset_registered_callback = std::move(cb); }
 
-	void register_budmesh_async(const std::string& json_path);
-	// Registers a .budmesh single-file (UE5-aligned layout, magic "BNNT") for
-	// streaming: parses the resident tables (clusters/groups/levels/pages) and
-	// registers every page for on-demand loading. Pages are CPU-decoded to the
-	// legacy page layout on load.
-	void register_budnanite_async(const std::string& path);
-	void register_region(const RegionManifest& region);
+	// Processes page faults emitted by the GPU hierarchy traversal pass
+	// (virtual page indices read back from the PageRequestBuffer) and starts
+	// async loads for pages that are not resident and not already pending.
+	void process_gpu_page_requests(const uint32_t* virtual_page_indices, uint32_t count);
+
+	// Registers a Virtual Geometry asset for streaming: parses resident tables
+	// (clusters/groups/pages), allocates virtual pages and uploads the group hierarchy.
+	// Page raw data is then streamed on demand from .budbulk.
+	void register_virtual_geometry_async(const std::string& path);
+	// Evicts resident pages that are farther than unload_radius_ from the
+	// camera. Loading itself is demand-driven by GPU page faults.
 	void update(const bud::math::vec3& camera_position);
 	bool is_page_resident(const std::string& page_key) const;
 
 private:
-	// Resolves a base color texture index to a bindless slot, reserving/loading
-	// the texture on first use. Returns 0 if unavailable (fallback/grey).
-	uint32_t resolve_texture_slot(const std::string& asset_key, uint32_t tex_index);
+	bud::io::AssetManager* asset_manager = nullptr;
+	bud::graphics::GPUScene* gpu_scene = nullptr;
+	bud::graphics::Renderer* renderer = nullptr;
+	bud::graphics::RHI* rhi = nullptr;
 
-private:
-	bud::io::AssetManager* asset_manager_ = nullptr;
-	bud::graphics::GPUScene* gpu_scene_ = nullptr;
-	bud::graphics::Renderer* renderer_ = nullptr;
-	bud::graphics::RHI* rhi_ = nullptr;
+	// Resident Virtual Geometry tables, kept alive for the lifetime of the asset.
+	std::unordered_map<std::string, std::shared_ptr<VirtualGeometryAsset>> virtual_geometry_assets;
+	std::unordered_map<std::string, StreamingPage> all_pages;
 
-	std::vector<RegionManifest> regions_;
-	std::unordered_map<std::string, BudMeshAsset> managed_assets_;
-	// Resident .budnanite tables. Held by shared_ptr so page-load callbacks can
-	// safely reference them (decode) without holding the mutex for their lifetime.
-	std::unordered_map<std::string, std::shared_ptr<BudNaniteAsset>> budnanite_assets_;
-	std::unordered_map<std::string, StreamingPage> all_pages_;
+	mutable std::mutex mutex_sm;
+	std::unordered_map<std::string, bool> residency_sm;
+	std::unordered_set<std::string> pending_loads;
+	std::unordered_map<std::string, uint32_t> page_gpu_slots;
 
-	mutable std::mutex mutex_;
-	std::unordered_map<std::string, bool> residency_;
-	std::unordered_set<std::string> pending_loads_;
-	std::unordered_map<std::string, uint32_t> page_gpu_slots_;
-	std::unordered_map<std::string, uint32_t> page_mesh_ids_;
+	// virtual page index -> page key ("asset_path:page_N").
+	// Lock ordering: always take mutex_sm before vpk_mutex.
+	std::vector<std::string> virtual_page_keys;
+	std::mutex vpk_mutex;
 
-	PageRegisteredCallback page_registered_cb_;
-	PageUnregisteredCallback page_unregistered_cb_;
+	AssetRegisteredCallback asset_registered_callback;
 
-	// Distance thresholds in world units (≈1 unit = 1 m). Sponza's exported
-	// scene spans ~3700 units (BudAssetTool keeps the obj scale). 2000/2500
-	// keeps the whole scene resident while the camera is inside it, with
-	// hysteresis to avoid load/unload thrash at the boundary.
-	// Distance thresholds in world units (≈1 unit = 1 m). Sponza's exported
-	// scene spans ~3700 units (BudAssetTool keeps the obj scale). 2000/2500
-	// keeps the whole scene resident while the camera is inside it, with
-	// hysteresis to avoid load/unload thrash at the boundary.
-	float load_radius_ = 2000.0f;
+	// Eviction threshold in world units (≈1 unit = 1 cm). Sponza's exported
+	// scene spans ~3700 units (BudAssetTool keeps the obj scale). 2500 keeps
+	// the whole scene resident while the camera is inside it.
 	float unload_radius_ = 2500.0f;
 };
 

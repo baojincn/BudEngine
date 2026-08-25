@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vector>
 #include <deque>
@@ -30,10 +30,11 @@ namespace bud::graphics {
 
 	struct RGResourceNode {
 		std::string name;
-		Texture* physical_texture = nullptr;
+		TextureHandle physical_texture;
 		bud::graphics::BufferHandle physical_buffer;
 		bool is_buffer = false;
 		TextureDesc desc;
+		BufferDesc buffer_desc;
 		bool is_transient = true;
 		bool is_external = false;
 
@@ -89,6 +90,7 @@ namespace bud::graphics {
 
 		// Create new transient resource
 		RGHandle create(const std::string& name, const TextureDesc& desc);
+		RGHandle create(const std::string& name, const BufferDesc& desc);
 
 		// Mark pass as having side effects (cannot be culled)
 		void set_side_effect(bool value = true);
@@ -114,11 +116,16 @@ namespace bud::graphics {
 				auto* pool = rhi->get_resource_pool();
 				if (pool) {
 					for (auto& node : resources) {
-						if (node.is_transient && node.physical_texture) {
-							pool->release_texture(node.physical_texture);
-							node.physical_texture = nullptr;
+						if (node.is_transient) {
+							if (node.physical_texture.is_valid()) {
+								pool->release_texture(node.physical_texture);
+								node.physical_texture.reset();
+							}
+							if (node.physical_buffer.is_valid()) {
+								pool->release_buffer(node.physical_buffer);
+								node.physical_buffer.reset();
+							}
 						}
-						node.physical_buffer = {};
 					}
 				}
 			}
@@ -143,9 +150,9 @@ namespace bud::graphics {
 			return setup(builder);
 		}
 
-		RGHandle import_texture(const std::string& name, Texture* texture, ResourceState current_state);
+		RGHandle import_texture(const std::string& name, TextureHandle texture, ResourceState current_state);
 		RGHandle import_buffer(const std::string& name, bud::graphics::BufferHandle buffer, ResourceState current_state);
-		Texture* get_texture(RGHandle handle) const;
+		TextureHandle get_texture(RGHandle handle) const;
 		bud::graphics::BufferHandle get_buffer(RGHandle handle) const;
 		
 		const TextureDesc& get_texture_desc(RGHandle handle) const {
@@ -154,6 +161,14 @@ namespace bud::graphics {
 				return empty;
 			}
 			return resources[handle.id].desc;
+		}
+
+		const BufferDesc& get_buffer_desc(RGHandle handle) const {
+			if (handle.id == 0 || handle.id >= resources.size()) {
+				static BufferDesc empty{};
+				return empty;
+			}
+			return resources[handle.id].buffer_desc;
 		}
 
 		void compile();

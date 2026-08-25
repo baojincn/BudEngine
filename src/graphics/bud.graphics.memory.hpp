@@ -1,8 +1,7 @@
 
-#include <cstdint>
-
 #pragma once
 
+#include <cstdint>
 #include "src/graphics/bud.graphics.types.hpp"
 
 namespace bud::graphics {
@@ -23,12 +22,12 @@ namespace bud::graphics {
 
 		// 2. 帧临时资源 (Transient)
 		// 策略：线性分配
-		virtual BufferHandle alloc_frame_transient(uint64_t size, uint64_t alignment) = 0;
+		virtual BufferSlice alloc_frame_transient(uint64_t size, uint64_t alignment) = 0;
 
 		// 3. 数据上传 (Staging Ring)
 		// 策略：环形缓冲 (Ring Buffer)，每帧重置
 		// 用途：UniformBuffer, UI动态顶点
-		virtual BufferHandle alloc_staging(uint64_t size, uint64_t alignment = 256) = 0;
+		virtual BufferSlice alloc_staging(uint64_t size, uint64_t alignment = 256) = 0;
 
 		// 4. 持久映射资源 (Persistent Mapped)
 		// 策略：分配后一直保持 Mapped 状态，跨帧复用 (需自行管理内部偏移)

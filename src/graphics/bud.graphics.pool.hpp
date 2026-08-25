@@ -1,9 +1,8 @@
-﻿
 
-#include <functional>
 
 #pragma once
 
+#include <functional>
 #include "src/graphics/bud.graphics.types.hpp"
 #include "src/graphics/bud.graphics.memory.hpp"
 
@@ -16,11 +15,19 @@ namespace bud::graphics {
 	public:
 		virtual ~ResourcePool() = default;
 
-		// 核心接口：给我一个描述，还我一个 handle (不分配显存，或者复用已有)
-		virtual Texture* acquire_texture(const TextureDesc& desc) = 0;
+		// Handle-based texture pool interface
+		virtual TextureHandle acquire_texture(const TextureDesc& desc) = 0;
+		virtual void release_texture(TextureHandle handle) = 0;
+		virtual Texture* get_texture(TextureHandle handle) = 0;
+		virtual const Texture* get_texture(TextureHandle handle) const = 0;
+		virtual TextureDesc get_texture_desc(TextureHandle handle) const = 0;
 
-		// 归还资源
-		virtual void release_texture(Texture* texture) = 0;
+		// Handle-based buffer pool interface
+		virtual BufferHandle acquire_buffer(const BufferDesc& desc) = 0;
+		virtual void release_buffer(BufferHandle handle) = 0;
+		virtual Buffer* get_buffer(BufferHandle handle) = 0;
+		virtual const Buffer* get_buffer(BufferHandle handle) const = 0;
+		virtual BufferDesc get_buffer_desc(BufferHandle handle) const = 0;
 
 		// 帧结束清理 (决定是否真的销毁过老的资源)
 		virtual void tick() = 0;

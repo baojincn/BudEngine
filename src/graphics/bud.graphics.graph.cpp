@@ -1,4 +1,4 @@
-﻿#include "src/graphics/bud.graphics.graph.hpp"
+#include "src/graphics/bud.graphics.graph.hpp"
 
 #include <iostream>
 
@@ -29,24 +29,38 @@ namespace bud::graphics {
 		return handle;
 	}
 
+	RGHandle RGBuilder::create(const std::string& name, const BufferDesc& desc) {
+		if (render_graph.resources.empty())
+			render_graph.resources.emplace_back();
+
+		RGResourceNode node;
+		node.name = name;
+		node.buffer_desc = desc;
+		node.is_buffer = true;
+		node.is_transient = true;
+		node.is_external = false;
+		
+		render_graph.resources.push_back(node);
+		RGHandle handle = RGHandle{ static_cast<uint32_t>(render_graph.resources.size() - 1) };
+
+		return handle;
+	}
+
 	void RGBuilder::set_side_effect(bool value) {
 		pass_node.has_side_effects = value;
 	}
 
-	RGHandle RenderGraph::import_texture(const std::string& name, Texture* texture, ResourceState current_state) {
+	RGHandle RenderGraph::import_texture(const std::string& name, TextureHandle texture, ResourceState current_state) {
 		if (resources.empty())
 			resources.emplace_back(); // Ensure index 0 is invalid
 
 		RGResourceNode node;
 		node.name = name;
 		node.physical_texture = texture;
-		if (texture) {
-			node.desc.width = texture->width;
-			node.desc.height = texture->height;
-			node.desc.mips = texture->mips;
-			node.desc.format = texture->format;
+		if (texture.is_valid() && rhi) {
+			node.desc = rhi->get_texture_desc(texture);
 		}
-		node.is_external = (texture != nullptr);
+		node.is_external = texture.is_valid();
 		node.is_transient = !node.is_external;
 		node.initial_state = current_state;
 		
@@ -62,6 +76,9 @@ namespace bud::graphics {
 		node.name = name;
 		node.physical_buffer = buffer;
 		node.is_buffer = true;
+		if (buffer.is_valid() && rhi) {
+			node.buffer_desc = rhi->get_buffer_desc(buffer);
+		}
 		node.is_external = buffer.is_valid();
 		node.is_transient = !node.is_external;
 		node.initial_state = current_state;
@@ -70,15 +87,9 @@ namespace bud::graphics {
 		return RGHandle{ static_cast<uint32_t>(resources.size() - 1) };
 	}
 
-	Texture* RenderGraph::get_texture(RGHandle handle) const {
+	TextureHandle RenderGraph::get_texture(RGHandle handle) const {
 		if (handle.id == 0 || handle.id >= resources.size()) {
-			std::string err = std::format("RenderGraph::get_texture invalid handle: id={} size={}", handle.id, resources.size());
-			bud::eprint("{}", err);
-#if defined(_DEBUG)
-			throw std::runtime_error(err);
-#else
-			return nullptr;
-#endif
+			return TextureHandle{};
 		}
 
 		return resources[handle.id].physical_texture;
@@ -239,29 +250,42 @@ namespace bud::graphics {
 	
 		// 4. Resource Allocation (Phase 2)
 		auto* pool = rhi->get_resource_pool();
-	if (pool) {
-		for (auto& node : resources) {
-			// Allocate only if transient and not already allocated (redundant check)
-			if (node.is_transient && !node.physical_texture && node.name != "") {
-				auto* tex = pool->acquire_texture(node.desc);
-				if (!tex) {
-					std::string err = std::format("RenderGraph::compile: resource pool failed to allocate texture '{}'", node.name);
-					bud::eprint("{}", err);
+		if (pool) {
+			for (auto& node : resources) {
+				// Allocate only if transient and not already allocated
+				if (node.is_transient && !node.name.empty()) {
+					if (!node.is_buffer && !node.physical_texture.is_valid()) {
+						auto handle = pool->acquire_texture(node.desc);
+						if (!handle.is_valid()) {
+							std::string err = std::format("RenderGraph::compile: resource pool failed to allocate texture '{}'", node.name);
+							bud::eprint("{}", err);
 #if defined(_DEBUG)
-					throw std::runtime_error(err);
+							throw std::runtime_error(err);
 #else
-					// Leave physical_texture as nullptr; callers should handle missing textures gracefully
-					node.physical_texture = nullptr;
+							node.physical_texture.reset();
 #endif
-				} else {
-					node.physical_texture = tex;
+						} else {
+							node.physical_texture = handle;
+						}
+					} else if (node.is_buffer && !node.physical_buffer.is_valid()) {
+						auto handle = pool->acquire_buffer(node.buffer_desc);
+						if (!handle.is_valid()) {
+							std::string err = std::format("RenderGraph::compile: resource pool failed to allocate buffer '{}'", node.name);
+							bud::eprint("{}", err);
+#if defined(_DEBUG)
+							throw std::runtime_error(err);
+#else
+							node.physical_buffer.reset();
+#endif
+						} else {
+							node.physical_buffer = handle;
+						}
+					}
 				}
 			}
+		} else {
+			bud::eprint("RenderGraph::compile: no resource pool available; transient resources will not be allocated");
 		}
-	} else {
-		// No resource pool available; log for diagnostics
-		bud::eprint("RenderGraph::compile: no resource pool available; transient resources will not be allocated");
-	}
 	}
 
 	void RenderGraph::execute(CommandHandle cmd) {
@@ -296,11 +320,9 @@ namespace bud::graphics {
 				auto tex = get_texture(barrier.handle);
 				auto buf = get_buffer(barrier.handle);
 				auto& debug_name = resources[barrier.handle.id].name;
-				if (tex) {
-					rhi->set_debug_name(tex, ObjectType::Texture, debug_name);
+				if (tex.is_valid()) {
 					rhi->resource_barrier(target, tex, barrier.old_state, barrier.new_state);
 				} else if (buf.is_valid()) {
-					rhi->set_debug_name(buf, ObjectType::Buffer, debug_name);
 					rhi->resource_barrier(target, buf, barrier.old_state, barrier.new_state);
 				}
 			}

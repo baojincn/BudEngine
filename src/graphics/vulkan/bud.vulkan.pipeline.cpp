@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include "src/graphics/vulkan/bud.vulkan.pipeline.hpp"
+#include "src/core/bud.asset.types.hpp"
 #include "src/graphics/bud.graphics.types.hpp"
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.logger.hpp"
@@ -64,33 +65,32 @@ namespace bud::graphics::vulkan {
 
         switch (key.vertex_layout) {
         case VertexLayoutType::Default:
-            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
+            bindingDescription.stride = sizeof(bud::asset::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)},
-                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, color)},
-                {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, normal)},
-                {3, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::io::MeshData::Vertex, texture_uv)},
-                {4, 0, VK_FORMAT_R32_SFLOAT,       offsetof(bud::io::MeshData::Vertex, texture_index)}
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, position)},
+                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, normal)},
+                {2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::asset::Vertex, uv)},
+                {3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(bud::asset::Vertex, tangent)}
             };
             break;
         case VertexLayoutType::PositionOnly:
-            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
+            bindingDescription.stride = sizeof(bud::asset::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)}
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, position)}
             };
             break;
         case VertexLayoutType::PositionUV:
-            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
+            bindingDescription.stride = sizeof(bud::asset::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)},
-                {3, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::io::MeshData::Vertex, texture_uv)}
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, position)},
+                {2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::asset::Vertex, uv)}
             };
             break;
         case VertexLayoutType::PositionNormal:
-            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
+            bindingDescription.stride = sizeof(bud::asset::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)},
-                {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, normal)}
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, position)},
+                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, normal)}
             };
             break;
         case VertexLayoutType::NoVertexInput:
