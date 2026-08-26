@@ -248,9 +248,11 @@ namespace bud::graphics {
 					rhi->cmd_dispatch(cmd, (dword_count + 63) / 64, 1, 1);
 				}
 
-				rhi->cmd_bind_pipeline(cmd, cluster_cull_pipeline);
-				
-				rhi->cmd_bind_storage_buffer(cmd, cluster_cull_pipeline, 0, frame.instance_data);
+				rhi->resource_barrier(cmd, frame.visible_clusters, ResourceState::UnorderedAccess, ResourceState::ShaderResource);
+
+rhi->cmd_bind_pipeline(cmd, cluster_cull_pipeline);
+
+rhi->cmd_bind_storage_buffer(cmd, cluster_cull_pipeline, 0, frame.instance_data);
 				rhi->cmd_bind_storage_buffer(cmd, cluster_cull_pipeline, 1, gpu_scene.get_page_table_buffer());
 				rhi->cmd_bind_storage_buffer(cmd, cluster_cull_pipeline, 2, gpu_scene.get_page_pool_buffer());
 				rhi->cmd_bind_storage_buffer(cmd, cluster_cull_pipeline, 3, frame.visible_clusters);

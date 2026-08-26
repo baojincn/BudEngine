@@ -63,7 +63,16 @@ namespace bud::graphics {
 			BufferHandle group_buffer; // Stores HierarchyCluster for all assets
 			
 			uint32_t allocate_virtual_pages(uint32_t count) { return next_virtual_page.fetch_add(count); }
-			uint32_t allocate_groups(uint32_t count) { return next_group.fetch_add(count); }
+			uint32_t allocate_groups(uint32_t count) {
+		uint32_t start = next_group.fetch_add(count);
+		// 1024K groups max = 36MB buffer
+		constexpr uint32_t max_groups = 1024u * 1024u;
+		if (start + count > max_groups) {
+			bud::eprint("[GPUScene] Group buffer overflow! {} + {} > {}", start, count, max_groups);
+			return 0;
+		}
+		return start;
+	}
 		};
 
 		struct FrameResources {
