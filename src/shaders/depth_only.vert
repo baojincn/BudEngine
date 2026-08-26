@@ -2,9 +2,6 @@
 #extension GL_GOOGLE_include_directive : enable
 
 #include "common.glsl"
-#extension GL_GOOGLE_include_directive : enable
-
-#include "common.glsl"
 
 layout(location = 0) in vec3 in_position;
 layout(location = 2) in vec2 in_tex_coord;

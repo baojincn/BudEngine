@@ -1,6 +1,7 @@
-#include "common.glsl"
 #version 460
 #extension GL_GOOGLE_include_directive : enable
+
+#include "common.glsl"
 #extension GL_ARB_shader_draw_parameters : enable
 
 layout(location = 0) in vec3 in_position;

@@ -118,8 +118,6 @@ layout(push_constant) uniform PushConstants {
     float error_threshold;
 } pc;
 
-const uint PAGE_SIZE_BYTES = 131072;
-
 float sample_hiz_depth(vec2 uv, float mip_level) {
     ivec2 mip_size = textureSize(hizPyramid, int(mip_level));
     ivec2 pmin = ivec2(floor(uv * vec2(mip_size)));
