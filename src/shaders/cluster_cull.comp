@@ -190,6 +190,9 @@ void main() {
     VisibleCluster cluster = in_clusters.visible_clusters[idx];
     uint instance_id = cluster.instance_and_page >> 16;
     uint page_slot = cluster.instance_and_page & 0x1FFFu; // 13 bits (8192 max)
+    // Validate page slot: skip if invalid (0x1FFF = reserved, 0xFFFFFFFF = uninitialized)
+    if (page_slot == 0xFFFFFFFFu || page_slot >= 8192u)
+        return;
     uint cluster_idx = cluster.cluster_idx;
     float blend_factor = cluster.blend_factor;
     

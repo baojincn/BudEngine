@@ -35,6 +35,9 @@ struct StreamingPage {
 	bud::math::AABB aabb;
 	bud::math::AABB global_aabb;
 	bool has_aabb = false;
+	// Optional dependency: the page that must be loaded before this one.
+	// INVALID_INDEX means no dependency (root page).
+	uint32_t dependency_page_id = bud::asset::INVALID_INDEX;
 	std::string get_unique_id() const { return asset_id + ":page_" + std::to_string(page_id); }
 };
 
@@ -76,6 +79,9 @@ public:
 	// (clusters/groups/pages), allocates virtual pages and uploads the group hierarchy.
 	// Page raw data is then streamed on demand from .budbulk.
 	void register_virtual_geometry_async(const std::string& path);
+	// Unregisters a previously registered Virtual Geometry asset and frees its
+	// virtual page slots for reuse.
+	void unregister_virtual_geometry(const std::string& path);
 	// Evicts resident pages that are farther than unload_radius_ from the
 	// camera. Loading itself is demand-driven by GPU page faults.
 	void update(const bud::math::vec3& camera_position);
@@ -100,6 +106,9 @@ private:
 	// Lock ordering: always take mutex_sm before vpk_mutex.
 	std::vector<std::string> virtual_page_keys;
 	std::mutex vpk_mutex;
+	// Free slots in virtual_page_keys that can be reused.
+	std::vector<uint32_t> free_virtual_page_slots;
+	std::mutex fvps_mutex;
 
 	AssetRegisteredCallback asset_registered_callback;
 
@@ -117,6 +126,16 @@ private:
 
 	// Maximum number of pages to evict per frame when pool is exhausted.
 	static constexpr uint32_t max_evict_per_frame = 16;
+
+	// LRU page access tracking: records the last frame each page was accessed.
+	// Used by evict_furthest_pages to prioritize eviction of least-recently-used pages.
+	struct PageAccessRecord {
+		uint64_t last_access_frame = 0;
+		float distance_to_camera = FLT_MAX;
+	};
+	mutable std::mutex access_mutex;
+	std::unordered_map<std::string, PageAccessRecord> page_access_records;
+	uint64_t current_frame_number = 0;
 
 	// Evict the furthest resident pages to free pool slots.
 	void evict_furthest_pages(uint32_t count, const bud::math::vec3& camera_position);

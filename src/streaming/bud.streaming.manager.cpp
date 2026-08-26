@@ -292,6 +292,7 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 				sp.aabb = asset_ptr->page_aabbs[i];
 				sp.global_aabb = global_aabb;
 				sp.has_aabb = true;
+				sp.dependency_page_id = asset_ptr->pages[i].dependency_page_id;
 
 				bulk_off += asset_ptr->pages[i].size_in_bytes;
 				temp_pages.push_back(std::move(sp));
@@ -354,6 +355,27 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 }
 
 void StreamingManager::update(const bud::math::vec3& camera_position) {
+	// Step 0: Increment frame counter and update access records for resident pages
+	{
+		std::scoped_lock alock(access_mutex);
+		++current_frame_number;
+		// Update access record for each resident page (access = visible this frame)
+		std::scoped_lock lock(mutex_sm);
+		for (const auto& [page_key, resident] : residency_sm) {
+			if (!resident) continue;
+			auto it = all_pages.find(page_key);
+			if (it == all_pages.end()) continue;
+			const auto& sp = it->second;
+			bud::math::vec3 bmin = sp.has_aabb ? sp.aabb.min : sp.global_aabb.min;
+			bud::math::vec3 bmax = sp.has_aabb ? sp.aabb.max : sp.global_aabb.max;
+			bud::math::vec3 closest(
+				std::clamp(camera_position.x, bmin.x, bmax.x),
+				std::clamp(camera_position.y, bmin.y, bmax.y),
+				std::clamp(camera_position.z, bmin.z, bmax.z));
+			float d = bud::math::length(camera_position - closest);
+			page_access_records[page_key] = { current_frame_number, d };
+		}
+	}
 	// Step 1: Process retry queue from previous frame (outside mutex_sm to avoid deadlock)
 	std::vector<std::string> retry_copy;
 	{
@@ -429,6 +451,7 @@ void StreamingManager::process_gpu_page_requests(const uint32_t* virtual_page_in
 		auto page_it = all_pages.find(p);
 		if (page_it == all_pages.end())
 			continue;
+
 		residency_sm[p] = false;
 		pending_loads.insert(p);
 
@@ -513,8 +536,12 @@ void StreamingManager::process_gpu_page_requests(const uint32_t* virtual_page_in
 }
 
 void StreamingManager::evict_furthest_pages(uint32_t count, const bud::math::vec3& camera_position) {
-	// Collect all resident pages with their distances to the camera
-	std::vector<std::pair<float, std::string>> candidates;
+	// Collect all resident pages with their LRU score (lower = better to evict)
+	struct Candidate {
+		float score;
+		std::string page_key;
+	};
+	std::vector<Candidate> candidates;
 	{
 		std::scoped_lock lock(mutex_sm);
 		for (const auto& [page_key, resident] : residency_sm) {
@@ -529,18 +556,30 @@ void StreamingManager::evict_furthest_pages(uint32_t count, const bud::math::vec
 				std::clamp(camera_position.y, bmin.y, bmax.y),
 				std::clamp(camera_position.z, bmin.z, bmax.z));
 			float d = bud::math::length(camera_position - closest);
-			candidates.emplace_back(d, page_key);
+
+			// LRU score: distance weighted by recency
+			// Pages not in access_records get a default score (oldest priority)
+			std::scoped_lock alock(access_mutex);
+			float recency_weight = 0.3f;
+			auto rec_it = page_access_records.find(page_key);
+			uint64_t age = (rec_it != page_access_records.end())
+				? (current_frame_number - rec_it->second.last_access_frame)
+				: UINT64_MAX;
+			float age_norm = std::min(1.0f, static_cast<float>(age) / 1000.0f);
+			float score = d * (1.0f - recency_weight) + age_norm * 1000.0f * recency_weight;
+			candidates.push_back({ score, page_key });
 		}
 	}
 
-	// Sort by distance (furthest first)
+	// Sort by score (highest first = best to evict)
 	std::sort(candidates.begin(), candidates.end(),
-		[](const auto& a, const auto& b) { return a.first > b.first; });
+		[](const auto& a, const auto& b) { return a.score > b.score; });
 
-	// Evict the furthest 'count' pages
+	// Evict the highest-scored 'count' pages
 	uint32_t evicted = 0;
-	for (const auto& [dist, page_key] : candidates) {
+	for (const auto& cand : candidates) {
 		if (evicted >= count) break;
+		const auto& page_key = cand.page_key;
 		std::scoped_lock lock(mutex_sm);
 		auto it = all_pages.find(page_key);
 		if (it == all_pages.end()) continue;
@@ -555,7 +594,7 @@ void StreamingManager::evict_furthest_pages(uint32_t count, const bud::math::vec
 		++evicted;
 	}
 	if (evicted > 0) {
-		bud::print("[Streaming] Evicted {} pages (furthest distance-based)", evicted);
+		bud::print("[Streaming] Evicted {} pages (LRU + distance)", evicted);
 	}
 }
 
@@ -652,6 +691,42 @@ void StreamingManager::process_gpu_page_requests_from_keys(const std::vector<std
 				});
 			});
 	}
+}
+
+void StreamingManager::unregister_virtual_geometry(const std::string& path) {
+	std::scoped_lock lock(mutex_sm);
+	std::scoped_lock vpk_lock(vpk_mutex);
+
+	// Find and remove all pages belonging to this asset
+	std::vector<std::string> keys_to_remove;
+	for (const auto& [page_key, sp] : all_pages) {
+		if (sp.asset_id == path) {
+			keys_to_remove.push_back(page_key);
+		}
+	}
+
+	for (const auto& page_key : keys_to_remove) {
+		auto it = all_pages.find(page_key);
+		if (it == all_pages.end()) continue;
+		uint32_t vpi = it->second.virtual_page_index;
+		// Free GPU slot if allocated
+		if (auto slot_it = page_gpu_slots.find(page_key); slot_it != page_gpu_slots.end()) {
+			gpu_scene->update_page_table_entry(vpi, 0, 0);
+			gpu_scene->get_page_pool().free_page(slot_it->second);
+			page_gpu_slots.erase(slot_it);
+		}
+		// Clear virtual_page_keys entry
+		if (vpi < virtual_page_keys.size())
+			virtual_page_keys[vpi].clear();
+		pending_loads.erase(page_key);
+		residency_sm.erase(page_key);
+		all_pages.erase(it);
+	}
+
+	// Remove the asset from the virtual_geometry_assets map
+	virtual_geometry_assets.erase(path);
+
+	bud::print("[Streaming] Unregistered Virtual Geometry asset: {}", path);
 }
 
 } // namespace bud::streaming
