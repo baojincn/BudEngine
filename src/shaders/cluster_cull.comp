@@ -1,5 +1,8 @@
 #version 460
 #extension GL_KHR_shader_subgroup_ballot : enable
+#extension GL_GOOGLE_include_directive : enable
+
+#include "common.glsl"
 
 layout(local_size_x = 256) in;
 
@@ -116,9 +119,6 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 const uint PAGE_SIZE_BYTES = 131072;
-const uint PAGE_HEADER_DWORDS = 16u;
-const uint CLUSTER_DESC_DWORDS = 7u;
-const uint CULL_DATA_DWORDS = 5u;
 
 float sample_hiz_depth(vec2 uv, float mip_level) {
     ivec2 mip_size = textureSize(hizPyramid, int(mip_level));

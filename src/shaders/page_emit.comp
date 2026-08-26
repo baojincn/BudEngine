@@ -1,4 +1,8 @@
 #version 460
+#extension GL_GOOGLE_include_directive : enable
+
+#include "common.glsl"
+
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 
@@ -27,7 +31,6 @@ layout(push_constant) uniform PushConstants {
     uint max_clusters;
 } pc;
 
-const uint PAGE_SIZE_BYTES = 131072;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;

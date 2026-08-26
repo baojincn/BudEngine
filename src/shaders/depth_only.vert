@@ -1,4 +1,10 @@
 #version 450
+#extension GL_GOOGLE_include_directive : enable
+
+#include "common.glsl"
+#extension GL_GOOGLE_include_directive : enable
+
+#include "common.glsl"
 
 layout(location = 0) in vec3 in_position;
 layout(location = 2) in vec2 in_tex_coord;
@@ -74,7 +80,7 @@ void main() {
 
 	uint page_slot = instance.page_slot;
 	if (page_slot != 0xFFFFFFFFu) {
-		uint pool_bytes = page_slot * 131072u;
+		uint pool_bytes = page_slot * PAGE_SIZE_BYTES;
 		uint base_word = pool_bytes / 4u;
 		uint magic = page_pool.data[base_word + 0u];
 

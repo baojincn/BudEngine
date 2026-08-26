@@ -1,4 +1,6 @@
+#include "common.glsl"
 #version 460
+#extension GL_GOOGLE_include_directive : enable
 #extension GL_ARB_shader_draw_parameters : enable
 
 layout(location = 0) in vec3 in_position;
@@ -88,7 +90,7 @@ void main() {
 
 	uint page_slot = instance.page_slot;
 	if (page_slot != 0xFFFFFFFFu) {
-		uint pool_bytes = page_slot * 131072u;
+		uint pool_bytes = page_slot * PAGE_SIZE_BYTES;
 		uint base_word = pool_bytes / 4u;
 		uint magic = page_pool.data[base_word + 0u];
 
