@@ -253,7 +253,7 @@ namespace bud::graphics {
 					desc.width = (uint32_t)img_ptr->width;
 					desc.height = (uint32_t)img_ptr->height;
 					desc.format = bud::graphics::TextureFormat::RGBA8_SRGB;
-					desc.mips = 1;
+					desc.mips = static_cast<uint32_t>(std::log2(std::max(desc.width, desc.height))) + 1u;
 
 					auto tex = rhi_ptr->create_texture_async(desc, (const void*)img_ptr->pixels,
 						(uint64_t)img_ptr->width * img_ptr->height * 4, current_slot);
@@ -807,9 +807,21 @@ namespace bud::graphics {
 
 			if (auto* req_buf = rhi->get_buffer(frame.page_request_readback); req_buf && req_buf->mapped_ptr && streaming_manager) {
 				const uint32_t* buf = static_cast<const uint32_t*>(req_buf->mapped_ptr);
-				uint32_t count = std::min(buf[0], 4095u);
+				uint32_t count = std::min(buf[0], 4093u);
+				// buf[1] = overflow_count
+				if (buf[1] > 0) {
+					bud::print("[Renderer] Page request overflow: {} requests lost (buffer full)", buf[1]);
+				}
+				// buf[2] = error_flags (bit 0: stack overflow, bit 1: iteration limit)
+				if (buf[2] & 1u) {
+					bud::print("[Renderer] Hierarchy traversal stack overflow detected!");
+				}
+				if (buf[2] & 2u) {
+					bud::print("[Renderer] Hierarchy traversal iteration limit exceeded!");
+				}
 				if (count > 0) {
-					streaming_manager->process_gpu_page_requests(buf + 1, count);
+					// requests start at buf[3] after request_count, overflow_count, error_flags
+					streaming_manager->process_gpu_page_requests(buf + 3, count);
 				}
 			}
 
@@ -986,8 +998,8 @@ namespace bud::graphics {
 									instance_dst[write_idx].model = render_scene.world_matrices[entity_idx];
 									instance_dst[write_idx].material_id = sub.material_id;
 									instance_dst[write_idx].page_slot = (is_resident && physical_slot != ~0u) ? physical_slot : ~0u;
-									instance_dst[write_idx].padding[0] = 0;
-									instance_dst[write_idx].padding[1] = 0;
+									instance_dst[write_idx].blend_factor = 0.0f;
+									instance_dst[write_idx].padding = 0;
 								}
 							}
 						} else {
@@ -1029,8 +1041,8 @@ namespace bud::graphics {
 								instance_dst[write_idx].model = render_scene.world_matrices[entity_idx];
 								instance_dst[write_idx].material_id = mat_id;
 								instance_dst[write_idx].page_slot = ~0u;
-								instance_dst[write_idx].padding[0] = 0;
-								instance_dst[write_idx].padding[1] = 0;
+								instance_dst[write_idx].blend_factor = 0.0f;
+								instance_dst[write_idx].padding = 0;
 							}
 						}
 					}
@@ -1232,7 +1244,7 @@ namespace bud::graphics {
 
 				if (depth_prepass.is_valid()) {
 					if (render_config.enable_gpu_driven) {
-						auto rg_hiz = pyramid_mip_pass->add_to_graph(render_graph, depth_prepass, render_config);
+					auto rg_hiz = pyramid_mip_pass->add_to_graph(render_graph, depth_prepass, render_config);
 
 						// Path A: Static Virtual Geometry Culling & Streaming
 						if (render_config.enable_virtual_geometry) {

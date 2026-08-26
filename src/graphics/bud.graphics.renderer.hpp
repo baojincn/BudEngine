@@ -141,7 +141,8 @@ namespace bud::graphics {
 			bud::math::mat4 model;
 			uint32_t material_id;
 			uint32_t page_slot;
-			uint32_t padding[2];
+			float blend_factor; // 0.0 = full high LOD, 1.0 = full low LOD
+			uint32_t padding;
 		};
 
 		std::shared_ptr<UploadQueue> upload_queue;

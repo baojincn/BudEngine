@@ -55,7 +55,9 @@ namespace bud::graphics {
 
 				if (frame.page_request_buffer.is_valid()) {
 					rhi->resource_barrier(cmd, frame.page_request_buffer, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-					rhi->cmd_copy_to_buffer(cmd, frame.page_request_buffer, 0, sizeof(uint32_t), &zero);
+					// Clear 3 header uints: request_count, overflow_count, error_flags
+					uint32_t zero_buf[3] = {0, 0, 0};
+					rhi->cmd_copy_to_buffer(cmd, frame.page_request_buffer, 0, sizeof(zero_buf), zero_buf);
 					rhi->resource_barrier(cmd, frame.page_request_buffer, ResourceState::TransferDst, ResourceState::UnorderedAccess);
 				}
 
@@ -92,11 +94,14 @@ namespace bud::graphics {
 					uint32_t enable_frustum_cull;
 					uint32_t enable_lod;
 					float screen_height;
+					uint32_t max_requests;
 				} push;
 				push.instance_count = static_cast<uint32_t>(instance_count);
 				push.enable_frustum_cull = 1u;
 				push.enable_lod = config.enable_virtual_geometry ? 1u : 0u;
 				push.screen_height = view.viewport_height;
+				// Page request buffer: 12 bytes header + 4093 * 4 requests = 16384 total
+				push.max_requests = 4093;
 				rhi->cmd_push_constants(cmd, hierarchy_traversal_pipeline, sizeof(Push), &push);
 
 				rhi->cmd_dispatch(cmd, (push.instance_count + 63) / 64, 1, 1);
@@ -264,8 +269,15 @@ namespace bud::graphics {
 
 				rhi->cmd_bind_compute_ubo(cmd, cluster_cull_pipeline, 8); // ubo bound at 8, from common.glsl
 
-				uint32_t max_clusters = frame.indirect_capacity;
-				rhi->cmd_push_constants(cmd, cluster_cull_pipeline, sizeof(uint32_t), &max_clusters);
+				struct ClusterCullPush {
+					uint32_t max_clusters;
+					float screen_height;
+					float error_threshold;
+				} push;
+				push.max_clusters = frame.indirect_capacity;
+				push.screen_height = view.viewport_height;
+				push.error_threshold = config.lod_error_threshold_px;
+				rhi->cmd_push_constants(cmd, cluster_cull_pipeline, sizeof(ClusterCullPush), &push);
 
 				// Dispatch enough to cover maximum visible clusters (which is visible_cluster_capacity)
 				rhi->cmd_dispatch(cmd, (frame.visible_cluster_capacity + 255) / 256, 1, 1);

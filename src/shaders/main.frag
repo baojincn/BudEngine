@@ -6,6 +6,7 @@ layout(location = 1) in vec3 frag_normal;
 layout(location = 2) in vec2 frag_tex_coord;
 layout(location = 3) in vec3 frag_color;
 layout(location = 4) flat in uint frag_material_id;
+layout(location = 5) flat in float frag_blend_factor;
 
 layout(location = 0) out vec4 out_color;
 
@@ -214,6 +215,18 @@ void main() {
 
     if (mat.alpha_mode == 1u && albedo_sample.a < mat.alpha_cutoff)
         discard;
+
+    // LOD dithering: when blend_factor is between 0 and 1, use screen-space
+    // golden noise to smoothly transition between LOD levels.
+    // blend_factor = 0.0 → full high LOD (keep all fragments)
+    // blend_factor = 1.0 → full low LOD (discard all fragments)
+    // In transition, noise < blend_factor → discard (low LOD pixels fade out)
+    if (frag_blend_factor > 0.0 && frag_blend_factor < 1.0) {
+        // Golden noise (better spectral properties than IGN, reduces moire)
+        float noise = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+        if (noise < frag_blend_factor)
+            discard;
+    }
 
     vec3 albedo = albedo_sample.rgb; 
     float metallic = mat.metallic_factor; 

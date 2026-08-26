@@ -9,6 +9,7 @@
 #include <cstring>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <nlohmann/json.hpp>
 
@@ -165,7 +166,8 @@ void generate_leaf_clusters(const std::vector<bud::asset::Vertex>& vertices,
     }
 }
 
-std::vector<InternalCluster> simplify_group(const InternalGroup& g, const std::vector<InternalCluster>& clusters, uint32_t level, uint32_t material_index) {
+std::vector<InternalCluster> simplify_group(const InternalGroup& g, const std::vector<InternalCluster>& clusters, uint32_t level, uint32_t material_index,
+    const std::unordered_set<uint64_t>* global_shared_edges = nullptr) {
     std::vector<bud::asset::Vertex> merged_v;
     std::vector<uint32_t> merged_i;
     size_t base = 0;
@@ -261,6 +263,35 @@ std::vector<InternalCluster> simplify_group(const InternalGroup& g, const std::v
             }
         }
 
+        // Lock vertices on edges shared with other groups (cross-group seam prevention).
+        // This ensures the simplified mesh's boundary matches adjacent groups' boundaries.
+        if (global_shared_edges && !global_shared_edges->empty()) {
+            // Use the same vertex position hash as in build_mesh_vg_dag
+            auto get_hash = [](const bud::asset::Vertex& v) -> uint32_t {
+                uint32_t hx = *reinterpret_cast<const uint32_t*>(&v.position[0]);
+                uint32_t hy = *reinterpret_cast<const uint32_t*>(&v.position[1]);
+                uint32_t hz = *reinterpret_cast<const uint32_t*>(&v.position[2]);
+                return hx ^ (hy * 16777619u) ^ (hz * 2166136261u);
+            };
+            for (size_t t = 0; t + 2 < deduped_i.size(); t += 3) {
+                uint32_t i0 = deduped_i[t];
+                uint32_t i1 = deduped_i[t + 1];
+                uint32_t i2 = deduped_i[t + 2];
+                auto check_edge = [&](uint32_t a, uint32_t b) {
+                    if (a < deduped_v.size() && b < deduped_v.size()) {
+                        uint32_t ha = get_hash(deduped_v[a]);
+                        uint32_t hb = get_hash(deduped_v[b]);
+                        uint64_t key = (static_cast<uint64_t>(std::min(ha, hb)) << 32) | std::max(ha, hb);
+                        if (global_shared_edges->count(key))
+                            vertex_lock[a] = vertex_lock[b] = 1;
+                    }
+                };
+                check_edge(i0, i1);
+                check_edge(i1, i2);
+                check_edge(i2, i0);
+            }
+        }
+
         std::vector<unsigned int> simplified(deduped_i.size());
         std::vector<float> attrs(deduped_v.size() * 5);
         for (size_t i = 0; i < deduped_v.size(); ++i) {
@@ -290,13 +321,14 @@ std::vector<InternalCluster> simplify_group(const InternalGroup& g, const std::v
             vertex_lock.data(),
             target_indices, base_error, 0, &result_error);
 
-        // If the regular simplification couldn't reduce at all, try a gentler
-        // sloppy pass as a last resort.
+        // If the regular simplification couldn't reduce at all, keep the original mesh.
+        // This preserves the vertex_lock implicitly (no vertex movement).
+        // Avoid meshopt_simplifySloppy which does NOT support vertex_lock and would
+        // move boundary vertices, causing visible cracks between LOD levels.
         if (simplified_count == 0) {
-            simplified_count = meshopt_simplifySloppy(
-                simplified.data(), deduped_i.data(), deduped_i.size(),
-                &deduped_v[0].position[0], deduped_v.size(), sizeof(bud::asset::Vertex),
-                deduped_i.size() * 3 / 4, base_error * 2.0f, &result_error);
+            simplified_count = deduped_i.size();
+            std::copy(deduped_i.begin(), deduped_i.end(), simplified.begin());
+            result_error = 0.0f;
         }
 
         if (simplified_count == 0)
@@ -528,6 +560,31 @@ void build_mesh_vg_dag(
 
     const uint32_t l0_group_count = static_cast<uint32_t>(out_groups.size()) - l0_group_start;
 
+    // Build cross-group shared edge map for seam prevention.
+    // An edge shared between two clusters in different L0 groups must be locked
+    // during simplification. This prevents cracks when adjacent groups are at
+    // different LOD levels.
+    std::unordered_set<uint64_t> cross_group_edges;
+    {
+        // Build group index lookup for each cluster
+        std::vector<uint32_t> cluster_group(out_clusters.size(), ~0u);
+        for (uint32_t g = 0; g < l0_group_count; ++g) {
+            auto& grp = out_groups[l0_group_start + g];
+            for (uint32_t k = 0; k < grp.cluster_count; ++k)
+                cluster_group[grp.cluster_start + k] = l0_group_start + g;
+        }
+        for (const auto& [edge_key, adjacent_clusters] : edge_to_clusters) {
+            std::unordered_set<uint32_t> group_set;
+            for (uint32_t ci : adjacent_clusters) {
+                if (ci < cluster_group.size() && cluster_group[ci] != ~0u)
+                    group_set.insert(cluster_group[ci]);
+            }
+            // If this edge is shared between two different groups, it's a cross-group edge
+            if (group_set.size() > 1)
+                cross_group_edges.insert(edge_key);
+        }
+    }
+
     for (uint32_t g = 0; g < l0_group_count; ++g) {
         auto& grp = out_groups[l0_group_start + g];
         for (uint32_t k = 0; k < grp.cluster_count; ++k)
@@ -587,7 +644,7 @@ void build_mesh_vg_dag(
             for (uint32_t k = 0; k < count; ++k) {
                 const auto& child_grp = out_groups[child_start_idx + k];
                 max_error = std::max(max_error, child_grp.lod_error);
-                std::vector<InternalCluster> simplified = simplify_group(child_grp, out_clusters, level + 1, material_index);
+                std::vector<InternalCluster> simplified = simplify_group(child_grp, out_clusters, level + 1, material_index, &cross_group_edges);
                 for (auto& sc : simplified) {
                     sc.source_group = child_start_idx + k;
                     combined_simplified.push_back(std::move(sc));

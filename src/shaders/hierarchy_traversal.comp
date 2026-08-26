@@ -93,6 +93,8 @@ layout(std430, set = 0, binding = 3) readonly buffer GroupBuffer {
 
 layout(std430, set = 0, binding = 4) buffer PageRequestBuffer {
     uint request_count;
+    uint overflow_count;
+    uint error_flags; // bit 0: stack overflow, bit 1: iteration limit exceeded
     uint requests[];
 };
 
@@ -110,6 +112,7 @@ layout(push_constant) uniform Constants {
     uint enable_frustum_cull;
     uint enable_lod;
     float screen_height; // viewport height in pixels, for focal_pixels calculation
+    uint max_requests;   // max page request entries before overflow
 } push_constants;
 
 // ---------------------------------------------------------------------------
@@ -174,17 +177,23 @@ float calculate_lod_error(vec3 center, float radius, float max_error) {
 // Emit one virtual page: if resident output it, else request a load
 // ---------------------------------------------------------------------------
 
-void emit_page(uint instance_id, uint virtual_page_index) {
+void emit_page(uint instance_id, uint virtual_page_index, float blend_factor) {
     PageTableEntry entry = page_table[virtual_page_index];
     if (entry.valid != 0) {
         uint page_slot = entry.pool_offset;
-        uint pack = (instance_id << 16) | (page_slot & 0xFFFF);
+        // Encode blend_factor (0.0-1.0) as 3 bits in bits 13-15 of the pack.
+        // page_slot is at most ~8000 (13 bits), leaving 3 spare bits.
+        uint blend_bits = uint(clamp(blend_factor, 0.0, 1.0) * 7.0);
+        uint pack = (instance_id << 16) | ((blend_bits & 0x7u) << 13) | (page_slot & 0x1FFFu);
         uint idx = atomicAdd(visible_page_count, 1);
         visible_pages[idx] = pack;
     } else {
         uint idx = atomicAdd(request_count, 1);
-        if (idx < 4096)
+        const uint kMaxRequests = (push_constants.max_requests > 0) ? push_constants.max_requests : 4096u;
+        if (idx < kMaxRequests)
             requests[idx] = virtual_page_index;
+        else
+            atomicAdd(overflow_count, 1);
     }
 }
 
@@ -213,12 +222,12 @@ void traverse_hierarchy(uint instance_id) {
     // This is used for transforming cluster-local bounding spheres to world space.
     mat3 rot_scale = mat3(inst.model_matrix);
 
-    uint stack[128];
+    uint stack[256];
     uint stack_ptr = 0;
     stack[stack_ptr++] = root_group;
 
     uint iterations = 0;
-    while (stack_ptr > 0 && iterations < 4096) {
+    while (stack_ptr > 0 && iterations < 65536) {
         uint group_idx = stack[--stack_ptr];
         VGClusterGroup group = groups[group_idx];
 
@@ -227,9 +236,12 @@ void traverse_hierarchy(uint instance_id) {
                            group.lod_bounds_center_y,
                            group.lod_bounds_center_z);
         vec3 world_center = (inst.model_matrix * vec4(center, 1.0)).xyz;
-        // Anisotropic radius: use the full rotation-scale matrix.
+        // Anisotropic radius: transform radius along each axis and take the max.
         // This correctly handles non-uniform scaling (e.g. stretched columns).
-        float world_radius = length(rot_scale * vec3(group.lod_bounds_radius, 0.0, 0.0));
+        vec3 a0 = rot_scale * vec3(group.lod_bounds_radius, 0.0, 0.0);
+        vec3 a1 = rot_scale * vec3(0.0, group.lod_bounds_radius, 0.0);
+        vec3 a2 = rot_scale * vec3(0.0, 0.0, group.lod_bounds_radius);
+        float world_radius = max(length(a0), max(length(a1), length(a2)));
 
         if (!frustum_cull(world_center, world_radius)) {
             iterations++;
@@ -242,18 +254,45 @@ void traverse_hierarchy(uint instance_id) {
         bool should_render = is_leaf ||
             (err <= inst.error_threshold && push_constants.enable_lod != 0);
 
-        if (should_render) {
+// Transition zone: when pixel error is near the threshold, render
+        // BOTH parent (low LOD) and children (high LOD) with a blend factor
+        // for smooth dithering transition.
+        float transition_start = inst.error_threshold * 0.7f;
+        float transition_end   = inst.error_threshold * 1.3f;
+        bool in_transition = !is_leaf && err > transition_start && err < transition_end;
+
+        if (in_transition) {
+            float blend = (err - transition_start) / (transition_end - transition_start);
+            blend = clamp(blend, 0.0, 1.0);
             for (uint i = 0; i < group.page_index_num; ++i)
-                emit_page(instance_id, group.page_index_start + i);
+                emit_page(instance_id, group.page_index_start + i, blend);
+            for (uint i = 0; i < group.children_num; ++i) {
+                if (stack_ptr < 256)
+                    stack[stack_ptr++] = group.children_start + i;
+                else
+                    atomicOr(error_flags, 1u);
+            }
+        } else if (should_render) {
+            // Leaf nodes (LOD0) get blend_factor = 0.0 (full high LOD).
+            // Non-leaf nodes (LOD1+) get blend_factor = 1.0 (full low LOD).
+            float blend = is_leaf ? 0.0 : 1.0;
+            for (uint i = 0; i < group.page_index_num; ++i)
+                emit_page(instance_id, group.page_index_start + i, blend);
         } else {
             for (uint i = 0; i < group.children_num; ++i) {
-                if (stack_ptr < 128)
+                if (stack_ptr < 256)
                     stack[stack_ptr++] = group.children_start + i;
+                else
+                    atomicOr(error_flags, 1u);
             }
         }
 
         iterations++;
     }
+
+    // Report iteration limit exceeded
+    if (iterations >= 65536u)
+        atomicOr(error_flags, 2u); // bit 1: iteration limit exceeded
 }
 
 void main() {

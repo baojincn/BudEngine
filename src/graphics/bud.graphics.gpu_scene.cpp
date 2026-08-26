@@ -289,7 +289,7 @@ namespace bud::graphics {
 			}
 
 			if (!frame_resource.page_request_buffer.is_valid()) {
-				constexpr uint32_t page_request_size = 16384; // 1 counter + ~4K page requests
+				constexpr uint32_t page_request_size = 16384; // 12 bytes header + ~4093 page requests
 				frame_resource.page_request_buffer = rhi->create_gpu_buffer(page_request_size, ResourceState::UnorderedAccess);
 				frame_resource.page_request_readback = rhi->create_readback_buffer(page_request_size);
 				if (auto* buf = rhi->get_buffer(frame_resource.page_request_readback); buf && buf->mapped_ptr)
@@ -306,8 +306,8 @@ namespace bud::graphics {
 			if (!frame_resource.visible_clusters.is_valid() || frame_resource.visible_cluster_capacity < desired_cluster_capacity) {
 				if (frame_resource.visible_clusters.is_valid())
 					rhi->destroy_buffer(frame_resource.visible_clusters);
-				// 1 uint for count + N * 8 bytes (VisibleCluster struct is 8 bytes)
-				uint64_t vc_size = 4 + static_cast<uint64_t>(desired_cluster_capacity) * 8;
+				// 1 uint for count + N * 12 bytes (VisibleCluster struct is 12 bytes: 3 uint32s)
+				uint64_t vc_size = 4 + static_cast<uint64_t>(desired_cluster_capacity) * 12;
 				frame_resource.visible_clusters = rhi->create_gpu_buffer(vc_size, ResourceState::UnorderedAccess);
 			}
 
@@ -335,8 +335,12 @@ namespace bud::graphics {
 		auto* buf = rhi_ptr->get_buffer(page_table_buffer);
 		if (!buf || !buf->mapped_ptr) return;
 		auto* entries = static_cast<PageTableEntry*>(buf->mapped_ptr);
-		entries[page_index].valid = valid;
+		// Write pool_offset BEFORE valid so that the GPU (which reads valid first)
+		// never sees valid=1 with a stale pool_offset.
+		// HOST_COHERENT memory guarantees CPU writes are visible to GPU in program order.
 		entries[page_index].pool_offset = pool_offset;
+		std::atomic_signal_fence(std::memory_order_release);
+		entries[page_index].valid = valid;
 	}
 
 	uint32_t GPUScene::PagePool::allocate_page() {

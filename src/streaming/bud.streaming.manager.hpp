@@ -107,6 +107,22 @@ private:
 	// scene spans ~3700 units (BudAssetTool keeps the obj scale). 2500 keeps
 	// the whole scene resident while the camera is inside it.
 	float unload_radius_ = 2500.0f;
+
+	// Retry queue for page requests that failed due to pool exhaustion.
+	// These will be retried in the next frame's process_gpu_page_requests().
+	// Max size limited to prevent unbounded memory growth.
+	std::vector<std::string> retry_queue;
+	std::mutex retry_mutex;
+	static constexpr size_t max_retry_queue_size = 4096;
+
+	// Maximum number of pages to evict per frame when pool is exhausted.
+	static constexpr uint32_t max_evict_per_frame = 16;
+
+	// Evict the furthest resident pages to free pool slots.
+	void evict_furthest_pages(uint32_t count, const bud::math::vec3& camera_position);
+
+	// Process page requests from a list of page keys (used by retry queue).
+	void process_gpu_page_requests_from_keys(const std::vector<std::string>& page_keys);
 };
 
 } // namespace bud::streaming

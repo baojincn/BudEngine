@@ -5,6 +5,7 @@ layout(location = 2) in vec2 in_tex_coord;
 
 layout(location = 0) out vec2 frag_tex_coord;
 layout(location = 1) flat out uint frag_material_id;
+layout(location = 2) flat out float frag_blend_factor;
 
 layout(binding = 0) uniform UniformBufferObject {
     mat4 view;
@@ -24,10 +25,11 @@ layout(binding = 0) uniform UniformBufferObject {
 } ubo;
 
 struct InstanceData {
-	mat4 model;
-	uint material_id;
-	uint page_slot;
-	uint padding[2];
+mat4 model;
+uint material_id;
+uint page_slot;
+float blend_factor;
+uint padding;
 };
 
 layout(std430, binding = 3) readonly buffer InstanceBuffer {
@@ -113,5 +115,6 @@ void main() {
 	vec4 world_pos = instance.model * vec4(pos, 1.0);
 	frag_tex_coord = uv;
 	frag_material_id = instance.material_id;
+frag_blend_factor = instance.blend_factor;
 	gl_Position = ubo.proj * ubo.view * world_pos;
 }

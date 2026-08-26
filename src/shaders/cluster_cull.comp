@@ -28,8 +28,8 @@ struct InstanceData {
     mat4 model;
     uint material_id;
     uint page_slot;
-    uint pad1;
-    uint pad2;
+    float blend_factor;
+    uint pad;
 };
 
 struct GPUStats {
@@ -67,6 +67,7 @@ layout(set = 0, binding = 8) uniform uniform_buffer_object_block {
 struct VisibleCluster {
     uint instance_and_page;
     uint cluster_idx;
+    float blend_factor;
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer InstanceDataBuffer {
@@ -110,6 +111,8 @@ layout(set = 0, binding = 7) uniform sampler2D hizPyramid;
 
 layout(push_constant) uniform PushConstants {
     uint max_clusters;
+    float screen_height;
+    float error_threshold;
 } pc;
 
 const uint PAGE_SIZE_BYTES = 131072;
@@ -186,8 +189,9 @@ void main() {
 
     VisibleCluster cluster = in_clusters.visible_clusters[idx];
     uint instance_id = cluster.instance_and_page >> 16;
-    uint page_slot = cluster.instance_and_page & 0xFFFF;
+    uint page_slot = cluster.instance_and_page & 0x1FFFu; // 13 bits (8192 max)
     uint cluster_idx = cluster.cluster_idx;
+    float blend_factor = cluster.blend_factor;
     
     HierarchyInstance inst = instances.data[instance_id];
     mat4 model_matrix = inst.model_matrix;
@@ -214,10 +218,14 @@ void main() {
     float sphere_radius = uintBitsToFloat(page_pool.data[cluster_base + 10u]);
 
     // Transform sphere to world space using full rotation-scale matrix.
+    // Anisotropic radius: transform along each axis and take the max.
     // This correctly handles non-uniform scaling (e.g. stretched columns).
     mat3 rot_scale = mat3(model_matrix);
     vec3 world_center = (model_matrix * vec4(sphere_center, 1.0)).xyz;
-    float world_radius = length(rot_scale * vec3(sphere_radius, 0.0, 0.0));
+    vec3 a0 = rot_scale * vec3(sphere_radius, 0.0, 0.0);
+    vec3 a1 = rot_scale * vec3(0.0, sphere_radius, 0.0);
+    vec3 a2 = rot_scale * vec3(0.0, 0.0, sphere_radius);
+    float world_radius = max(length(a0), max(length(a1), length(a2)));
 
     bool visible = true;
     // Extract frustum planes from the view-projection matrix.
@@ -275,8 +283,8 @@ void main() {
         out_instances.data[idx].model = model_matrix;
         out_instances.data[idx].material_id = material_id;
         out_instances.data[idx].page_slot = page_slot;
-        out_instances.data[idx].pad1 = 0;
-        out_instances.data[idx].pad2 = 0;
+        out_instances.data[idx].blend_factor = in_clusters.visible_clusters[idx].blend_factor;
+        out_instances.data[idx].pad = 0;
 
         // Write indirect command
         out_draws.commands[idx].indexCount = triangle_count * 3u;

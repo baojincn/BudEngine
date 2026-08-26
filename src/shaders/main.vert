@@ -11,6 +11,7 @@ layout(location = 1) out vec3 frag_normal;
 layout(location = 2) out vec2 frag_tex_coord;
 layout(location = 3) out vec3 frag_color;
 layout(location = 4) flat out uint frag_material_id;
+layout(location = 5) flat out float frag_blend_factor;
 
 layout(binding = 0) uniform UniformBufferObject {
 	mat4 view;
@@ -34,7 +35,8 @@ struct InstanceData {
 	mat4 model;
 	uint material_id;
 	uint page_slot;
-	uint padding[2];
+	float blend_factor; // 0.0 = full high LOD, 1.0 = full low LOD
+	uint padding;
 };
 
 layout(std430, binding = 3) readonly buffer InstanceBuffer {
@@ -132,6 +134,7 @@ void main() {
 	frag_normal = normalize(mat3(instance.model) * norm);
 	frag_color = vec3(1.0);
 	frag_material_id = instance.material_id;
+	frag_blend_factor = instance.blend_factor;
 	gl_Position = ubo.proj * ubo.view * world_pos;
 	frag_tex_coord = uv;
 }

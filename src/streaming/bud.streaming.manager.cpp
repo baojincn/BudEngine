@@ -354,6 +354,17 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 }
 
 void StreamingManager::update(const bud::math::vec3& camera_position) {
+	// Step 1: Process retry queue from previous frame (outside mutex_sm to avoid deadlock)
+	std::vector<std::string> retry_copy;
+	{
+		std::scoped_lock rlock(retry_mutex);
+		retry_copy.swap(retry_queue);
+	}
+	if (!retry_copy.empty()) {
+		process_gpu_page_requests_from_keys(retry_copy);
+	}
+
+	// Step 2: Distance-based eviction
 	std::scoped_lock lock(mutex_sm);
 	for (const auto& [page_key, sp] : all_pages) {
 		// Per-page distance-based eviction: distance from the camera to the
@@ -448,7 +459,21 @@ void StreamingManager::process_gpu_page_requests(const uint32_t* virtual_page_in
 
 				uint32_t slot = gpu_scene->get_page_pool().allocate_page();
 				if (slot == ~0u) {
-					bud::eprint("[Streaming] Page pool exhausted for: {}", p);
+					bud::print("[Streaming] Page pool exhausted for: {} — adding to retry queue and evicting furthest pages", p);
+					// Add to retry queue for the next frame
+					{
+						std::scoped_lock rlock(retry_mutex);
+						if (retry_queue.size() < max_retry_queue_size)
+							retry_queue.push_back(p);
+					}
+					// Trigger eviction to free up slots
+					// (camera position is approximated from the page's AABB center)
+					bud::math::vec3 cam_pos_approx = (sp.aabb.min + sp.aabb.max) * 0.5f;
+					evict_furthest_pages(max_evict_per_frame, cam_pos_approx);
+					{
+						std::scoped_lock lock(mutex_sm);
+						pending_loads.erase(p);
+					}
 					return;
 				}
 				uint32_t gpu_offset = gpu_scene->get_page_pool().get_page_offset(slot);
@@ -462,6 +487,148 @@ void StreamingManager::process_gpu_page_requests(const uint32_t* virtual_page_in
 				}
 
 				// 将数据移入 lambda，在 render thread 的 flush_upload_queue() 中执行 staging 分配与 GPU copy
+				auto page_pool_buf = gpu_scene->get_page_pool_buffer();
+				renderer->enqueue_rhi_command([this, p, sp, slot, gpu_offset, page_pool_buf, data = std::move(data)]() {
+					const size_t src_size = data.size();
+					auto staging = rhi->get_allocator()->alloc_staging(src_size);
+					if (staging.mapped_ptr) {
+						std::memcpy(staging.mapped_ptr, data.data(), src_size);
+						rhi->copy_buffer_immediate_offset(staging.buffer, page_pool_buf, src_size, staging.offset, gpu_offset);
+					}
+
+					if (sp.is_virtual_geometry)
+						gpu_scene->update_page_table_entry(sp.virtual_page_index, slot, 1);
+
+					{
+						std::scoped_lock lock(mutex_sm);
+						residency_sm[p] = true;
+						pending_loads.erase(p);
+						page_gpu_slots[p] = slot;
+					}
+
+					bud::print("[Streaming] Loaded Virtual Geometry page: {} (virtual_page={}) -> slot {}", p, sp.virtual_page_index, slot);
+				});
+			});
+	}
+}
+
+void StreamingManager::evict_furthest_pages(uint32_t count, const bud::math::vec3& camera_position) {
+	// Collect all resident pages with their distances to the camera
+	std::vector<std::pair<float, std::string>> candidates;
+	{
+		std::scoped_lock lock(mutex_sm);
+		for (const auto& [page_key, resident] : residency_sm) {
+			if (!resident) continue;
+			auto it = all_pages.find(page_key);
+			if (it == all_pages.end()) continue;
+			const auto& sp = it->second;
+			bud::math::vec3 bmin = sp.has_aabb ? sp.aabb.min : sp.global_aabb.min;
+			bud::math::vec3 bmax = sp.has_aabb ? sp.aabb.max : sp.global_aabb.max;
+			bud::math::vec3 closest(
+				std::clamp(camera_position.x, bmin.x, bmax.x),
+				std::clamp(camera_position.y, bmin.y, bmax.y),
+				std::clamp(camera_position.z, bmin.z, bmax.z));
+			float d = bud::math::length(camera_position - closest);
+			candidates.emplace_back(d, page_key);
+		}
+	}
+
+	// Sort by distance (furthest first)
+	std::sort(candidates.begin(), candidates.end(),
+		[](const auto& a, const auto& b) { return a.first > b.first; });
+
+	// Evict the furthest 'count' pages
+	uint32_t evicted = 0;
+	for (const auto& [dist, page_key] : candidates) {
+		if (evicted >= count) break;
+		std::scoped_lock lock(mutex_sm);
+		auto it = all_pages.find(page_key);
+		if (it == all_pages.end()) continue;
+		const auto& sp = it->second;
+		if (auto slot_it = page_gpu_slots.find(page_key); slot_it != page_gpu_slots.end()) {
+			gpu_scene->update_page_table_entry(sp.virtual_page_index, 0, 0);
+			gpu_scene->get_page_pool().free_page(slot_it->second);
+			page_gpu_slots.erase(slot_it);
+		}
+		pending_loads.erase(page_key);
+		residency_sm.erase(page_key);
+		++evicted;
+	}
+	if (evicted > 0) {
+		bud::print("[Streaming] Evicted {} pages (furthest distance-based)", evicted);
+	}
+}
+
+void StreamingManager::process_gpu_page_requests_from_keys(const std::vector<std::string>& page_keys) {
+	std::vector<std::string> to_load;
+	{
+		std::scoped_lock lock(mutex_sm);
+		for (const auto& p : page_keys) {
+			if (pending_loads.count(p) || p.empty()) continue;
+			if (auto it = residency_sm.find(p); it != residency_sm.end() && it->second) continue;
+			to_load.push_back(p);
+		}
+	}
+
+	for (const auto& p : to_load) {
+		std::scoped_lock lock(mutex_sm);
+		if (pending_loads.count(p)) continue;
+		if (auto it = residency_sm.find(p); it != residency_sm.end() && it->second) continue;
+		auto page_it = all_pages.find(p);
+		if (page_it == all_pages.end()) continue;
+		residency_sm[p] = false;
+		pending_loads.insert(p);
+
+		const StreamingPage& sp = page_it->second;
+		asset_manager->load_file_chunk_async(sp.bin_path, sp.file_offset, sp.capacity,
+			[this, p, sp](std::vector<char> data) {
+				if (data.empty()) {
+					std::scoped_lock lock(mutex_sm);
+					pending_loads.erase(p);
+					return;
+				}
+
+				if (sp.is_virtual_geometry) {
+					if (data.size() < sizeof(bud::asset::VGPageDataHeader)) {
+						std::scoped_lock lock(mutex_sm);
+						pending_loads.erase(p);
+						bud::eprint("[Streaming] Virtual Geometry raw page chunk too small: {}", p);
+						return;
+					}
+					const auto& ph = *reinterpret_cast<const bud::asset::VGPageDataHeader*>(data.data());
+					if (ph.magic != bud::asset::VG_PAGE_DATA_MAGIC) {
+						std::scoped_lock lock(mutex_sm);
+						pending_loads.erase(p);
+						bud::eprint("[Streaming] Bad Virtual Geometry page magic 0x{:X} for: {}", ph.magic, p);
+						return;
+					}
+				}
+
+				uint32_t slot = gpu_scene->get_page_pool().allocate_page();
+				if (slot == ~0u) {
+					bud::print("[Streaming] Page pool exhausted for: {} (retry) — adding to retry queue", p);
+					{
+						std::scoped_lock rlock(retry_mutex);
+						if (retry_queue.size() < max_retry_queue_size)
+							retry_queue.push_back(p);
+					}
+					bud::math::vec3 cam_pos_approx = (sp.aabb.min + sp.aabb.max) * 0.5f;
+					evict_furthest_pages(max_evict_per_frame, cam_pos_approx);
+					{
+						std::scoped_lock lock(mutex_sm);
+						pending_loads.erase(p);
+					}
+					return;
+				}
+				uint32_t gpu_offset = gpu_scene->get_page_pool().get_page_offset(slot);
+
+				const size_t src_size = data.size();
+				if (src_size > bud::graphics::GPUScene::PagePool::page_size) {
+					bud::eprint("[Streaming] Page {} is larger than pool slot ({} > {})", p, src_size, bud::graphics::GPUScene::PagePool::page_size);
+					gpu_scene->get_page_pool().free_page(slot);
+					return;
+				}
+
 				auto page_pool_buf = gpu_scene->get_page_pool_buffer();
 				renderer->enqueue_rhi_command([this, p, sp, slot, gpu_offset, page_pool_buf, data = std::move(data)]() {
 					const size_t src_size = data.size();

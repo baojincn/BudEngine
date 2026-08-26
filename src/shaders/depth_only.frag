@@ -3,6 +3,7 @@
 
 layout(location = 0) in vec2 frag_tex_coord;
 layout(location = 1) flat in uint frag_material_id;
+layout(location = 2) flat in float frag_blend_factor;
 
 layout(binding = 1) uniform sampler2D tex_samplers[];
 
@@ -23,6 +24,13 @@ layout(std430, set = 0, binding = 7) readonly buffer MaterialBuffer {
 };
 
 void main() {
+    // Skip dithering transition geometry in depth prepass.
+    // Only the high LOD (blend_factor = 0.0) writes to depth buffer.
+    // The low LOD being dithered out (0.0 < blend_factor < 1.0) should
+    // NOT write depth, so the high LOD behind it passes the depth test.
+    // Non-transition low LOD (blend_factor = 1.0) still writes depth.
+    if (frag_blend_factor > 0.0 && frag_blend_factor < 1.0)
+        discard;
     if (frag_material_id >= materials.length())
         return;
 
