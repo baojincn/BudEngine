@@ -259,7 +259,7 @@ std::vector<InternalCluster> simplify_group(const InternalGroup& g, const std::v
                             vertex_lock[remap[ly]] = 1;
                     }
                 }
-                cluster_base += c.vertices.size();
+                cluster_base += static_cast<uint32_t>(c.vertices.size());
             }
         }
 
@@ -758,8 +758,7 @@ void assign_vg_pages(
     uint32_t page_tri_count = 0;
     std::vector<uint32_t> page_clusters;
 
-    auto calc_raw_bytes = [&](uint32_t verts, uint32_t tris, uint32_t cluster_count) -> uint32_t {
-        const uint32_t bits = bud::asset::VG_POSITION_BITS;
+    auto calc_raw_bytes = [&](uint32_t verts, uint32_t tris, uint32_t cluster_count, uint32_t bits = 16u) -> uint32_t {
         const uint32_t pos_bytes = static_cast<uint32_t>((static_cast<uint64_t>(verts) * bits * 3 + 7) / 8);
         const uint32_t pos_bytes_aligned = (pos_bytes + 3u) & ~3u;
         const uint32_t attr_bytes = verts * static_cast<uint32_t>(sizeof(bud::asset::VGPackedVertex));
@@ -1133,7 +1132,15 @@ VGBuildResult VirtualGeometryBuilder::build(const InternalMesh& mesh) {
             pext[k] = (pext[k] > poff[k]) ? (pext[k] - poff[k]) : 1.0f;
         }
 
-        const uint32_t bits = bud::asset::VG_POSITION_BITS;
+        // Calculate adaptive quantization precision based on page extent.
+        // Target: 0.1cm (1mm) precision. Unit = cm so 0.1 = 1mm.
+        // Clamp to 8..16 bits. 16 bits max ensures the page fits in the
+        // 128KB slot (calc_raw_bytes uses 16 bits as conservative estimate).
+        float max_extent = std::max({ pext[0], pext[1], pext[2] });
+        uint32_t bits = 12u; // default
+        if (max_extent > 0.0f) {
+            bits = std::clamp(static_cast<uint32_t>(std::ceil(std::log2(max_extent / 0.1f))), 8u, 16u);
+        }
         std::vector<uint8_t> pos_stream;
         write_page_quantized_positions(page_vertices, poff, pext, bits, pos_stream);
 

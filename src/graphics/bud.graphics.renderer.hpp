@@ -124,6 +124,7 @@ namespace bud::graphics {
 		std::atomic<uint32_t> next_bindless_slot{ 1 };
 		std::atomic<uint32_t> next_mesh_id{ 0 };
 
+	public:
 		struct HierarchyInstance {
 			uint32_t mesh_id;
 			uint32_t material_id;

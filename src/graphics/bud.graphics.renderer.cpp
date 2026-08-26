@@ -15,7 +15,33 @@
 #include "src/streaming/bud.streaming.manager.hpp"
 #include "src/core/bud.asset.types.hpp"
 #include "src/runtime/bud.scene.hpp"
-#include "src/core/bud.math.hpp"
+// Compile-time layout validation for C++ / GLSL shared structs
+#include "src/core/bud.layouts.hpp"
+// HierarchyInstance and InstanceData are nested in Renderer, so we validate here
+namespace bud::graphics { namespace {
+struct LayoutValidation {
+    static_assert(sizeof(Renderer::HierarchyInstance) == 112,
+        "HierarchyInstance size must match GLSL layout (112 bytes)");
+    static_assert(offsetof(Renderer::HierarchyInstance, mesh_id) == 0, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, material_id) == 4, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, root_group_index) == 8, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, flags) == 12, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, global_sphere_center) == 16, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, global_sphere_radius) == 28, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, error_threshold) == 32, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, base_virtual_page) == 36, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, padding) == 40, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, model_matrix) == 48, "");
+
+    static_assert(sizeof(Renderer::InstanceData) == 80,
+        "InstanceData size must match GLSL layout (80 bytes)");
+    static_assert(offsetof(Renderer::InstanceData, model) == 0, "");
+    static_assert(offsetof(Renderer::InstanceData, material_id) == 64, "");
+    static_assert(offsetof(Renderer::InstanceData, page_slot) == 68, "");
+    static_assert(offsetof(Renderer::InstanceData, blend_factor) == 72, "");
+    static_assert(offsetof(Renderer::InstanceData, padding) == 76, "");
+};
+}} // namespace#include "src/core/bud.math.hpp"
 #include "src/graphics/bud.graphics.sortkey.hpp"
 #include "src/graphics/vulkan/bud.vulkan.memory.hpp"
 

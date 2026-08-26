@@ -4,6 +4,9 @@
 #include <bit>
 #include <cstring>
 
+// Compile-time layout validation for C++ / GLSL shared structs
+#include "src/core/bud.layouts.hpp"
+
 namespace bud::graphics {
 
 	static inline uint32_t next_power_of_two(uint32_t v) {
