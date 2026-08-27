@@ -158,28 +158,26 @@ namespace bud::graphics {
 						return;
 					}
 
-					if (config.enable_gpu_driven) {
-						if (indirect_draw_buffer.is_valid() && draw_count > 0) {
-							auto page_pool_buf = gpu_scene.get_page_pool_buffer();
+					if (indirect_draw_buffer.is_valid() && draw_count > 0) {
+						auto page_pool_buf = gpu_scene.get_page_pool_buffer();
 
-							uint32_t gpu_draw_count = static_cast<uint32_t>(draw_count);
-							if (config.enable_virtual_geometry) {
-								uint32_t frame_idx = rhi->get_current_frame_index();
-								gpu_draw_count = std::max(gpu_draw_count,
-									gpu_scene.get_frame_resources(frame_idx).indirect_capacity);
-							}
+						uint32_t gpu_draw_count = static_cast<uint32_t>(draw_count);
+						if (config.enable_virtual_geometry) {
+							uint32_t frame_idx = rhi->get_current_frame_index();
+							gpu_draw_count = std::max(gpu_draw_count,
+								gpu_scene.get_frame_resources(frame_idx).indirect_capacity);
+						}
 
-							if (split_index > 0) {
-								rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-								rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-								rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), 0, static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
-							}
+						if (split_index > 0) {
+							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+							rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), 0, static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
+						}
 
-							if (split_index < gpu_draw_count && page_pool_buf.is_valid()) {
-								rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
-								rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
-								rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), split_index * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(gpu_draw_count - split_index), sizeof(bud::graphics::IndirectCommand));
-							}
+						if (split_index < gpu_draw_count && page_pool_buf.is_valid()) {
+							rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
+							rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
+							rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), split_index * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(gpu_draw_count - split_index), sizeof(bud::graphics::IndirectCommand));
 						}
 					}
 				}

@@ -23,8 +23,6 @@ namespace bud::ui {
         float current_occluder,
         std::function<void(bool)> set_occluder_enable,
 		bool current_occluder_enable,
-		std::function<void(bool)> set_gpu_driven_enable,
-		bool current_gpu_driven_enable,
 		std::function<void(bud::graphics::AOMode)> set_ao_mode,
 		bud::graphics::AOMode current_ao_mode) {
 
@@ -93,7 +91,7 @@ namespace bud::ui {
 				update_timer += delta_time;
 				if (update_timer >= 0.5f) {
 					display_draw_calls = stats.draw_calls;
-					display_drawn_tris = current_gpu_driven_enable ? stats.gpu_visible_triangles : stats.drawn_triangles;
+					display_drawn_tris = stats.gpu_visible_triangles;
 					display_pipeline_binds = stats.pipeline_binds;
 
 					cpu_display_total_tris = stats.cpu_total_triangles;
@@ -189,20 +187,6 @@ namespace bud::ui {
 				ImGui::Separator();
 				ImGui::TextColored(color_neutral, "Cluster Rendering");
 
-				if (set_gpu_driven_enable) {
-					ImGui::SameLine();
-					ImGui::TextColored(color_neutral, " | GPU Driven");
-					ImGui::SameLine();
-					ImGui::PushID("gpu_driven_enable");
-					ImGui::PushItemWidth(24.0f);
-					bool tmp = current_gpu_driven_enable;
-					if (ImGui::Checkbox("##gpu_driven_enable", &tmp)) {
-						set_gpu_driven_enable(tmp);
-					}
-					ImGui::PopItemWidth();
-					ImGui::PopID();
-				}
-
 				if (set_ao_mode) {
 					ImGui::SameLine();
 					ImGui::TextColored(color_neutral, " | AO:");
@@ -222,49 +206,29 @@ namespace bud::ui {
 					if (set_occluder && current_occluder >= 0.0f) {
 						ImGui::TextColored(color_neutral, "Heuristic Occluder Frac: %.1f%%", current_occluder * 100.0f);
 						ImGui::SameLine();
-						if (ImGui::SmallButton("-")) {
-							float v = std::clamp(current_occluder - 0.01f, 0.0f, 1.0f);
-							set_occluder(v);
+						ImGui::PushID("occluder_slider");
+						ImGui::PushItemWidth(60.0f);
+						float tmp = current_occluder;
+						if (ImGui::SliderFloat("##occluder", &tmp, 0.0f, 1.0f, "%.2f")) {
+							set_occluder(tmp);
 						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+					}
+					if (set_occluder_enable) {
 						ImGui::SameLine();
-						if (ImGui::SmallButton("+")) {
-							float v = std::clamp(current_occluder + 0.01f, 0.0f, 1.0f);
-							set_occluder(v);
+						ImGui::TextColored(color_neutral, " | Heuristic Occluder");
+						ImGui::SameLine();
+						ImGui::PushID("occluder_enable");
+						ImGui::PushItemWidth(24.0f);
+						bool tmp = current_occluder_enable;
+						if (ImGui::Checkbox("##occluder_enable", &tmp)) {
+							set_occluder_enable(tmp);
 						}
-						if (set_occluder_enable) {
-							ImGui::SameLine();
-							ImGui::PushID("heuristic_occluder_enable");
-							ImGui::PushItemWidth(24.0f);
-							bool tmp = current_occluder_enable;
-							if (ImGui::Checkbox("##heuristic_occluder_enable", &tmp)) {
-								set_occluder_enable(tmp);
-							}
-							ImGui::PopItemWidth();
-							ImGui::PopID();
-						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
 					}
 				};
-
-				//{
-				//	ImGui::TextColored(color_neutral, "Cluster Rendering [Off]");
-				//	draw_heuristic_occluder_controls();
-
-				//	ImGui::Separator();
-				//	ImGui::TextColored(color_neutral, "GPU Instance HiZ Group");
-				//	ImGui::TextColored(color_neutral, "Total Objects/Entities: %u", gpu_display_total_objs);
-				//	ImGui::TextColored(color_neutral, "Visible Objects/Entities: %u", gpu_display_visible_objs);
-				//	float gpu_obj_cull_rate = gpu_display_total_objs > 0 ? (1.0f - (float)gpu_display_visible_objs / gpu_display_total_objs) * 100.0f : 0.0f;
-				//	ImGui::TextColored(color_neutral, "Obj Cull Ratio: %.1f%%", gpu_obj_cull_rate);
-				//	ImGui::TextColored(color_neutral, "Total Submesh Instances: %u", gpu_display_total_instances);
-				//	ImGui::TextColored(color_neutral, "Visible Submesh Instances: %u", gpu_display_visible_instances);
-				//	float gpu_instance_cull_rate = gpu_display_total_instances > 0 ? (1.0f - (float)gpu_display_visible_instances / gpu_display_total_instances) * 100.0f : 0.0f;
-				//	ImGui::TextColored(color_neutral, "Instance Cull Ratio: %.1f%%", gpu_instance_cull_rate);
-				//	ImGui::TextColored(color_neutral, "Total Triangles: %u", gpu_display_total_tris);
-				//	ImVec4 gpu_tri_color = gpu_display_visible_tris <= 2000000 ? color_good : (gpu_display_visible_tris <= 5000000 ? color_warn : color_bad);
-				//	ImGui::TextColored(gpu_tri_color, "Visible Triangles: %u", gpu_display_visible_tris);
-				//	float gpu_tri_cull_rate = gpu_display_total_tris > 0 ? (1.0f - (float)gpu_display_visible_tris / gpu_display_total_tris) * 100.0f : 0.0f;
-				//	ImGui::TextColored(color_neutral, "Tri Cull Ratio: %.1f%%", gpu_tri_cull_rate);
-				//}
 
 				ImGui::Separator();
 				ImGui::TextColored(color_neutral, "Shadow Casters: %u", display_shadow_casters);

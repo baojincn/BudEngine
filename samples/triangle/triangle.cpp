@@ -56,7 +56,6 @@ void TriangleApp::on_init(const AppConfig& config) {
 	// CPU-driven path: page-backed streaming is validated via the CPU indirect
 	// path (GPU-driven meshlet rendering would need per-page meshlet GPU data
 	// that streaming does not upload yet).
-	render_config.enable_gpu_driven = true;
 	render_config.enable_virtual_geometry = true;
 	renderer->set_config(render_config);
 

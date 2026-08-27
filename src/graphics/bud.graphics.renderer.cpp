@@ -826,8 +826,7 @@ namespace bud::graphics {
 				sizeof(InstanceData),
 				sizeof(DrawData),
 				sizeof(IndirectCommand),
-				1024u,
-				render_config.enable_gpu_driven);
+				1024u);
 
 			auto& frame = gpu_scene.get_frame_resources(current_idx);
 
@@ -898,10 +897,9 @@ namespace bud::graphics {
 				rg_instance_data = render_graph.import_buffer("GlobalInstanceData", frame.instance_data, ResourceState::ShaderResource);
 			}
 
-			if (render_config.enable_gpu_driven) {
-				const BufferHandle current_inst_buf = frame.indirect_instance;
-				const BufferHandle current_draw_buf = frame.indirect_draw;
-				const BufferHandle current_stats_buf = frame.stats_readback;
+			const BufferHandle current_inst_buf = frame.indirect_instance;
+			const BufferHandle current_draw_buf = frame.indirect_draw;
+			const BufferHandle current_stats_buf = frame.stats_readback;
 
 				if (visible_count > 0) {
 					auto staging = rhi->get_allocator()->alloc_staging(visible_count * sizeof(DrawData));
@@ -1085,7 +1083,6 @@ namespace bud::graphics {
 						}
 					}
 				}
-			}
 
 			// Calculate CPU Frustum Culling Stats
 			uint32_t scene_total_objs = 0;
@@ -1142,36 +1139,27 @@ namespace bud::graphics {
 			}
 
 			// Setup GPU Stats
-			if (render_config.enable_gpu_driven) {
-				rhi->add_culling_stats(scene_total_objs, (uint32_t)visible_instance_count, total_shadow_casters);
-				if (visible_count > 0) {
-					rhi->get_render_stats().gpu_total_instances = last_gpu_stats.totalInstances;
-					rhi->get_render_stats().gpu_visible_instances = last_gpu_stats.visibleInstances;
-					rhi->get_render_stats().gpu_total_triangles = last_gpu_stats.totalTriangles;
-					rhi->get_render_stats().gpu_visible_triangles = last_gpu_stats.visibleTriangles;
-					rhi->get_render_stats().heuristic_total_count = last_gpu_stats.heuristicTotalCount;
-					rhi->get_render_stats().heuristic_cutoff_bucket = last_gpu_stats.heuristicCutoffBucket;
-					rhi->get_render_stats().heuristic_remaining = last_gpu_stats.heuristicRemaining;
-					rhi->get_render_stats().gpu_occluder_instances = last_gpu_stats.heuristicVisibleInstances;
-				}
-				else {
-					last_gpu_stats = {};
-					rhi->get_render_stats().gpu_total_instances = 0;
-					rhi->get_render_stats().gpu_visible_instances = 0;
-					rhi->get_render_stats().gpu_total_triangles = 0;
-					rhi->get_render_stats().gpu_visible_triangles = 0;
-					rhi->get_render_stats().heuristic_total_count = 0;
-					rhi->get_render_stats().heuristic_cutoff_bucket = 0;
-					rhi->get_render_stats().heuristic_remaining = 0;
-					rhi->get_render_stats().gpu_occluder_instances = 0;
-				}
+			rhi->add_culling_stats(scene_total_objs, (uint32_t)visible_instance_count, total_shadow_casters);
+			if (visible_count > 0) {
+				rhi->get_render_stats().gpu_total_instances = last_gpu_stats.totalInstances;
+				rhi->get_render_stats().gpu_visible_instances = last_gpu_stats.visibleInstances;
+				rhi->get_render_stats().gpu_total_triangles = last_gpu_stats.totalTriangles;
+				rhi->get_render_stats().gpu_visible_triangles = last_gpu_stats.visibleTriangles;
+				rhi->get_render_stats().heuristic_total_count = last_gpu_stats.heuristicTotalCount;
+				rhi->get_render_stats().heuristic_cutoff_bucket = last_gpu_stats.heuristicCutoffBucket;
+				rhi->get_render_stats().heuristic_remaining = last_gpu_stats.heuristicRemaining;
+				rhi->get_render_stats().gpu_occluder_instances = last_gpu_stats.heuristicVisibleInstances;
 			}
 			else {
-				rhi->add_culling_stats(scene_total_objs, (uint32_t)visible_instance_count, total_shadow_casters);
-				rhi->get_render_stats().gpu_total_instances = cpu_visible_instances;
-				rhi->get_render_stats().gpu_visible_instances = cpu_visible_instances;
-				rhi->get_render_stats().gpu_total_triangles = cpu_visible_tris; // CPU fallback for GPU
-				rhi->get_render_stats().gpu_visible_triangles = cpu_visible_tris;
+				last_gpu_stats = {};
+				rhi->get_render_stats().gpu_total_instances = 0;
+				rhi->get_render_stats().gpu_visible_instances = 0;
+				rhi->get_render_stats().gpu_total_triangles = 0;
+				rhi->get_render_stats().gpu_visible_triangles = 0;
+				rhi->get_render_stats().heuristic_total_count = 0;
+				rhi->get_render_stats().heuristic_cutoff_bucket = 0;
+				rhi->get_render_stats().heuristic_remaining = 0;
+				rhi->get_render_stats().gpu_occluder_instances = 0;
 			}
 
 			// Push CPU Stats
@@ -1189,7 +1177,7 @@ namespace bud::graphics {
 			bool has_main_pass = false;
 			RGHandle shadow_map;
 			if (rg_instance_data.is_valid()) {
-				rhi->update_global_instance_data(render_config.enable_gpu_driven ? frame.dynamic_instances : frame.instance_data);
+				rhi->update_global_instance_data(frame.dynamic_instances);
 			}
 
 			if (frame.csm_instance_models.is_valid()) {
@@ -1211,7 +1199,7 @@ namespace bud::graphics {
 				RGHandle rg_csm_indirect;
 				RGHandle rg_csm_static_indirect;
 				// GPU-driven CSM culling: dispatch csm_cull.comp to populate csm_indirect_draw
-				if (render_config.enable_gpu_driven && csm_cull_pipeline.is_valid() && frame.csm_indirect_draw.is_valid()) {
+				if (csm_cull_pipeline.is_valid() && frame.csm_indirect_draw.is_valid()) {
 					if (render_config.cache_shadows && frame.csm_static_indirect_draw.is_valid()) {
 						rg_csm_static_indirect = render_graph.import_buffer("CSMStaticIndirectDraw", frame.csm_static_indirect_draw, ResourceState::UnorderedAccess);
 						render_graph.add_pass("CSM Static Cull",
@@ -1266,10 +1254,9 @@ namespace bud::graphics {
 
 				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), csm_inst_input, csm_inst_count, csm_split, rg_csm_indirect, rg_csm_static_indirect);
 
-				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, render_config.enable_gpu_driven ? rg_draw : RGHandle{}, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), {}, split_index);
+				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), {}, split_index);
 
 				if (depth_prepass.is_valid()) {
-					if (render_config.enable_gpu_driven) {
 					auto rg_hiz = pyramid_mip_pass->add_to_graph(render_graph, depth_prepass, render_config);
 
 						// Path A: Static Virtual Geometry Culling & Streaming
@@ -1298,7 +1285,6 @@ namespace bud::graphics {
 						if (rg_draw.is_valid()) {
 							depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), depth_prepass, split_index);
 						}
-					}
 
 					RGHandle rg_ao{};
 					if (ao_pass && render_config.ao_mode != AOMode::Disabled) {

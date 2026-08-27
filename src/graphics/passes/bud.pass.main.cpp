@@ -93,9 +93,7 @@ namespace bud::graphics {
 				if (ao_map.is_valid()) {
 					builder.read(ao_map, ResourceState::ShaderResource);
 				}
-				if (config.enable_gpu_driven) {
-					builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
-				}
+				builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
 				builder.read(instance_data, ResourceState::ShaderResource);
 				return depth_buffer;
 			},
@@ -117,9 +115,7 @@ namespace bud::graphics {
 				}
 
 				bud::graphics::BufferHandle indirect_buffer_handle;
-				if (config.enable_gpu_driven) {
-					indirect_buffer_handle = render_graph.get_buffer(indirect_draw_buffer);
-				}
+				indirect_buffer_handle = render_graph.get_buffer(indirect_draw_buffer);
 
 				RenderPassBeginInfo info;
 				info.color_attachments.push_back(render_graph.get_texture(backbuffer));
@@ -142,31 +138,29 @@ namespace bud::graphics {
 				// Bind global Mega-Buffer once for the entire pass
 				rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-				if (config.enable_gpu_driven) {
-					if (indirect_draw_buffer.is_valid() && draw_count > 0) {
-						auto page_pool_buf = gpu_scene.get_page_pool_buffer();
+				if (indirect_draw_buffer.is_valid() && draw_count > 0) {
+					auto page_pool_buf = gpu_scene.get_page_pool_buffer();
 
-						// GPU-driven indirect draw count: the GPU writes up to
-						// indirect_capacity commands into the buffer.  Use the
-						// full capacity so all cluster-cull outputs are drawn.
-						uint32_t gpu_draw_count = static_cast<uint32_t>(draw_count);
-						if (config.enable_virtual_geometry) {
-							uint32_t frame_idx = rhi->get_current_frame_index();
-							gpu_draw_count = std::max(gpu_draw_count,
-								gpu_scene.get_frame_resources(frame_idx).indirect_capacity);
-						}
+					// GPU-driven indirect draw count: the GPU writes up to
+					// indirect_capacity commands into the buffer.  Use the
+					// full capacity so all cluster-cull outputs are drawn.
+					uint32_t gpu_draw_count = static_cast<uint32_t>(draw_count);
+					if (config.enable_virtual_geometry) {
+						uint32_t frame_idx = rhi->get_current_frame_index();
+						gpu_draw_count = std::max(gpu_draw_count,
+							gpu_scene.get_frame_resources(frame_idx).indirect_capacity);
+					}
 
-						if (split_index > 0) {
-							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-							rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), 0, static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
-						}
+					if (split_index > 0) {
+						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+						rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), 0, static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
+					}
 
-						if (split_index < gpu_draw_count && page_pool_buf.is_valid()) {
-							rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
-							rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
-							rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), split_index * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(gpu_draw_count - split_index), sizeof(bud::graphics::IndirectCommand));
-						}
+					if (split_index < gpu_draw_count && page_pool_buf.is_valid()) {
+						rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
+						rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
+						rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), split_index * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(gpu_draw_count - split_index), sizeof(bud::graphics::IndirectCommand));
 					}
 				}
 				else {
@@ -258,9 +252,7 @@ namespace bud::graphics {
 			[=](RGBuilder& builder) {
 				builder.write(backbuffer, ResourceState::RenderTarget);
 				builder.write(depth_buffer, ResourceState::DepthWrite);
-				if (config.enable_gpu_driven) {
-					builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
-				}
+				builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
 				builder.read(instance_data, ResourceState::ShaderResource);
 				return backbuffer;
 			},
@@ -268,7 +260,7 @@ namespace bud::graphics {
 				if (!pipeline.is_valid()) return;
 
 				bud::graphics::BufferHandle indirect_buffer_handle;
-				if (config.enable_gpu_driven) indirect_buffer_handle = render_graph.get_buffer(indirect_draw_buffer);
+				indirect_buffer_handle = render_graph.get_buffer(indirect_draw_buffer);
 
 				RenderPassBeginInfo info;
 				info.color_attachments.push_back(render_graph.get_texture(backbuffer));
@@ -289,7 +281,7 @@ namespace bud::graphics {
 				rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 
-				if (config.enable_gpu_driven && indirect_buffer_handle.is_valid()) {
+				if (indirect_buffer_handle.is_valid()) {
 					auto page_pool_buf = gpu_scene.get_page_pool_buffer();
 
 					uint32_t gpu_draw_count = static_cast<uint32_t>(draw_count);

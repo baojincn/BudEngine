@@ -31,7 +31,7 @@ namespace bud::graphics {
 	}
 
 	void HierarchyTraversalPass::add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, size_t instance_count, const GPUScene& gpu_scene, uint32_t current_frame) {
-		if (!config.enable_gpu_driven || !hierarchy_traversal_pipeline.is_valid()) return;
+		if (!hierarchy_traversal_pipeline.is_valid()) return;
 
 		const auto& frame = gpu_scene.get_frame_resources(current_frame);
 
@@ -146,7 +146,7 @@ namespace bud::graphics {
 	}
 
 	void PageEmitPass::add_to_graph(RenderGraph& rg, const RenderConfig& config, const GPUScene& gpu_scene, uint32_t current_frame) {
-		if (!config.enable_gpu_driven || !page_emit_pipeline.is_valid()) return;
+		if (!page_emit_pipeline.is_valid()) return;
 
 		const auto& frame = gpu_scene.get_frame_resources(current_frame);
 
@@ -217,7 +217,7 @@ namespace bud::graphics {
 	}
 
 	void ClusterCullPass::add_to_graph(RenderGraph& rg, RGHandle hiz_pyramid, RGHandle rg_draw, const SceneView& view, const RenderConfig& config, const GPUScene& gpu_scene, uint32_t current_frame) {
-		if (!config.enable_gpu_driven || !cluster_cull_pipeline.is_valid()) return;
+		if (!cluster_cull_pipeline.is_valid()) return;
 
 		const auto& frame = gpu_scene.get_frame_resources(current_frame);
 

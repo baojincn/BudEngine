@@ -222,64 +222,25 @@ namespace bud::graphics {
 							push_consts.light_view_proj = cascade_light_view_proj;
 							push_consts.model = bud::math::mat4(1.0f);
 							push_consts.material_id = 0;
-							push_consts.use_gpu_driven = config.enable_gpu_driven ? 1 : 0;
+							push_consts.use_gpu_driven = 1;
 							push_consts.page_slot = ~0u;
 
 							auto page_pool_buf = gpu_scene.get_page_pool_buffer();
 
-							if (config.enable_gpu_driven) {
-								auto& frame = gpu_scene.get_frame_resources(rhi->get_current_frame_index());
-								if (frame.csm_static_indirect_draw.is_valid()) {
-									rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+							auto& frame = gpu_scene.get_frame_resources(rhi->get_current_frame_index());
+							if (frame.csm_static_indirect_draw.is_valid()) {
+								rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
 
-									if (split_index > 0) {
-										rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-										rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-										rhi->cmd_draw_indexed_indirect(cmd, frame.csm_static_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
-									}
-
-									if (split_index < instance_count && page_pool_buf.is_valid()) {
-										rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
-										rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
-										rhi->cmd_draw_indexed_indirect(cmd, frame.csm_static_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
-									}
-								}
-							}
-							else {
-								// Non-GPU-driven: only render traditional meshes
-								push_consts.use_gpu_driven = 0;
-								for (size_t idx = 0; idx < render_scene.world_matrices.size(); ++idx) {
-									if ((render_scene.flags[idx] & 1) == 0) continue; // Skip dynamic objects
-
-									uint32_t mesh_id = render_scene.mesh_indices[idx];
-									if (mesh_id >= meshes.size()) continue;
-									const auto& mesh = meshes[mesh_id];
-									if (!mesh.is_valid() || mesh.is_page_based) continue;
-
-									const auto& model_matrix = render_scene.world_matrices[idx];
-									bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
-									if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum)) continue;
-
-									push_consts.model = model_matrix;
-									push_consts.page_slot = ~0u;
-
+								if (split_index > 0) {
 									rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 									rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+									rhi->cmd_draw_indexed_indirect(cmd, frame.csm_static_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
+								}
 
-									uint32_t sub_idx = render_scene.submesh_indices[idx];
-									const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
-
-									if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
-										const auto& sub = mesh.submeshes[sub_idx];
-										push_consts.material_id = sub.material_id;
-										rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-										rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)idx);
-									}
-									else {
-										push_consts.material_id = render_scene.material_indices[idx];
-										rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-										rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)idx);
-									}
+								if (split_index < instance_count && page_pool_buf.is_valid()) {
+									rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
+									rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
+									rhi->cmd_draw_indexed_indirect(cmd, frame.csm_static_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
 								}
 							}
 							rhi->cmd_end_render_pass(cmd);
@@ -376,7 +337,7 @@ namespace bud::graphics {
 					push_consts.light_view_proj = cascade_light_view_proj;
 					push_consts.model = bud::math::mat4(1.0f);
 					push_consts.material_id = 0;
-					push_consts.use_gpu_driven = config.enable_gpu_driven ? 1 : 0;
+					push_consts.use_gpu_driven = 1;
 					push_consts.page_slot = ~0u;
 
 					const auto page_pool_buf = gpu_scene.get_page_pool_buffer();
@@ -416,31 +377,23 @@ namespace bud::graphics {
 						}
 					};
 
-					if (config.enable_gpu_driven) {
-						auto& frame = gpu_scene.get_frame_resources(rhi->get_current_frame_index());
-						if (frame.csm_indirect_draw.is_valid()) {
-							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+					auto& frame = gpu_scene.get_frame_resources(rhi->get_current_frame_index());
+					if (frame.csm_indirect_draw.is_valid()) {
+						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
 
-							if (split_index > 0) {
-								rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-								rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-								rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
-							}
-
-							if (split_index < instance_count && page_pool_buf.is_valid()) {
-								rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
-								rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
-								rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
-							}
-						} else {
-							// Fallback: CPU-driven draw for each visible instance.
-							const auto& visible_instances = csm_vis[i];
-							for (size_t k = 0; k < visible_instances.size(); ++k) {
-								draw_occluder(visible_instances[k], did_copy);
-							}
+						if (split_index > 0) {
+							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+							rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
 						}
-					}
-					else {
+
+						if (split_index < instance_count && page_pool_buf.is_valid()) {
+							rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
+							rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
+							rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
+						}
+					} else {
+						// Fallback: CPU-driven draw for each visible instance.
 						const auto& visible_instances = csm_vis[i];
 						for (size_t k = 0; k < visible_instances.size(); ++k) {
 							draw_occluder(visible_instances[k], did_copy);

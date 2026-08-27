@@ -20,8 +20,6 @@ namespace bud::ui {
                            float current_occluder = -1.0f,
                            std::function<void(bool)> set_occluder_enable = nullptr,
 					bool current_occluder_enable = true,
-					std::function<void(bool)> set_gpu_driven_enable = nullptr,
-					bool current_gpu_driven_enable = true,
 					std::function<void(bud::graphics::AOMode)> set_ao_mode = nullptr,
 					bud::graphics::AOMode current_ao_mode = bud::graphics::AOMode::GTAO);
     };

@@ -209,8 +209,7 @@ namespace bud::graphics {
 		uint64_t instance_data_stride,
 		uint64_t indirect_instance_stride,
 		uint64_t indirect_draw_stride,
-		uint64_t stats_buffer_size,
-		bool enable_gpu_driven)
+		uint64_t stats_buffer_size)
 	{
 		if (!rhi || frame_index >= frame_resources.size()) {
 			return;
@@ -223,12 +222,10 @@ namespace bud::graphics {
 		uint32_t desired_scene_capacity = std::max(64u, next_power_of_two(required_scene_instance_count));
 		uint32_t desired_cluster_capacity = 65536u; // Capacity for GPU-driven Virtual Geometry clusters
 
-		// When GPU-driven rendering is enabled, the indirect draw buffer must be
-		// large enough to hold commands emitted by cluster_cull.comp (one per
-		// visible cluster, up to desired_cluster_capacity).
-		if (enable_gpu_driven) {
-			desired_indirect_capacity = std::max(desired_indirect_capacity, desired_cluster_capacity);
-		}
+		// The indirect draw buffer must be large enough to hold commands
+		// emitted by cluster_cull.comp (one per visible cluster, up to
+		// desired_cluster_capacity).
+		desired_indirect_capacity = std::max(desired_indirect_capacity, desired_cluster_capacity);
 
 		if (frame_resource.instance_capacity < desired_instance_capacity || !frame_resource.instance_data.is_valid()) {
 			if (frame_resource.instance_data.is_valid())
@@ -238,26 +235,25 @@ namespace bud::graphics {
 			frame_resource.instance_capacity = desired_instance_capacity;
 		}
 
-		if (enable_gpu_driven) {
-			if (frame_resource.indirect_capacity < desired_indirect_capacity || !frame_resource.indirect_instance.is_valid()) {
-				if (frame_resource.indirect_instance.is_valid())
-					rhi->destroy_buffer(frame_resource.indirect_instance);
-				// CPU 每帧 memcpy 写入 DrawData，需要 PersistentMapped
-				frame_resource.indirect_instance = rhi->create_upload_buffer(static_cast<uint64_t>(desired_indirect_capacity) * indirect_instance_stride);
-			}
+		if (frame_resource.indirect_capacity < desired_indirect_capacity || !frame_resource.indirect_instance.is_valid()) {
+			if (frame_resource.indirect_instance.is_valid())
+				rhi->destroy_buffer(frame_resource.indirect_instance);
+			// CPU 每帧 memcpy 写入 DrawData，需要 PersistentMapped
+			frame_resource.indirect_instance = rhi->create_upload_buffer(static_cast<uint64_t>(desired_indirect_capacity) * indirect_instance_stride);
+		}
 
-			if (frame_resource.indirect_capacity < desired_indirect_capacity || !frame_resource.indirect_draw.is_valid()) {
-				if (frame_resource.indirect_draw.is_valid())
-					rhi->destroy_buffer(frame_resource.indirect_draw);
-				frame_resource.indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_indirect_capacity) * indirect_draw_stride, ResourceState::IndirectArgument);
-			}
+		if (frame_resource.indirect_capacity < desired_indirect_capacity || !frame_resource.indirect_draw.is_valid()) {
+			if (frame_resource.indirect_draw.is_valid())
+				rhi->destroy_buffer(frame_resource.indirect_draw);
+			frame_resource.indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_indirect_capacity) * indirect_draw_stride, ResourceState::IndirectArgument);
+		}
 
-			// Full-scene CSM indirect draw buffer for GPU-driven shadow culling.
-			// Size: cascade_count * scene_capacity entries.
-			if (!frame_resource.csm_indirect_draw.is_valid() || frame_resource.csm_indirect_capacity < desired_scene_capacity) {
-				if (frame_resource.csm_indirect_draw.is_valid())
-					rhi->destroy_buffer(frame_resource.csm_indirect_draw);
-				frame_resource.csm_indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * 4 * indirect_draw_stride, ResourceState::IndirectArgument);
+		// Full-scene CSM indirect draw buffer for GPU-driven shadow culling.
+		// Size: cascade_count * scene_capacity entries.
+		if (!frame_resource.csm_indirect_draw.is_valid() || frame_resource.csm_indirect_capacity < desired_scene_capacity) {
+			if (frame_resource.csm_indirect_draw.is_valid())
+				rhi->destroy_buffer(frame_resource.csm_indirect_draw);
+			frame_resource.csm_indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * 4 * indirect_draw_stride, ResourceState::IndirectArgument);
 				frame_resource.csm_indirect_capacity = static_cast<uint32_t>(desired_scene_capacity);
 			}
 
@@ -324,7 +320,6 @@ namespace bud::graphics {
 			frame_resource.visible_cluster_capacity = desired_cluster_capacity;
 
 			frame_resource.indirect_capacity = desired_indirect_capacity;
-		}
 	}
 
 	GPUScene::PagePool& GPUScene::get_page_pool() { return page_pool; }

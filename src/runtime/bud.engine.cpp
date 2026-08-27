@@ -445,12 +445,6 @@ namespace bud::engine {
             };
             bool current_occluder_enable = renderer->get_config().heuristic_occluder_enable;
 
-			auto set_gpu_driven_enable = [this](bool v) {
-				auto cfg = renderer->get_config();
-				cfg.enable_gpu_driven = v;
-				renderer->set_config(cfg);
-			};
-			bool current_gpu_driven_enable = renderer->get_config().enable_gpu_driven;
 
 			auto set_ao_mode = [this](bud::graphics::AOMode mode) {
 				auto cfg = renderer->get_config();
@@ -459,7 +453,7 @@ namespace bud::engine {
 			};
 			bud::graphics::AOMode current_ao_mode = renderer->get_config().ao_mode;
 
-			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_gpu_driven_enable, current_gpu_driven_enable, set_ao_mode, current_ao_mode);
+			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_ao_mode, current_ao_mode);
 
             ImGui::Render();
 

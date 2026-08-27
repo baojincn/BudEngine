@@ -159,8 +159,7 @@ namespace bud::graphics {
 			uint64_t instance_data_stride,
 			uint64_t indirect_instance_stride,
 			uint64_t indirect_draw_stride,
-			uint64_t stats_buffer_size,
-			bool enable_gpu_driven);
+			uint64_t stats_buffer_size);
 
 	private:
 		GeometryPool geometry_pool;
