@@ -22,16 +22,16 @@ namespace bud::graphics { namespace {
 struct LayoutValidation {
     static_assert(sizeof(Renderer::HierarchyInstance) == 112,
         "HierarchyInstance size must match GLSL layout (112 bytes)");
-    static_assert(offsetof(Renderer::HierarchyInstance, mesh_id) == 0, "");
-    static_assert(offsetof(Renderer::HierarchyInstance, material_id) == 4, "");
-    static_assert(offsetof(Renderer::HierarchyInstance, root_group_index) == 8, "");
-    static_assert(offsetof(Renderer::HierarchyInstance, flags) == 12, "");
-    static_assert(offsetof(Renderer::HierarchyInstance, global_sphere_center) == 16, "");
-    static_assert(offsetof(Renderer::HierarchyInstance, global_sphere_radius) == 28, "");
-    static_assert(offsetof(Renderer::HierarchyInstance, error_threshold) == 32, "");
-    static_assert(offsetof(Renderer::HierarchyInstance, base_virtual_page) == 36, "");
-    static_assert(offsetof(Renderer::HierarchyInstance, padding) == 40, "");
-    static_assert(offsetof(Renderer::HierarchyInstance, model_matrix) == 48, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, model_matrix) == 0, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, mesh_id) == 64, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, material_id) == 68, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, root_group_index) == 72, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, flags) == 76, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, global_sphere_center) == 80, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, global_sphere_radius) == 92, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, error_threshold) == 96, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, base_virtual_page) == 100, "");
+    static_assert(offsetof(Renderer::HierarchyInstance, padding) == 104, "");
 
     static_assert(sizeof(Renderer::InstanceData) == 80,
         "InstanceData size must match GLSL layout (80 bytes)");
@@ -64,6 +64,8 @@ namespace bud::graphics {
 		main_pass = std::make_unique<MainPass>();
 		cluster_visualization_pass = std::make_unique<ClusterVisualizationPass>();
 		ui_pass = std::make_unique<UIPass>();
+		visibility_pass = std::make_unique<VisibilityPass>();
+		resolve_pass = std::make_unique<ResolvePass>();
 
 		csm_pass->init(rhi, render_config, asset_manager);
 		depth_only_pass->init(rhi, render_config, asset_manager);
@@ -79,6 +81,10 @@ namespace bud::graphics {
 		main_pass->init(rhi, render_config, asset_manager);
 		cluster_visualization_pass->init(rhi, render_config, asset_manager);
 		ui_pass->init(rhi, render_config, asset_manager);
+		visibility_pass->init(rhi, render_config, asset_manager);
+		resolve_pass->init(rhi, render_config, asset_manager);
+
+		has_mesh_shader = true; // GPU supports mesh shaders (NV / EXT)
 		gpu_scene.init(rhi, rhi->get_inflight_frame_count());
 
 		// Load CSM cull shader for GPU-driven shadow culling
@@ -113,6 +119,8 @@ namespace bud::graphics {
 		if (cluster_cull_pass) cluster_cull_pass->shutdown(rhi);
 		if (main_pass) main_pass->shutdown(rhi);
 		if (cluster_visualization_pass) cluster_visualization_pass->shutdown(rhi);
+		if (visibility_pass) visibility_pass->shutdown(rhi);
+		if (resolve_pass) resolve_pass->shutdown(rhi);
 		if (csm_cull_pipeline.is_valid()) {
 			rhi->destroy_pipeline(csm_cull_pipeline);
 			csm_cull_pipeline.reset();
@@ -150,6 +158,23 @@ namespace bud::graphics {
 			result.push_back(std::move(sub_aabbs));
 		}
 		return result;
+	}
+
+	void Renderer::register_mesh_bounds(uint32_t mesh_id, const bud::math::AABB& aabb) {
+		std::lock_guard lock(mesh_bounds_mutex);
+		if (mesh_bounds.size() <= mesh_id) {
+			mesh_bounds.resize(mesh_id + 1);
+		}
+		mesh_bounds[mesh_id] = aabb;
+
+		std::lock_guard mesh_lock(mesh_mutex);
+		if (meshes.size() <= mesh_id) {
+			meshes.resize(mesh_id + 1);
+		}
+		meshes[mesh_id].aabb = aabb;
+		meshes[mesh_id].sphere.center = (aabb.min + aabb.max) * 0.5f;
+		meshes[mesh_id].sphere.radius = bud::math::distance(aabb.max, meshes[mesh_id].sphere.center);
+		meshes[mesh_id].is_page_based = true;
 	}
 
 	uint32_t Renderer::register_page_based_mesh(uint32_t page_index, uint32_t meshlet_count,
@@ -1138,9 +1163,49 @@ namespace bud::graphics {
 				}
 			}
 
+			bool has_main_pass = false;
+			RGHandle shadow_map;
+			bool is_mesh_shader_vg = (has_mesh_shader && visibility_pass && resolve_pass && render_config.enable_virtual_geometry);
+
 			// Setup GPU Stats
 			rhi->add_culling_stats(scene_total_objs, (uint32_t)visible_instance_count, total_shadow_casters);
-			if (visible_count > 0) {
+			if (is_mesh_shader_vg) {
+				uint32_t vg_visible_pages = 0;
+				uint32_t vg_visible_tris = 0;
+				if (frame.visible_pages_readback.is_valid()) {
+					if (auto* vp_buf = rhi->get_buffer(frame.visible_pages_readback); vp_buf && vp_buf->mapped_ptr) {
+						const uint32_t* vp_data = static_cast<const uint32_t*>(vp_buf->mapped_ptr);
+						vg_visible_pages = std::min(vp_data[0], 4096u);
+
+						if (auto* pool_buf = rhi->get_buffer(gpu_scene.get_page_pool_buffer()); pool_buf && pool_buf->mapped_ptr) {
+							const uint8_t* pool_base = static_cast<const uint8_t*>(pool_buf->mapped_ptr);
+							for (uint32_t p = 0; p < vg_visible_pages; ++p) {
+								uint32_t pack = vp_data[1 + p];
+								uint32_t page_slot = pack & 0x1FFFu;
+								if (page_slot < GPUScene::PagePool::max_pages) {
+									const auto* ph = reinterpret_cast<const bud::asset::VGPageDataHeader*>(pool_base + page_slot * GPUScene::PagePool::page_size);
+									if (ph && ph->magic == 0x50414745) { // 'PAGE'
+										vg_visible_tris += ph->index_count / 3;
+									}
+								}
+							}
+						}
+						if (vg_visible_tris == 0 && vg_visible_pages > 0) {
+							vg_visible_tris = vg_visible_pages * 1280;
+						}
+					}
+				}
+				rhi->get_render_stats().gpu_total_instances = static_cast<uint32_t>(render_scene.size());
+				rhi->get_render_stats().gpu_visible_instances = vg_visible_pages;
+				rhi->get_render_stats().gpu_total_triangles = scene_total_tris;
+				rhi->get_render_stats().gpu_visible_triangles = vg_visible_tris;
+				rhi->get_render_stats().heuristic_total_count = 0;
+				rhi->get_render_stats().heuristic_cutoff_bucket = 0;
+				rhi->get_render_stats().heuristic_remaining = 0;
+				rhi->get_render_stats().gpu_occluder_instances = 0;
+				rhi->get_render_stats().active_visibility_path = bud::graphics::VisibilityPath::Cluster;
+			}
+			else if (visible_count > 0) {
 				rhi->get_render_stats().gpu_total_instances = last_gpu_stats.totalInstances;
 				rhi->get_render_stats().gpu_visible_instances = last_gpu_stats.visibleInstances;
 				rhi->get_render_stats().gpu_total_triangles = last_gpu_stats.totalTriangles;
@@ -1174,10 +1239,8 @@ namespace bud::graphics {
 			rhi->get_render_stats().shadow_casters = total_shadow_casters;
 			rhi->get_render_stats().shadow_caster_submeshes = total_shadow_caster_submeshes;
 
-			bool has_main_pass = false;
-			RGHandle shadow_map;
 			if (rg_instance_data.is_valid()) {
-				rhi->update_global_instance_data(frame.dynamic_instances);
+				rhi->update_global_instance_data(is_mesh_shader_vg ? frame.instance_data : frame.dynamic_instances);
 			}
 
 			if (frame.csm_instance_models.is_valid()) {
@@ -1254,10 +1317,44 @@ namespace bud::graphics {
 
 				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), csm_inst_input, csm_inst_count, csm_split, rg_csm_indirect, rg_csm_static_indirect);
 
-				auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), {}, split_index);
+				if (is_mesh_shader_vg) {
+					// Mesh shader visibility path (task+mesh shader)
+					RGHandle rg_visible_pages{};
+					if (hierarchy_traversal_pass) {
+						rg_visible_pages = hierarchy_traversal_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, visible_count, gpu_scene, current_idx);
+					}
 
-				if (depth_prepass.is_valid()) {
-					auto rg_hiz = pyramid_mip_pass->add_to_graph(render_graph, depth_prepass, render_config);
+					if (rg_visible_pages.is_valid() && visibility_pass) {
+						RGHandle rg_depth{};
+						auto rg_visibility = visibility_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+							scene_view, render_config, rg_visible_pages, RGHandle{}, gpu_scene, &rg_depth);
+
+						RGHandle rg_ao{};
+						if (rg_depth.is_valid() && ao_pass && render_config.ao_mode != AOMode::Disabled) {
+							RGHandle raw_ao = ao_pass->add_to_graph(render_graph, rg_depth, scene_view, render_config);
+							if (raw_ao.is_valid() && ao_temporal_pass) {
+								raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
+							}
+							if (raw_ao.is_valid() && ao_blur_pass) {
+								rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
+							}
+							else {
+								rg_ao = raw_ao;
+							}
+						}
+
+						if (rg_visibility.is_valid() && resolve_pass) {
+							resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
+								scene_view, render_config, gpu_scene, shadow_map, rg_ao);
+							has_main_pass = true;
+						}
+					}
+				}
+				else {
+					auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), {}, split_index);
+
+					if (depth_prepass.is_valid()) {
+						auto rg_hiz = pyramid_mip_pass->add_to_graph(render_graph, depth_prepass, render_config);
 
 						// Path A: Static Virtual Geometry Culling & Streaming
 						if (render_config.enable_virtual_geometry) {
@@ -1286,28 +1383,29 @@ namespace bud::graphics {
 							depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), depth_prepass, split_index);
 						}
 
-					RGHandle rg_ao{};
-					if (ao_pass && render_config.ao_mode != AOMode::Disabled) {
-						RGHandle raw_ao = ao_pass->add_to_graph(render_graph, depth_prepass, scene_view, render_config);
-						if (raw_ao.is_valid() && ao_temporal_pass) {
-							raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, depth_prepass, scene_view, render_config);
+						RGHandle rg_ao{};
+						if (ao_pass && render_config.ao_mode != AOMode::Disabled) {
+							RGHandle raw_ao = ao_pass->add_to_graph(render_graph, depth_prepass, scene_view, render_config);
+							if (raw_ao.is_valid() && ao_temporal_pass) {
+								raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, depth_prepass, scene_view, render_config);
+							}
+							if (raw_ao.is_valid() && ao_blur_pass) {
+								rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, depth_prepass, scene_view, render_config);
+							}
+							else {
+								rg_ao = raw_ao;
+							}
 						}
-						if (raw_ao.is_valid() && ao_blur_pass) {
-							rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, depth_prepass, scene_view, render_config);
-						}
-						else {
-							rg_ao = raw_ao;
-						}
-					}
 
-					if (shadow_map.is_valid()) {
-						if (render_config.enable_cluster_visualization) {
-							cluster_visualization_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), split_index);
+						if (shadow_map.is_valid()) {
+							if (render_config.enable_cluster_visualization) {
+								cluster_visualization_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), split_index);
+							}
+							else {
+								main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), rg_ao, split_index);
+							}
+							has_main_pass = true;
 						}
-						else {
-							main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), rg_ao, split_index);
-						}
-						has_main_pass = true;
 					}
 				}
 			}

@@ -15,6 +15,8 @@ namespace bud::graphics::vulkan {
 	 struct PipelineKey {
 		VkShaderModule vert_shader;
 		VkShaderModule frag_shader;
+		VkShaderModule task_shader;   // Task shader (mesh shader pipeline)
+		VkShaderModule mesh_shader;   // Mesh shader (mesh shader pipeline)
 		VkRenderPass render_pass;
 		VkBool32 depth_test;
 		VkBool32 depth_write;
@@ -30,6 +32,8 @@ namespace bud::graphics::vulkan {
 		bool operator==(const PipelineKey& other) const {
 			return vert_shader == other.vert_shader &&
 				frag_shader == other.frag_shader &&
+				task_shader == other.task_shader &&
+				mesh_shader == other.mesh_shader &&
 				render_pass == other.render_pass &&
 				depth_test == other.depth_test &&
 				depth_write == other.depth_write &&
@@ -48,15 +52,17 @@ namespace bud::graphics::vulkan {
 		std::size_t operator()(const PipelineKey& k) const {
 			return std::hash<void*>()(k.vert_shader) ^
 				(std::hash<void*>()(k.frag_shader) << 1) ^
-				(std::hash<uint32_t>()(k.cull_mode) << 2) ^
-				(std::hash<uint32_t>()(k.color_format) << 3) ^
-				(std::hash<uint32_t>()(k.depth_compare_op) << 4) ^
-				(std::hash<uint32_t>()(k.depth_write) << 5) ^
-				(std::hash<uint32_t>()(k.blending_enable) << 6) ^
-				(std::hash<uint32_t>()((uint32_t)k.vertex_layout) << 7) ^
-				(std::hash<uint32_t>()(k.depth_bias_enable) << 8) ^
-				(std::hash<uint32_t>()(k.depth_format) << 9) ^
-				(std::hash<uint32_t>()(k.wireframe) << 10);
+				(std::hash<void*>()(k.task_shader) << 2) ^
+				(std::hash<void*>()(k.mesh_shader) << 3) ^
+				(std::hash<uint32_t>()(k.cull_mode) << 4) ^
+				(std::hash<uint32_t>()(k.color_format) << 5) ^
+				(std::hash<uint32_t>()(k.depth_compare_op) << 6) ^
+				(std::hash<uint32_t>()(k.depth_write) << 7) ^
+				(std::hash<uint32_t>()(k.blending_enable) << 8) ^
+				(std::hash<uint32_t>()((uint32_t)k.vertex_layout) << 9) ^
+				(std::hash<uint32_t>()(k.depth_bias_enable) << 10) ^
+				(std::hash<uint32_t>()(k.depth_format) << 11) ^
+				(std::hash<uint32_t>()(k.wireframe) << 12);
 		}
 	};
 

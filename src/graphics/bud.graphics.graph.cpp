@@ -88,10 +88,9 @@ namespace bud::graphics {
 	}
 
 	TextureHandle RenderGraph::get_texture(RGHandle handle) const {
-		if (handle.id == 0 || handle.id >= resources.size()) {
+		if (handle.id >= resources.size()) {
 			return TextureHandle{};
 		}
-
 		return resources[handle.id].physical_texture;
 	}
 
@@ -344,8 +343,7 @@ namespace bud::graphics {
 				async_active = false;
 			}
 		}
-
-		reset(); 
+		// reset() is called externally by the renderer after execute() returns
 	}
 
 	void RenderGraph::execute_parallel(CommandHandle cmd, bud::threading::TaskScheduler* task_scheduler) {

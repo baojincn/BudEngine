@@ -192,7 +192,8 @@ vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
     // Apply Shadow
     Lo *= (1.0 - shadow);
 
-    vec3 ambient = vec3(ubo.ambient_strength) * albedo * ao;
+    float ao_factor = mix(0.35, 1.0, clamp(ao, 0.0, 1.0));
+    vec3 ambient = vec3(ubo.ambient_strength) * albedo * ao_factor;
     vec3 color = ambient + Lo;
 
     // [DEBUG] Toggle this to visualize cascades

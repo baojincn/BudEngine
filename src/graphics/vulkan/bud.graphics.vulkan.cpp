@@ -227,21 +227,21 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	// Binding 2: ShadowMap (Sampler2DShadow)
 
 	DescriptorLayoutBuilder layout_builder;
-	layout_builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+	layout_builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT);
 	layout_builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1000,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	layout_builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
-	layout_builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1,
+	layout_builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT, 1,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	layout_builder.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
-	layout_builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1,
+	layout_builder.add_binding(5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT, 1,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	// Binding 6: full-scene CSM instance models (shadow.vert). Separate from
 	// binding 3 (main-view instance data) so the CSM shadow passes never fight
 	// the main pass over one descriptor slot.
-	layout_builder.add_binding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1,
+	layout_builder.add_binding(6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 1,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	// Binding 7: GPU Materials Buffer (std430 GPUMaterialData)
 	layout_builder.add_binding(7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT, 1,
@@ -458,6 +458,27 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 
 	if (vkCreateSampler(device, &sampler_info, nullptr, &default_sampler) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create default sampler!");
+	}
+
+	// Create Point/Nearest Sampler (for Integer / Visibility Textures)
+	VkSamplerCreateInfo point_sampler_info{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+	point_sampler_info.magFilter = VK_FILTER_NEAREST;
+	point_sampler_info.minFilter = VK_FILTER_NEAREST;
+	point_sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	point_sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	point_sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	point_sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	point_sampler_info.anisotropyEnable = VK_FALSE;
+	point_sampler_info.maxAnisotropy = 1.0f;
+	point_sampler_info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+	point_sampler_info.unnormalizedCoordinates = VK_FALSE;
+	point_sampler_info.compareEnable = VK_FALSE;
+	point_sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
+	point_sampler_info.minLod = 0.0f;
+	point_sampler_info.maxLod = 0.0f;
+
+	if (vkCreateSampler(device, &point_sampler_info, nullptr, &point_sampler) != VK_SUCCESS) {
+		throw std::runtime_error("failed to create point sampler!");
 	}
 
 	// Create Shadow Sampler (Compare Enable)
@@ -767,6 +788,9 @@ void VulkanRHI::cleanup() {
 	if (shadow_sampler)
 		vkDestroySampler(device, shadow_sampler, nullptr);
 
+	if (point_sampler)
+		vkDestroySampler(device, point_sampler, nullptr);
+
 	if (default_sampler)
 		vkDestroySampler(device, default_sampler, nullptr);
 
@@ -888,13 +912,25 @@ PipelineHandle VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& d
 	push_constant.offset = 0;
 	push_constant.size = 256; // Enough for standard matrices
 	push_constant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+	if (desc.ts.code.size() > 0) push_constant.stageFlags |= VK_SHADER_STAGE_TASK_BIT_EXT;
+	if (desc.ms.code.size() > 0) push_constant.stageFlags |= VK_SHADER_STAGE_MESH_BIT_EXT;
 
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 	pipelineLayoutInfo.setLayoutCount = 0;
 
-	// 使用全局 Descriptor Set Layout
-	std::vector<VkDescriptorSetLayout> setLayouts = { global_set_layout };
+	// Use custom descriptor set layouts if provided, otherwise fall back to global set
+	std::vector<VkDescriptorSetLayout> setLayouts;
+	if (!desc.custom_set_layouts.empty()) {
+		setLayouts.reserve(desc.custom_set_layouts.size() + 1);
+		for (auto layout : desc.custom_set_layouts) {
+			setLayouts.push_back(reinterpret_cast<VkDescriptorSetLayout>(layout));
+		}
+		// Append the global descriptor set as the last set (for UBO, bindless textures, etc.)
+		setLayouts.push_back(global_set_layout);
+	} else {
+		setLayouts = { global_set_layout };
+	}
 
 	pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
 	pipelineLayoutInfo.pSetLayouts = setLayouts.data();
@@ -906,19 +942,43 @@ PipelineHandle VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& d
 		throw std::runtime_error("failed to create pipeline layout!");
 	}
 
-    VkShaderModule vertModule = create_shader_module(device, desc.vs.code);
-    if (vertModule == VK_NULL_HANDLE) {
-        // failed to create vertex module, cleanup and return
-        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-        return PipelineHandle{};
+    VkShaderModule vertModule = VK_NULL_HANDLE;
+    VkShaderModule taskModule = VK_NULL_HANDLE;
+    VkShaderModule meshModule = VK_NULL_HANDLE;
+
+    // If mesh shader is provided, use task+mesh instead of vertex shader
+    if (desc.ms.code.size() > 0) {
+        if (desc.ts.code.size() > 0) {
+            taskModule = create_shader_module(device, desc.ts.code);
+            if (taskModule == VK_NULL_HANDLE) {
+                vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+                return PipelineHandle{};
+            }
+        }
+        meshModule = create_shader_module(device, desc.ms.code);
+        if (meshModule == VK_NULL_HANDLE) {
+            if (taskModule) vkDestroyShaderModule(device, taskModule, nullptr);
+            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+            return PipelineHandle{};
+        }
+    } else {
+        vertModule = create_shader_module(device, desc.vs.code);
+        if (vertModule == VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+            return PipelineHandle{};
+        }
     }
 
-    VkShaderModule fragModule = create_shader_module(device, desc.fs.code);
-    if (fragModule == VK_NULL_HANDLE) {
-        // failed to create fragment module, cleanup and return
-        vkDestroyShaderModule(device, vertModule, nullptr);
-        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-        return PipelineHandle{};
+    VkShaderModule fragModule = VK_NULL_HANDLE;
+    if (desc.fs.code.size() > 0) {
+        fragModule = create_shader_module(device, desc.fs.code);
+        if (fragModule == VK_NULL_HANDLE) {
+            if (taskModule) vkDestroyShaderModule(device, taskModule, nullptr);
+            if (meshModule) vkDestroyShaderModule(device, meshModule, nullptr);
+            if (vertModule) vkDestroyShaderModule(device, vertModule, nullptr);
+            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+            return PipelineHandle{};
+        }
     }
 
 #if defined(BUD_HAVE_SPIRV_REFLECT)
@@ -973,13 +1033,17 @@ PipelineHandle VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& d
         spvReflectDestroyShaderModule(&module);
     };
 
-    validate_spv_strict(desc.vs.code, "vertex");
-    validate_spv_strict(desc.fs.code, "fragment");
+    if (desc.ts.code.size() > 0) validate_spv_strict(desc.ts.code, "task");
+    if (desc.ms.code.size() > 0) validate_spv_strict(desc.ms.code, "mesh");
+    if (desc.vs.code.size() > 0) validate_spv_strict(desc.vs.code, "vertex");
+    if (desc.fs.code.size() > 0) validate_spv_strict(desc.fs.code, "fragment");
 #endif
 
     PipelineKey key{};
     key.vert_shader = vertModule;
     key.frag_shader = fragModule;
+    key.task_shader = taskModule;
+    key.mesh_shader = meshModule;
     key.render_pass = VK_NULL_HANDLE;
     key.depth_test = desc.depth_test ? VK_TRUE : VK_FALSE;
     key.depth_write = desc.depth_write ? VK_TRUE : VK_FALSE;
@@ -1008,8 +1072,10 @@ PipelineHandle VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& d
     bool is_depth_only = (desc.color_attachment_format == TextureFormat::Undefined);
     VkPipeline pipeline = pipeline_cache->get_pipeline(key, pipelineLayout, is_depth_only);
 
-	vkDestroyShaderModule(device, vertModule, nullptr);
-	vkDestroyShaderModule(device, fragModule, nullptr);
+	if (vertModule) vkDestroyShaderModule(device, vertModule, nullptr);
+	if (fragModule) vkDestroyShaderModule(device, fragModule, nullptr);
+	if (taskModule) vkDestroyShaderModule(device, taskModule, nullptr);
+	if (meshModule) vkDestroyShaderModule(device, meshModule, nullptr);
 
 	VulkanPipelineObject* pipeObj = new VulkanPipelineObject{ pipeline, pipelineLayout, VK_PIPELINE_BIND_POINT_GRAPHICS };
 
@@ -1017,7 +1083,10 @@ PipelineHandle VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& d
 
 	// Attach a human-readable debug name to the pipeline
     try {
-        std::string dbg = std::format("GraphicsPipeline_vs={}_fs={}", (void*)vertModule, (void*)fragModule);
+        std::string dbg = std::format("GraphicsPipeline_{}{}_fs={}",
+                desc.ms.code.size() > 0 ? "ms=" : "vs=",
+                (void*)(desc.ms.code.size() > 0 ? meshModule : vertModule),
+                (void*)fragModule);
         set_object_debug_name(reinterpret_cast<uint64_t>(pipeline), ObjectType::Pipeline, dbg);
     } catch (...) {
     }
@@ -1051,6 +1120,77 @@ void VulkanRHI::destroy_pipeline(PipelineHandle handle) {
 	}
 	slot.in_use = false;
 	free_pipeline_indices.push_back(handle.id);
+}
+
+uint64_t VulkanRHI::create_descriptor_set_layout(const std::vector<DescriptorBinding>& bindings) {
+	DescriptorLayoutBuilder builder;
+	for (const auto& b : bindings) {
+		builder.add_binding(
+			b.binding,
+			static_cast<VkDescriptorType>(b.descriptor_type),
+			static_cast<VkShaderStageFlags>(b.stage_flags),
+			b.count,
+			static_cast<VkDescriptorBindingFlags>(b.binding_flags));
+	}
+	VkDescriptorSetLayout layout = builder.build(device, 0, nullptr, 0);
+	return reinterpret_cast<uint64_t>(layout);
+}
+
+uint64_t VulkanRHI::create_descriptor_set(uint64_t layout) {
+	VkDescriptorSetLayout vk_layout = reinterpret_cast<VkDescriptorSetLayout>(layout);
+	VkDescriptorSet set = VK_NULL_HANDLE;
+	descriptor_allocators[current_frame].allocate(vk_layout, set);
+	return reinterpret_cast<uint64_t>(set);
+}
+
+void VulkanRHI::update_descriptor_set_buffer(uint64_t set, uint32_t binding, BufferHandle buffer, uint32_t descriptor_type) {
+	auto* vk_buf = get_vulkan_buffer(buffer);
+	if (!vk_buf || !vk_buf->buffer) return;
+
+	VkDescriptorType type = (descriptor_type != 0)
+		? static_cast<VkDescriptorType>(descriptor_type)
+		: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+
+	DescriptorWriter writer;
+	writer.write_buffer(binding, vk_buf->buffer, vk_buf->size > 0 ? vk_buf->size : VK_WHOLE_SIZE, 0, type);
+	writer.update_set(device, reinterpret_cast<VkDescriptorSet>(set));
+}
+
+void VulkanRHI::update_descriptor_set_image(uint64_t set, uint32_t binding, TextureHandle texture, uint32_t mip_level, uint32_t descriptor_type) {
+	auto* vk_tex = get_vulkan_texture(texture);
+	if (!vk_tex)
+		return;
+
+	VkImageLayout layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	VkDescriptorType type = (descriptor_type != 0)
+		? static_cast<VkDescriptorType>(descriptor_type)
+		: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+
+	VkSampler sampler_to_use = vk_tex->sampler;
+	if (!sampler_to_use) {
+		if (vk_tex->format == TextureFormat::R32G32_UINT || vk_tex->format == TextureFormat::RGBA32_UINT)
+			sampler_to_use = point_sampler;
+		else
+			sampler_to_use = default_sampler;
+	}
+	else if (vk_tex->format == TextureFormat::R32G32_UINT || vk_tex->format == TextureFormat::RGBA32_UINT) {
+		sampler_to_use = point_sampler;
+	}
+
+	DescriptorWriter writer;
+	writer.write_image(binding, 0, vk_tex->view, sampler_to_use, layout, type);
+	writer.update_set(device, reinterpret_cast<VkDescriptorSet>(set));
+}
+
+void VulkanRHI::destroy_descriptor_set_layout(uint64_t layout) {
+	if (layout) {
+		vkDestroyDescriptorSetLayout(device, reinterpret_cast<VkDescriptorSetLayout>(layout), nullptr);
+	}
+}
+
+void VulkanRHI::destroy_descriptor_set(uint64_t set) {
+	// Descriptor sets are freed by the pool, no explicit destruction needed
+	(void)set;
 }
 
 PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& desc) {
@@ -1527,6 +1667,14 @@ void VulkanRHI::cmd_begin_render_pass(CommandHandle cmd, const RenderPassBeginIn
 
 	rendering_info.layerCount = info.layer_count;
 
+	// Fallback: use explicit render size if texture-based lookup failed
+	if (rendering_info.renderArea.extent.width == 0 && info.render_width > 0) {
+		rendering_info.renderArea = { {0, 0}, {info.render_width, info.render_height} };
+	}
+	if (rendering_info.renderArea.extent.width == 0) {
+		rendering_info.renderArea = { {0, 0}, {1, 1} };
+	}
+
 	std::vector<VkRenderingAttachmentInfo> color_attachments;
 	for (auto handle : info.color_attachments) {
 		auto vk_tex = get_vulkan_texture(handle);
@@ -1543,7 +1691,15 @@ void VulkanRHI::cmd_begin_render_pass(CommandHandle cmd, const RenderPassBeginIn
 		attach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		attach.loadOp = info.clear_color ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 		attach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		attach.clearValue.color = { info.clear_color_value.r, info.clear_color_value.g, info.clear_color_value.b, info.clear_color_value.a };
+		if (vk_tex->format == TextureFormat::R32G32_UINT || vk_tex->format == TextureFormat::RGBA32_UINT) {
+			attach.clearValue.color.uint32[0] = 0xFFFFFFFF;
+			attach.clearValue.color.uint32[1] = 0xFFFFFFFF;
+			attach.clearValue.color.uint32[2] = 0;
+			attach.clearValue.color.uint32[3] = 0;
+		}
+		else {
+			attach.clearValue.color = { info.clear_color_value.r, info.clear_color_value.g, info.clear_color_value.b, info.clear_color_value.a };
+		}
 		color_attachments.push_back(attach);
 	}
 
@@ -1786,6 +1942,12 @@ void VulkanRHI::cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32
     current_stats.drawn_triangles += (index_count / 3) * instance_count;
 }
 
+void VulkanRHI::cmd_draw_mesh_tasks(CommandHandle cmd, uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z) {
+    if (fpCmdDrawMeshTasksEXT) {
+        fpCmdDrawMeshTasksEXT(static_cast<VkCommandBuffer>(cmd), group_count_x, group_count_y, group_count_z);
+    }
+}
+
 void VulkanRHI::cmd_draw_indexed_indirect(CommandHandle cmd, bud::graphics::BufferHandle buffer, uint64_t offset, uint32_t draw_count, uint32_t stride) {
     if (!buffer.is_valid() || draw_count == 0) return;
 
@@ -1834,6 +1996,7 @@ void VulkanRHI::cmd_bind_descriptor_set(CommandHandle cmd, PipelineHandle pipeli
 	}
 	auto& frame = frames[current_frame];
 
+	// Bind the per-frame global descriptor set at the given set index
 	vkCmdBindDescriptorSets(
 		static_cast<VkCommandBuffer>(cmd),
 		pipeObj->bind_point,
@@ -1841,6 +2004,26 @@ void VulkanRHI::cmd_bind_descriptor_set(CommandHandle cmd, PipelineHandle pipeli
 		set_index,  // first set
 		1,          // descriptor set count
 		&frame.global_descriptor_set,
+		0,
+		nullptr  // dynamic offsets
+	);
+}
+
+void VulkanRHI::cmd_bind_descriptor_set(CommandHandle cmd, PipelineHandle pipeline, uint32_t set_index, uint64_t descriptor_set) {
+	auto pipeObj = get_pipeline_obj(pipeline);
+	if (!pipeObj || !pipeObj->layout) {
+		bud::eprint("cmd_bind_descriptor_set called with invalid pipeline object");
+		return;
+	}
+
+	VkDescriptorSet vk_set = reinterpret_cast<VkDescriptorSet>(descriptor_set);
+	vkCmdBindDescriptorSets(
+		static_cast<VkCommandBuffer>(cmd),
+		pipeObj->bind_point,
+		pipeObj->layout,
+		set_index,  // first set
+		1,          // descriptor set count
+		&vk_set,
 		0,
 		nullptr  // dynamic offsets
 	);
@@ -2026,6 +2209,7 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
     features13.pNext = nullptr;
     features13.dynamicRendering = VK_FALSE;
     features13.synchronization2 = VK_FALSE;
+    features13.maintenance4 = VK_FALSE;
 
     VkPhysicalDeviceVulkan12Features features12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     features12.pNext = nullptr;
@@ -2042,6 +2226,12 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
     VkPhysicalDeviceVulkan11Features features11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
     features11.pNext = nullptr;
 
+    // Mesh shader features (EXT extension)
+    VkPhysicalDeviceMeshShaderFeaturesEXT mesh_shader_features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT };
+    mesh_shader_features.pNext = nullptr;
+    mesh_shader_features.taskShader = VK_TRUE;
+    mesh_shader_features.meshShader = VK_TRUE;
+
     // 使用 VkPhysicalDeviceFeatures2 整合所有 Features
     VkPhysicalDeviceFeatures2 device_features2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
     device_features2.pNext = nullptr;
@@ -2051,21 +2241,30 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 	device_features2.features.fillModeNonSolid = VK_TRUE;
 
     // Chain feature structs according to supported device_api_version
+    // Mesh shader features are always appended to the end of the chain
     if (device_api_version >= VK_API_VERSION_1_3) {
         features13.dynamicRendering = VK_TRUE;
         features13.synchronization2 = VK_TRUE;
+        features13.maintenance4 = VK_TRUE;
         features12.pNext = &features13;
         features11.pNext = &features12;
+        mesh_shader_features.pNext = nullptr;
+        features13.pNext = &mesh_shader_features;
         device_features2.pNext = &features11;
     } else if (device_api_version >= VK_API_VERSION_1_2) {
         features11.pNext = &features12;
+        mesh_shader_features.pNext = nullptr;
+        features12.pNext = &mesh_shader_features;
         device_features2.pNext = &features11;
     } else if (device_api_version >= VK_API_VERSION_1_1) {
         // Only 1.1 features available, chain features11 only
+        mesh_shader_features.pNext = nullptr;
+        features11.pNext = &mesh_shader_features;
         device_features2.pNext = &features11;
     } else {
         // No extended feature structs
-        device_features2.pNext = nullptr;
+        mesh_shader_features.pNext = nullptr;
+        device_features2.pNext = &mesh_shader_features;
     }
 
 #ifdef BUD_ENABLE_AFTERMATH
@@ -2155,6 +2354,11 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 	fpCmdPushDescriptorSetKHR = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR");
 	if (!fpCmdPushDescriptorSetKHR) {
 		bud::eprint("[Vulkan] Warning: vkCmdPushDescriptorSetKHR not found, compute bindings may fail!");
+	}
+
+	fpCmdDrawMeshTasksEXT = (PFN_vkCmdDrawMeshTasksEXT)vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksEXT");
+	if (!fpCmdDrawMeshTasksEXT) {
+		bud::eprint("[Vulkan] Warning: vkCmdDrawMeshTasksEXT not found, mesh shaders will not work!");
 	}
 }
 
@@ -3048,7 +3252,10 @@ TextureHandle VulkanRHI::create_texture(const bud::graphics::TextureDesc& desc, 
 		this->end_single_time_commands(cmd);
 	}
 
-	tex->sampler = default_sampler;
+	if (desc.format == TextureFormat::R32G32_UINT || desc.format == TextureFormat::RGBA32_UINT)
+		tex->sampler = point_sampler;
+	else
+		tex->sampler = default_sampler;
 	return handle;
 }
 
@@ -3136,7 +3343,10 @@ TextureHandle VulkanRHI::create_texture_async(const bud::graphics::TextureDesc& 
 	tex->format = desc.format;
 	tex->mips = desc.mips;
 	tex->array_layers = desc.array_layers;
-	tex->sampler = default_sampler;
+	if (desc.format == TextureFormat::R32G32_UINT)
+		tex->sampler = point_sampler;
+	else
+		tex->sampler = default_sampler;
 
 	if (!initial_data || size == 0) return handle;
 
@@ -3347,6 +3557,7 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	ubo.reversed_z = render_config.reversed_z ? 1 : 0;
 	ubo.shadow_bias_constant = render_config.shadow_bias_constant;
 	ubo.shadow_bias_slope = render_config.shadow_bias_slope;
+	ubo.debug_cluster = render_config.enable_cluster_visualization ? 1 : 0;
 
 	if (frames[current_frame].uniform_mapped) {
 		std::memcpy(frames[current_frame].uniform_mapped, &ubo, sizeof(UniformBufferObject));

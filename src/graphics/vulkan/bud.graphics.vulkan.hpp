@@ -95,6 +95,7 @@ namespace bud::graphics::vulkan {
 		void cmd_bind_index_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer, bool is_u16 = false) override;
 		void cmd_draw(CommandHandle cmd, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) override;
 		void cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset, uint32_t first_instance) override;
+		void cmd_draw_mesh_tasks(CommandHandle cmd, uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z) override;
 		void cmd_draw_indexed_indirect(CommandHandle cmd, bud::graphics::BufferHandle buffer, uint64_t offset, uint32_t draw_count, uint32_t stride) override;
 
 		void cmd_set_viewport(CommandHandle cmd, float width, float height) override;
@@ -143,6 +144,7 @@ namespace bud::graphics::vulkan {
 		void cmd_bind_pipeline(CommandHandle cmd, PipelineHandle pipeline) override;
 		void cmd_push_constants(CommandHandle cmd, PipelineHandle pipeline, uint32_t size, const void* data) override;
 		void cmd_bind_descriptor_set(CommandHandle cmd, PipelineHandle pipeline, uint32_t set_index) override;
+		void cmd_bind_descriptor_set(CommandHandle cmd, PipelineHandle pipeline, uint32_t set_index, uint64_t descriptor_set) override;
 		void cmd_bind_storage_buffer(CommandHandle cmd, PipelineHandle pipeline, uint32_t binding, bud::graphics::BufferHandle buffer) override;
 		void cmd_bind_compute_texture(CommandHandle cmd, PipelineHandle pipeline, uint32_t binding, TextureHandle texture, uint32_t mip_level = 0, bool is_storage = false, bool is_general = false) override;
 		void cmd_bind_compute_ubo(CommandHandle cmd, PipelineHandle pipeline, uint32_t binding) override;
@@ -173,6 +175,16 @@ namespace bud::graphics::vulkan {
 			current_stats.gpu_visible_objects += visible;
 			current_stats.shadow_casters += casters;
 		}
+
+		// Per-pass descriptor set management
+		uint64_t create_descriptor_set_layout(const std::vector<DescriptorBinding>& bindings) override;
+		uint64_t create_descriptor_set(uint64_t layout) override;
+		void update_descriptor_set_buffer(uint64_t set, uint32_t binding, BufferHandle buffer, uint32_t descriptor_type = 0) override;
+		void update_descriptor_set_image(uint64_t set, uint32_t binding, TextureHandle texture, uint32_t mip_level = 0, uint32_t descriptor_type = 0) override;
+		void destroy_descriptor_set_layout(uint64_t layout) override;
+		void destroy_descriptor_set(uint64_t set) override;
+
+		// Private helpers
 
 		void cmd_copy_buffer(CommandHandle cmd, bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size) override;
 		void cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) override;
@@ -313,7 +325,9 @@ namespace bud::graphics::vulkan {
 			VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 			VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
 			VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
-			VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME
+			VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+			VK_EXT_MESH_SHADER_EXTENSION_NAME,
+			VK_NV_MESH_SHADER_EXTENSION_NAME
 		};
 
 		// Swapchain
@@ -365,6 +379,7 @@ namespace bud::graphics::vulkan {
 		VkDescriptorSetLayout compute_csm_cull_set_layout = VK_NULL_HANDLE;
 		VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
 		VkSampler default_sampler = VK_NULL_HANDLE;
+		VkSampler point_sampler = VK_NULL_HANDLE;
 		VkSampler shadow_sampler = VK_NULL_HANDLE;
 		VulkanTexture dummy_depth_texture; // Placeholder for shadow map binding
 
@@ -382,6 +397,7 @@ namespace bud::graphics::vulkan {
 		RenderStats current_stats;
 		
 		PFN_vkCmdPushDescriptorSetKHR fpCmdPushDescriptorSetKHR = nullptr;
+		PFN_vkCmdDrawMeshTasksEXT fpCmdDrawMeshTasksEXT = nullptr;
 
 		std::vector<VkPipelineLayout> created_layouts;
 	};

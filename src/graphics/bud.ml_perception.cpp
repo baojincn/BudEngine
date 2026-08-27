@@ -35,34 +35,34 @@ namespace bud::graphics {
 #endif
         }
 
-        RGHandle output_tex;
+        auto output_tex = std::make_shared<RGHandle>();
 
-        rg.add_pass("Depth Downsample Pass",
-            [&](RGBuilder& builder) {
+        return rg.add_pass("Depth Downsample Pass",
+            [=](RGBuilder& builder) {
                 TextureDesc desc{};
                 desc.width = target_width;
                 desc.height = target_height;
                 desc.format = TextureFormat::R32_FLOAT;
                 desc.is_storage = true;
                 
-                output_tex = builder.create("DownsampledDepth", desc);
+                *output_tex = builder.create("DownsampledDepth", desc);
 
                 builder.read(depth_buffer, ResourceState::ShaderResource);
-                builder.write(output_tex, ResourceState::UnorderedAccess);
+                builder.write(*output_tex, ResourceState::UnorderedAccess);
+                return *output_tex;
             },
-            [this, rg_ptr = &rg, depth_buffer, output_tex, target_width, target_height](RHI* rhi, CommandHandle cmd) {
-                if (!pipeline.is_valid()) return;
+            [=, rg_ptr = &rg, this](RHI* rhi, CommandHandle cmd) {
+                if (!pipeline.is_valid())
+                    return;
                 rhi->cmd_bind_pipeline(cmd, pipeline);
 
                 rhi->cmd_bind_compute_texture(cmd, pipeline, 0, rg_ptr->get_texture(depth_buffer), 0, false, false);
-                rhi->cmd_bind_compute_texture(cmd, pipeline, 1, rg_ptr->get_texture(output_tex), 0, true, false);
+                rhi->cmd_bind_compute_texture(cmd, pipeline, 1, rg_ptr->get_texture(*output_tex), 0, true, false);
 
                 uint32_t groups_x = (target_width + 7) / 8;
                 uint32_t groups_y = (target_height + 7) / 8;
                 rhi->cmd_dispatch(cmd, groups_x, groups_y, 1);
             }
         );
-
-        return output_tex;
     }
 }

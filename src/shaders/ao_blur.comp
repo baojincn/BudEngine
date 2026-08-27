@@ -14,8 +14,8 @@ layout(push_constant) uniform PushConsts {
 } pc;
 
 vec3 get_view_pos(vec2 uv, float depth) {
-    // Depth texture stores gl_FragCoord.z in [0,1]; convert to NDC z.
-    vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    // Depth texture stores gl_FragCoord.z in [0,1] for Vulkan.
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth, 1.0);
     vec4 view = pc.inv_proj * clip;
     return view.xyz / view.w;
 }

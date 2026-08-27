@@ -42,6 +42,7 @@ third_party/*/.gitignore
 .gemini/
 temp/
 tmp/
+.clinerules/
 
 
 

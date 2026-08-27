@@ -28,7 +28,7 @@ layout(binding = 0) uniform UniformBufferObject {
 	uint reversed_z;
 	float shadow_bias_constant;
 	float shadow_bias_slope;
-	uint padding[1];
+	uint debug_cluster;
 } ubo;
 
 layout(binding = 1) uniform sampler2D tex_samplers[];

@@ -111,6 +111,11 @@ namespace bud::graphics {
 		RenderGraph(RHI* rhi) : rhi(rhi) {}
 		~RenderGraph() { reset(); }
 
+		RenderGraph(const RenderGraph&) = delete;
+		RenderGraph& operator=(const RenderGraph&) = delete;
+		RenderGraph(RenderGraph&&) = delete;
+		RenderGraph& operator=(RenderGraph&&) = delete;
+
 		void reset() {
 			if (rhi) {
 				auto* pool = rhi->get_resource_pool();

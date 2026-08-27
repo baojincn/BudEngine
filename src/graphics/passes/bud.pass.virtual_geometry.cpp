@@ -30,21 +30,23 @@ namespace bud::graphics {
 		});
 	}
 
-	void HierarchyTraversalPass::add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, size_t instance_count, const GPUScene& gpu_scene, uint32_t current_frame) {
-		if (!hierarchy_traversal_pipeline.is_valid()) return;
+	RGHandle HierarchyTraversalPass::add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, size_t instance_count, const GPUScene& gpu_scene, uint32_t current_frame) {
+		if (!hierarchy_traversal_pipeline.is_valid())
+			return {};
 
 		const auto& frame = gpu_scene.get_frame_resources(current_frame);
 
 		if (!frame.visible_pages.is_valid())
-			return;
+			return {};
 
 		RGHandle rg_visible_pages = rg.import_buffer("VisiblePages", frame.visible_pages, ResourceState::UnorderedAccess);
 
-		rg.add_pass("Hierarchy Traversal",
+		return rg.add_pass("Hierarchy Traversal",
 			[=](RGBuilder& builder) {
 				builder.write(rg_visible_pages, ResourceState::UnorderedAccess);
+				return rg_visible_pages;
 			},
-			[=, &view, &config, &render_scene, &meshes, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
+			[=, &rg, &view, &config, &render_scene, &meshes, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
 				const auto& frame = gpu_scene.get_frame_resources(current_frame);
 				uint32_t zero = 0;
 				
@@ -119,6 +121,18 @@ namespace bud::graphics {
 					rhi->resource_barrier(cmd, frame.page_request_readback,
 						ResourceState::TransferDst, ResourceState::UnorderedAccess);
 				}
+
+				if (frame.visible_pages_readback.is_valid()) {
+					rhi->resource_barrier(cmd, frame.visible_pages,
+						ResourceState::UnorderedAccess, ResourceState::TransferSrc);
+					rhi->resource_barrier(cmd, frame.visible_pages_readback,
+						ResourceState::UnorderedAccess, ResourceState::TransferDst);
+					rhi->cmd_copy_buffer(cmd, frame.visible_pages, frame.visible_pages_readback, 4 + 4096 * sizeof(uint32_t));
+					rhi->resource_barrier(cmd, frame.visible_pages,
+						ResourceState::TransferSrc, ResourceState::UnorderedAccess);
+					rhi->resource_barrier(cmd, frame.visible_pages_readback,
+						ResourceState::TransferDst, ResourceState::UnorderedAccess);
+				}
 			}
 		);
 	}
@@ -161,7 +175,7 @@ namespace bud::graphics {
 				builder.read(rg_visible_pages, ResourceState::ShaderResource);
 				builder.write(rg_visible_clusters, ResourceState::UnorderedAccess);
 			},
-			[=, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
+			[=, &rg, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
 				const auto& frame = gpu_scene.get_frame_resources(current_frame);
 				rhi->cmd_bind_pipeline(cmd, page_emit_pipeline);
 				
@@ -236,7 +250,7 @@ namespace bud::graphics {
 				builder.write(rg_draw, ResourceState::UnorderedAccess);
 				builder.write(rg_dynamic_instances, ResourceState::UnorderedAccess);
 			},
-			[=, &view, &config, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
+			[=, &rg, &view, &config, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
 				const auto& frame = gpu_scene.get_frame_resources(current_frame);
 
 				// Clear stats buffer using compute shader (avoids transfer barrier).

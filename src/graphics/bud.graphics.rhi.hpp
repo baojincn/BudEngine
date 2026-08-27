@@ -20,6 +20,8 @@ namespace bud::graphics {
 		float clear_depth_value = 1.0f;
 		uint32_t base_array_layer = 0;
 		uint32_t layer_count = 1;
+		uint32_t render_width = 0;  // 0 = auto from attachment
+		uint32_t render_height = 0; // 0 = auto from attachment
 	};
 
 	class ResourcePool;
@@ -62,6 +64,17 @@ namespace bud::graphics {
 		virtual void resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) = 0;
 		virtual void cmd_bind_pipeline(CommandHandle cmd, PipelineHandle pipeline) = 0;
 		virtual void cmd_bind_descriptor_set(CommandHandle cmd, PipelineHandle pipeline, uint32_t set_index) = 0;
+		virtual void cmd_bind_descriptor_set(CommandHandle cmd, PipelineHandle pipeline, uint32_t set_index, uint64_t descriptor_set) = 0;
+
+		// Descriptor set management for per-pass custom descriptor sets
+		// Returns a VkDescriptorSetLayout as uint64_t
+		virtual uint64_t create_descriptor_set_layout(const std::vector<DescriptorBinding>& bindings) = 0;
+		// Returns a VkDescriptorSet as uint64_t
+		virtual uint64_t create_descriptor_set(uint64_t layout) = 0;
+		virtual void update_descriptor_set_buffer(uint64_t set, uint32_t binding, BufferHandle buffer, uint32_t descriptor_type = 0) = 0;
+		virtual void update_descriptor_set_image(uint64_t set, uint32_t binding, TextureHandle texture, uint32_t mip_level = 0, uint32_t descriptor_type = 0) = 0;
+		virtual void destroy_descriptor_set_layout(uint64_t layout) = 0;
+		virtual void destroy_descriptor_set(uint64_t set) = 0;
 		virtual void cmd_bind_storage_buffer(CommandHandle cmd, PipelineHandle pipeline, uint32_t binding, BufferHandle buffer) = 0;
 		virtual void cmd_bind_compute_texture(CommandHandle cmd, PipelineHandle pipeline, uint32_t binding, TextureHandle texture, uint32_t mip_level = 0, bool is_storage = false, bool is_general = false) = 0;
 		virtual void cmd_bind_compute_ubo(CommandHandle cmd, PipelineHandle pipeline, uint32_t binding) = 0;
@@ -89,6 +102,7 @@ namespace bud::graphics {
 		virtual void cmd_bind_vertex_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer) = 0;
 		virtual void cmd_bind_index_buffer(CommandHandle cmd, bud::graphics::BufferHandle buffer, bool is_u16 = false) = 0;
 		virtual void cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset, uint32_t first_instance) = 0;
+		virtual void cmd_draw_mesh_tasks(CommandHandle cmd, uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z) = 0;
 		virtual void cmd_set_viewport(CommandHandle cmd, float width, float height) = 0;
 		virtual void cmd_set_scissor(CommandHandle cmd, int32_t x, int32_t y, uint32_t width, uint32_t height) = 0;
 

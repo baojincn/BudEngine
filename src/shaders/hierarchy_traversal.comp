@@ -28,6 +28,7 @@ struct VGClusterGroup {
 };
 
 struct HierarchyInstance {
+    mat4 model_matrix;
     uint mesh_id;
     uint material_id;
     uint root_group_index;
@@ -40,13 +41,13 @@ struct HierarchyInstance {
     uint base_virtual_page;
     uint padding0;
     uint padding1;
-    mat4 model_matrix;
 };
 
 struct PageTableEntry {
-    uint valid;
-    uint padding;
     uint pool_offset;
+    uint valid;
+    uint pad0;
+    uint pad1;
 };
 
 // ---------------------------------------------------------------------------
@@ -75,7 +76,7 @@ layout(std140, set = 0, binding = 0) uniform CameraBuffer {
     uint reversed_z;
     float shadow_bias_constant;
     float shadow_bias_slope;
-    uint padding[1];
+    uint debug_cluster;
 };
 
 // Compute view-projection matrix in the shader since it's not in the UBO.
@@ -138,9 +139,9 @@ void compute_frustum_planes(out vec4 planes[6]) {
     planes[3] = m[3] - m[1];
     if (reversed_z == 1u) {
         planes[4] = m[3] - m[2]; // near (z=1)
-        planes[5] = m[3];         // far  (z=0)
+        planes[5] = m[2];         // far  (z=0)
     } else {
-        planes[4] = m[3];         // near (z=0)
+        planes[4] = m[2];         // near (z=0)
         planes[5] = m[3] - m[2]; // far  (z=1)
     }
 }

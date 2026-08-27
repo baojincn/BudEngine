@@ -53,7 +53,7 @@ namespace bud::graphics::vulkan {
 		uint32_t reversed_z;
 		float shadow_bias_constant;
 		float shadow_bias_slope;
-		uint32_t padding[1];
+		uint32_t debug_cluster;
 	};
 
 	struct Vertex {

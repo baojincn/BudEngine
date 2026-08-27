@@ -48,7 +48,7 @@ layout(set = 0, binding = 4) uniform uniform_buffer_object {
     uint reversed_z;
     float shadow_bias_constant;
     float shadow_bias_slope;
-    uint padding[1];
+    uint debug_cluster;
 } ubo;
 
 layout(push_constant) uniform PushConstants {

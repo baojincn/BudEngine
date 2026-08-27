@@ -1,0 +1,122 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_mesh_shader : require
+
+#include "common.glsl"
+#include "vg_common.glsl"
+
+layout(local_size_x = 32) in;
+
+layout(std430, set = 0, binding = 1) readonly buffer VisiblePages {
+    uint visible_page_count;
+    uint visible_pages[];
+} in_visibility;
+
+layout(std430, set = 0, binding = 2) readonly buffer PagePool {
+    uint data[];
+} page_pool;
+
+layout(std430, set = 0, binding = 3) readonly buffer InstanceBuffer {
+    HierarchyInstance data[];
+} instance_buffer;
+
+struct TaskData {
+    uint instance_id;
+    uint page_slot;
+    uint blend_bits;
+    uint cluster_indices[256];
+};
+
+taskPayloadSharedEXT TaskData td;
+
+shared uint visible_cluster_count;
+shared uint visible_cluster_indices[256];
+
+void compute_frustum_planes(out vec4 planes[6]) {
+    mat4 vp = ubo.proj * ubo.view;
+    mat4 m = transpose(vp);
+    planes[0] = m[3] + m[0];
+    planes[1] = m[3] - m[0];
+    planes[2] = m[3] + m[1];
+    planes[3] = m[3] - m[1];
+    if (ubo.reversed_z == 1u) {
+        planes[4] = m[3] - m[2];
+        planes[5] = m[3];
+    } else {
+        planes[4] = m[3];
+        planes[5] = m[3] - m[2];
+    }
+}
+
+bool frustum_cull_sphere(vec3 center, float radius) {
+    vec4 planes[6];
+    compute_frustum_planes(planes);
+    for (int i = 0; i < 6; ++i) {
+        float plane_length = length(planes[i].xyz);
+        if (plane_length > 0.0) {
+            planes[i] /= plane_length;
+        }
+        if (dot(planes[i].xyz, center) + planes[i].w <= -radius)
+            return true;
+    }
+    return false;
+}
+
+void main() {
+    uint page_idx = gl_WorkGroupID.x;
+    uint page_count = in_visibility.visible_page_count;
+    uint li = gl_LocalInvocationIndex.x;
+
+    if (li == 0u) {
+        visible_cluster_count = 0u;
+    }
+    barrier();
+
+    if (page_idx >= page_count) {
+        if (li == 0u) {
+            EmitMeshTasksEXT(0u, 1u, 1u);
+        }
+        return;
+    }
+
+    uint packed_page = in_visibility.visible_pages[page_idx];
+    uint instance_id = (packed_page >> 16u) & 0xFFFFu;
+    uint blend_bits  = (packed_page >> 13u) & 0x7u;
+    uint page_slot   = packed_page & 0x1FFFu;
+
+    HierarchyInstance instance = instance_buffer.data[instance_id];
+    mat4 model_matrix = instance.model_matrix;
+    mat3 rot_scale = mat3(model_matrix);
+
+    uint pool_bytes = page_slot * VG_PAGE_SIZE_BYTES;
+    uint base_word = pool_bytes / 4u;
+    if (page_pool.data[base_word + 0u] != VG_PAGE_MAGIC) {
+        if (li == 0u) {
+            EmitMeshTasksEXT(0u, 1u, 1u);
+        }
+        return;
+    }
+
+    uint cluster_count = page_pool.data[base_word + 2u];
+    uint tid = gl_WorkGroupSize.x;
+
+    for (uint c = li; c < cluster_count; c += tid) {
+        uint idx = atomicAdd(visible_cluster_count, 1u);
+        if (idx < 256u) {
+            visible_cluster_indices[idx] = c;
+        }
+    }
+    barrier();
+
+    if (li == 0u) {
+        uint total = visible_cluster_count;
+        uint emit = min(total, 256u);
+        td.instance_id = instance_id;
+        td.page_slot = page_slot;
+        td.blend_bits = blend_bits;
+        for (uint i = 0u; i < emit; ++i) {
+            td.cluster_indices[i] = visible_cluster_indices[i];
+        }
+        EmitMeshTasksEXT(emit, 1u, 1u);
+    }
+}

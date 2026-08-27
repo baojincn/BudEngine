@@ -87,7 +87,7 @@ namespace bud::graphics {
 		~HierarchyTraversalPass();
 		void shutdown(RHI* rhi) override;
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		void add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, size_t instance_count, const GPUScene& gpu_scene, uint32_t current_frame);
+		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, size_t instance_count, const GPUScene& gpu_scene, uint32_t current_frame);
 	};
 
 	class PageEmitPass : public RenderPass {
@@ -280,5 +280,41 @@ namespace bud::graphics {
 		void shutdown(RHI* rhi) override;
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		RGHandle add_to_graph(RenderGraph& rg, RGHandle raw_ao, RGHandle depth_buffer, const SceneView& view, const RenderConfig& config);
+	};
+
+	class VisibilityPass : public RenderPass {
+		PipelineHandle visibility_pipeline;
+		PipelineHandle visibility_pipeline_wireframe;
+		uint64_t visibility_set_layout = 0;
+		uint64_t visibility_descriptor_set = 0;
+
+	public:
+		~VisibilityPass() = default;
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle depth_buffer,
+			const SceneView& view,
+			const RenderConfig& config,
+			RGHandle rg_visible_pages,
+			RGHandle rg_hiz_pyramid,
+			const GPUScene& gpu_scene,
+			RGHandle* out_depth = nullptr);
+	};
+
+	class ResolvePass : public RenderPass {
+		PipelineHandle resolve_pipeline;
+		uint64_t resolve_set_layout = 0;
+		uint64_t resolve_descriptor_set = 0;
+
+	public:
+		~ResolvePass() = default;
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle visibility_buffer,
+			const SceneView& view,
+			const RenderConfig& config,
+			const GPUScene& gpu_scene,
+			RGHandle shadow_map = {},
+			RGHandle ao_map = {});
 	};
 }

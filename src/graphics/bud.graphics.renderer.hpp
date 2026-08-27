@@ -57,6 +57,7 @@ namespace bud::graphics {
 		// Game-thread safe snapshot (CPU-side bounds only)
 		std::vector<bud::math::AABB> get_mesh_bounds_snapshot() const;
 		std::vector<std::vector<bud::math::AABB>> get_submesh_bounds_snapshot() const;
+		void register_mesh_bounds(uint32_t mesh_id, const bud::math::AABB& aabb);
 
 		GPUScene& get_gpu_scene() { return gpu_scene; }
 		RHI* get_rhi() { return rhi; }
@@ -105,6 +106,9 @@ namespace bud::graphics {
 		std::unique_ptr<ClusterVisualizationPass> cluster_visualization_pass;
 		std::unique_ptr<MainPass> main_pass;
 		std::unique_ptr<UIPass> ui_pass;
+		std::unique_ptr<VisibilityPass> visibility_pass;
+		std::unique_ptr<ResolvePass> resolve_pass;
+		bool has_mesh_shader = false;
 
 		PipelineHandle csm_cull_pipeline;
 		GPUStats last_gpu_stats{};
@@ -126,6 +130,7 @@ namespace bud::graphics {
 
 	public:
 		struct HierarchyInstance {
+			bud::math::mat4 model_matrix;
 			uint32_t mesh_id;
 			uint32_t material_id;
 			uint32_t root_group_index;
@@ -135,7 +140,6 @@ namespace bud::graphics {
 			float error_threshold;
 			uint32_t base_virtual_page;
 			uint32_t padding[2];
-			bud::math::mat4 model_matrix;
 		};
 		
 		struct InstanceData {

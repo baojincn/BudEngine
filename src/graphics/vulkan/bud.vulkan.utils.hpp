@@ -41,6 +41,8 @@ namespace bud::graphics::vulkan {
 		case TextureFormat::BC5_UNORM:         return VK_FORMAT_BC5_UNORM_BLOCK;
 		case TextureFormat::RGBA16_FLOAT:      return VK_FORMAT_R16G16B16A16_SFLOAT;
 		case TextureFormat::R32G32B32_FLOAT:   return VK_FORMAT_R32G32B32_SFLOAT;
+		case TextureFormat::R32G32_UINT:       return VK_FORMAT_R32G32_UINT;
+		case TextureFormat::RGBA32_UINT:      return VK_FORMAT_R32G32B32A32_UINT;
 		case TextureFormat::D32_FLOAT:         return VK_FORMAT_D32_SFLOAT;
 		case TextureFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
 		case TextureFormat::R32_FLOAT:         return VK_FORMAT_R32_SFLOAT;

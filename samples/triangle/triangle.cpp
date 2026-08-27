@@ -72,6 +72,21 @@ void TriangleApp::on_init(const AppConfig& config) {
 					return p.ends_with(".budasset") || p.ends_with(".budmesh");
 				};
 
+				if (streaming_manager) {
+					streaming_manager->set_asset_registered_callback([this, engine, renderer](uint32_t mesh_id, const bud::math::AABB& aabb, uint32_t root_group_index, uint32_t base_virtual_page) {
+						renderer->register_mesh_bounds(mesh_id, aabb);
+						auto& s = engine->get_scene();
+						for (auto& ent : s.entities) {
+							if (!ent.asset_path.empty() && (ent.asset_path.ends_with(".budasset") || ent.asset_path.ends_with(".budmesh"))) {
+								ent.mesh_index = mesh_id;
+								ent.root_group_index = root_group_index;
+								ent.base_virtual_page = base_virtual_page;
+							}
+						}
+						bud::print("[TriangleApp] Virtual Geometry mesh registered: mesh_id={}, root_group={}, base_page={}", mesh_id, root_group_index, base_virtual_page);
+					});
+				}
+
 				// Route Virtual Geometry assets (.budasset / .budmesh) through GPU page streaming;
 				// everything else loads as a traditional dynamic mesh below.
 				for (auto& e : scene.entities) {

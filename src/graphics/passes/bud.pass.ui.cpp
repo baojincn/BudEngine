@@ -125,7 +125,7 @@ namespace bud::graphics {
 			[&](RGBuilder& builder) {
 				builder.write(backbuffer, ResourceState::RenderTarget);
 			},
-			[=, this](RHI* rhi, CommandHandle cmd) {
+			[=, &rg, this](RHI* rhi, CommandHandle cmd) {
 				UIDrawDataSnapshot draw_data;
 				{
 					std::lock_guard lock(draw_data_mutex);

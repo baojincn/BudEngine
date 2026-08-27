@@ -39,9 +39,10 @@ layout(std430, binding = 3) readonly buffer InstanceBuffer {
 } instance_buffer;
 
 struct PageTableEntry {
-	uint valid;
-	uint padding;
 	uint pool_offset;
+	uint valid;
+	uint pad0;
+	uint pad1;
 };
 
 layout(std430, binding = 4) readonly buffer PageTableBuffer {

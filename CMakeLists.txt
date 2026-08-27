@@ -158,13 +158,22 @@ else()
 		if(NOT SHADER_EXT STREQUAL ".spv")
             set(SHADER_OUTPUT "${SHADER_SOURCE}.spv")
 
+			# Mesh/Task shaders require explicit stage and Vulkan target-env
+			if(SHADER_EXT STREQUAL ".task")
+				set(TARGET_FLAGS "-fshader-stage=task" "--target-env=vulkan1.3")
+			elseif(SHADER_EXT STREQUAL ".mesh")
+				set(TARGET_FLAGS "-fshader-stage=mesh" "--target-env=vulkan1.3")
+			else()
+				set(TARGET_FLAGS "")
+			endif()
+
 			add_custom_command(
 				OUTPUT ${SHADER_OUTPUT}
 				# -g keeps SPIR-V debug info (source + line mapping) so
 				# Nsight Graphics / Aftermath GPU crash dumps can resolve the
 				# exact shader instruction that faulted. -O keeps the default
 				# optimization level (needed for readable disassembly).
-				COMMAND ${GLSLC_EXECUTABLE} -g ${SHADER_SOURCE} -o ${SHADER_OUTPUT}
+				COMMAND ${GLSLC_EXECUTABLE} -g ${TARGET_FLAGS} ${SHADER_SOURCE} -o ${SHADER_OUTPUT}
 				DEPENDS ${SHADER_SOURCE}
 				COMMENT "Compiling ${SHADER_SOURCE} -> ${SHADER_OUTPUT}"
 				VERBATIM
@@ -234,6 +243,8 @@ target_sources(bud_engine_core
 		"src/graphics/passes/bud.pass.shadow.cpp"
 		"src/graphics/passes/bud.pass.main.cpp"
 		"src/graphics/passes/bud.pass.ao.cpp"
+		"src/graphics/passes/bud.pass.visibility.cpp"
+		"src/graphics/passes/bud.pass.resolve.cpp"
 		"src/graphics/passes/bud.pass.ui.cpp"
 		"src/graphics/bud.graphics.graph.cpp"
 		"src/graphics/bud.graphics.renderer.cpp"

@@ -51,9 +51,9 @@ namespace bud::graphics {
 		};
 
 		struct PageTableEntry {
-			uint32_t valid;
-			uint32_t padding;
 			uint32_t pool_offset;
+			uint32_t valid;
+			uint32_t padding[2];
 		};
 		static constexpr uint32_t max_page_table_entries = 65536;
 		
@@ -83,6 +83,7 @@ namespace bud::graphics {
 			BufferHandle page_request_buffer;         // GPU device-local: written by hierarchy_traversal.comp
 			BufferHandle page_request_readback;       // Host-visible: copied from page_request_buffer each frame
 			BufferHandle visible_pages;       // Phase 1 GPU-driven (hierarchy_traversal -> page_emit)
+			BufferHandle visible_pages_readback; // Host-visible readback buffer for stats & streaming
 			BufferHandle visible_clusters;    // Phase 2 GPU-driven (page_emit -> cluster_cull)
 			BufferHandle dynamic_instances;   // Phase 2 GPU-driven dynamic instances per cluster
 			uint64_t submit_timeline_value = 0;

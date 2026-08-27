@@ -124,6 +124,7 @@ namespace bud::graphics {
 				if (frame_resource.csm_static_indirect_draw.is_valid()) rhi->destroy_buffer(frame_resource.csm_static_indirect_draw);
 				if (frame_resource.csm_instance_data.is_valid()) rhi->destroy_buffer(frame_resource.csm_instance_data);
 				if (frame_resource.visible_pages.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages);
+				if (frame_resource.visible_pages_readback.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages_readback);
 				if (frame_resource.visible_clusters.is_valid()) rhi->destroy_buffer(frame_resource.visible_clusters);
 				if (frame_resource.dynamic_instances.is_valid()) rhi->destroy_buffer(frame_resource.dynamic_instances);
 				frame_resource = {};
@@ -299,6 +300,7 @@ namespace bud::graphics {
 				constexpr uint32_t max_visible_pages = 65536;
 				uint64_t vp_size = 4 + static_cast<uint64_t>(max_visible_pages) * sizeof(uint32_t);
 				frame_resource.visible_pages = rhi->create_gpu_buffer(vp_size, ResourceState::UnorderedAccess);
+				frame_resource.visible_pages_readback = rhi->create_readback_buffer(vp_size);
 				frame_resource.visible_page_capacity = max_visible_pages;
 			}
 

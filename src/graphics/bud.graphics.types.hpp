@@ -14,6 +14,20 @@ namespace math = bud::math;
 
 
 namespace bud::graphics {
+
+	// Backend-agnostic descriptor type constants (matching VkDescriptorType)
+	inline constexpr uint32_t DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER = 1;
+	inline constexpr uint32_t DESCRIPTOR_TYPE_STORAGE_IMAGE = 3;
+	inline constexpr uint32_t DESCRIPTOR_TYPE_UNIFORM_BUFFER = 6;
+	inline constexpr uint32_t DESCRIPTOR_TYPE_STORAGE_BUFFER = 7;
+
+	// Backend-agnostic shader stage constants (matching VkShaderStageFlagBits for EXT mesh shader)
+	inline constexpr uint32_t SHADER_STAGE_TASK_BIT = 0x00000040;  // VK_SHADER_STAGE_TASK_BIT_EXT
+	inline constexpr uint32_t SHADER_STAGE_MESH_BIT = 0x00000080;  // VK_SHADER_STAGE_MESH_BIT_EXT
+	inline constexpr uint32_t SHADER_STAGE_VERTEX_BIT = 0x00000001;
+	inline constexpr uint32_t SHADER_STAGE_FRAGMENT_BIT = 0x00000010;
+	inline constexpr uint32_t SHADER_STAGE_COMPUTE_BIT = 0x00000020;
+
 	constexpr uint32_t ALL_MIPS = 0xFFFFFFFF;
 
 	// Screen-space-error LOD selection for page-backed meshes (Nanite-style
@@ -93,6 +107,8 @@ namespace bud::graphics {
 		BC5_UNORM,
 		RGBA16_FLOAT,
 		R32G32B32_FLOAT,
+		R32G32_UINT,
+		RGBA32_UINT,
 		D32_FLOAT,
 		D24_UNORM_S8_UINT,
 		R32_FLOAT,
@@ -292,9 +308,19 @@ namespace bud::graphics {
 		ImGui         // Special ImGui layout (0,1,2)
 	};
 
+	struct DescriptorBinding {
+		uint32_t binding;
+		uint32_t descriptor_type; // VkDescriptorType cast to uint32_t
+		uint32_t count = 1;
+		uint32_t stage_flags = 0; // VkShaderStageFlags cast to uint32_t
+		uint32_t binding_flags = 0; // VkDescriptorBindingFlags cast to uint32_t
+	};
+
 	struct GraphicsPipelineDesc {
 		ShaderStage vs;
 		ShaderStage fs;
+		ShaderStage ts; // Task shader (mesh shader pipeline)
+		ShaderStage ms; // Mesh shader (mesh shader pipeline)
 		bool depth_test = true;
 		bool depth_write = true;
 		CompareOp depth_compare_op = CompareOp::Less;
@@ -305,6 +331,10 @@ namespace bud::graphics {
 		bool blending_enable = false;
 		VertexLayoutType vertex_layout = VertexLayoutType::Default;
 		bool wireframe = false;
+		// Backend-specific descriptor set layouts to use instead of the global set.
+		// These are VkDescriptorSetLayout handles cast to uint64_t for portability.
+		// When non-empty, the pipeline layout will use these sets instead of the global set.
+		std::vector<uint64_t> custom_set_layouts;
 	};
 
 	struct ComputePipelineDesc {

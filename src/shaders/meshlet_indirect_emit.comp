@@ -68,9 +68,10 @@ layout(set = 0, binding = 4) uniform UniformBufferObject {
 } ubo;
 
 struct PageTableEntry {
-    uint valid;
-    uint padding;
     uint pool_offset;
+    uint valid;
+    uint pad0;
+    uint pad1;
 };
 
 layout(std430, set = 0, binding = 5) readonly buffer PageTableBuffer {

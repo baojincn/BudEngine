@@ -27,9 +27,10 @@ layout(push_constant) uniform PushConsts {
 } push_consts;
 
 struct PageTableEntry {
-	uint valid;
-	uint padding;
 	uint pool_offset;
+	uint valid;
+	uint pad0;
+	uint pad1;
 };
 
 layout(std430, set = 0, binding = 4) readonly buffer PageTableBuffer {
