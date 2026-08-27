@@ -229,81 +229,22 @@ void main() {
     vec3 a2 = rot_scale * vec3(0.0, 0.0, sphere_radius);
     float world_radius = max(length(a0), max(length(a1), length(a2)));
 
-    bool visible = true;
-    // Extract frustum planes from the view-projection matrix.
-    // After transpose(), clip_matrix[i] = row i of the original column-major matrix.
-    // The standard plane extraction formula gives:
-    //   left   = row3 + row0
-    //   right  = row3 - row0
-    //   bottom = row3 + row1
-    //   top    = row3 - row1
-    // For Vulkan clip space (z in [0,1]):
-    //   near   = row3          (z=0)
-    //   far    = row3 - row2   (z=1)
-    // For OpenGL clip space (z in [-1,1]):
-    //   near   = row3 + row2   (z=-1)
-    //   far    = row3 - row2   (z=1)
-    // With reversed-z, near and far are swapped.
-    mat4 view_proj = ubo.proj * ubo.view;
-    mat4 clip_matrix = transpose(view_proj);
-    vec4 planes[6];
-    planes[0] = clip_matrix[3] + clip_matrix[0];
-    planes[1] = clip_matrix[3] - clip_matrix[0];
-    planes[2] = clip_matrix[3] + clip_matrix[1];
-    planes[3] = clip_matrix[3] - clip_matrix[1];
-    if (ubo.reversed_z == 1u) {
-        // Reversed-z: near at z=1, far at z=0 in clip space.
-        planes[4] = clip_matrix[3] - clip_matrix[2]; // near (z=1)
-        planes[5] = clip_matrix[2];                   // far  (z=0)
-    } else {
-        // Vulkan default: z in [0,1], near at z=0, far at z=1.
-        planes[4] = clip_matrix[2];                   // near (z=0)
-        planes[5] = clip_matrix[3] - clip_matrix[2]; // far  (z=1)
-    }
+    // Write dynamic instance data
+    out_instances.data[idx].model = model_matrix;
+    out_instances.data[idx].material_id = material_id;
+    out_instances.data[idx].page_slot = page_slot;
+    out_instances.data[idx].blend_factor = 0.0;
+    out_instances.data[idx].pad = 0;
 
-    for (int i = 0; i < 6; ++i) {
-        float plane_length = length(planes[i].xyz);
-        if (plane_length > 0.0) {
-            planes[i] /= plane_length;
-        }
-        if (dot(planes[i].xyz, world_center) + planes[i].w < -world_radius) {
-            visible = false;
-            break;
-        }
-    }
+    // Write indirect command
+    out_draws.commands[idx].indexCount = triangle_count * 3u;
+    out_draws.commands[idx].instanceCount = 1u;
+    uint index_stream_offset_bytes = page_pool.data[pool_dword + 6u];
+    uint page_index_base_elements = (page_slot * PAGE_SIZE_BYTES + index_stream_offset_bytes) / 2u;
+    out_draws.commands[idx].firstIndex = page_index_base_elements + triangle_offset * 3u;
+    out_draws.commands[idx].vertexOffset = 0; 
+    out_draws.commands[idx].firstInstance = idx;
 
-    if (visible) {
-        vec3 bmin = world_center - vec3(world_radius);
-        vec3 bmax = world_center + vec3(world_radius);
-        if (aabb_occluded(bmin, bmax)) {
-            visible = false;
-        }
-    }
-
-    if (visible) {
-        // Write dynamic instance data
-        out_instances.data[idx].model = model_matrix;
-        out_instances.data[idx].material_id = material_id;
-        out_instances.data[idx].page_slot = page_slot;
-        out_instances.data[idx].blend_factor = in_clusters.visible_clusters[idx].blend_factor;
-        out_instances.data[idx].pad = 0;
-
-        // Write indirect command
-        out_draws.commands[idx].indexCount = triangle_count * 3u;
-        out_draws.commands[idx].instanceCount = 1u;
-        uint index_stream_offset_bytes = page_pool.data[pool_dword + 6u];
-        uint page_index_base_elements = (page_slot * PAGE_SIZE_BYTES + index_stream_offset_bytes) / 2u;
-        out_draws.commands[idx].firstIndex = page_index_base_elements + triangle_offset * 3u;
-        out_draws.commands[idx].vertexOffset = 0; 
-        out_draws.commands[idx].firstInstance = idx;
-
-        atomicAdd(stats.visibleInstances, 1);
-        atomicAdd(stats.visibleTriangles, triangle_count);
-    } else {
-        out_draws.commands[idx].indexCount = 0u;
-        out_draws.commands[idx].instanceCount = 0u;
-        out_draws.commands[idx].firstIndex = 0u;
-        out_draws.commands[idx].vertexOffset = 0;
-        out_draws.commands[idx].firstInstance = 0u;
-    }
+    atomicAdd(stats.visibleInstances, 1);
+    atomicAdd(stats.visibleTriangles, triangle_count);
 }

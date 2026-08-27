@@ -57,6 +57,7 @@ void TriangleApp::on_init(const AppConfig& config) {
 	// path (GPU-driven meshlet rendering would need per-page meshlet GPU data
 	// that streaming does not upload yet).
 	render_config.enable_virtual_geometry = true;
+	render_config.enable_mesh_shader = true;
 	renderer->set_config(render_config);
 
 	// 2. Load Scene Data-Driven

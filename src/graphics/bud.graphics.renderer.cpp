@@ -1165,7 +1165,7 @@ namespace bud::graphics {
 
 			bool has_main_pass = false;
 			RGHandle shadow_map;
-			bool is_mesh_shader_vg = (has_mesh_shader && visibility_pass && resolve_pass && render_config.enable_virtual_geometry);
+			bool is_mesh_shader_vg = (has_mesh_shader && render_config.enable_mesh_shader && visibility_pass && resolve_pass && render_config.enable_virtual_geometry);
 
 			// Setup GPU Stats
 			rhi->add_culling_stats(scene_total_objs, (uint32_t)visible_instance_count, total_shadow_casters);
@@ -1378,33 +1378,33 @@ namespace bud::graphics {
 							pyramid_mip_debug_pass->add_to_graph(render_graph, back_buffer, rg_hiz, render_config.debug_hiz_mip);
 						}
 						
-						// Render into the depth prepass!
-						if (rg_draw.is_valid()) {
-							depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), depth_prepass, split_index);
-						}
+						// Visibility Indirect Pass: rasterize indirect draws into VisibilityBuffer + DepthBuffer
+						if (visibility_pass && resolve_pass) {
+							RGHandle rg_depth{};
+							auto rg_visibility = visibility_pass->add_indirect_to_graph(render_graph, back_buffer, rg_depth,
+								scene_view, render_config, render_scene, meshes, sort_list, visible_count,
+								rg_draw, rg_instance_data, gpu_scene,
+								gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), split_index, &rg_depth);
 
-						RGHandle rg_ao{};
-						if (ao_pass && render_config.ao_mode != AOMode::Disabled) {
-							RGHandle raw_ao = ao_pass->add_to_graph(render_graph, depth_prepass, scene_view, render_config);
-							if (raw_ao.is_valid() && ao_temporal_pass) {
-								raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, depth_prepass, scene_view, render_config);
+							RGHandle rg_ao{};
+							if (rg_depth.is_valid() && ao_pass && render_config.ao_mode != AOMode::Disabled) {
+								RGHandle raw_ao = ao_pass->add_to_graph(render_graph, rg_depth, scene_view, render_config);
+								if (raw_ao.is_valid() && ao_temporal_pass) {
+									raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
+								}
+								if (raw_ao.is_valid() && ao_blur_pass) {
+									rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
+								}
+								else {
+									rg_ao = raw_ao;
+								}
 							}
-							if (raw_ao.is_valid() && ao_blur_pass) {
-								rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, depth_prepass, scene_view, render_config);
-							}
-							else {
-								rg_ao = raw_ao;
-							}
-						}
 
-						if (shadow_map.is_valid()) {
-							if (render_config.enable_cluster_visualization) {
-								cluster_visualization_pass->add_to_graph(render_graph, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), split_index);
+							if (rg_visibility.is_valid()) {
+								resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
+									scene_view, render_config, gpu_scene, shadow_map, rg_ao);
+								has_main_pass = true;
 							}
-							else {
-								main_pass->add_to_graph(render_graph, shadow_map, back_buffer, depth_prepass, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, rg_instance_data, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), rg_ao, split_index);
-							}
-							has_main_pass = true;
 						}
 					}
 				}

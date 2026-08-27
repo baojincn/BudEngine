@@ -217,6 +217,7 @@ namespace bud::graphics {
 		bool cache_shadows = false; // Disabled: feature has rendering bugs, enable when fixed
 
 		bool enable_virtual_geometry = true;
+		bool enable_mesh_shader = true;
 		bool debug_hiz = false;
 		uint32_t debug_hiz_mip = 0;
 		bool enable_cluster_visualization = false;

@@ -285,6 +285,8 @@ namespace bud::graphics {
 	class VisibilityPass : public RenderPass {
 		PipelineHandle visibility_pipeline;
 		PipelineHandle visibility_pipeline_wireframe;
+		PipelineHandle visibility_indirect_pipeline;
+		PipelineHandle visibility_indirect_pipeline_wireframe;
 		uint64_t visibility_set_layout = 0;
 		uint64_t visibility_descriptor_set = 0;
 
@@ -298,6 +300,20 @@ namespace bud::graphics {
 			RGHandle rg_visible_pages,
 			RGHandle rg_hiz_pyramid,
 			const GPUScene& gpu_scene,
+			RGHandle* out_depth = nullptr);
+		RGHandle add_indirect_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle depth_buffer,
+			const SceneView& view,
+			const RenderConfig& config,
+			const RenderScene& render_scene,
+			const std::vector<RenderMesh>& meshes,
+			const std::vector<SortItem>& sort_list,
+			size_t draw_count,
+			RGHandle rg_draw,
+			RGHandle rg_instance_data,
+			const GPUScene& gpu_scene,
+			BufferHandle mega_vertex_buffer,
+			BufferHandle mega_index_buffer,
+			size_t split_index,
 			RGHandle* out_depth = nullptr);
 	};
 

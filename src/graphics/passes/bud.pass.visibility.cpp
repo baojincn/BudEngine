@@ -32,11 +32,32 @@ namespace bud::graphics {
 			desc.wireframe = true;
 			visibility_pipeline_wireframe = rhi->create_graphics_pipeline(desc);
 		});
+
+		load_shaders_async(asset_manager, { "src/shaders/visibility_indirect.vert.spv", "src/shaders/visibility_indirect.frag.spv" }, [this, rhi, config](std::vector<std::vector<char>> shaders) {
+			GraphicsPipelineDesc desc;
+			desc.vs.code = shaders[0];
+			desc.fs.code = shaders[1];
+			desc.depth_test = true;
+			desc.depth_write = true;
+			desc.cull_mode = CullMode::None;
+			desc.color_attachment_format = TextureFormat::RGBA32_UINT;
+			desc.depth_attachment_format = TextureFormat::D32_FLOAT;
+			desc.depth_compare_op = config.reversed_z ? CompareOp::GreaterEqual : CompareOp::LessEqual;
+			desc.vertex_layout = VertexLayoutType::Default;
+			visibility_indirect_pipeline = rhi->create_graphics_pipeline(desc);
+			desc.wireframe = true;
+			visibility_indirect_pipeline_wireframe = rhi->create_graphics_pipeline(desc);
+		});
 	}
 	void VisibilityPass::shutdown(RHI* rhi) {
 		if (visibility_pipeline.is_valid()) rhi->destroy_pipeline(visibility_pipeline);
 		if (visibility_pipeline_wireframe.is_valid()) rhi->destroy_pipeline(visibility_pipeline_wireframe);
+		if (visibility_indirect_pipeline.is_valid()) rhi->destroy_pipeline(visibility_indirect_pipeline);
+		if (visibility_indirect_pipeline_wireframe.is_valid()) rhi->destroy_pipeline(visibility_indirect_pipeline_wireframe);
 		visibility_pipeline.reset();
+		visibility_pipeline_wireframe.reset();
+		visibility_indirect_pipeline.reset();
+		visibility_indirect_pipeline_wireframe.reset();
 		if (visibility_set_layout) rhi->destroy_descriptor_set_layout(visibility_set_layout);
 		visibility_descriptor_set = 0;
 	}
@@ -112,4 +133,137 @@ namespace bud::graphics {
 		return res;
 	}
 
+	RGHandle VisibilityPass::add_indirect_to_graph(RenderGraph& render_graph, RGHandle backbuffer, RGHandle depth_buffer,
+		const SceneView& view, const RenderConfig& config,
+		const RenderScene& render_scene,
+		const std::vector<RenderMesh>& meshes,
+		const std::vector<SortItem>& sort_list,
+		size_t draw_count,
+		RGHandle rg_draw,
+		RGHandle rg_instance_data,
+		const GPUScene& gpu_scene,
+		BufferHandle mega_vertex_buffer,
+		BufferHandle mega_index_buffer,
+		size_t split_index,
+		RGHandle* out_depth) {
+		if (!visibility_indirect_pipeline.is_valid())
+			return {};
+
+		uint32_t w = view.viewport_width;
+		uint32_t h = view.viewport_height;
+		TextureDesc vis_desc;
+		vis_desc.format = TextureFormat::RGBA32_UINT;
+		vis_desc.width = w;
+		vis_desc.height = h;
+		TextureDesc depth_desc;
+		depth_desc.format = TextureFormat::D32_FLOAT;
+		depth_desc.width = w;
+		depth_desc.height = h;
+
+		auto vis_h = std::make_shared<RGHandle>();
+		auto depth_h = std::make_shared<RGHandle>(depth_buffer);
+
+		auto res = render_graph.add_pass("Visibility Indirect Pass",
+			[=](RGBuilder& builder) {
+				*vis_h = builder.create("VisibilityBuffer", vis_desc);
+				if (!depth_h->is_valid())
+					*depth_h = builder.create("DepthBuffer", depth_desc);
+				if (rg_draw.is_valid())
+					builder.read(rg_draw, ResourceState::IndirectArgument);
+				if (rg_instance_data.is_valid())
+					builder.read(rg_instance_data, ResourceState::ShaderResource);
+				builder.write(*vis_h, ResourceState::RenderTarget);
+				builder.write(*depth_h, ResourceState::DepthWrite);
+				return *vis_h;
+			},
+			[=, &render_graph, &gpu_scene, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
+				TextureHandle visibility_texture_handle = render_graph.get_texture(*vis_h);
+				RenderPassBeginInfo rp_info;
+				rp_info.color_attachments.push_back(visibility_texture_handle);
+				rp_info.depth_attachment = render_graph.get_texture(*depth_h);
+				rp_info.clear_color = true;
+				rp_info.clear_depth = true;
+				rp_info.clear_depth_value = config.reversed_z ? 0.0f : 1.0f;
+				rp_info.render_width = w;
+				rp_info.render_height = h;
+				rp_info.base_array_layer = 0;
+				rp_info.layer_count = 1;
+
+				PipelineHandle active_pipeline = (config.enable_wireframe && visibility_indirect_pipeline_wireframe.is_valid())
+					? visibility_indirect_pipeline_wireframe
+					: visibility_indirect_pipeline;
+
+				rhi->cmd_begin_render_pass(cmd, rp_info);
+				rhi->cmd_bind_pipeline(cmd, active_pipeline);
+				rhi->cmd_set_viewport(cmd, (float)w, (float)h);
+				rhi->cmd_set_scissor(cmd, w, h);
+
+				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
+				rhi->cmd_bind_descriptor_set(cmd, active_pipeline, 0);
+
+				BufferHandle indirect_buffer_handle = rg_draw.is_valid() ? render_graph.get_buffer(rg_draw) : BufferHandle{};
+
+				if (indirect_buffer_handle.is_valid()) {
+					auto page_pool_buf = gpu_scene.get_page_pool_buffer();
+					uint32_t gpu_draw_count = static_cast<uint32_t>(draw_count);
+					if (config.enable_virtual_geometry) {
+						uint32_t frame_idx = rhi->get_current_frame_index();
+						gpu_draw_count = std::max(gpu_draw_count,
+							gpu_scene.get_frame_resources(frame_idx).indirect_capacity);
+					}
+
+					if (split_index > 0) {
+						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+						rhi->cmd_draw_indexed_indirect(cmd, indirect_buffer_handle, 0, static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
+					}
+
+					if (split_index < gpu_draw_count && page_pool_buf.is_valid()) {
+						rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
+						rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
+						rhi->cmd_draw_indexed_indirect(cmd, indirect_buffer_handle, split_index * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(gpu_draw_count - split_index), sizeof(bud::graphics::IndirectCommand));
+					}
+				}
+				else {
+					for (size_t i = 0; i < draw_count; ++i) {
+						const auto& item = sort_list[i];
+						uint32_t idx = item.entity_index;
+						if (idx >= render_scene.mesh_indices.size()) continue;
+
+						uint32_t mesh_id = render_scene.mesh_indices[idx];
+						if (mesh_id >= meshes.size()) continue;
+						const auto& mesh = meshes[mesh_id];
+						if (!mesh.is_valid()) continue;
+						const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
+
+						if (mesh.is_page_based && gpu_scene.get_page_pool_buffer().is_valid()) {
+							rhi->cmd_bind_vertex_buffer(cmd, gpu_scene.get_page_pool_buffer());
+							rhi->cmd_bind_index_buffer(cmd, gpu_scene.get_page_pool_buffer(), true);
+						}
+						else {
+							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+						}
+
+						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+							const auto& sub = mesh.submeshes[item.submesh_index];
+							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
+						}
+						else {
+							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
+						}
+					}
+				}
+
+				rhi->cmd_end_render_pass(cmd);
+			}
+		);
+
+		if (out_depth) {
+			*out_depth = *depth_h;
+		}
+		return res;
+	}
+
 }
+
