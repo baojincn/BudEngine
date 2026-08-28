@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -19,6 +19,7 @@ namespace bud::graphics {
 	enum class MemoryUsage;
 	enum class ResourceState;
 	class Allocator;
+	class ResourcePool;
 }
 
 namespace bud::graphics::vulkan {
@@ -30,18 +31,17 @@ namespace bud::graphics::vulkan {
 		VkDeviceSize size = 0;
 		VkDeviceSize offset = 0;
 		void* mapped_ptr = nullptr;
+		BufferHandle pool_handle;
 
 		bool try_alloc(VkDeviceSize req_size, VkDeviceSize alignment, VkDeviceSize& out_offset);
 		void reset();
 	};
 
-	struct VulkanBuffer {
+	struct VulkanBuffer : public Buffer {
 		VkBuffer buffer = VK_NULL_HANDLE;
 		VmaAllocation allocation = VK_NULL_HANDLE;
 		VmaAllocationInfo alloc_info = {};
 		bool owns_allocation = true;
-		void* mapped_ptr = nullptr;
-		uint64_t size = 0;
 
 		// Optional back-reference to allocator for RAII cleanup.
 		VmaAllocator allocator = VK_NULL_HANDLE;
@@ -51,7 +51,7 @@ namespace bud::graphics::vulkan {
 
 		// RAII destructor: will unregister and destroy underlying VMA allocation
 		// if this wrapper owns the allocation. Implementation in cpp.
-		~VulkanBuffer();
+		~VulkanBuffer() override;
 	};
 
     class VulkanMemoryAllocator : public bud::graphics::Allocator {
@@ -65,14 +65,16 @@ namespace bud::graphics::vulkan {
 		void cleanup() override;
 		void on_frame_begin(uint32_t frame_index) override;
 
+		void set_resource_pool(bud::graphics::ResourcePool* pool);
+
 		// 1. GPU 专用资源
 		bud::graphics::BufferHandle alloc_gpu(uint64_t size, bud::graphics::ResourceState usage) override;
 
 		// 2. 帧临时分配 (线性)
-		bud::graphics::BufferHandle alloc_frame_transient(uint64_t size, uint64_t alignment) override;
+		bud::graphics::BufferSlice alloc_frame_transient(uint64_t size, uint64_t alignment) override;
 
 		// 3. 上传堆分配 (多帧线性)
-		bud::graphics::BufferHandle alloc_staging(uint64_t size, uint64_t alignment = 256) override;
+		bud::graphics::BufferSlice alloc_staging(uint64_t size, uint64_t alignment = 256) override;
 
 		// 4. 持久映射分配
 		bud::graphics::BufferHandle alloc_persistent(uint64_t size, bud::graphics::ResourceState usage) override;
@@ -113,6 +115,7 @@ namespace bud::graphics::vulkan {
 		uint32_t frames_in_flight;
 		uint32_t current_frame_index = 0;
 		std::mutex mutex;
+		bud::graphics::ResourcePool* resource_pool = nullptr;
 
 		// Queue family info for CONCURRENT sharing (async copy queue access).
 		uint32_t graphics_family = 0;

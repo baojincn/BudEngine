@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 setlocal enabledelayedexpansion
 
 :: Configuration Stage: Set explicit paths for VS 2026 (Professional) on D: drive
@@ -30,13 +30,13 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-:: 3. Build only BudAssetTool
-echo [Build Tools Script] Building BudAssetTool (Debug x64)...
-"%CMAKE_EXE%" --build --preset "Debug x64" --target BudAssetTool
+:: 3. Build BudAssetCompiler and BudAssetImporter
+echo [Build Tools Script] Building BudAssetCompiler and BudAssetImporter (Debug x64)...
+"%CMAKE_EXE%" --build --preset "Debug x64" --target BudAssetCompiler BudAssetImporter
 if %errorlevel% neq 0 (
     echo [Error] Build failed
     exit /b 1
 )
 
-echo [Build Tools Script] BudAssetTool Build Success!
+echo [Build Tools Script] Bud Tools Build Success!
 exit /b 0

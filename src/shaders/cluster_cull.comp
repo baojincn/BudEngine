@@ -1,0 +1,250 @@
+#version 460
+#extension GL_KHR_shader_subgroup_ballot : enable
+#extension GL_GOOGLE_include_directive : enable
+
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+
+// Common Structs
+struct HierarchyInstance {
+    mat4 model_matrix;
+    uint mesh_id;
+    uint material_id;
+    uint root_group_index;
+    uint flags;
+    float global_sphere_center_x;
+    float global_sphere_center_y;
+    float global_sphere_center_z;
+    float global_sphere_radius;
+    float error_threshold;
+    uint base_virtual_page;
+    uint padding[2];
+};
+struct PageTableEntry {
+    uint pool_offset;
+    uint valid;
+    uint pad0;
+    uint pad1;
+};
+
+struct InstanceData {
+    mat4 model;
+    uint material_id;
+    uint page_slot;
+    float blend_factor;
+    uint pad;
+};
+
+struct GPUStats {
+    uint totalInstances;
+    uint visibleInstances;
+    uint totalTriangles;
+    uint visibleTriangles;
+    uint totalMeshlets;
+    uint visibleMeshlets;
+    uint heuristicTotalCount;
+    uint heuristicCutoffBucket;
+    uint heuristicRemaining;
+    uint heuristicVisibleInstances;
+};
+
+layout(set = 0, binding = 8) uniform uniform_buffer_object_block {
+    mat4 view;
+    mat4 proj;
+    mat4 cascade_view_proj[4];
+    vec4 cascade_split_depths;
+    vec3 cam_pos;
+    vec3 light_dir;
+    vec3 light_color;
+    float light_intensity;
+    float ambient_strength;
+    uint cascade_count;
+    uint debug_cascades;
+    uint reversed_z;
+    float shadow_bias_constant;
+    float shadow_bias_slope;
+    uint debug_cluster;
+} ubo;
+
+
+struct VisibleCluster {
+    uint instance_and_page;
+    uint cluster_idx;
+    float blend_factor;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer InstanceDataBuffer {
+    HierarchyInstance data[];
+} instances;
+
+layout(std430, set = 0, binding = 1) readonly buffer PageTableBuffer {
+    PageTableEntry data[];
+} page_table;
+
+layout(std430, set = 0, binding = 2) readonly buffer PagePoolBuffer {
+    uint data[];
+} page_pool;
+
+layout(std430, set = 0, binding = 3) readonly buffer VisibleClusterBuffer {
+    uint visible_cluster_count;
+    VisibleCluster visible_clusters[];
+} in_clusters;
+
+struct IndirectCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+layout(std430, set = 0, binding = 4) writeonly buffer IndirectDrawBuffer {
+    IndirectCommand commands[];
+} out_draws;
+
+layout(std430, set = 0, binding = 5) writeonly buffer DynamicInstanceBuffer {
+    InstanceData data[];
+} out_instances;
+
+layout(std430, set = 0, binding = 6) buffer StatsBuffer {
+    GPUStats stats;
+};
+
+layout(set = 0, binding = 7) uniform sampler2D hizPyramid;
+
+layout(push_constant) uniform PushConstants {
+    uint max_clusters;
+    float screen_height;
+    float error_threshold;
+} pc;
+
+float sample_hiz_depth(vec2 uv, float mip_level) {
+    ivec2 mip_size = textureSize(hizPyramid, int(mip_level));
+    ivec2 pmin = ivec2(floor(uv * vec2(mip_size)));
+    ivec2 pmax = ivec2(ceil(uv * vec2(mip_size)));
+
+    float d0 = texelFetch(hizPyramid, clamp(pmin, ivec2(0), mip_size - ivec2(1)), int(mip_level)).r;
+    float d1 = texelFetch(hizPyramid, ivec2(clamp(pmax.x, 0, mip_size.x - 1), clamp(pmin.y, 0, mip_size.y - 1)), int(mip_level)).r;
+    float d2 = texelFetch(hizPyramid, ivec2(clamp(pmin.x, 0, mip_size.x - 1), clamp(pmax.y, 0, mip_size.y - 1)), int(mip_level)).r;
+    float d3 = texelFetch(hizPyramid, clamp(pmax, ivec2(0), mip_size - ivec2(1)), int(mip_level)).r;
+
+    if (ubo.reversed_z == 1u) {
+        return min(min(d0, d1), min(d2, d3));
+    }
+    return max(max(d0, d1), max(d2, d3));
+}
+
+bool aabb_occluded(vec3 bmin, vec3 bmax) {
+    if (textureSize(hizPyramid, 0).x <= 1) return false;
+
+    vec4 corners[8] = vec4[](
+        vec4(bmin.x, bmin.y, bmin.z, 1.0), vec4(bmax.x, bmin.y, bmin.z, 1.0),
+        vec4(bmin.x, bmax.y, bmin.z, 1.0), vec4(bmax.x, bmax.y, bmin.z, 1.0),
+        vec4(bmin.x, bmin.y, bmax.z, 1.0), vec4(bmax.x, bmin.y, bmax.z, 1.0),
+        vec4(bmin.x, bmax.y, bmax.z, 1.0), vec4(bmax.x, bmax.y, bmax.z, 1.0));
+
+    mat4 vp = ubo.proj * ubo.view;
+    vec2 min_xy = vec2(1.0); vec2 max_xy = vec2(-1.0);
+    float min_z = 1.0; float max_z = 0.0;
+
+    for (int i = 0; i < 8; ++i) {
+        vec4 clip = vp * corners[i];
+        if (clip.w <= 0.0) return false; 
+        vec3 ndc = clip.xyz / clip.w;
+        min_xy = min(min_xy, ndc.xy);
+        max_xy = max(max_xy, ndc.xy);
+        min_z = min(min_z, ndc.z);
+        max_z = max(max_z, ndc.z);
+    }
+
+    vec2 uv_min = min_xy * 0.5 + 0.5; vec2 uv_max = max_xy * 0.5 + 0.5;
+    uv_min.y = 1.0 - uv_min.y; uv_max.y = 1.0 - uv_max.y;
+    vec2 temp = uv_min; uv_min = min(uv_min, uv_max); uv_max = max(temp, uv_max);
+
+    if (uv_max.x < 0.0 || uv_min.x > 1.0 || uv_max.y < 0.0 || uv_min.y > 1.0) return false;
+    uv_min = clamp(uv_min, 0.0, 1.0); uv_max = clamp(uv_max, 0.0, 1.0);
+
+    vec2 size = (uv_max - uv_min) * textureSize(hizPyramid, 0);
+    float mip = ceil(log2(max(size.x, size.y)));
+    mip = clamp(mip, 0.0, textureQueryLevels(hizPyramid) - 1.0);
+
+    float hiz_depth = sample_hiz_depth((uv_min + uv_max) * 0.5, mip);
+    return (ubo.reversed_z == 1u) ? (max_z < hiz_depth) : (min_z > hiz_depth);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.max_clusters) return;
+
+    if (idx >= in_clusters.visible_cluster_count) {
+        out_draws.commands[idx].indexCount = 0u;
+        out_draws.commands[idx].instanceCount = 0u;
+        out_draws.commands[idx].firstIndex = 0u;
+        out_draws.commands[idx].vertexOffset = 0;
+        out_draws.commands[idx].firstInstance = 0u;
+        return;
+    }
+
+    VisibleCluster cluster = in_clusters.visible_clusters[idx];
+    uint instance_id = cluster.instance_and_page >> 16;
+    uint page_slot = cluster.instance_and_page & 0x1FFFu; // 13 bits (8192 max)
+    // Validate page slot: skip if invalid (0x1FFF = reserved, 0xFFFFFFFF = uninitialized)
+    if (page_slot == 0xFFFFFFFFu || page_slot >= 8192u)
+        return;
+    uint cluster_idx = cluster.cluster_idx;
+    float blend_factor = cluster.blend_factor;
+    
+    HierarchyInstance inst = instances.data[instance_id];
+    mat4 model_matrix = inst.model_matrix;
+    uint pool_dword = (page_slot * PAGE_SIZE_BYTES) / 4u;
+    
+    uint page_cluster_count = page_pool.data[pool_dword + 2u];
+    
+    // Read cluster desc and cull data (12 dwords per cluster)
+    uint cluster_base = pool_dword + PAGE_HEADER_DWORDS + cluster_idx * 12u;
+    uint vertex_offset  = page_pool.data[cluster_base + 0u];
+    uint vertex_count   = page_pool.data[cluster_base + 1u];
+    uint triangle_offset= page_pool.data[cluster_base + 2u];
+    uint triangle_count = page_pool.data[cluster_base + 3u];
+    uint cluster_mat_id = page_pool.data[cluster_base + 4u];
+    uint base_mat = (inst.material_id == 0u) ? 1u : inst.material_id;
+    uint material_id = (cluster_mat_id != 0xFFFFFFFFu) ? (base_mat + cluster_mat_id) : base_mat;
+    
+    // Read cull data
+    vec3 sphere_center = vec3(
+        uintBitsToFloat(page_pool.data[cluster_base + 7u]),
+        uintBitsToFloat(page_pool.data[cluster_base + 8u]),
+        uintBitsToFloat(page_pool.data[cluster_base + 9u])
+    );
+    float sphere_radius = uintBitsToFloat(page_pool.data[cluster_base + 10u]);
+
+    // Transform sphere to world space using full rotation-scale matrix.
+    // Anisotropic radius: transform along each axis and take the max.
+    // This correctly handles non-uniform scaling (e.g. stretched columns).
+    mat3 rot_scale = mat3(model_matrix);
+    vec3 world_center = (model_matrix * vec4(sphere_center, 1.0)).xyz;
+    vec3 a0 = rot_scale * vec3(sphere_radius, 0.0, 0.0);
+    vec3 a1 = rot_scale * vec3(0.0, sphere_radius, 0.0);
+    vec3 a2 = rot_scale * vec3(0.0, 0.0, sphere_radius);
+    float world_radius = max(length(a0), max(length(a1), length(a2)));
+
+    // Write dynamic instance data
+    out_instances.data[idx].model = model_matrix;
+    out_instances.data[idx].material_id = material_id;
+    out_instances.data[idx].page_slot = page_slot;
+    out_instances.data[idx].blend_factor = 0.0;
+    out_instances.data[idx].pad = 0;
+
+    // Write indirect command
+    out_draws.commands[idx].indexCount = triangle_count * 3u;
+    out_draws.commands[idx].instanceCount = 1u;
+    uint index_stream_offset_bytes = page_pool.data[pool_dword + 6u];
+    uint page_index_base_elements = (page_slot * PAGE_SIZE_BYTES + index_stream_offset_bytes) / 2u;
+    out_draws.commands[idx].firstIndex = page_index_base_elements + triangle_offset * 3u;
+    out_draws.commands[idx].vertexOffset = 0; 
+    out_draws.commands[idx].firstInstance = idx;
+
+    atomicAdd(stats.visibleInstances, 1);
+    atomicAdd(stats.visibleTriangles, triangle_count);
+}

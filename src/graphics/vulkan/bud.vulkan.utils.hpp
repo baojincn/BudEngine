@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vulkan/vulkan.h>
 #include <stdexcept>
@@ -33,10 +33,16 @@ namespace bud::graphics::vulkan {
 		switch (format) {
 		case TextureFormat::Undefined:         return VK_FORMAT_UNDEFINED;
 		case TextureFormat::R8_UNORM:          return VK_FORMAT_R8_UNORM;
-		case TextureFormat::RGBA8_SRGB:       return VK_FORMAT_R8G8B8A8_SRGB;
+		case TextureFormat::RGBA8_UNORM:       return VK_FORMAT_R8G8B8A8_UNORM;
+		case TextureFormat::RGBA8_SRGB:        return VK_FORMAT_R8G8B8A8_SRGB;
 		case TextureFormat::BGRA8_UNORM:       return VK_FORMAT_B8G8R8A8_UNORM;
 		case TextureFormat::BGRA8_SRGB:        return VK_FORMAT_B8G8R8A8_SRGB;
+		case TextureFormat::BC7_UNORM:         return VK_FORMAT_BC7_UNORM_BLOCK;
+		case TextureFormat::BC5_UNORM:         return VK_FORMAT_BC5_UNORM_BLOCK;
+		case TextureFormat::RGBA16_FLOAT:      return VK_FORMAT_R16G16B16A16_SFLOAT;
 		case TextureFormat::R32G32B32_FLOAT:   return VK_FORMAT_R32G32B32_SFLOAT;
+		case TextureFormat::R32G32_UINT:       return VK_FORMAT_R32G32_UINT;
+		case TextureFormat::RGBA32_UINT:      return VK_FORMAT_R32G32B32A32_UINT;
 		case TextureFormat::D32_FLOAT:         return VK_FORMAT_D32_SFLOAT;
 		case TextureFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
 		case TextureFormat::R32_FLOAT:         return VK_FORMAT_R32_SFLOAT;
@@ -77,6 +83,24 @@ namespace bud::graphics::vulkan {
 			usage |= VK_IMAGE_USAGE_STORAGE_BIT;
 		}
 
+		return usage;
+	}
+
+	constexpr VkBufferUsageFlags get_vk_buffer_usage(bud::graphics::ResourceState usage_state) {
+		VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT; // Allow both src & dst transfers by default
+		if (usage_state == bud::graphics::ResourceState::VertexBuffer) {
+			usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		} else if (usage_state == bud::graphics::ResourceState::IndexBuffer) {
+			usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		} else if (usage_state == bud::graphics::ResourceState::IndirectArgument) {
+			usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		} else if (usage_state == bud::graphics::ResourceState::UnorderedAccess) {
+			usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+		} else if (usage_state == bud::graphics::ResourceState::ShaderResource) {
+			usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		} else if (usage_state == bud::graphics::ResourceState::Common || usage_state == bud::graphics::ResourceState::TransferDst) {
+			usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+		}
 		return usage;
 	}
 

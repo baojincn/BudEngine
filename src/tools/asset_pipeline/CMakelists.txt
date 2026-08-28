@@ -1,0 +1,48 @@
+cmake_minimum_required(VERSION 3.30)
+
+project(bud_asset_pipeline LANGUAGES CXX)
+
+find_package(metis CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+find_package(Stb REQUIRED)
+
+add_library(bud_asset_pipeline STATIC
+    core/support.cpp
+    core/asset_format.cpp
+    core/serializer.cpp
+    core/raw_mesh.cpp
+    core/raw_texture.cpp
+    core/internal_mesh.cpp
+    importers/obj_importer.cpp
+    importers/gltf_importer.cpp
+    importers/fbx_importer.cpp
+    importers/texture_importer.cpp
+    builders/virtual_geometry_builder.cpp
+    builders/material_builder.cpp
+    builders/material_asset_builder.cpp
+    builders/texture_builder.cpp
+    builders/mesh_builder.cpp
+    builders/cascade_builder.cpp
+)
+
+target_link_libraries(bud_asset_pipeline
+    PUBLIC
+        meshoptimizer::meshoptimizer
+        assimp::assimp
+        metis
+        nlohmann_json::nlohmann_json
+)
+
+target_include_directories(bud_asset_pipeline
+    PUBLIC
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${Stb_INCLUDE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(bud_asset_pipeline PRIVATE /W3)
+else()
+    target_compile_options(bud_asset_pipeline PRIVATE -Wall -Wextra)
+endif()

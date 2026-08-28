@@ -1,0 +1,307 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_shader_atomic_float : enable
+
+#include "common.glsl"
+#extension GL_EXT_shader_16bit_storage : enable
+#extension GL_EXT_shader_8bit_storage : enable
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// ---------------------------------------------------------------------------
+// Structs — must match C++ HierarchyInstance / VGClusterGroup exactly
+// ---------------------------------------------------------------------------
+
+struct VGClusterGroup {
+    uint page_index_start;
+    uint page_index_num;
+    uint children_start;
+    uint children_num;
+    float lod_bounds_center_x;
+    float lod_bounds_center_y;
+    float lod_bounds_center_z;
+    float lod_bounds_radius;
+    float lod_error;
+};
+
+struct HierarchyInstance {
+    mat4 model_matrix;
+    uint mesh_id;
+    uint material_id;
+    uint root_group_index;
+    uint flags;
+    float global_sphere_center_x;
+    float global_sphere_center_y;
+    float global_sphere_center_z;
+    float global_sphere_radius;
+    float error_threshold;
+    uint base_virtual_page;
+    uint padding0;
+    uint padding1;
+};
+
+struct PageTableEntry {
+    uint pool_offset;
+    uint valid;
+    uint pad0;
+    uint pad1;
+};
+
+// ---------------------------------------------------------------------------
+// Descriptor bindings — must match build_hierarchy_traversal_compute_layout()
+// binding 0: UBO  (CameraBuffer)
+// binding 1: SSBO (PageTableBuffer)
+// binding 2: SSBO (InstanceBuffer)
+// binding 3: SSBO (GroupBuffer)
+// binding 4: SSBO (PageRequestBuffer)
+// binding 5: SSBO (VisiblePageBuffer)
+// ---------------------------------------------------------------------------
+
+layout(std140, set = 0, binding = 0) uniform CameraBuffer {
+    // Matches C++ UniformBufferObject exactly.
+    mat4 view;
+    mat4 proj;
+    mat4 cascade_view_proj[4];
+    vec4 cascade_split_depths;
+    vec3 cam_pos;
+    vec3 light_dir;
+    vec3 light_color;
+    float light_intensity;
+    float ambient_strength;
+    uint cascade_count;
+    uint debug_cascades;
+    uint reversed_z;
+    float shadow_bias_constant;
+    float shadow_bias_slope;
+    uint debug_cluster;
+};
+
+// Compute view-projection matrix in the shader since it's not in the UBO.
+mat4 get_view_proj() { return proj * view; }
+
+layout(std430, set = 0, binding = 1) readonly buffer PageTableBuffer {
+    PageTableEntry page_table[];
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer InstanceBuffer {
+    HierarchyInstance instances[];
+};
+
+layout(std430, set = 0, binding = 3) readonly buffer GroupBuffer {
+    VGClusterGroup groups[];
+};
+
+layout(std430, set = 0, binding = 4) buffer PageRequestBuffer {
+    uint request_count;
+    uint overflow_count;
+    uint error_flags; // bit 0: stack overflow, bit 1: iteration limit exceeded
+    uint requests[];
+};
+
+layout(std430, set = 0, binding = 5) buffer VisiblePageBuffer {
+    uint visible_page_count;
+    uint visible_pages[]; // packed: (instance_id << 16) | (page_slot & 0xFFFF)
+};
+
+// ---------------------------------------------------------------------------
+// Push constants
+// ---------------------------------------------------------------------------
+
+layout(push_constant) uniform Constants {
+    uint instance_count;
+    uint enable_frustum_cull;
+    uint enable_lod;
+    float screen_height; // viewport height in pixels, for focal_pixels calculation
+    uint max_requests;   // max page request entries before overflow
+} push_constants;
+
+// ---------------------------------------------------------------------------
+// Frustum cull using planes extracted from the view-projection matrix.
+// This is done in the shader because the C++ UniformBufferObject does not
+// contain pre-computed frustum planes.
+// ---------------------------------------------------------------------------
+
+// Compute frustum planes from the view-projection matrix.
+// After transpose(), clip_matrix[i] = row i of the original column-major matrix.
+// For Vulkan clip space (z in [0,1]):
+//   near = row3        (z=0)
+//   far  = row3 - row2 (z=1)
+// With reversed-z, near and far are swapped.
+void compute_frustum_planes(out vec4 planes[6]) {
+    mat4 vp = proj * view;
+    mat4 m = transpose(vp);
+    planes[0] = m[3] + m[0];
+    planes[1] = m[3] - m[0];
+    planes[2] = m[3] + m[1];
+    planes[3] = m[3] - m[1];
+    if (reversed_z == 1u) {
+        planes[4] = m[3] - m[2]; // near (z=1)
+        planes[5] = m[2];         // far  (z=0)
+    } else {
+        planes[4] = m[2];         // near (z=0)
+        planes[5] = m[3] - m[2]; // far  (z=1)
+    }
+}
+
+bool frustum_cull(vec3 center, float radius) {
+    if (push_constants.enable_frustum_cull == 0)
+        return true;
+
+    vec4 planes[6];
+    compute_frustum_planes(planes);
+
+    for (int i = 0; i < 6; ++i) {
+        float plane_length = length(planes[i].xyz);
+        if (plane_length > 0.0) {
+            planes[i] /= plane_length;
+        }
+        if (dot(planes[i].xyz, center) + planes[i].w <= -radius)
+            return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Simple projected-error LOD metric
+// ---------------------------------------------------------------------------
+
+float calculate_lod_error(vec3 center, float radius, float max_error) {
+    float d = max(length(cam_pos - center) - radius, 0.01);
+    // Use focal length in pixels for consistent screen-space error metric.
+    // proj[1][1] = cot(fov/2); focal_pixels = abs(proj[1][1] * viewport_height * 0.5).
+    float focal_pixels = abs(proj[1][1] * push_constants.screen_height * 0.5);
+    return (max_error * focal_pixels) / d;
+}
+
+// ---------------------------------------------------------------------------
+// Emit one virtual page: if resident output it, else request a load
+// ---------------------------------------------------------------------------
+
+void emit_page(uint instance_id, uint virtual_page_index, float blend_factor) {
+    PageTableEntry entry = page_table[virtual_page_index];
+    if (entry.valid != 0) {
+        uint page_slot = entry.pool_offset;
+        // Encode blend_factor (0.0-1.0) as 3 bits in bits 13-15 of the pack.
+        // page_slot is at most ~8000 (13 bits), leaving 3 spare bits.
+        uint blend_bits = uint(clamp(blend_factor, 0.0, 1.0) * 7.0);
+        uint pack = (instance_id << 16) | ((blend_bits & 0x7u) << 13) | (page_slot & 0x1FFFu);
+        uint idx = atomicAdd(visible_page_count, 1);
+        visible_pages[idx] = pack;
+    } else {
+        uint idx = atomicAdd(request_count, 1);
+        const uint kMaxRequests = (push_constants.max_requests > 0) ? push_constants.max_requests : 4096u;
+        if (idx < kMaxRequests)
+            requests[idx] = virtual_page_index;
+        else
+            atomicAdd(overflow_count, 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BFS/DFS hierarchy traversal with a fixed-size local stack
+// ---------------------------------------------------------------------------
+
+void traverse_hierarchy(uint instance_id) {
+    HierarchyInstance inst = instances[instance_id];
+
+    // global_sphere_center/radius are already in world space (computed from
+    // world_aabbs on CPU). Do NOT transform by model_matrix again.
+    vec3 global_center = vec3(inst.global_sphere_center_x,
+                               inst.global_sphere_center_y,
+                               inst.global_sphere_center_z);
+    float global_radius = inst.global_sphere_radius;
+
+    if (!frustum_cull(global_center, global_radius))
+        return;
+
+    uint root_group = inst.root_group_index;
+    if (root_group == 0xFFFFFFFF)
+        return;
+
+    // Pre-compute the rotation-scale matrix for anisotropic radius scaling.
+    // This is used for transforming cluster-local bounding spheres to world space.
+    mat3 rot_scale = mat3(inst.model_matrix);
+
+    uint stack[256];
+    uint stack_ptr = 0;
+    stack[stack_ptr++] = root_group;
+
+    uint iterations = 0;
+    while (stack_ptr > 0 && iterations < 65536) {
+        uint group_idx = stack[--stack_ptr];
+        VGClusterGroup group = groups[group_idx];
+
+        // Cluster group bounds are in local space; transform to world space.
+        vec3 center = vec3(group.lod_bounds_center_x,
+                           group.lod_bounds_center_y,
+                           group.lod_bounds_center_z);
+        vec3 world_center = (inst.model_matrix * vec4(center, 1.0)).xyz;
+        // Anisotropic radius: transform radius along each axis and take the max.
+        // This correctly handles non-uniform scaling (e.g. stretched columns).
+        vec3 a0 = rot_scale * vec3(group.lod_bounds_radius, 0.0, 0.0);
+        vec3 a1 = rot_scale * vec3(0.0, group.lod_bounds_radius, 0.0);
+        vec3 a2 = rot_scale * vec3(0.0, 0.0, group.lod_bounds_radius);
+        float world_radius = max(length(a0), max(length(a1), length(a2)));
+
+        if (!frustum_cull(world_center, world_radius)) {
+            iterations++;
+            continue;
+        }
+
+        float err = calculate_lod_error(world_center, world_radius, group.lod_error);
+
+        bool is_leaf = (group.children_num == 0);
+        bool should_render = is_leaf ||
+            (err <= inst.error_threshold && push_constants.enable_lod != 0);
+
+// Transition zone: when pixel error is near the threshold, render
+        // BOTH parent (low LOD) and children (high LOD) with a blend factor
+        // for smooth dithering transition.
+        float transition_start = inst.error_threshold * 0.7f;
+        float transition_end   = inst.error_threshold * 1.3f;
+        bool in_transition = !is_leaf && err > transition_start && err < transition_end;
+
+        if (in_transition) {
+            float blend = (err - transition_start) / (transition_end - transition_start);
+            blend = clamp(blend, 0.0, 1.0);
+            for (uint i = 0; i < group.page_index_num; ++i)
+                emit_page(instance_id, group.page_index_start + i, blend);
+            for (uint i = 0; i < group.children_num; ++i) {
+                if (stack_ptr < 256)
+                    stack[stack_ptr++] = group.children_start + i;
+                else
+                    atomicOr(error_flags, 1u);
+            }
+        } else if (should_render) {
+            // Leaf nodes (LOD0) get blend_factor = 0.0 (full high LOD).
+            // Non-leaf nodes (LOD1+) get blend_factor = 1.0 (full low LOD).
+            float blend = is_leaf ? 0.0 : 1.0;
+            for (uint i = 0; i < group.page_index_num; ++i)
+                emit_page(instance_id, group.page_index_start + i, blend);
+        } else {
+            for (uint i = 0; i < group.children_num; ++i) {
+                if (stack_ptr < 256)
+                    stack[stack_ptr++] = group.children_start + i;
+                else
+                    atomicOr(error_flags, 1u);
+            }
+        }
+
+        iterations++;
+    }
+
+    // Report iteration limit exceeded
+    if (iterations >= 65536u)
+        atomicOr(error_flags, 2u); // bit 1: iteration limit exceeded
+}
+
+void main() {
+    uint g_id = gl_GlobalInvocationID.x;
+    if (g_id >= push_constants.instance_count)
+        return;
+
+    traverse_hierarchy(g_id);
+}

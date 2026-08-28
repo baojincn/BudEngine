@@ -1,9 +1,10 @@
-﻿#include <vulkan/vulkan.h>
+#include <vulkan/vulkan.h>
 #include <unordered_map>
 #include <vector>
 #include <stdexcept>
 
 #include "src/graphics/vulkan/bud.vulkan.pipeline.hpp"
+#include "src/core/bud.asset.types.hpp"
 #include "src/graphics/bud.graphics.types.hpp"
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.logger.hpp"
@@ -48,10 +49,20 @@ namespace bud::graphics::vulkan {
 
     VkPipeline VulkanPipelineCache::create_pipeline_internal(const PipelineKey& key, VkPipelineLayout layout, bool is_depth_only) {
         
-        VkPipelineShaderStageCreateInfo shaderStages[] = {
-            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, key.vert_shader, "main", nullptr },
-            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, key.frag_shader, "main", nullptr }
-        };
+        VkPipelineShaderStageCreateInfo shaderStages[4] = {};
+        uint32_t stageCount = 0;
+
+        if (key.task_shader) {
+            shaderStages[stageCount++] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_TASK_BIT_EXT, key.task_shader, "main", nullptr };
+        }
+        if (key.mesh_shader) {
+            shaderStages[stageCount++] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_MESH_BIT_EXT, key.mesh_shader, "main", nullptr };
+        } else if (key.vert_shader) {
+            shaderStages[stageCount++] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, key.vert_shader, "main", nullptr };
+        }
+        if (key.frag_shader) {
+            shaderStages[stageCount++] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, key.frag_shader, "main", nullptr };
+        }
 
         // Vertex Input (Hardcoded for Sponza sample based on MeshData::Vertex)
         // in Vulkan 1.3 Dynamic Rendering, we often use generic layouts.
@@ -64,33 +75,32 @@ namespace bud::graphics::vulkan {
 
         switch (key.vertex_layout) {
         case VertexLayoutType::Default:
-            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
+            bindingDescription.stride = sizeof(bud::asset::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)},
-                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, color)},
-                {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, normal)},
-                {3, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::io::MeshData::Vertex, texture_uv)},
-                {4, 0, VK_FORMAT_R32_SFLOAT,       offsetof(bud::io::MeshData::Vertex, texture_index)}
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, position)},
+                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, normal)},
+                {2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::asset::Vertex, uv)},
+                {3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(bud::asset::Vertex, tangent)}
             };
             break;
         case VertexLayoutType::PositionOnly:
-            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
+            bindingDescription.stride = sizeof(bud::asset::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)}
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, position)}
             };
             break;
         case VertexLayoutType::PositionUV:
-            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
+            bindingDescription.stride = sizeof(bud::asset::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)},
-                {3, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::io::MeshData::Vertex, texture_uv)}
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, position)},
+                {2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::asset::Vertex, uv)}
             };
             break;
         case VertexLayoutType::PositionNormal:
-            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
+            bindingDescription.stride = sizeof(bud::asset::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)},
-                {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, normal)}
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, position)},
+                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, normal)}
             };
             break;
         case VertexLayoutType::NoVertexInput:
@@ -129,7 +139,7 @@ namespace bud::graphics::vulkan {
         rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
         rasterizer.depthClampEnable = VK_FALSE;
         rasterizer.rasterizerDiscardEnable = VK_FALSE;
-        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer.polygonMode = key.wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
         rasterizer.lineWidth = 1.0f;
         rasterizer.cullMode = key.cull_mode;
         rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
@@ -209,10 +219,16 @@ namespace bud::graphics::vulkan {
         VkGraphicsPipelineCreateInfo pipelineInfo{};
         pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
         pipelineInfo.pNext = &renderingInfo;
-        pipelineInfo.stageCount = 2; 
+        pipelineInfo.stageCount = stageCount; 
         pipelineInfo.pStages = shaderStages;
-        pipelineInfo.pVertexInputState = &vertexInputInfo;
-        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        if (key.mesh_shader) {
+            pipelineInfo.flags = 0;
+            pipelineInfo.pVertexInputState = nullptr;
+            pipelineInfo.pInputAssemblyState = nullptr;
+        } else {
+            pipelineInfo.pVertexInputState = &vertexInputInfo;
+            pipelineInfo.pInputAssemblyState = &inputAssembly;
+        }
         pipelineInfo.pViewportState = &viewportState;
         pipelineInfo.pRasterizationState = &rasterizer;
         pipelineInfo.pMultisampleState = &multisampling;
@@ -233,8 +249,10 @@ namespace bud::graphics::vulkan {
         VkPipeline graphicsPipeline = VK_NULL_HANDLE;
         // Diagnostic: record that we are about to create a graphics pipeline
         {
-            std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines: vert_module={} frag_module={} color_fmt={} depth_fmt={}",
-                (void*)shaderStages[0].module, (void*)shaderStages[1].module, (int)colorFormat, (int)depthFormat);
+            std::string msg = std::format("[Vulkan][Worker] vkCreateGraphicsPipelines: {}={} frag_module={} color_fmt={} depth_fmt={}",
+                key.mesh_shader ? "mesh" : "vert",
+                (void*)(key.mesh_shader ? key.mesh_shader : key.vert_shader),
+                (void*)key.frag_shader, (int)colorFormat, (int)depthFormat);
             bud::print("{}", msg);
         }
 

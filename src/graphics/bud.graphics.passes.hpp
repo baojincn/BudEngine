@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vector>
 #include <mutex>
@@ -28,7 +28,7 @@ namespace bud::graphics {
 
 	class RenderPass : public RenderPassBase {
 	protected:
-		void* pipeline = nullptr;
+		PipelineHandle pipeline;
 
 		// Helper for asynchronous multi-shader loading
 		void load_shaders_async(bud::io::AssetManager* asset_manager, 
@@ -38,56 +38,24 @@ namespace bud::graphics {
 	public:
         virtual ~RenderPass() = default;
         bool is_ready() const {
-            if (pipeline != nullptr)
-                return true;
-            return false;
+            return pipeline.is_valid();
         }
 		void shutdown(RHI* rhi) override;
 	};
 
-	class HiZCullingPass : public RenderPass {
+	class InstanceCullingPass : public RenderPass {
 	public:
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		RGHandle add_to_graph(RenderGraph& rg, RGHandle instance_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, RGHandle hiz_pyramid, const SceneView& view, size_t instance_count);
 	};
 
-	class MeshletFrustumCullingPass : public RenderPass {
-	public:
-		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, const GPUScene& gpu_scene);
-	};
-
-	class HeuristicOccluderSelectionPass : public RenderPass {
-		void* histogram_pipeline = nullptr;
-		void* prefix_sum_pipeline = nullptr;
-		bud::graphics::BufferHandle config_ubo;
-		bud::graphics::BufferHandle histogram_buffer;
-		uint32_t frame_counter = 0;
-	public:
-		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		void shutdown(RHI* rhi) override;
-		RGHandle add_to_graph(RenderGraph& rg, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, float occluder_fraction);
-	};
-
-	class MeshletHiZCullingPass : public RenderPass {
-	public:
-		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, RGHandle instance_buffer, RGHandle meshlet_visibility_in, RGHandle meshlet_visibility_out, RGHandle stats_buffer, RGHandle hiz_pyramid, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, const GPUScene& gpu_scene);
-	};
-
-	class MeshletIndirectEmissionPass : public RenderPass {
-	public:
-		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, RGHandle instance_buffer, RGHandle meshlet_visibility_buffer, RGHandle indirect_draw_buffer, RGHandle stats_buffer, const SceneView& view, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, const std::vector<SortItem>& sort_list, size_t visible_count, const GPUScene& gpu_scene);
-	};
-
-	class HiZMipPass : public RenderPass {
+	class PyramidMipPass : public RenderPass {
 	public:
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		RGHandle add_to_graph(RenderGraph& rg, RGHandle depth_buffer, const RenderConfig& config);
 	};
 
-	class HiZDebugPass : public RenderPass {
+	class PyramidMipDebugPass : public RenderPass {
 	public:
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		void add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle hiz_pyramid, uint32_t mip_level);
@@ -112,13 +80,46 @@ namespace bud::graphics {
     };
 
 
+	class HierarchyTraversalPass : public RenderPass {
+		PipelineHandle hierarchy_traversal_pipeline;
+
+	public:
+		~HierarchyTraversalPass();
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, size_t instance_count, const GPUScene& gpu_scene, uint32_t current_frame);
+	};
+
+	class PageEmitPass : public RenderPass {
+		PipelineHandle page_emit_pipeline;
+
+	public:
+		~PageEmitPass();
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		void add_to_graph(RenderGraph& rg, const RenderConfig& config, const GPUScene& gpu_scene, uint32_t current_frame);
+	};
+
+	class ClusterCullPass : public RenderPass {
+		PipelineHandle cluster_cull_pipeline;
+		PipelineHandle clear_stats_pipeline;
+
+	public:
+		~ClusterCullPass();
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		void add_to_graph(RenderGraph& rg, RGHandle hiz_pyramid, RGHandle rg_draw, const SceneView& view, const RenderConfig& config, const GPUScene& gpu_scene, uint32_t current_frame);
+	};
+
 	class CSMShadowPass : public RenderPass {
-		void* csm_cull_pipeline = nullptr;
-		Texture* static_cache_texture = nullptr;
+		PipelineHandle csm_cull_pipeline;
+		TextureHandle static_cache_texture;
 		bud::math::vec3 last_light_dir = bud::math::vec3(0.0f);
 		bud::math::mat4 last_view_proj = bud::math::mat4(1.0f);
+		bud::math::mat4 last_cascade_view_proj[MAX_CASCADES]{};
 		RenderConfig last_config{};
 		bool has_last_view_proj = false;
+		bool has_last_cascade_proj = false;
 		bool has_last_config = false;
 		bool cache_initialized = false;
 		RHI* stored_rhi = nullptr;
@@ -132,13 +133,21 @@ namespace bud::graphics {
 			bud::math::vec4 light_dir;
 		};
 
+		bool is_cache_valid() const {
+			return cache_initialized && static_cache_texture.is_valid();
+		}
+
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances, const GPUScene& gpu_scene, bud::graphics::BufferHandle mega_vertex_buffer, bud::graphics::BufferHandle mega_index_buffer, bud::graphics::RGHandle rg_instance_data, size_t instance_count, size_t split_index = 0);
+		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances, const GPUScene& gpu_scene, bud::graphics::BufferHandle mega_vertex_buffer, bud::graphics::BufferHandle mega_index_buffer, bud::graphics::RGHandle rg_instance_data, size_t instance_count, size_t split_index = 0, bud::graphics::RGHandle rg_indirect_draw = {}, bud::graphics::RGHandle rg_static_indirect_draw = {});
 	};
 
 	
 	class MainPass : public RenderPass {
 	public:
+		PipelineHandle pipeline_wireframe;
+		bool is_ready() const { return pipeline.is_valid() && pipeline_wireframe.is_valid(); }
+		void shutdown(RHI* rhi) override;
+
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		void add_to_graph(RenderGraph& rg, RGHandle shadow_map, RGHandle backbuffer, RGHandle depth_buffer,
 			const RenderScene& render_scene,
@@ -195,9 +204,7 @@ namespace bud::graphics {
 		std::vector<UIDrawListSnapshot> lists;
 
         bool has_data() const {
-            if (!lists.empty())
-                return true;
-            return false;
+            return !lists.empty();
         }
 
 		uint32_t total_vtx_count() const {
@@ -216,16 +223,16 @@ namespace bud::graphics {
 	};
 
 	class UIPass : public RenderPass {
-		Texture* font_texture = nullptr;
-
-		bud::graphics::BufferHandle vertex_buffer;
-		bud::graphics::BufferHandle index_buffer;
-		uint32_t current_vertex_buffer_size = 0;
-		uint32_t current_index_buffer_size = 0;
+		TextureHandle font_texture;
 
 		uint32_t font_bindless_index = 0;
 		std::mutex draw_data_mutex;
 		UIDrawDataSnapshot cached_draw_data;
+
+		std::vector<BufferHandle> vertex_buffers;
+		std::vector<BufferHandle> index_buffers;
+		std::vector<uint32_t> current_vertex_buffer_sizes;
+		std::vector<uint32_t> current_index_buffer_sizes;
 
 	public:
 		~UIPass();
@@ -236,8 +243,8 @@ namespace bud::graphics {
 	};
 
 	class AmbientOcclusionPass : public RenderPass {
-		void* ssao_pipeline = nullptr;
-		void* gtao_pipeline = nullptr;
+		PipelineHandle ssao_pipeline;
+		PipelineHandle gtao_pipeline;
 
 	public:
 		~AmbientOcclusionPass() = default;
@@ -255,9 +262,8 @@ namespace bud::graphics {
 	};
 
 	class AOTemporalPass : public RenderPass {
-		// Ping-pong history textures so the pass never reads and writes the
-		// same image within one dispatch.
-		Texture* history_textures[2] = { nullptr, nullptr };
+		// Ping-pong history textures
+		TextureHandle history_textures[2];
 		uint32_t history_read_index = 0;
 		bool has_valid_history = false;
 
@@ -274,5 +280,57 @@ namespace bud::graphics {
 		void shutdown(RHI* rhi) override;
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		RGHandle add_to_graph(RenderGraph& rg, RGHandle raw_ao, RGHandle depth_buffer, const SceneView& view, const RenderConfig& config);
+	};
+
+	class VisibilityPass : public RenderPass {
+		PipelineHandle visibility_pipeline;
+		PipelineHandle visibility_pipeline_wireframe;
+		PipelineHandle visibility_indirect_pipeline;
+		PipelineHandle visibility_indirect_pipeline_wireframe;
+		uint64_t visibility_set_layout = 0;
+		uint64_t visibility_descriptor_set = 0;
+
+	public:
+		~VisibilityPass() = default;
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle depth_buffer,
+			const SceneView& view,
+			const RenderConfig& config,
+			RGHandle rg_visible_pages,
+			RGHandle rg_hiz_pyramid,
+			const GPUScene& gpu_scene,
+			RGHandle* out_depth = nullptr);
+		RGHandle add_indirect_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle depth_buffer,
+			const SceneView& view,
+			const RenderConfig& config,
+			const RenderScene& render_scene,
+			const std::vector<RenderMesh>& meshes,
+			const std::vector<SortItem>& sort_list,
+			size_t draw_count,
+			RGHandle rg_draw,
+			RGHandle rg_instance_data,
+			const GPUScene& gpu_scene,
+			BufferHandle mega_vertex_buffer,
+			BufferHandle mega_index_buffer,
+			size_t split_index,
+			RGHandle* out_depth = nullptr);
+	};
+
+	class ResolvePass : public RenderPass {
+		PipelineHandle resolve_pipeline;
+		uint64_t resolve_set_layout = 0;
+		uint64_t resolve_descriptor_set = 0;
+
+	public:
+		~ResolvePass() = default;
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle visibility_buffer,
+			const SceneView& view,
+			const RenderConfig& config,
+			const GPUScene& gpu_scene,
+			RGHandle shadow_map = {},
+			RGHandle ao_map = {});
 	};
 }

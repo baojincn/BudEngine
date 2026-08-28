@@ -55,17 +55,12 @@ namespace bud::scene {
     }
 
     bud::math::quaternion Camera::get_rotation() const {
-        // Build quaternion from yaw (Y-axis) and pitch (X-axis), no roll
         bud::math::quaternion q_yaw   = glm::angleAxis(bud::math::radians(yaw),   bud::math::vec3(0.0f, 1.0f, 0.0f));
         bud::math::quaternion q_pitch = glm::angleAxis(bud::math::radians(pitch), bud::math::vec3(1.0f, 0.0f, 0.0f));
         return glm::normalize(q_yaw * q_pitch);
     }
 
     void Camera::set_rotation(const bud::math::quaternion& rot) {
-        // Rotate the camera-space forward (0,0,-1) by the quaternion to get the
-        // world-space forward vector, then invert the same formula used in
-        // update_camera_vectors:
-        //   f = (cos(yaw)*cos(pitch), sin(pitch), sin(yaw)*cos(pitch))
         bud::math::vec3 f = glm::normalize(rot * bud::math::vec3(0.0f, 0.0f, -1.0f));
         pitch = bud::math::degrees(std::asin(std::clamp(f.y, -1.0f, 1.0f)));
         yaw   = bud::math::degrees(std::atan2(f.z, f.x));

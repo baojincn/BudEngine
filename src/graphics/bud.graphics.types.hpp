@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstdint>
 #include <vector>
@@ -14,6 +14,20 @@ namespace math = bud::math;
 
 
 namespace bud::graphics {
+
+	// Backend-agnostic descriptor type constants (matching VkDescriptorType)
+	inline constexpr uint32_t DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER = 1;
+	inline constexpr uint32_t DESCRIPTOR_TYPE_STORAGE_IMAGE = 3;
+	inline constexpr uint32_t DESCRIPTOR_TYPE_UNIFORM_BUFFER = 6;
+	inline constexpr uint32_t DESCRIPTOR_TYPE_STORAGE_BUFFER = 7;
+
+	// Backend-agnostic shader stage constants (matching VkShaderStageFlagBits for EXT mesh shader)
+	inline constexpr uint32_t SHADER_STAGE_TASK_BIT = 0x00000040;  // VK_SHADER_STAGE_TASK_BIT_EXT
+	inline constexpr uint32_t SHADER_STAGE_MESH_BIT = 0x00000080;  // VK_SHADER_STAGE_MESH_BIT_EXT
+	inline constexpr uint32_t SHADER_STAGE_VERTEX_BIT = 0x00000001;
+	inline constexpr uint32_t SHADER_STAGE_FRAGMENT_BIT = 0x00000010;
+	inline constexpr uint32_t SHADER_STAGE_COMPUTE_BIT = 0x00000020;
+
 	constexpr uint32_t ALL_MIPS = 0xFFFFFFFF;
 
 	// Screen-space-error LOD selection for page-backed meshes (Nanite-style
@@ -26,10 +40,16 @@ namespace bud::graphics {
 		float error_lod1, float error_lod2, float threshold_px) {
 		(void)radius;
 		float dist = std::max(distance, 1e-3f);
+		// Vulkan's clip-space Y is flipped, so proj[1][1] (and thus focal_pixels
+		// = proj[1][1] * viewport_height * 0.5) is NEGATIVE. Using a negative
+		// focal would make every projected error negative, so e <= threshold is
+		// always true and the coarsest LOD is always selected (broken, stretched
+		// meshes). Use the absolute focal length.
+		const float f = std::abs(focal_pixels);
 		// Prefer LOD2 while its projected error is acceptable.
-		float e2 = error_lod2 * focal_pixels / dist;
+		float e2 = error_lod2 * f / dist;
 		if (e2 <= threshold_px) return 2;
-		float e1 = error_lod1 * focal_pixels / dist;
+		float e1 = error_lod1 * f / dist;
 		if (e1 <= threshold_px) return 1;
 		return 0;
 	}
@@ -79,14 +99,33 @@ namespace bud::graphics {
 	enum class TextureFormat {
 		Undefined,
 		R8_UNORM,
+		RGBA8_UNORM,
 		RGBA8_SRGB,
 		BGRA8_UNORM,
 		BGRA8_SRGB,
+		BC7_UNORM,
+		BC5_UNORM,
+		RGBA16_FLOAT,
 		R32G32B32_FLOAT,
+		R32G32_UINT,
+		RGBA32_UINT,
 		D32_FLOAT,
 		D24_UNORM_S8_UINT,
 		R32_FLOAT,
 	};
+
+	struct GPUMaterialData {
+		glm::vec4 base_color_factor{ 1.0f, 1.0f, 1.0f, 1.0f }; // 16 bytes
+		uint32_t albedo_texture_id = 0;                         // 4 bytes (Bindless slot)
+		uint32_t normal_texture_id = 0;                         // 4 bytes (Bindless slot)
+		uint32_t metallic_roughness_id = 0;                     // 4 bytes (Bindless slot)
+		uint32_t emissive_texture_id = 0;                       // 4 bytes (Bindless slot)
+		float metallic_factor = 0.0f;                           // 4 bytes
+		float roughness_factor = 0.5f;                          // 4 bytes
+		float alpha_cutoff = 0.5f;                              // 4 bytes
+		uint32_t alpha_mode = 0;                                // 4 bytes (0=Opaque, 1=Mask, 2=Blend)
+	};
+	static_assert(sizeof(GPUMaterialData) == 48, "GPUMaterialData must be 48 bytes (std430 aligned)");
 
 	enum class TextureType {
 		Texture2D,
@@ -133,6 +172,13 @@ namespace bud::graphics {
 		ResourceState initial_state = ResourceState::Undefined;
 	};
 
+	struct BufferDesc {
+		uint64_t size = 0;
+		ResourceState usage = ResourceState::Common;
+		MemoryUsage memory_usage = MemoryUsage::GpuOnly;
+		std::string name;
+	};
+
 	struct EngineConfig {
 		std::string name = "Bud Engine";
 		int width = 1920;
@@ -143,6 +189,10 @@ namespace bud::graphics {
 		bool vsync = false;
 		bool is_puppet_mode = false;
 		bool is_headless = false;
+
+		// Standard World Spatial & Physical Units (1.0f == 1.0 cm)
+		float world_unit_scale_cm = bud::core::units::cm;
+		float default_gravity = -bud::core::units::gravity; // -980.665 cm/s^2
 	};
 
 	enum class AOMode : uint32_t {
@@ -170,11 +220,12 @@ namespace bud::graphics {
 		bool debug_cascades = false;
 		bool cache_shadows = false; // Disabled: feature has rendering bugs, enable when fixed
 
-		bool enable_gpu_driven = true;
-		bool enable_meshlets = true;
+		bool enable_virtual_geometry = true;
+		bool enable_mesh_shader = true;
 		bool debug_hiz = false;
 		uint32_t debug_hiz_mip = 0;
 		bool enable_cluster_visualization = false;
+		bool enable_wireframe = false;
 
 		// CPU-driven page LOD selection by screen-space error (Nanite-style
 		// single threshold): a LOD level L is used while its accumulated
@@ -262,9 +313,19 @@ namespace bud::graphics {
 		ImGui         // Special ImGui layout (0,1,2)
 	};
 
+	struct DescriptorBinding {
+		uint32_t binding;
+		uint32_t descriptor_type; // VkDescriptorType cast to uint32_t
+		uint32_t count = 1;
+		uint32_t stage_flags = 0; // VkShaderStageFlags cast to uint32_t
+		uint32_t binding_flags = 0; // VkDescriptorBindingFlags cast to uint32_t
+	};
+
 	struct GraphicsPipelineDesc {
 		ShaderStage vs;
 		ShaderStage fs;
+		ShaderStage ts; // Task shader (mesh shader pipeline)
+		ShaderStage ms; // Mesh shader (mesh shader pipeline)
 		bool depth_test = true;
 		bool depth_write = true;
 		CompareOp depth_compare_op = CompareOp::Less;
@@ -274,6 +335,11 @@ namespace bud::graphics {
 		bool enable_depth_bias = false;
 		bool blending_enable = false;
 		VertexLayoutType vertex_layout = VertexLayoutType::Default;
+		bool wireframe = false;
+		// Backend-specific descriptor set layouts to use instead of the global set.
+		// These are VkDescriptorSetLayout handles cast to uint64_t for portability.
+		// When non-empty, the pipeline layout will use these sets instead of the global set.
+		std::vector<uint64_t> custom_set_layouts;
 	};
 
 	struct ComputePipelineDesc {
@@ -281,13 +347,14 @@ namespace bud::graphics {
 			HiZCulling,
 			HiZMip,
 			MlIdentity,
-			HeuristicOccluder,
-			MeshletFrustum,
-			MeshletIndirect,
-			MeshletHiZ,
 			AmbientOcclusion,
 			AOBlur,
-			AOTemporal
+			AOTemporal,
+			HierarchyTraversal,
+			PageEmit,
+			ClusterCull,
+			ClearStats,
+			CSMCulling
 		};
 
 		ShaderStage cs;
@@ -295,33 +362,65 @@ namespace bud::graphics {
 	};
 	// POD, end
 
-	// BufferHandle replaces the old "MemoryBlock" to avoid API leakage
-	// Keep a raw pointer for fast access ( "internal_state" ) and an optional owning
-    // shared_ptr ("owner") that controls lifetime when this handle represents ownership.
-    struct BufferHandle {
-        void* internal_state = nullptr; // e.g. VulkanBuffer*
-        std::shared_ptr<void> owner;    // optional owning reference with custom deleter
-        uint64_t offset = 0;
-        uint64_t size = 0;
-        void* mapped_ptr = nullptr;
+	// Runtime GPU Resource Handles (Direct Slot ID)
+	struct BufferHandle {
+		uint32_t id = ~0u;
 
-        bool is_valid() const { return internal_state != nullptr; }
+		constexpr bool is_valid() const noexcept { return id != ~0u; }
+		constexpr void reset() noexcept { id = ~0u; }
+		constexpr bool operator==(const BufferHandle& other) const noexcept = default;
+		constexpr auto operator<=>(const BufferHandle& other) const noexcept = default;
+	};
 
-        void reset() {
-            internal_state = nullptr;
-            owner.reset();
-            offset = 0;
-            size = 0;
-            mapped_ptr = nullptr;
-        }
-    };
+	struct BufferSlice {
+		BufferHandle buffer;
+		uint64_t offset = 0;
+		uint64_t size = 0;
+		void* mapped_ptr = nullptr;
+
+		constexpr bool is_valid() const noexcept { return buffer.is_valid(); }
+		constexpr void reset() noexcept {
+			buffer.reset();
+			offset = 0;
+			size = 0;
+			mapped_ptr = nullptr;
+		}
+	};
+
+	struct TextureHandle {
+		uint32_t id = ~0u;
+
+		constexpr bool is_valid() const noexcept { return id != ~0u; }
+		constexpr void reset() noexcept { id = ~0u; }
+		constexpr bool operator==(const TextureHandle& other) const noexcept = default;
+		constexpr auto operator<=>(const TextureHandle& other) const noexcept = default;
+	};
+
+	struct PipelineHandle {
+		uint32_t id = ~0u;
+
+		constexpr bool is_valid() const noexcept { return id != ~0u; }
+		constexpr void reset() noexcept { id = ~0u; }
+		constexpr bool operator==(const PipelineHandle& other) const noexcept = default;
+		constexpr auto operator<=>(const PipelineHandle& other) const noexcept = default;
+	};
+
+	struct MaterialHandle {
+		uint32_t id = ~0u;
+
+		constexpr bool is_valid() const noexcept { return id != ~0u; }
+		constexpr void reset() noexcept { id = ~0u; }
+		constexpr bool operator==(const MaterialHandle& other) const noexcept = default;
+		constexpr auto operator<=>(const MaterialHandle& other) const noexcept = default;
+	};
 
 	class Texture;
+	class Buffer;
 
 	using CommandHandle = void*;
 
 	// Aliases for clarity
-	using ImageHandle = Texture*;
+	using ImageHandle = TextureHandle;
 
 	class Texture {
 	public:
@@ -333,6 +432,18 @@ namespace bud::graphics {
 		uint32_t mips = 1;
 		uint32_t array_layers = 1;
 		TextureType type = TextureType::Texture2D;
+
+		size_t desc_hash = 0;
+	};
+
+	class Buffer {
+	public:
+		virtual ~Buffer() = default;
+
+		uint64_t size = 0;
+		ResourceState usage = ResourceState::Common;
+		MemoryUsage memory_usage = MemoryUsage::GpuOnly;
+		void* mapped_ptr = nullptr;
 
 		size_t desc_hash = 0;
 	};
@@ -354,13 +465,10 @@ namespace bud::graphics {
 	struct SubMesh {
 		uint32_t index_start;
 		uint32_t index_count;
-		uint32_t meshlet_start;
-		uint32_t meshlet_count;
 		uint32_t material_id;
-		// LOD level of this draw range (page-backed meshes only). Page-backed
-		// meshes carry one submesh per (LOD, material) run so the CPU-driven
-		// path can draw a single LOD level per frame.
+
 		uint32_t lod_level = 0;
+		uint32_t page_index = ~0u;
 		bool double_sided = false;
 		bool is_alpha_tested = false;
 
@@ -368,10 +476,7 @@ namespace bud::graphics {
 		bud::math::BoundingSphere sphere;
 	};
 
-	// Per-(LOD, material) draw range inside a virtual geometry page.
-	// index_start/index_count are page-local (relative to the page's index data).
-	// cluster_start/cluster_count are page-local cluster ranges (into the page's
-	// LOD-grouped PageClusterDesc array).
+
 	struct PageSubMesh {
 		uint32_t index_start = 0;
 		uint32_t index_count = 0;
@@ -379,45 +484,31 @@ namespace bud::graphics {
 		uint32_t lod_level = 0;
 		uint32_t cluster_start = 0;
 		uint32_t cluster_count = 0;
+		uint32_t page_index = ~0u;
+		bud::math::AABB aabb{};
 	};
 
 	struct RenderMesh {
 		uint32_t index_count = 0;
 
-		// GPU-Driven Meshlet data
-		BufferHandle meshlet_buffer;
-		BufferHandle vertex_index_buffer;
-		BufferHandle meshlet_index_buffer;
-		BufferHandle cull_data_buffer;
-		uint32_t meshlet_count = 0;
 
 		// Virtual geometry page residency
-		bool is_page_backed = false;
+		bool is_page_based = false;
 		uint32_t page_index = ~0u;
 		uint32_t page_vertex_data_offset = 0;
 		uint32_t page_index_data_offset = 0;
-		// Per-LOD index ranges inside the page's index data (exported by
-		// BudAssetTool as lod_ranges; all zero when the asset predates LOD
-		// grouping). The page index stream is ordered LOD0 then LOD1 then LOD2,
-		// so each level is one contiguous range. Used by the CSM/shadow path to
-		// rasterize only the selected LOD instead of every LOD in the page.
+
 		uint32_t lod_index_start[3] = {};
 		uint32_t lod_index_count[3] = {};
 
+		float lod_error[3] = {};
+
 		bud::math::AABB aabb;
 		bud::math::BoundingSphere sphere;
+		bud::math::BoundingSphere global_sphere;
 		std::vector<SubMesh> submeshes;
 
 		bool is_valid() const { return index_count > 0; }
-		bool has_meshlet_data() const {
-			if (is_page_backed)
-				return meshlet_count > 0 && page_index != ~0u;
-			return meshlet_count > 0 &&
-				meshlet_buffer.is_valid() &&
-				vertex_index_buffer.is_valid() &&
-				meshlet_index_buffer.is_valid() &&
-				cull_data_buffer.is_valid();
-		}
 	};
 
 	struct GPUStats {
@@ -434,8 +525,8 @@ namespace bud::graphics {
 	};
 
 	enum class VisibilityPath {
-		InstanceFallback,
-		Meshlet,
+		Instance,
+		Cluster,
 	};
 
 
@@ -450,7 +541,7 @@ namespace bud::graphics {
 		uint32_t draw_calls = 0;
 		uint32_t drawn_triangles = 0; // Total accumulated across ALL render passes (Shadows, etc)
 		uint32_t pipeline_binds = 0;
-		VisibilityPath active_visibility_path = VisibilityPath::InstanceFallback;
+		VisibilityPath active_visibility_path = VisibilityPath::Instance;
 
 		// 剔除指标 (GPU Occlusion Culling)
 		uint32_t gpu_total_objects = 0;
@@ -459,12 +550,6 @@ namespace bud::graphics {
 		uint32_t gpu_visible_instances = 0;
 		uint32_t gpu_total_triangles = 0;
 		uint32_t gpu_visible_triangles = 0;
-		uint32_t gpu_total_meshlets = 0;
-		uint32_t gpu_visible_meshlets = 0;
-		uint32_t meshlet_frustum_total_meshlets = 0;
-		uint32_t meshlet_frustum_visible_meshlets = 0;
-		uint32_t meshlet_hiz_total_meshlets = 0;
-		uint32_t meshlet_hiz_visible_meshlets = 0;
 
 		// 剔除指标 (CPU Frustum Culling)
 		uint32_t cpu_total_objects = 0;
@@ -473,8 +558,12 @@ namespace bud::graphics {
 		uint32_t cpu_visible_instances = 0;
 		uint32_t cpu_total_triangles = 0;
 		uint32_t cpu_visible_triangles = 0;
-		uint32_t cpu_total_meshlets = 0;
-		uint32_t cpu_visible_meshlets = 0;
+
+		// Virtual Geometry Cluster Stats
+		uint32_t vg_total_clusters = 0;
+		uint32_t vg_visible_clusters = 0;
+		uint32_t vg_resident_pages = 0;
+		uint32_t vg_streaming_requests = 0;
 
 		// Neural/Heuristic Occluder Stats
 		uint32_t occluder_count = 0;
@@ -491,27 +580,23 @@ namespace bud::graphics {
 			draw_calls = 0;
 			drawn_triangles = 0;
 			pipeline_binds = 0;
-			active_visibility_path = VisibilityPath::InstanceFallback;
+			active_visibility_path = VisibilityPath::Instance;
 			gpu_total_objects = 0;
 			gpu_visible_objects = 0;
 			gpu_total_instances = 0;
 			gpu_visible_instances = 0;
 			gpu_total_triangles = 0;
 			gpu_visible_triangles = 0;
-			gpu_total_meshlets = 0;
-			gpu_visible_meshlets = 0;
-			meshlet_frustum_total_meshlets = 0;
-			meshlet_frustum_visible_meshlets = 0;
-			meshlet_hiz_total_meshlets = 0;
-			meshlet_hiz_visible_meshlets = 0;
 			cpu_total_objects = 0;
 			cpu_visible_objects = 0;
 			cpu_total_instances = 0;
 			cpu_visible_instances = 0;
 			cpu_total_triangles = 0;
 			cpu_visible_triangles = 0;
-			cpu_total_meshlets = 0;
-			cpu_visible_meshlets = 0;
+			vg_total_clusters = 0;
+			vg_visible_clusters = 0;
+			vg_resident_pages = 0;
+			vg_streaming_requests = 0;
 			occluder_count = 0;
 			occluder_triangles = 0;
 			heuristic_total_count = 0;

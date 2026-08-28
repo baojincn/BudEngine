@@ -21,6 +21,9 @@ namespace bud::graphics {
 		std::vector<uint32_t> mesh_indices;
 		std::vector<uint32_t> submesh_indices;
 		std::vector<uint32_t> material_indices;
+		
+		std::vector<uint32_t> root_group_indices;
+		std::vector<uint32_t> base_virtual_pages;
 
 		// 标志位 (Bit 0 = IsStatic, Bit 1 = CastShadow ...)
 		std::vector<uint8_t> flags;
@@ -65,6 +68,8 @@ namespace bud::graphics {
 			mesh_indices.assign(estimated_capacity, 0);
 			submesh_indices.assign(estimated_capacity, 0);
 			material_indices.assign(estimated_capacity, 0);
+			root_group_indices.assign(estimated_capacity, 0xFFFFFFFF);
+			base_virtual_pages.assign(estimated_capacity, 0xFFFFFFFF);
 			flags.assign(estimated_capacity, 0);
 			instance_count.store(0);
 			dropped_instances.store(0);
@@ -75,7 +80,7 @@ namespace bud::graphics {
 		void cull_frustum(const bud::math::Frustum& frustum, std::vector<uint32_t>& out_indices) const;
 		bool intersect_scene(const bud::math::AABB& aabb) const;
 
-		inline void add_instance(const bud::math::mat4& transform, const bud::math::AABB& aabb, uint32_t mesh_index, uint32_t submesh_index, uint32_t material_index, bool is_static) {
+		inline void add_instance(const bud::math::mat4& transform, const bud::math::AABB& aabb, uint32_t mesh_index, uint32_t submesh_index, uint32_t material_index, bool is_static, uint32_t root_group_index = 0xFFFFFFFF, uint32_t base_virtual_page = 0xFFFFFFFF) {
 			size_t idx = instance_count.fetch_add(1, std::memory_order_relaxed);
 
 			if (idx >= world_matrices.size()) [[unlikely]] {
@@ -88,6 +93,8 @@ namespace bud::graphics {
 			mesh_indices[idx] = mesh_index;
 			submesh_indices[idx] = submesh_index;
 			material_indices[idx] = material_index;
+			root_group_indices[idx] = root_group_index;
+			base_virtual_pages[idx] = base_virtual_page;
 
 			flags[idx] = is_static ? 1 : 0;
 		}

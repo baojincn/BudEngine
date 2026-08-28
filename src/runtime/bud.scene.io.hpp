@@ -75,11 +75,8 @@ namespace bud::scene {
         j.at("zoom").get_to(c.zoom);
         if (j.contains("speed")) j.at("speed").get_to(c.movement_speed);
         if (j.contains("sensitivity")) j.at("sensitivity").get_to(c.mouse_sensitivity);
-        // Rebuild front/right/up from the loaded yaw/pitch NOW. Without this the
-        // camera keeps its OLD facing until the first mouse move calls
-        // process_mouse_movement -> update_camera_vectors, which then suddenly
-        // snaps to the loaded yaw (perceived as a 90-degree jump on first look).
-        c.refresh_camera_vectors();
+
+        c.rebuild_camera_vectors();
     }
 
     // DirectionalLight

@@ -123,7 +123,7 @@ A traditional heuristic approach used as a fallback for platforms where RL infer
 
 ## Virtual Geometry & Page Streaming Architecture
 
-BudEngine implements a GPU-driven **Virtual Geometry** pipeline modeled after operating system **Virtual Memory Paging**. Instead of binding individual static vertex and index buffers per mesh, complex geometry is sliced into uniform-sized GPU memory pages (`kPageSize = 131,040 Bytes`, ~128KB) and managed through a unified GPU memory pool with indirect page-table addressing.
+BudEngine implements a GPU-driven **Virtual Geometry** pipeline modeled after operating system **Virtual Memory Paging**. Instead of binding individual static vertex and index buffers per mesh, complex geometry is sliced into uniform-sized GPU memory pages (`page_size = 131,040 Bytes`, ~128KB) and managed through a unified GPU memory pool with indirect page-table addressing.
 
 ### 1. Architectural Motivation
 * **Decoupling VRAM from Scene Complexity:** Traditional engines load entire static meshes into GPU memory. In open-world or high-fidelity scenes, this quickly exhausts VRAM. Virtual Geometry streams individual 128KB pages on demand, keeping only visible or camera-adjacent geometry resident in GPU memory.
@@ -215,7 +215,7 @@ Using **Pybind11**, the engine's core slicing and asset logic is exposed as a Py
 ### 5. GPU-Driven Page-Backed Virtual Geometry Pipeline & Performance Analysis
 
 #### Implementation Principles (Virtual Geometry & Bindless Page Pool)
-*   **Page-Backed Virtual Addressing**: Instead of binding individual static vertex/index buffers per mesh, geometry is sliced offline into 128KB pages (`kPageSize = 131,040 Bytes`). At runtime, visible pages are loaded into a global slot-based GPU storage buffer (`PagePoolBuffer`), addressed indirectly via a virtual-to-physical translation table (`PageTableBuffer`).
+*   **Page-Backed Virtual Addressing**: Instead of binding individual static vertex/index buffers per mesh, geometry is sliced offline into 128KB pages (`page_size = 131,040 Bytes`). At runtime, visible pages are loaded into a global slot-based GPU storage buffer (`PagePoolBuffer`), addressed indirectly via a virtual-to-physical translation table (`PageTableBuffer`).
 *   **Per-Draw Visibility Offset**: To avoid visibility buffer collisions when multiple instances or pages share the same meshlet pipeline, each draw call carries a unique `visibility_offset` inside `DrawData`. Compute shaders (`meshlet_frustum_cull.comp` and `meshlet_hiz_cull.comp`) use this offset to write culling decisions into distinct slices of the visibility buffer.
 *   **GPU-Driven Command Emission**: `MeshletIndirectEmitPass` scans surviving visible meshlets and compacts them into an indirect draw buffer (`vkCmdDrawIndexedIndirect`). When executing the main pass (`MainPass`) or depth prepass (`DepthOnlyPass`), the `PagePoolBuffer` is bound directly as both the vertex and index buffer (`rhi->cmd_bind_vertex_buffer(cmd, pp_buf); rhi->cmd_bind_index_buffer(cmd, pp_buf);`).
 

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vector>
 #include <optional>
@@ -28,7 +28,12 @@ namespace bud::graphics::vulkan {
 
 
 
-	// Strict alignment for UBO
+	// Strict alignment for UBO.
+	// IMPORTANT: GLSL std140 treats vec3 as occupying 16 bytes (same as vec4).
+	// C++ vec3 is only 12 bytes, so we must add explicit float padding after
+	// each vec3 field to keep C++ and GLSL offsets in sync. Failure to do so
+	// shifts all following fields by 4 bytes per vec3, corrupting reads of
+	// cascade_count and other scalars in GPU shaders.
 	struct UniformBufferObject {
 		alignas(16) bud::math::mat4 view;
 		alignas(16) bud::math::mat4 proj;
@@ -37,16 +42,18 @@ namespace bud::graphics::vulkan {
 		alignas(16) bud::math::vec4 cascade_split_depths; // Pack 4 depths into vec4 (x,y,z,w)
 
 		alignas(16) bud::math::vec3 cam_pos;
+		float _pad_cam_pos = 0.0f;         // pad vec3 → 16 bytes (std140)
 		alignas(16) bud::math::vec3 light_dir;
+		float _pad_light_dir = 0.0f;       // pad vec3 → 16 bytes (std140)
 		alignas(16) bud::math::vec3 light_color;
-		float light_intensity;
+		float light_intensity;             // packed with light_color as vec4.w
 		float ambient_strength;
 		uint32_t cascade_count;
 		uint32_t debug_cascades;
 		uint32_t reversed_z;
 		float shadow_bias_constant;
 		float shadow_bias_slope;
-		uint32_t padding[1];
+		uint32_t debug_cluster;
 	};
 
 	struct Vertex {

@@ -29,7 +29,8 @@
 		"meshoptimizer",
 		"assimp",
 		"spirv-reflect",
-		"spirv-headers"
+		"spirv-headers",
+		"metis"
 	],
   "overrides": [
     {

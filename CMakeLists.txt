@@ -158,13 +158,22 @@ else()
 		if(NOT SHADER_EXT STREQUAL ".spv")
             set(SHADER_OUTPUT "${SHADER_SOURCE}.spv")
 
+			# Mesh/Task shaders require explicit stage and Vulkan target-env
+			if(SHADER_EXT STREQUAL ".task")
+				set(TARGET_FLAGS "-fshader-stage=task" "--target-env=vulkan1.3")
+			elseif(SHADER_EXT STREQUAL ".mesh")
+				set(TARGET_FLAGS "-fshader-stage=mesh" "--target-env=vulkan1.3")
+			else()
+				set(TARGET_FLAGS "")
+			endif()
+
 			add_custom_command(
 				OUTPUT ${SHADER_OUTPUT}
 				# -g keeps SPIR-V debug info (source + line mapping) so
 				# Nsight Graphics / Aftermath GPU crash dumps can resolve the
 				# exact shader instruction that faulted. -O keeps the default
 				# optimization level (needed for readable disassembly).
-				COMMAND ${GLSLC_EXECUTABLE} -g ${SHADER_SOURCE} -o ${SHADER_OUTPUT}
+				COMMAND ${GLSLC_EXECUTABLE} -g ${TARGET_FLAGS} ${SHADER_SOURCE} -o ${SHADER_OUTPUT}
 				DEPENDS ${SHADER_SOURCE}
 				COMMENT "Compiling ${SHADER_SOURCE} -> ${SHADER_OUTPUT}"
 				VERBATIM
@@ -227,7 +236,16 @@ target_sources(bud_engine_core
 		"src/graphics/bud.graphics.cpp"
 		"src/graphics/bud.graphics.scene.cpp"
 		"src/graphics/bud.graphics.gpu_scene.cpp"
-        "src/graphics/bud.graphics.passes.cpp"
+		"src/graphics/passes/bud.pass.base.cpp"
+		"src/graphics/passes/bud.pass.culling.cpp"
+		"src/graphics/passes/bud.pass.depth.cpp"
+		"src/graphics/passes/bud.pass.virtual_geometry.cpp"
+		"src/graphics/passes/bud.pass.shadow.cpp"
+		"src/graphics/passes/bud.pass.main.cpp"
+		"src/graphics/passes/bud.pass.ao.cpp"
+		"src/graphics/passes/bud.pass.visibility.cpp"
+		"src/graphics/passes/bud.pass.resolve.cpp"
+		"src/graphics/passes/bud.pass.ui.cpp"
 		"src/graphics/bud.graphics.graph.cpp"
 		"src/graphics/bud.graphics.renderer.cpp"
 		"src/graphics/bud.ml_passes.cpp"
@@ -259,7 +277,6 @@ target_sources(bud_engine_core
 		"src/core/bud.math.hpp"
 		"src/core/bud.logger.hpp"
 		"src/io/bud.io.hpp"
-		"src/dod/bud.dod.hpp"
 		"src/runtime/bud.engine.hpp"
 		"src/platform/bud.platform.hpp"
 		"src/threading/bud.threading.hpp"
@@ -346,9 +363,9 @@ if(BUD_BUILD_SAMPLES)
     # the binary from the filesystem works the same as from Visual Studio.
     add_custom_command(TARGET triangle_sample POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/data"
-            "$<TARGET_FILE_DIR:triangle_sample>/data"
-        COMMENT "Copying data/ to output directory"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Content"
+            "$<TARGET_FILE_DIR:triangle_sample>/Content"
+        COMMENT "Copying Content/ to output directory"
     )
 
     # Preserve original source tree layout for shaders so runtime loader
@@ -378,9 +395,10 @@ endif()
 # End, triangle_sample
 
 # Begin, tools
-add_subdirectory(src/tools/bud_tool_support)
-add_subdirectory(src/tools/BudAssetTool)
-add_subdirectory(src/tools/shader_layout_codegen)
+add_subdirectory(src/tools/asset_pipeline)
+add_subdirectory(src/tools/applications/bud_asset_importer)
+add_subdirectory(src/tools/applications/bud_asset_compiler)
+add_subdirectory(src/tools/applications/shader_layout_codegen)
 
 # Generate shader layouts header at build time using the codegen tool.
 # Input: tmp/shader_report.json
@@ -390,12 +408,12 @@ add_custom_command(
     # Ensure tmp and include/generated exist
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_SOURCE_DIR}/tmp
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_SOURCE_DIR}/include/generated
-    # Run BudAssetTool to produce tmp/shader_report.json
-    COMMAND $<TARGET_FILE:BudAssetTool> --validate-shaders ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders --report ${CMAKE_CURRENT_SOURCE_DIR}/tmp/shader_report.json
+    # Run BudAssetCompiler to produce tmp/shader_report.json
+    COMMAND $<TARGET_FILE:BudAssetCompiler> --validate-shaders ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders --report ${CMAKE_CURRENT_SOURCE_DIR}/tmp/shader_report.json
     # Run codegen to generate the header from the report
     COMMAND $<TARGET_FILE:ShaderLayoutCodegen> --input ${CMAKE_CURRENT_SOURCE_DIR}/tmp/shader_report.json --output ${CMAKE_CURRENT_SOURCE_DIR}/include/generated/shader_layouts.h
-    DEPENDS ShaderLayoutCodegen BudAssetTool
-    COMMENT "Generating include/generated/shader_layouts.h from shader reflection (BudAssetTool + ShaderLayoutCodegen)"
+    DEPENDS ShaderLayoutCodegen BudAssetCompiler
+    COMMENT "Generating include/generated/shader_layouts.h from shader reflection (BudAssetCompiler + ShaderLayoutCodegen)"
     VERBATIM
 )
 
@@ -403,10 +421,10 @@ add_custom_target(GenerateShaderLayouts DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/incl
 
 # Separate target: only generate the shader reflection JSON report (tmp/shader_report.json)
 add_custom_target(GenerateShaderReport
-    COMMAND $<TARGET_FILE:BudAssetTool> --validate-shaders ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders --report ${CMAKE_CURRENT_SOURCE_DIR}/tmp/shader_report.json
-    DEPENDS BudAssetTool
+    COMMAND $<TARGET_FILE:BudAssetCompiler> --validate-shaders ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders --report ${CMAKE_CURRENT_SOURCE_DIR}/tmp/shader_report.json
+    DEPENDS BudAssetCompiler
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    COMMENT "Generating tmp/shader_report.json using BudAssetTool"
+    COMMENT "Generating tmp/shader_report.json using BudAssetCompiler"
     VERBATIM
 )
 

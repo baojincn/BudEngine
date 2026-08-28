@@ -1,0 +1,61 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+
+#include "common.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+
+
+struct VisibleCluster {
+    uint instance_and_page; // (instance_id << 16) | ((blend_bits & 0x7) << 13) | (page_slot & 0x1FFF)
+    uint cluster_idx;
+    float blend_factor; // 0.0 = high LOD, 1.0 = low LOD
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer PagePoolBuffer {
+    uint data[];
+} page_pool;
+
+layout(std430, set = 0, binding = 1) buffer MeshletVisibilityBuffer {
+    uint visible_page_count;
+    uint visible_pages[]; // packed: (instance_id << 16) | (page_slot & 0xFFFF)
+} in_visibility;
+
+layout(std430, set = 0, binding = 2) buffer VisibleClusterBuffer {
+    uint visible_cluster_count;
+    VisibleCluster visible_clusters[];
+} out_clusters;
+
+layout(push_constant) uniform PushConstants {
+    uint max_clusters;
+} pc;
+
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Read count from buffer
+    uint page_count = in_visibility.visible_page_count;
+    if (idx >= page_count) return;
+
+    uint page_val = in_visibility.visible_pages[idx];
+    uint instance_id = page_val >> 16;
+    // Decode: bits 13-15 = blend_factor (3 bits), bits 0-12 = page_slot (13 bits)
+    uint blend_bits = (page_val >> 13) & 0x7u;
+    uint page_slot = page_val & 0x1FFFu;
+    float blend_factor = float(blend_bits) / 7.0;
+
+    uint pool_offset = page_slot * PAGE_SIZE_BYTES;
+    // cluster_count is the 3rd uint in VGPageDataHeader (offset 8 bytes)
+    uint cluster_count = page_pool.data[pool_offset / 4u + 2u];
+
+    for (uint c = 0; c < cluster_count; ++c) {
+        uint out_idx = atomicAdd(out_clusters.visible_cluster_count, 1);
+        if (out_idx < pc.max_clusters) {
+            out_clusters.visible_clusters[out_idx].instance_and_page = page_val;
+            out_clusters.visible_clusters[out_idx].cluster_idx = c;
+            out_clusters.visible_clusters[out_idx].blend_factor = blend_factor;
+        }
+    }
+}

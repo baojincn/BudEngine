@@ -1,0 +1,150 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_nonuniform_qualifier : enable
+
+#include "common.glsl"
+#include "vg_common.glsl"
+
+layout(local_size_x = 32) in;
+layout(triangles, max_vertices = 128, max_primitives = 256) out;
+
+struct TaskData {
+    uint instance_id;
+    uint page_slot;
+    uint blend_bits;
+    uint cluster_indices[256];
+};
+
+taskPayloadSharedEXT TaskData td;
+
+layout(std430, set = 0, binding = 2) readonly buffer PagePool {
+    uint data[];
+} page_pool;
+
+layout(std430, set = 0, binding = 3) readonly buffer InstanceBuffer {
+    HierarchyInstance data[];
+} instance_buffer;
+
+layout(location = 0) flat out uint frag_material_id[];
+layout(location = 1) flat out float frag_blend_factor[];
+layout(location = 2) flat out uint frag_instance_id[];
+layout(location = 3) out vec2 frag_tex_coord[];
+layout(location = 4) out vec3 frag_normal[];
+layout(location = 5) flat out uint frag_cluster_id[];
+
+uint vg_read_bits(uint base_word_idx, uint bit_offset, uint num_bits) {
+    uint word_idx = base_word_idx + (bit_offset >> 5);
+    uint bit_in_word = bit_offset & 31u;
+    uint w0 = page_pool.data[word_idx];
+    uint mask = (num_bits == 32u) ? 0xFFFFFFFFu : ((1u << num_bits) - 1u);
+    if (bit_in_word + num_bits <= 32u) {
+        return (w0 >> bit_in_word) & mask;
+    } else {
+        uint w1 = page_pool.data[word_idx + 1u];
+        uint low_count = 32u - bit_in_word;
+        uint high_count = num_bits - low_count;
+        uint low_bits = (w0 >> bit_in_word) & ((1u << low_count) - 1u);
+        uint high_bits = (w1 & ((1u << high_count) - 1u));
+        return low_bits | (high_bits << low_count);
+    }
+}
+
+float vg_snorm8(uint byte_val) {
+    int s8 = int(byte_val & 0xFFu);
+    if (s8 >= 128) s8 -= 256;
+    return float(s8) / 127.0;
+}
+
+void main() {
+    uint task_id = gl_WorkGroupID.x;
+    uint cluster_idx = td.cluster_indices[task_id];
+    uint instance_id = td.instance_id;
+    HierarchyInstance instance = instance_buffer.data[instance_id];
+    mat4 model_matrix = instance.model_matrix;
+
+    uint page_slot = td.page_slot;
+    float blend_factor = float(td.blend_bits) / 7.0;
+    uint cluster_global_id = (page_slot * 256u + cluster_idx);
+
+    uint pool_bytes = page_slot * VG_PAGE_SIZE_BYTES;
+    uint base_word = pool_bytes / 4u;
+    if (page_pool.data[base_word + 0u] != VG_PAGE_MAGIC) {
+        SetMeshOutputsEXT(0u, 0u);
+        return;
+    }
+
+    uint cluster_base = base_word + VG_PAGE_HEADER_DWORDS + cluster_idx * VG_CLUSTER_DWORDS;
+    uint vertex_offset = page_pool.data[cluster_base + 0u];
+    uint vertex_count = page_pool.data[cluster_base + 1u];
+    uint triangle_offset = page_pool.data[cluster_base + 2u];
+    uint triangle_count = page_pool.data[cluster_base + 3u];
+    uint cluster_mat_id = page_pool.data[cluster_base + 4u];
+    uint base_mat = (instance.material_id == 0u) ? 1u : instance.material_id;
+    uint material_id = (cluster_mat_id != 0xFFFFFFFFu) ? (base_mat + cluster_mat_id) : base_mat;
+
+    uint page_vertex_count = page_pool.data[base_word + 3u];
+    uint v_stream_off = page_pool.data[base_word + 5u];
+    uint index_stream_off = page_pool.data[base_word + 6u];
+    uint bits = page_pool.data[base_word + 9u];
+    if (bits == 0u) bits = 12u;
+
+    vec3 poff = vec3(
+        uintBitsToFloat(page_pool.data[base_word + 10u]),
+        uintBitsToFloat(page_pool.data[base_word + 11u]),
+        uintBitsToFloat(page_pool.data[base_word + 12u]));
+    vec3 pext = vec3(
+        uintBitsToFloat(page_pool.data[base_word + 13u]),
+        uintBitsToFloat(page_pool.data[base_word + 14u]),
+        uintBitsToFloat(page_pool.data[base_word + 15u]));
+
+    uint local_idx = gl_LocalInvocationID.x;
+    uint max_vertices = min(vertex_count, 128u);
+    uint tris = min(triangle_count, 256u);
+
+    SetMeshOutputsEXT(max_vertices, tris);
+
+    float max_q = float((1u << bits) - 1u);
+    uint pos_bytes = (page_vertex_count * bits * 3u + 7u) / 8u;
+    uint pos_bytes_aligned = (pos_bytes + 3u) & ~3u;
+
+    for (uint v_idx = local_idx; v_idx < max_vertices; v_idx += 32u) {
+        uint global_v = vertex_offset + v_idx;
+        uint bit_offset = v_stream_off * 8u + global_v * (bits * 3u);
+
+        uint qx = vg_read_bits(base_word, bit_offset, bits);
+        uint qy = vg_read_bits(base_word, bit_offset + bits, bits);
+        uint qz = vg_read_bits(base_word, bit_offset + bits * 2u, bits);
+
+        vec3 local_pos = poff + (vec3(float(qx), float(qy), float(qz)) / max_q) * pext;
+        vec4 world_pos = model_matrix * vec4(local_pos, 1.0);
+
+        uint attr_word = base_word + (v_stream_off + pos_bytes_aligned + global_v * 16u) / 4u;
+        uint n_raw = page_pool.data[attr_word + 0u];
+        uint uv_raw = page_pool.data[attr_word + 2u];
+
+        vec3 local_norm = vec3(vg_snorm8(n_raw), vg_snorm8(n_raw >> 8u), vg_snorm8(n_raw >> 16u));
+
+        gl_MeshVerticesEXT[v_idx].gl_Position = ubo.proj * ubo.view * world_pos;
+        frag_material_id[v_idx] = material_id;
+        frag_blend_factor[v_idx] = blend_factor;
+        frag_instance_id[v_idx] = instance_id;
+        frag_tex_coord[v_idx] = unpackHalf2x16(uv_raw);
+        frag_normal[v_idx] = normalize(mat3(model_matrix) * local_norm);
+        frag_cluster_id[v_idx] = cluster_global_id;
+    }
+
+    for (uint t_idx = local_idx; t_idx < tris; t_idx += 32u) {
+        uint base_elem = triangle_offset * 3u + t_idx * 3u;
+        uint v[3];
+        for (uint i = 0u; i < 3u; ++i) {
+            uint elem = base_elem + i;
+            uint w_idx = (index_stream_off / 4u) + (elem / 2u);
+            uint w = page_pool.data[base_word + w_idx];
+            uint raw_idx = (elem % 2u == 0u) ? (w & 0xFFFFu) : (w >> 16u);
+            uint lv = (raw_idx >= vertex_offset) ? (raw_idx - vertex_offset) : 0u;
+            v[i] = min(lv, max_vertices > 0u ? max_vertices - 1u : 0u);
+        }
+        gl_PrimitiveTriangleIndicesEXT[t_idx] = uvec3(v[0], v[1], v[2]);
+    }
+}

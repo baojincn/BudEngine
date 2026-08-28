@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <memory>
 #include <atomic>
@@ -16,6 +16,9 @@
 #include "src/graphics/bud.graphics.rhi.hpp"
 #include "src/graphics/bud.graphics.graph.hpp"
 #include "src/graphics/bud.graphics.passes.hpp"
+
+namespace bud::streaming { class StreamingManager; }
+
 namespace bud::graphics {
 	struct MeshAssetHandle {
 		static constexpr uint32_t invalid_id = std::numeric_limits<uint32_t>::max();
@@ -48,27 +51,30 @@ namespace bud::graphics {
 
 		void set_config(const RenderConfig& config);
 		const RenderConfig& get_config() const;
-		void request_meshlet_rendering_enabled(bool enabled);
-		bool is_meshlet_rendering_enabled() const;
 
 		const void* get_readback_pixels() const;
 
 		// Game-thread safe snapshot (CPU-side bounds only)
 		std::vector<bud::math::AABB> get_mesh_bounds_snapshot() const;
 		std::vector<std::vector<bud::math::AABB>> get_submesh_bounds_snapshot() const;
+		void register_mesh_bounds(uint32_t mesh_id, const bud::math::AABB& aabb);
 
-			GPUScene& get_gpu_scene() { return gpu_scene; }
-			RHI* get_rhi() { return rhi; }
-			uint32_t register_page_backed_mesh(uint32_t page_index, uint32_t meshlet_count,
-				uint32_t index_count, const bud::math::AABB& aabb,
-				uint32_t vertex_data_offset = 0, uint32_t index_data_offset = 0,
-				const std::vector<PageSubMesh>& submeshes = {},
-				const std::vector<std::pair<uint32_t, uint32_t>>& lod_index_ranges = {});
+		GPUScene& get_gpu_scene() { return gpu_scene; }
+		RHI* get_rhi() { return rhi; }
+		uint32_t register_page_based_mesh(uint32_t page_index, uint32_t meshlet_count,
+			uint32_t index_count, const bud::math::AABB& aabb, const bud::math::AABB& global_aabb,
+			uint32_t vertex_data_offset, uint32_t index_data_offset,
+			const std::vector<PageSubMesh>& page_submeshes,
+			const std::vector<std::pair<uint32_t, uint32_t>>& lod_index_ranges,
+			const float lod_errors[3] = nullptr);
 
-			// Reserves a bindless texture slot, binds the fallback immediately, and
-			// queues an async texture upload. Returns the bindless slot (>= 1) to use
-			// as the material id for page-backed meshes.
-			uint32_t bind_texture_async(const std::string& path);
+		uint32_t bind_texture_async(const std::string& path);
+
+		// 线程安全：将 RHI 命令推入 UploadQueue，将在下一帧 render pass 前的 flush_upload_queue() 中执行。
+		// 用于 StreamingManager 等异步系统避免在 worker 线程直接调用 single-time commands。
+		void enqueue_rhi_command(std::function<void()> cmd);
+
+		void set_streaming_manager(bud::streaming::StreamingManager* sm) { streaming_manager = sm; }
 
 		private:
 		struct UploadQueue {
@@ -77,8 +83,6 @@ namespace bud::graphics {
 		};
 
 		void update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb);
-
-		// CPU heuristic occluder selection (prototype)
 		void select_occluders_cpu(const RenderScene& render_scene, const SceneView& view, const std::vector<SortItem>& source_list, size_t source_count, std::vector<SortItem>& out_occluders, size_t out_count);
 
 		RHI* rhi;
@@ -86,27 +90,27 @@ namespace bud::graphics {
 		RenderConfig render_config;
 		bud::io::AssetManager* asset_manager;
 		bud::threading::TaskScheduler* task_scheduler;
+		bud::streaming::StreamingManager* streaming_manager = nullptr;
 
         std::unique_ptr<CSMShadowPass> csm_pass;
         std::unique_ptr<DepthOnlyPass> depth_only_pass;
 		std::unique_ptr<AmbientOcclusionPass> ao_pass;
 		std::unique_ptr<AOTemporalPass> ao_temporal_pass;
 		std::unique_ptr<AOBlurPass> ao_blur_pass;
-		std::unique_ptr<HiZMipPass> hiz_mip_pass;
-		std::unique_ptr<HiZCullingPass> hiz_pass;
-		std::unique_ptr<MeshletFrustumCullingPass> meshlet_frustum_pass;
-		std::unique_ptr<HeuristicOccluderSelectionPass> heuristic_occluder_pass;
-		std::unique_ptr<MeshletHiZCullingPass> meshlet_hiz_pass;
-		std::unique_ptr<MeshletIndirectEmissionPass> meshlet_indirect_pass;
-		std::unique_ptr<HiZDebugPass> hiz_debug_pass;
+		std::unique_ptr<PyramidMipPass> pyramid_mip_pass;
+		std::unique_ptr<PyramidMipDebugPass> pyramid_mip_debug_pass;
+		std::unique_ptr<InstanceCullingPass> instance_culling_pass;
+		std::unique_ptr<HierarchyTraversalPass> hierarchy_traversal_pass;
+		std::unique_ptr<PageEmitPass> page_emit_pass;
+		std::unique_ptr<ClusterCullPass> cluster_cull_pass;
+		std::unique_ptr<ClusterVisualizationPass> cluster_visualization_pass;
 		std::unique_ptr<MainPass> main_pass;
-		std::unique_ptr<ClusterVisualizationPass> cluster_viz_pass;
 		std::unique_ptr<UIPass> ui_pass;
+		std::unique_ptr<VisibilityPass> visibility_pass;
+		std::unique_ptr<ResolvePass> resolve_pass;
+		bool has_mesh_shader = false;
 
-		std::atomic<bool> meshlet_rendering_enabled{ true };
-		std::atomic<bool> meshlet_rendering_toggle_pending{ false };
-		std::atomic<bool> meshlet_rendering_toggle_value{ true };
-
+		PipelineHandle csm_cull_pipeline;
 		GPUStats last_gpu_stats{};
 		GPUScene gpu_scene;
 
@@ -124,16 +128,32 @@ namespace bud::graphics {
 		std::atomic<uint32_t> next_bindless_slot{ 1 };
 		std::atomic<uint32_t> next_mesh_id{ 0 };
 
+	public:
+		struct HierarchyInstance {
+			bud::math::mat4 model_matrix;
+			uint32_t mesh_id;
+			uint32_t material_id;
+			uint32_t root_group_index;
+			uint32_t flags;
+			bud::math::vec3 global_sphere_center;
+			float global_sphere_radius;
+			float error_threshold;
+			uint32_t base_virtual_page;
+			uint32_t padding[2];
+		};
+		
 		struct InstanceData {
 			bud::math::mat4 model;
 			uint32_t material_id;
-			uint32_t padding[3];
+			uint32_t page_slot;
+			float blend_factor; // 0.0 = full high LOD, 1.0 = full low LOD
+			uint32_t padding;
 		};
 
 		std::shared_ptr<UploadQueue> upload_queue;
 
         // Headless Offscreen Rendering
-        bud::graphics::Texture* offscreen_target = nullptr;
+        bud::graphics::TextureHandle offscreen_target{};
         std::vector<bud::graphics::BufferHandle> readback_buffers;
 	};
 }

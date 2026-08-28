@@ -1,11 +1,13 @@
-#version 450
+#version 460
 #extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_GOOGLE_include_directive : enable
 
 layout(location = 0) in vec3 frag_world_pos;
 layout(location = 1) in vec3 frag_normal;
 layout(location = 2) in vec2 frag_tex_coord;
 layout(location = 3) in vec3 frag_color;
 layout(location = 4) flat in uint frag_material_id;
+layout(location = 5) flat in float frag_blend_factor;
 
 layout(location = 0) out vec4 out_color;
 
@@ -26,180 +28,83 @@ layout(binding = 0) uniform UniformBufferObject {
 	uint reversed_z;
 	float shadow_bias_constant;
 	float shadow_bias_slope;
-	uint padding[1];
+	uint debug_cluster;
 } ubo;
 
 layout(binding = 1) uniform sampler2D tex_samplers[];
 layout(binding = 2) uniform sampler2DArrayShadow shadow_map;
 
-const float PI = 3.14159265359;
+struct GPUMaterialData {
+    vec4 base_color_factor;
+    uint albedo_texture_id;
+    uint normal_texture_id;
+    uint metallic_roughness_id;
+    uint emissive_texture_id;
+    float metallic_factor;
+    float roughness_factor;
+    float alpha_cutoff;
+    uint alpha_mode;
+};
 
-// ACES 电影级色调映射
-vec3 ACESFilm(vec3 x) {
-    float a = 2.51;
-    float b = 0.03;
-    float c = 2.43;
-    float d = 0.59;
-    float e = 0.14;
-    return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
-}
+layout(std430, set = 0, binding = 7) readonly buffer MaterialBuffer {
+    GPUMaterialData materials[];
+};
 
-float DistributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
-    float NdotH2 = NdotH * NdotH;
-    float num = a2;
-    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
-    denom = PI * denom * denom;
-    return num / denom;
-}
+#include "lighting.glsl"
 
-float GeometrySchlickGGX(float NdotV, float roughness) {
-    float r = (roughness + 1.0);
-    float k = (r * r) / 8.0;
-    float num = NdotV;
-    float denom = NdotV * (1.0 - k) + k;
-    return num / denom;
-}
-
-float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
-    float NdotV = max(dot(N, V), 0.0);
-    float NdotL = max(dot(N, L), 0.0);
-    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
-    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
-    return ggx1 * ggx2;
-}
-
-vec3 FresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
-
-
-vec2 poissonDisk[16] = vec2[]( 
-   vec2( -0.94201624, -0.39906216 ), 
-   vec2( 0.94558609, -0.76890725 ), 
-   vec2( -0.094184101, -0.92938870 ), 
-   vec2( 0.34495938, 0.29387760 ), 
-   vec2( -0.91588581, 0.45771432 ), 
-   vec2( -0.81544232, -0.87912464 ), 
-   vec2( -0.38277543, 0.27676845 ), 
-   vec2( 0.97484398, 0.75648379 ), 
-   vec2( 0.44323325, -0.97511554 ), 
-   vec2( 0.53742981, -0.47373420 ), 
-   vec2( -0.26496911, -0.41893023 ), 
-   vec2( 0.79197514, 0.19090188 ), 
-   vec2( -0.24188840, 0.99706507 ), 
-   vec2( -0.81409955, 0.91437590 ), 
-   vec2( 0.19984126, 0.78641367 ), 
-   vec2( 0.14383161, -0.14100790 ) 
-);
-
-float SampleCascade(int layer, vec3 world_pos, vec3 N, vec3 L) {
-    vec4 frag_pos_light_space = ubo.cascade_view_proj[layer] * vec4(world_pos, 1.0);
-    vec3 proj_coords = frag_pos_light_space.xyz / frag_pos_light_space.w;
-    
-    // NDC -> [0, 1]
-    proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
-
-    // 超出视锥体范围，视作无阴影
-    if(proj_coords.z > 1.0 || proj_coords.z < 0.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 || proj_coords.y < 0.0 || proj_coords.y > 1.0)
-        return 1.0;
-
-    // Dynamic Bias based on slope and constant
-    // shadow_bias_constant is usually ~0.005, shadow_bias_slope is ~1.25
-    float bias = max(ubo.shadow_bias_slope * 0.001 * (1.0 - dot(N, L)), ubo.shadow_bias_constant);
-    
-    // Scale bias by cascade level (far cascades have less precision)
-    bias *= (1.0 + float(layer));
-
-    // PCF
-    float shadow_sum = 0.0;
-    vec2 texel_size = 1.0 / textureSize(shadow_map, 0).xy;
-    
-    // Spread: 控制软阴影程度
-    // 远处的级联 (layer 越大) 纹素覆盖的世界面积越大，
-    float spread = 2.5; 
-
-    bool is_reversed = ubo.reversed_z != 0u;
-    for(int i = 0; i < 16; ++i) {
-        vec2 offset = poissonDisk[i] * texel_size * spread;
-        float pcf_depth = is_reversed ? (proj_coords.z + bias) : (proj_coords.z - bias);
-        shadow_sum += texture(shadow_map, vec4(proj_coords.xy + offset, float(layer), pcf_depth));
-    }
-
-    return 1.0 - (shadow_sum / 16.0);
-}
-
-
-float ShadowCalculation(vec3 world_pos, vec3 N, vec3 L) {
-	// 1. Cascade Selection
-	vec4 view_pos = ubo.view * vec4(world_pos, 1.0);
-	float depth = -view_pos.z;
-
-	int layer = -1;
-	float blend_band = 1.5f;
-	float blend_factor = 0.0f;
-	int next_layer = -1;
-
-	for (int i = 0; i < 4; ++i) {
-		if (depth < ubo.cascade_split_depths[i]) {
-			layer = i;
-
-			// Blend between cascades
-			float split_dist = ubo.cascade_split_depths[i];
-			float dist_to_edge = split_dist - depth;
-
-			if (dist_to_edge < blend_band && i < 3) {
-				next_layer = i + 1;
-				blend_factor = 1.0 - (dist_to_edge / blend_band);
-			}
-
-			break;
-		}
-	}
-
-	if (layer == -1)
-		layer = 3;
-
-	// 2. 采样当前层级
-    float shadow = SampleCascade(layer, world_pos, N, L);
-
-    // 3. 如果处于混合带，采样下一层级并插值
-    if (blend_factor > 0.001) {
-        float next_shadow = SampleCascade(layer + 1, world_pos, N, L);
-        
-        // 线性插值：blend_factor 越大，越倾向于 next_shadow
-        shadow = mix(shadow, next_shadow, blend_factor);
-    }
-
-    return shadow;
+// Golden-angle based dithering threshold for LOD transitions
+float golden_noise(ivec2 coord) {
+    const float PHI = 1.61803398874989484820459;
+    return fract(sin(dot(vec2(coord), vec2(12.9898, 78.233))) * 43758.5453);
 }
 
 void main() {
-    //int tex_id = int(frag_tex_index + 0.5);
-	uint tex_id = frag_material_id;
-    vec4 albedo_sample;
-    
-	// Handle unbound texture index 0 or missing textures
-	if (tex_id <= 0) {
-		albedo_sample = vec4(0.7, 0.7, 0.7, 1.0); // Grey for non-textured (page-streamed) meshes
-	} else {
-		// Page-streamed meshes may reference textures that aren't bound yet; fall back to grey
-		if (tex_id >= 1000u) {
-			albedo_sample = vec4(0.7, 0.7, 0.7, 1.0);
-		} else {
-			albedo_sample = texture(tex_samplers[nonuniformEXT(tex_id)], frag_tex_coord);
-		}
-	}
+    GPUMaterialData mat;
+    if (frag_material_id < materials.length())
+        mat = materials[frag_material_id];
+    else {
+        mat.base_color_factor = vec4(0.8, 0.8, 0.8, 1.0);
+        mat.albedo_texture_id = 0u;
+        mat.normal_texture_id = 0u;
+        mat.metallic_roughness_id = 0u;
+        mat.emissive_texture_id = 0u;
+        mat.metallic_factor = 0.0;
+        mat.roughness_factor = 0.5;
+        mat.alpha_cutoff = 0.5;
+        mat.alpha_mode = 0u;
+    }
 
-	if (albedo_sample.a < 0.5 && tex_id > 0 && tex_id < 1000u)
-		discard;
+    vec4 albedo_sample = mat.base_color_factor;
+    if (mat.albedo_texture_id > 0u && mat.albedo_texture_id < 1000u)
+        albedo_sample *= texture(tex_samplers[nonuniformEXT(mat.albedo_texture_id)], frag_tex_coord);
 
-	vec3 albedo = albedo_sample.rgb; 
+    if (mat.alpha_mode == 1u && albedo_sample.a < mat.alpha_cutoff)
+        discard;
 
-    float metallic = 0.1; 
-    float roughness = 0.5;
+    // LOD dithering: when blend_factor is between 0 and 1, use screen-space
+    // golden noise to smoothly transition between LOD levels.
+    // blend_factor = 0.0 → full high LOD (keep all fragments)
+    // blend_factor = 1.0 → full low LOD (discard all fragments)
+    // In transition, noise < blend_factor → discard (low LOD pixels fade out)
+    if (frag_blend_factor > 0.0 && frag_blend_factor < 1.0) {
+        // Golden noise (better spectral properties than IGN, reduces moire)
+        float noise = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+        if (noise < frag_blend_factor)
+            discard;
+    }
+
+    vec3 albedo = albedo_sample.rgb; 
+    float metallic = mat.metallic_factor; 
+    float roughness = mat.roughness_factor;
+
+    if (mat.metallic_roughness_id > 0u && mat.metallic_roughness_id < 1000u) {
+        vec4 mr_sample = texture(tex_samplers[nonuniformEXT(mat.metallic_roughness_id)], frag_tex_coord);
+        roughness *= mr_sample.g;
+        metallic *= mr_sample.b;
+    }
+    roughness = clamp(roughness, 0.04, 1.0);
+    metallic = clamp(metallic, 0.0, 1.0);
+
     // Screen-space AO sampling from bindless slot 998 (slot 999 is reserved for ImGui Font Atlas)
     ivec2 ao_tex_size = textureSize(tex_samplers[998], 0);
     float ao = 1.0;
@@ -209,70 +114,19 @@ void main() {
     }
 
     vec3 N = normalize(frag_normal);
-    vec3 V = normalize(ubo.cam_pos - frag_world_pos);
-    vec3 L = normalize(ubo.light_dir); 
-    vec3 H = normalize(V + L);
-
-    vec3 cascadeColors[4] = vec3[](
-        vec3(1.0, 0.1, 0.1),
-        vec3(0.1, 1.0, 0.1),
-        vec3(0.1, 0.1, 1.0),
-        vec3(1.0, 1.0, 0.1)
-    );
-
-    vec3 F0 = vec3(0.04); 
-    F0 = mix(F0, albedo, metallic);
-
-    vec3 light_color = ubo.light_color; 
-    float light_intensity = ubo.light_intensity;
-    vec3 radiance = light_color * light_intensity; 
-
-    // Cook-Torrance BRDF
-    float NDF = DistributionGGX(N, H, roughness);   
-    float G   = GeometrySmith(N, V, L, roughness);      
-    vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
-       
-    vec3 numerator    = NDF * G * F; 
-    float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-    vec3 specular = numerator / denominator;
-    
-    vec3 kS = F;
-    vec3 kD = vec3(1.0) - kS;
-    kD *= 1.0 - metallic;  
-
-    float NdotL = max(dot(N, L), 0.0);        
-
-    vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
-
-	float shadow = ShadowCalculation(frag_world_pos, N, L);
-
-	// Apply Shadow
-	Lo *= (1.0 - shadow);
-
-    vec3 ambient = vec3(ubo.ambient_strength) * albedo * ao;
-    vec3 color = ambient + Lo;
-
-    // [DEBUG] Toggle this to visualize cascades
-    if (ubo.debug_cascades > 0) {
-        int debugLayer = -1;
-        vec4 debugViewPos = ubo.view * vec4(frag_world_pos, 1.0);
-		float debugDepth = -debugViewPos.z;
-        for (int i = 0; i < 4; ++i) {
-			if (debugDepth < ubo.cascade_split_depths[i]) {
-				debugLayer = i;
-				break;
-			}
-		}
-
-        if (debugLayer == -1)
-			debugLayer = 3;
-        color = mix(color, albedo * cascadeColors[debugLayer], 0.5);
+    if (mat.normal_texture_id > 0u && mat.normal_texture_id < 1000u) {
+        vec3 normal_sample = texture(tex_samplers[nonuniformEXT(mat.normal_texture_id)], frag_tex_coord).xyz * 2.0 - 1.0;
+        vec3 Q1 = dFdx(frag_world_pos);
+        vec3 Q2 = dFdy(frag_world_pos);
+        vec2 st1 = dFdx(frag_tex_coord);
+        vec2 st2 = dFdy(frag_tex_coord);
+        vec3 T = normalize(Q1 * st2.t - Q2 * st1.t);
+        vec3 B = -normalize(cross(N, T));
+        mat3 TBN = mat3(T, B, N);
+        N = normalize(TBN * normal_sample);
     }
 
-    color = ACESFilm(color);
-
-    // Gamma Correction (Linear -> sRGB)
-    color = pow(color, vec3(1.0/2.2)); 
+        vec3 color = calculate_lighting(frag_world_pos, N, frag_tex_coord, mat, albedo, ao, metallic, roughness);
 
     out_color = vec4(color * frag_color, albedo_sample.a);
 }

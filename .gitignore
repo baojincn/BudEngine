@@ -1,4 +1,4 @@
-﻿# .gitignore
+# .gitignore
 # Build directories
 build/
 cmake-build-*/
@@ -7,13 +7,10 @@ vcpkg/
 vcpkg_installed/
 
 # Generated files
-/data/replays
-/aftermath_dumps
+aftermath_dumps/
+data/
+Cache/
 
-# BudAssetTool exports (DDC, regenerate locally, do not upload)
-*.budmesh
-*.budmesh.bin
-*.budmesh.json
 
 # IDE files
 .vs/
@@ -45,6 +42,7 @@ third_party/*/.gitignore
 .gemini/
 temp/
 tmp/
+.clinerules/
 
 
 

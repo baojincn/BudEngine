@@ -15,6 +15,7 @@ namespace bud::graphics::vulkan {
 
 		void init(VkDevice device);
 		void cleanup();
+		~VulkanDescriptorAllocator() { cleanup(); }
 		void reset_frame();
 		bool allocate(VkDescriptorSetLayout layout, VkDescriptorSet& out_set);
 
