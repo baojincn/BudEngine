@@ -52,7 +52,7 @@ namespace bud::graphics {
 	class PyramidMipPass : public RenderPass {
 	public:
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, RGHandle depth_buffer, const RenderConfig& config);
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle depth_buffer, const RenderConfig& config, RGHandle target_pyramid = {});
 	};
 
 	class PyramidMipDebugPass : public RenderPass {
@@ -319,6 +319,14 @@ namespace bud::graphics {
 			RGHandle rg_hiz_pyramid,
 			const GPUScene& gpu_scene,
 			RGHandle* out_depth = nullptr);
+		void add_phase2_to_graph(RenderGraph& rg,
+			RGHandle visibility_buffer,
+			RGHandle depth_buffer,
+			const SceneView& view,
+			const RenderConfig& config,
+			RGHandle rg_visible_pages,
+			RGHandle rg_current_hiz,
+			const GPUScene& gpu_scene);
 		RGHandle add_indirect_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle depth_buffer,
 			const SceneView& view,
 			const RenderConfig& config,

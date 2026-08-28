@@ -1,6 +1,7 @@
 #version 460
 #extension GL_GOOGLE_include_directive : enable
 #extension GL_EXT_mesh_shader : require
+#extension GL_EXT_shader_atomic_float : enable
 
 #include "common.glsl"
 #include "vg_common.glsl"
@@ -20,9 +21,17 @@ layout(std430, set = 0, binding = 3) readonly buffer InstanceBuffer {
     HierarchyInstance data[];
 } instance_buffer;
 
+layout(set = 0, binding = 4) uniform sampler2D hiz_pyramid;
+
+layout(std430, set = 0, binding = 5) buffer PageClusterMask {
+    uint data[];
+} page_cluster_mask;
+
 layout(push_constant) uniform PushConstants {
     uint cascade_index;  // 0 = Main Camera View, 1..4 = CSM Cascade 0..3
     uint is_shadow_pass; // 1 = shadow pass (depth-only), 0 = main visibility pass
+    uint is_phase2;      // 0 = Phase 1 (test history Hi-Z), 1 = Phase 2 (test current Hi-Z)
+    uint enable_hiz;     // 0 = bypass Hi-Z, 1 = test Hi-Z
 } push;
 
 struct TaskData {
@@ -67,6 +76,62 @@ bool frustum_cull_sphere(vec3 center, float radius) {
     return false;
 }
 
+bool cluster_hiz_occluded(vec3 world_center, float world_radius, mat4 vp) {
+    if (textureSize(hiz_pyramid, 0).x <= 1) return false;
+
+    vec3 bmin = world_center - vec3(world_radius);
+    vec3 bmax = world_center + vec3(world_radius);
+
+    vec4 corners[8] = vec4[](
+        vec4(bmin.x, bmin.y, bmin.z, 1.0), vec4(bmax.x, bmin.y, bmin.z, 1.0),
+        vec4(bmin.x, bmax.y, bmin.z, 1.0), vec4(bmax.x, bmax.y, bmin.z, 1.0),
+        vec4(bmin.x, bmin.y, bmax.z, 1.0), vec4(bmax.x, bmin.y, bmax.z, 1.0),
+        vec4(bmin.x, bmax.y, bmax.z, 1.0), vec4(bmax.x, bmax.y, bmax.z, 1.0)
+    );
+
+    vec2 min_xy = vec2(1.0);
+    vec2 max_xy = vec2(-1.0);
+    float min_z = 1.0;
+    float max_z = 0.0;
+
+    for (int i = 0; i < 8; ++i) {
+        vec4 clip = vp * corners[i];
+        if (clip.w <= 0.0) return false; // Crosses near plane
+        vec3 ndc = clip.xyz / clip.w;
+        min_xy = min(min_xy, ndc.xy);
+        max_xy = max(max_xy, ndc.xy);
+        min_z = min(min_z, ndc.z);
+        max_z = max(max_z, ndc.z);
+    }
+
+    // Convert NDC [-1, 1] to UV [0, 1]
+    vec2 uv_min = clamp(min_xy * 0.5 + 0.5, 0.0, 1.0);
+    vec2 uv_max = clamp(max_xy * 0.5 + 0.5, 0.0, 1.0);
+
+    vec2 size = (uv_max - uv_min) * vec2(textureSize(hiz_pyramid, 0));
+    float max_dim = max(size.x, size.y);
+    float mip = ceil(log2(max(max_dim, 1.0)));
+    mip = clamp(mip, 0.0, float(textureQueryLevels(hiz_pyramid) - 1));
+
+    ivec2 mip_size = textureSize(hiz_pyramid, int(mip));
+    ivec2 p_min = clamp(ivec2(floor(uv_min * vec2(mip_size))), ivec2(0), mip_size - ivec2(1));
+    ivec2 p_max = clamp(ivec2(floor(uv_max * vec2(mip_size))), ivec2(0), mip_size - ivec2(1));
+
+    float d0 = texelFetch(hiz_pyramid, p_min, int(mip)).r;
+    float d1 = texelFetch(hiz_pyramid, ivec2(p_max.x, p_min.y), int(mip)).r;
+    float d2 = texelFetch(hiz_pyramid, ivec2(p_min.x, p_max.y), int(mip)).r;
+    float d3 = texelFetch(hiz_pyramid, p_max, int(mip)).r;
+
+    const float depth_bias = 0.001;
+    if (ubo.reversed_z == 1u) {
+        float hiz_depth = min(min(d0, d1), min(d2, d3));
+        return (max_z + depth_bias) < hiz_depth;
+    } else {
+        float hiz_depth = max(max(d0, d1), max(d2, d3));
+        return (min_z - depth_bias) > hiz_depth;
+    }
+}
+
 void main() {
     uint page_idx = gl_WorkGroupID.x;
     uint page_count = in_visibility.visible_page_count;
@@ -74,6 +139,12 @@ void main() {
 
     if (li == 0u) {
         visible_cluster_count = 0u;
+    }
+    if (push.is_phase2 == 0u) {
+        if (li == 0u) {
+            page_cluster_mask.data[page_idx * 2u + 0u] = 0u;
+            page_cluster_mask.data[page_idx * 2u + 1u] = 0u;
+        }
     }
     barrier();
 
@@ -91,7 +162,6 @@ void main() {
 
     HierarchyInstance instance = instance_buffer.data[instance_id];
     mat4 model_matrix = instance.model_matrix;
-    mat3 rot_scale = mat3(model_matrix);
 
     uint pool_bytes = page_slot * VG_PAGE_SIZE_BYTES;
     uint base_word = pool_bytes / 4u;
@@ -104,11 +174,61 @@ void main() {
 
     uint cluster_count = page_pool.data[base_word + 2u];
     uint tid = gl_WorkGroupSize.x;
+    mat4 vp = (push.cascade_index == 0u) ? (ubo.proj * ubo.view) : ubo.cascade_view_proj[push.cascade_index - 1u];
+
+    float scale = max(length(model_matrix[0].xyz), max(length(model_matrix[1].xyz), length(model_matrix[2].xyz)));
 
     for (uint c = li; c < cluster_count; c += tid) {
-        uint idx = atomicAdd(visible_cluster_count, 1u);
-        if (idx < 256u) {
-            visible_cluster_indices[idx] = c;
+        uint cluster_base = base_word + VG_PAGE_HEADER_DWORDS + c * VG_CLUSTER_DWORDS;
+        vec3 local_center = vec3(
+            uintBitsToFloat(page_pool.data[cluster_base + 7u]),
+            uintBitsToFloat(page_pool.data[cluster_base + 8u]),
+            uintBitsToFloat(page_pool.data[cluster_base + 9u])
+        );
+        float local_radius = uintBitsToFloat(page_pool.data[cluster_base + 10u]);
+        vec3 world_center = (model_matrix * vec4(local_center, 1.0)).xyz;
+        float world_radius = local_radius * scale;
+
+        // 1. Frustum Culling
+        if (frustum_cull_sphere(world_center, world_radius)) {
+            continue;
+        }
+
+        bool is_visible = true;
+        if (push.enable_hiz == 1u) {
+            uint word_idx = page_idx * 2u + (c >> 5u);
+            uint bit_idx = c & 31u;
+            uint already_drawn = (page_cluster_mask.data[word_idx] >> bit_idx) & 1u;
+
+            if (push.is_phase2 == 0u) {
+                // Phase 1: Test against History Hi-Z
+                bool occluded = cluster_hiz_occluded(world_center, world_radius, vp);
+                if (occluded) {
+                    is_visible = false;
+                } else {
+                    atomicOr(page_cluster_mask.data[word_idx], (1u << bit_idx));
+                }
+            } else {
+                // Phase 2: If already drawn in Phase 1, skip
+                if (already_drawn == 1u) {
+                    is_visible = false;
+                } else {
+                    // Test against Current Hi-Z
+                    bool occluded = cluster_hiz_occluded(world_center, world_radius, vp);
+                    if (occluded) {
+                        is_visible = false;
+                    } else {
+                        atomicOr(page_cluster_mask.data[word_idx], (1u << bit_idx));
+                    }
+                }
+            }
+        }
+
+        if (is_visible) {
+            uint idx = atomicAdd(visible_cluster_count, 1u);
+            if (idx < 256u) {
+                visible_cluster_indices[idx] = c;
+            }
         }
     }
     barrier();

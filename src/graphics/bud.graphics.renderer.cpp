@@ -1322,27 +1322,53 @@ namespace bud::graphics {
 				if (is_mesh_shader_vg) {
 					// Mesh shader visibility path (task+mesh shader)
 					RGHandle rg_visible_pages{};
-					if (hierarchy_traversal_pass) {
+					if (hierarchy_traversal_pass)
 						rg_visible_pages = hierarchy_traversal_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, visible_count, gpu_scene, current_idx);
+
+					gpu_scene.ensure_hiz_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
+
+					RGHandle rg_history_hiz{};
+					if (gpu_scene.has_history_hiz() && render_config.enable_hiz_culling) {
+						auto hist_tex = gpu_scene.get_history_hiz(current_idx);
+						if (hist_tex.is_valid())
+							rg_history_hiz = render_graph.import_texture("HistoryHiZ", hist_tex, ResourceState::ShaderResource);
 					}
 
 					if (rg_visible_pages.is_valid() && visibility_pass) {
 						RGHandle rg_depth{};
+						// Phase 1: Visibility Pass using History Hi-Z
 						auto rg_visibility = visibility_pass->add_to_graph(render_graph, back_buffer, rg_depth,
-							scene_view, render_config, rg_visible_pages, RGHandle{}, gpu_scene, &rg_depth);
+							scene_view, render_config, rg_visible_pages, rg_history_hiz, gpu_scene, &rg_depth);
+
+						// Build Current Frame Hi-Z Pyramid from Phase 1 Depth Buffer
+						RGHandle rg_current_hiz{};
+						if (rg_depth.is_valid() && pyramid_mip_pass) {
+							RGHandle target_hiz{};
+							auto curr_tex = gpu_scene.get_current_hiz(current_idx);
+							if (curr_tex.is_valid())
+								target_hiz = render_graph.import_texture("CurrentHiZ", curr_tex, ResourceState::Undefined);
+							rg_current_hiz = pyramid_mip_pass->add_to_graph(render_graph, rg_depth, render_config, target_hiz);
+						}
+
+						// Phase 2: Incremental Visibility Pass using Current Hi-Z
+						if (rg_current_hiz.is_valid()) {
+							gpu_scene.mark_history_hiz_valid();
+							visibility_pass->add_phase2_to_graph(render_graph, rg_visibility, rg_depth,
+								scene_view, render_config, rg_visible_pages, rg_current_hiz, gpu_scene);
+
+							if (render_config.debug_hiz && pyramid_mip_debug_pass)
+								pyramid_mip_debug_pass->add_to_graph(render_graph, back_buffer, rg_current_hiz, render_config.debug_hiz_mip);
+						}
 
 						RGHandle rg_ao{};
 						if (rg_depth.is_valid() && ao_pass && render_config.ao_mode != AOMode::Disabled) {
 							RGHandle raw_ao = ao_pass->add_to_graph(render_graph, rg_depth, scene_view, render_config);
-							if (raw_ao.is_valid() && ao_temporal_pass) {
+							if (raw_ao.is_valid() && ao_temporal_pass)
 								raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
-							}
-							if (raw_ao.is_valid() && ao_blur_pass) {
+							if (raw_ao.is_valid() && ao_blur_pass)
 								rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
-							}
-							else {
+							else
 								rg_ao = raw_ao;
-							}
 						}
 
 						if (rg_visibility.is_valid() && resolve_pass) {

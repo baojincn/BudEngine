@@ -129,8 +129,16 @@ namespace bud::graphics {
 				}
 				if (frame_resource.visible_clusters.is_valid()) rhi->destroy_buffer(frame_resource.visible_clusters);
 				if (frame_resource.dynamic_instances.is_valid()) rhi->destroy_buffer(frame_resource.dynamic_instances);
+				if (frame_resource.page_cluster_mask.is_valid()) rhi->destroy_buffer(frame_resource.page_cluster_mask);
 				frame_resource = {};
 			}
+			for (int i = 0; i < 2; ++i) {
+				if (persistent_hiz_textures[i].is_valid()) {
+					rhi->destroy_texture(persistent_hiz_textures[i]);
+					persistent_hiz_textures[i].reset();
+				}
+			}
+			persistent_hiz_size = 0;
 		}
 
 		mesh_geometries.clear();
@@ -299,6 +307,14 @@ namespace bud::graphics {
 				frame_resource.visible_page_capacity = max_visible_pages;
 			}
 
+			if (!frame_resource.page_cluster_mask.is_valid() || frame_resource.page_cluster_mask_capacity < frame_resource.visible_page_capacity) {
+				if (frame_resource.page_cluster_mask.is_valid())
+					rhi->destroy_buffer(frame_resource.page_cluster_mask);
+				uint64_t pcm_size = static_cast<uint64_t>(frame_resource.visible_page_capacity) * 2 * sizeof(uint32_t);
+				frame_resource.page_cluster_mask = rhi->create_gpu_buffer(pcm_size, ResourceState::UnorderedAccess);
+				frame_resource.page_cluster_mask_capacity = frame_resource.visible_page_capacity;
+			}
+
 			for (size_t c_idx = 0; c_idx < frame_resource.csm_visible_pages.size(); ++c_idx) {
 				if (!frame_resource.csm_visible_pages[c_idx].is_valid()) {
 					constexpr uint32_t max_visible_pages = 65536;
@@ -358,4 +374,34 @@ namespace bud::graphics {
 		std::lock_guard lock(mutex);
 		free_slots.push_back(page_index);
 	}
+
+	void GPUScene::ensure_hiz_textures(RHI* rhi, uint32_t width, uint32_t height) {
+		if (width == 0 || height == 0 || !rhi)
+			return;
+		uint32_t pot_w = 1 << (uint32_t)std::ceil(std::log2((float)width));
+		uint32_t pot_h = 1 << (uint32_t)std::ceil(std::log2((float)height));
+		uint32_t size = std::max(pot_w, pot_h);
+		if (persistent_hiz_size == size && persistent_hiz_textures[0].is_valid() && persistent_hiz_textures[1].is_valid())
+			return;
+
+		uint32_t mip_count = (uint32_t)std::floor(std::log2((float)size)) + 1;
+		TextureDesc desc;
+		desc.width = size;
+		desc.height = size;
+		desc.mips = mip_count;
+		desc.format = TextureFormat::R32_FLOAT;
+		desc.is_storage = true;
+		desc.initial_state = ResourceState::ShaderResource;
+
+		for (int i = 0; i < 2; ++i) {
+			if (persistent_hiz_textures[i].is_valid()) {
+				rhi->destroy_texture(persistent_hiz_textures[i]);
+				persistent_hiz_textures[i].reset();
+			}
+			persistent_hiz_textures[i] = rhi->create_texture(desc, nullptr, 0);
+		}
+		persistent_hiz_size = size;
+		has_history_hiz_valid = false;
+	}
 }
+

@@ -45,6 +45,8 @@ namespace bud::graphics {
 			{1, DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, SHADER_STAGE_TASK_BIT},
 			{2, DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, SHADER_STAGE_TASK_BIT | SHADER_STAGE_MESH_BIT},
 			{3, DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, SHADER_STAGE_TASK_BIT | SHADER_STAGE_MESH_BIT},
+			{4, DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, SHADER_STAGE_TASK_BIT},
+			{5, DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, SHADER_STAGE_TASK_BIT},
 		};
 		shadow_visibility_set_layout = rhi->create_descriptor_set_layout(bindings);
 
@@ -180,6 +182,8 @@ namespace bud::graphics {
 						rhi->update_descriptor_set_buffer(ds, 1, render_graph.get_buffer(rg_csm_visible_pages[i]));
 						rhi->update_descriptor_set_buffer(ds, 2, gpu_scene.get_page_pool_buffer());
 						rhi->update_descriptor_set_buffer(ds, 3, frame.instance_data);
+						rhi->update_descriptor_set_image(ds, 4, gpu_scene.get_history_hiz(rhi->get_current_frame_index()));
+						rhi->update_descriptor_set_buffer(ds, 5, frame.page_cluster_mask);
 
 						rhi->cmd_bind_pipeline(cmd, shadow_mesh_pipeline);
 						rhi->cmd_bind_descriptor_set(cmd, shadow_mesh_pipeline, 0, ds);
@@ -188,9 +192,13 @@ namespace bud::graphics {
 						struct VisPush {
 							uint32_t cascade_index;
 							uint32_t is_shadow_pass;
+							uint32_t is_phase2;
+							uint32_t enable_hiz;
 						} vis_push;
 						vis_push.cascade_index = i + 1; // 1 = cascade 0, 2 = cascade 1, etc.
 						vis_push.is_shadow_pass = 1;
+						vis_push.is_phase2 = 0;
+						vis_push.enable_hiz = 0;
 						rhi->cmd_push_constants(cmd, shadow_mesh_pipeline, sizeof(VisPush), &vis_push);
 
 						uint32_t vpc = frame.visible_page_capacity;

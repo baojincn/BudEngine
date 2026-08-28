@@ -41,7 +41,7 @@ Rendering is implemented as a scalable multi-profile pipeline:
 - **R1 (Done):** CPU macro-culling at instance level.
 - **R1.5 (In Progress):** Unified HLSL shader compilation pipeline & glTF data ingestion.
 - **R2 (Done):** GPU instance-level occlusion culling pipeline.
-- **R3:** Meshlet-level fine-grained culling pipeline.
+- **R3 (In Progress):** Meshlet/Cluster-level fine-grained Virtual Geometry & Multi-View GPU-driven pipeline (See [gpu_driven_multi_view_and_culling_plan.md](file:///d:/PersonalProjects/BudEngine/doc/gpu_driven_multi_view_and_culling_plan.md)).
 - **R4:** Low-resolution internal raster + robust motion vector output.
 - **R5:** Neural upscaling/denoise integration before present.
 

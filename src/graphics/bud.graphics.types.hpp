@@ -221,6 +221,7 @@ namespace bud::graphics {
 
 		bool enable_virtual_geometry = true;
 		bool enable_mesh_shader = true;
+		bool enable_hiz_culling = true;
 		bool debug_hiz = false;
 		uint32_t debug_hiz_mip = 0;
 		bool enable_cluster_visualization = false;

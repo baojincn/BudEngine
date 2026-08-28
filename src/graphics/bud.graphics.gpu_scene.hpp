@@ -87,6 +87,7 @@ namespace bud::graphics {
 			std::array<BufferHandle, MAX_CASCADES> csm_visible_pages; // Multi-view: Visible pages per CSM cascade
 			BufferHandle visible_clusters;    // Phase 2 GPU-driven (page_emit -> cluster_cull)
 			BufferHandle dynamic_instances;   // Phase 2 GPU-driven dynamic instances per cluster
+			BufferHandle page_cluster_mask;   // Two-Phase Cluster Hi-Z: bitmask per visible page
 			uint64_t submit_timeline_value = 0;
 			bool requests_processed = true;
 			BufferHandle csm_indirect_draw;
@@ -106,6 +107,7 @@ namespace bud::graphics {
 			uint32_t page_request_capacity = 0;
 			uint32_t visible_page_capacity = 0;
 			uint32_t visible_cluster_capacity = 0;
+			uint32_t page_cluster_mask_capacity = 0;
 		};
 
 		GPUScene() = default;
@@ -159,12 +161,28 @@ namespace bud::graphics {
 			uint64_t indirect_draw_stride,
 			uint64_t stats_buffer_size);
 
+		TextureHandle get_history_hiz(uint32_t frame_index) const {
+			return persistent_hiz_textures[(frame_index + 1) % 2];
+		}
+		TextureHandle get_current_hiz(uint32_t frame_index) const {
+			return persistent_hiz_textures[frame_index % 2];
+		}
+		bool has_history_hiz() const {
+			return has_history_hiz_valid && persistent_hiz_textures[0].is_valid();
+		}
+		void mark_history_hiz_valid() { has_history_hiz_valid = true; }
+		void reset_history_hiz() { has_history_hiz_valid = false; }
+		void ensure_hiz_textures(RHI* rhi, uint32_t width, uint32_t height);
+
 	private:
 		GeometryPool geometry_pool;
 		PagePool page_pool;
 		VirtualGeometryPool vg_pool;
 		BufferHandle page_table_buffer;
 		BufferHandle materials_buffer;
+		std::array<TextureHandle, 2> persistent_hiz_textures;
+		uint32_t persistent_hiz_size = 0;
+		bool has_history_hiz_valid = false;
 		std::vector<GPUMaterialData> cpu_materials;
 		std::mutex materials_mutex;
 		std::vector<MeshGeometry> mesh_geometries;
