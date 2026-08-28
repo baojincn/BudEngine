@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <nlohmann/json.hpp>
 #include "bud.scene.hpp"
@@ -55,6 +55,7 @@ namespace bud::scene {
         j.at("transform").get_to(e.transform);
         j.at("is_static").get_to(e.is_static);
         j.at("is_active").get_to(e.is_active);
+        if (j.contains("lod_bias")) j.at("lod_bias").get_to(e.lod_bias);
     }
 
     // Camera
@@ -99,6 +100,8 @@ namespace bud::scene {
             {"main_camera", s.main_camera},
             {"directional_light", s.directional_light},
             {"ambient_strength", s.ambient_strength},
+            {"lod_error_threshold_px", s.lod_error_threshold_px},
+            {"streaming_unload_radius", s.streaming_unload_radius},
             {"entities", s.entities}
         };
     }
@@ -106,6 +109,8 @@ namespace bud::scene {
         j.at("main_camera").get_to(s.main_camera);
         j.at("directional_light").get_to(s.directional_light);
         j.at("ambient_strength").get_to(s.ambient_strength);
+        if (j.contains("lod_error_threshold_px")) j.at("lod_error_threshold_px").get_to(s.lod_error_threshold_px);
+        if (j.contains("streaming_unload_radius")) j.at("streaming_unload_radius").get_to(s.streaming_unload_radius);
         j.at("entities").get_to(s.entities);
     }
 }

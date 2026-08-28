@@ -311,12 +311,23 @@ std::vector<InternalCluster> simplify_cluster_set(
         result_error = 0.0f;
     }
 
-    // Convert meshopt normalized error to object-space error (cm) and scale with level
-    // Level 1: ~0.4 - 0.6 cm (LOD0 -> LOD1 transition around 3-4 meters)
-    // Level 2: ~1.0 - 1.4 cm (LOD1 -> LOD2 transition around 7-10 meters)
-    // Level 3: ~2.0 - 2.8 cm (LOD2 -> LOD3 transition around 15-20 meters)
-    float level_error_step = std::max(2.0_mm, std::min(group_radius * 0.004f, 0.5_cm)) * static_cast<float>(level);
-    float max_level_error = 0.6_cm * static_cast<float>(level);
+    // Convert meshopt normalized error to object-space error (cm) and scale with level.
+    // Calibrate geometric error step by scale/profile:
+    // Small/medium hero props (R < 2.5m, e.g. Lion, Vases, Columns):
+    //   Level 1: ~1.4 - 1.5 cm (LOD0 -> LOD1 transition around 6.5 - 7.0 meters)
+    //   Level 2: ~3.5 - 3.8 cm (LOD1 -> LOD2 transition around 16 - 18 meters)
+    // Large architecture (R >= 2.5m, e.g. Arches, Ceiling, Roof):
+    //   Level 1: ~1.8 - 2.0 cm (LOD0 -> LOD1 transition around 8.5 - 9.5 meters)
+    //   Level 2: ~4.5 - 5.0 cm (LOD1 -> LOD2 transition around 21 - 24 meters)
+    float level_error_step;
+    float max_level_error;
+    if (group_radius < 250.0_cm) {
+        level_error_step = std::max(5.0_mm, std::min(group_radius * 0.015f, 1.5_cm)) * static_cast<float>(level);
+        max_level_error = 1.6_cm * static_cast<float>(level);
+    } else {
+        level_error_step = std::max(8.0_mm, std::min(group_radius * 0.003f, 1.8_cm)) * static_cast<float>(level);
+        max_level_error = 2.0_cm * static_cast<float>(level);
+    }
     float added_error = std::min(std::max(result_error * group_radius, level_error_step), max_level_error);
     float final_lod_error = max_child_lod_error + added_error;
 

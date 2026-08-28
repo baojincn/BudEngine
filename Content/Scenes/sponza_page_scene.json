@@ -1,6 +1,8 @@
-﻿{
+{
     "name":  "Sponza Page-Streaming Test",
     "ambient_strength":  0.35,
+    "lod_error_threshold_px": 2.0,
+    "streaming_unload_radius": 20.0,
     "directional_light":  {
                               "color":  [
                                             1.0,

@@ -67,7 +67,15 @@ void TriangleApp::on_init(const AppConfig& config) {
 				auto& scene = engine->get_scene();
 				scene = j.get<bud::scene::Scene>();
 
-				bud::print("[TriangleApp] Scene file parsed. Entities found: {}", scene.entities.size());
+				if (streaming_manager) {
+					streaming_manager->set_unload_radius(scene.streaming_unload_radius * bud::core::units::m);
+				}
+				auto cur_cfg = renderer->get_config();
+				cur_cfg.lod_error_threshold_px = scene.lod_error_threshold_px;
+				renderer->set_config(cur_cfg);
+
+				bud::print("[TriangleApp] Scene file parsed. Entities found: {}, lod_threshold={}px, unload_radius={}m",
+					scene.entities.size(), scene.lod_error_threshold_px, scene.streaming_unload_radius);
 
 				auto is_vg_asset = [](const std::string& p) {
 					return p.ends_with(".budasset") || p.ends_with(".budmesh");

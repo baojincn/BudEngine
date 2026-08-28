@@ -89,6 +89,9 @@ public:
 	void update(const bud::math::vec3& camera_position);
 	bool is_page_resident(const std::string& page_key) const;
 
+	void set_unload_radius(float r) { unload_radius_ = r; }
+	float get_unload_radius() const { return unload_radius_; }
+
 private:
 	bud::io::AssetManager* asset_manager = nullptr;
 	bud::graphics::GPUScene* gpu_scene = nullptr;
