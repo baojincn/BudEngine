@@ -1260,59 +1260,33 @@ namespace bud::graphics {
 				const size_t csm_split = csm_instance_h.is_valid() ? scene_split : split_index;
 
 				RGHandle rg_csm_indirect;
-				RGHandle rg_csm_static_indirect;
-				// GPU-driven CSM culling: dispatch csm_cull.comp to populate csm_indirect_draw
+				// GPU-driven CSM culling for traditional dynamic meshes (only when dynamic instances exist)
 				if (csm_cull_pipeline.is_valid() && frame.csm_indirect_draw.is_valid()) {
-					if (render_config.cache_shadows && frame.csm_static_indirect_draw.is_valid()) {
-						rg_csm_static_indirect = render_graph.import_buffer("CSMStaticIndirectDraw", frame.csm_static_indirect_draw, ResourceState::UnorderedAccess);
-						render_graph.add_pass("CSM Static Cull",
+					if (!is_mesh_shader_vg || csm_split > 0) {
+						rg_csm_indirect = render_graph.import_buffer("CSMIndirectDraw", frame.csm_indirect_draw, ResourceState::UnorderedAccess);
+						render_graph.add_pass("CSM Cull",
 							[=](RGBuilder& builder) {
 								builder.read(csm_inst_input, ResourceState::ShaderResource);
-								builder.write(rg_csm_static_indirect, ResourceState::UnorderedAccess);
+								builder.write(rg_csm_indirect, ResourceState::UnorderedAccess);
 							},
 							[=, this](RHI* rhi, CommandHandle cmd) {
 								rhi->cmd_bind_pipeline(cmd, csm_cull_pipeline);
 								rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 0, render_graph.get_buffer(csm_inst_input));
-								rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 2, frame.csm_static_indirect_draw);
+								rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 2, frame.csm_indirect_draw);
 								rhi->cmd_bind_compute_ubo(cmd, csm_cull_pipeline, 4);
 								struct PushConsts {
 									uint32_t total_instances;
 									uint32_t did_copy;
 									uint32_t static_only;
 								} pc;
-								pc.total_instances = static_cast<uint32_t>(csm_inst_count);
+								pc.total_instances = static_cast<uint32_t>(is_mesh_shader_vg ? csm_split : csm_inst_count);
 								pc.did_copy = 0;
-								pc.static_only = 1;
+								pc.static_only = 0;
 								rhi->cmd_push_constants(cmd, csm_cull_pipeline, sizeof(PushConsts), &pc);
-								rhi->cmd_dispatch(cmd, (csm_inst_count + 255) / 256, 1, 1);
+								rhi->cmd_dispatch(cmd, (pc.total_instances + 255) / 256, 1, 1);
 							}
 						);
 					}
-
-					rg_csm_indirect = render_graph.import_buffer("CSMIndirectDraw", frame.csm_indirect_draw, ResourceState::UnorderedAccess);
-					render_graph.add_pass("CSM Cull",
-						[=](RGBuilder& builder) {
-							builder.read(csm_inst_input, ResourceState::ShaderResource);
-							builder.write(rg_csm_indirect, ResourceState::UnorderedAccess);
-						},
-						[=, this](RHI* rhi, CommandHandle cmd) {
-							rhi->cmd_bind_pipeline(cmd, csm_cull_pipeline);
-							rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 0, render_graph.get_buffer(csm_inst_input));
-							rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 2, frame.csm_indirect_draw);
-							rhi->cmd_bind_compute_ubo(cmd, csm_cull_pipeline, 4);
-							struct PushConsts {
-								uint32_t total_instances;
-								uint32_t did_copy;
-								uint32_t static_only;
-							} pc;
-							pc.total_instances = static_cast<uint32_t>(csm_inst_count);
-							bool cache_active = render_config.cache_shadows && csm_pass->is_cache_valid();
-							pc.did_copy = cache_active ? 1 : 0;
-							pc.static_only = 0;
-							rhi->cmd_push_constants(cmd, csm_cull_pipeline, sizeof(PushConsts), &pc);
-							rhi->cmd_dispatch(cmd, (csm_inst_count + 255) / 256, 1, 1);
-						}
-					);
 				}
 
 				std::array<RGHandle, MAX_CASCADES> rg_csm_visible_pages{};
@@ -1343,7 +1317,7 @@ namespace bud::graphics {
 					}
 				}
 
-				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), csm_inst_input, csm_inst_count, csm_split, rg_csm_indirect, rg_csm_static_indirect, rg_csm_visible_pages);
+				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), csm_inst_input, csm_inst_count, csm_split, rg_csm_indirect, rg_csm_visible_pages);
 
 				if (is_mesh_shader_vg) {
 					// Mesh shader visibility path (task+mesh shader)

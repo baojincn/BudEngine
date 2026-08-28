@@ -218,7 +218,6 @@ namespace bud::graphics {
 
 		bool enable_soft_shadows = true;
 		bool debug_cascades = false;
-		bool cache_shadows = false; // Disabled: feature has rendering bugs, enable when fixed
 
 		bool enable_virtual_geometry = true;
 		bool enable_mesh_shader = true;

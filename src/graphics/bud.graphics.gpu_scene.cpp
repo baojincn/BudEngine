@@ -121,7 +121,6 @@ namespace bud::graphics {
 				if (frame_resource.stats_readback.is_valid()) rhi->destroy_buffer(frame_resource.stats_readback);
 				if (frame_resource.page_request_buffer.is_valid()) rhi->destroy_buffer(frame_resource.page_request_buffer);
 				if (frame_resource.page_request_readback.is_valid()) rhi->destroy_buffer(frame_resource.page_request_readback);
-				if (frame_resource.csm_static_indirect_draw.is_valid()) rhi->destroy_buffer(frame_resource.csm_static_indirect_draw);
 				if (frame_resource.csm_instance_data.is_valid()) rhi->destroy_buffer(frame_resource.csm_instance_data);
 				if (frame_resource.visible_pages.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages);
 				if (frame_resource.visible_pages_readback.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages_readback);
@@ -254,18 +253,11 @@ namespace bud::graphics {
 
 		// Full-scene CSM indirect draw buffer for GPU-driven shadow culling.
 		// Size: cascade_count * scene_capacity entries.
-		if (!frame_resource.csm_indirect_draw.is_valid() || frame_resource.csm_indirect_capacity < desired_scene_capacity) {
-			if (frame_resource.csm_indirect_draw.is_valid())
-				rhi->destroy_buffer(frame_resource.csm_indirect_draw);
-			frame_resource.csm_indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * 4 * indirect_draw_stride, ResourceState::IndirectArgument);
+			if (!frame_resource.csm_indirect_draw.is_valid() || frame_resource.csm_indirect_capacity < desired_scene_capacity) {
+				if (frame_resource.csm_indirect_draw.is_valid())
+					rhi->destroy_buffer(frame_resource.csm_indirect_draw);
+				frame_resource.csm_indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * 4 * indirect_draw_stride, ResourceState::IndirectArgument);
 				frame_resource.csm_indirect_capacity = static_cast<uint32_t>(desired_scene_capacity);
-			}
-
-			// Static-only indirect commands for the CSM static cache update.
-			if (!frame_resource.csm_static_indirect_draw.is_valid() || frame_resource.csm_indirect_capacity < desired_scene_capacity) {
-				if (frame_resource.csm_static_indirect_draw.is_valid())
-					rhi->destroy_buffer(frame_resource.csm_static_indirect_draw);
-				frame_resource.csm_static_indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * 4 * indirect_draw_stride, ResourceState::IndirectArgument);
 			}
 
 			// Full-scene DrawData for CSM cull (covers out-of-view casters).

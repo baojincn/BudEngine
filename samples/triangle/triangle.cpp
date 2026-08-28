@@ -49,7 +49,6 @@ void TriangleApp::on_init(const AppConfig& config) {
 	bud::graphics::RenderConfig render_config;
 	render_config.shadow_bias_constant = 0.005f;
 	render_config.shadow_bias_slope = 1.25f;
-	render_config.cache_shadows = true;
 	render_config.cascade_count = 4;
 	render_config.cascade_split_lambda = 0.5;
 	render_config.debug_cascades = false;

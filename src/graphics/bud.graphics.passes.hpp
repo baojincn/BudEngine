@@ -129,15 +129,6 @@ namespace bud::graphics {
 		PipelineHandle csm_cull_pipeline;
 		PipelineHandle shadow_mesh_pipeline;
 		uint64_t shadow_visibility_set_layout = 0;
-		TextureHandle static_cache_texture;
-		bud::math::vec3 last_light_dir = bud::math::vec3(0.0f);
-		bud::math::mat4 last_view_proj = bud::math::mat4(1.0f);
-		bud::math::mat4 last_cascade_view_proj[MAX_CASCADES]{};
-		RenderConfig last_config{};
-		bool has_last_view_proj = false;
-		bool has_last_cascade_proj = false;
-		bool has_last_config = false;
-		bool cache_initialized = false;
 		RHI* stored_rhi = nullptr;
 
 	public:
@@ -148,10 +139,6 @@ namespace bud::graphics {
 			bud::math::mat4 light_space_matrix;
 			bud::math::vec4 light_dir;
 		};
-
-		bool is_cache_valid() const {
-			return cache_initialized && static_cache_texture.is_valid();
-		}
 
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		RGHandle add_to_graph(
@@ -168,7 +155,6 @@ namespace bud::graphics {
 			size_t instance_count,
 			size_t split_index = 0,
 			bud::graphics::RGHandle rg_indirect_draw = {},
-			bud::graphics::RGHandle rg_static_indirect_draw = {},
 			std::array<bud::graphics::RGHandle, MAX_CASCADES> rg_csm_visible_pages = {}
 		);
 	};
