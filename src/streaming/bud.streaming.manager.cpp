@@ -193,14 +193,11 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 					}
 
 					gpu_mat.albedo_texture_id = renderer->bind_texture_async(tex_path);
-					bud::print("[Streaming] Binding material {} texture: {} -> {} (slot {}) alpha_mode={} cutoff={}",
-					           mi, raw_tex_path, tex_path, gpu_mat.albedo_texture_id, gpu_mat.alpha_mode, gpu_mat.alpha_cutoff);
 				}
 			}
 
 			if (gpu_scene) {
 				uint32_t id = gpu_scene->register_material(gpu_mat);
-				bud::print("[Streaming] Registered material {} -> GPU slot {}", mi, id);
 			}
 		}
 
@@ -542,8 +539,6 @@ void StreamingManager::process_gpu_page_requests(const uint32_t* virtual_page_in
 						pending_loads.erase(p);
 						page_gpu_slots[p] = slot;
 					}
-
-					bud::print("[Streaming] Loaded Virtual Geometry page: {} (virtual_page={}) -> slot {}", p, sp.virtual_page_index, slot);
 				});
 			});
 	}
@@ -705,8 +700,6 @@ void StreamingManager::process_gpu_page_requests_from_keys(const std::vector<std
 						pending_loads.erase(p);
 						page_gpu_slots[p] = slot;
 					}
-
-					bud::print("[Streaming] Loaded Virtual Geometry page: {} (virtual_page={}) -> slot {}", p, sp.virtual_page_index, slot);
 				});
 			});
 	}

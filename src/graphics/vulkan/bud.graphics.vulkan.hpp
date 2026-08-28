@@ -81,12 +81,20 @@ namespace bud::graphics::vulkan {
 		// 帧控制
 		CommandHandle begin_frame() override;
 		void end_frame(CommandHandle cmd) override;
+		CommandHandle get_current_graphics_command_buffer() override;
 		TextureHandle get_current_swapchain_texture() override;
 		uint32_t get_current_image_index() override;
 
 		// 命令录制 
 		void resource_barrier(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) override;
 		void resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) override;
+		void resource_barrier_release(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) override;
+		void resource_barrier_release(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) override;
+		void resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) override;
+		void resource_barrier_acquire(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) override;
+		uint32_t get_graphics_queue_family() const override { return graphics_family_index; }
+		uint32_t get_compute_queue_family() const override { return compute_family_index; }
+		uint32_t get_transfer_queue_family() const override { return copy_family_index; }
 
 		// 动态渲染通道
 		void cmd_begin_render_pass(CommandHandle cmd, const bud::graphics::RenderPassBeginInfo& info) override;
@@ -156,7 +164,10 @@ namespace bud::graphics::vulkan {
 		uint64_t get_compute_timeline_value() const override { return compute_timeline_value; }
 		uint64_t get_graphics_timeline_value() const override { return graphics_timeline_value; }
 		uint64_t get_graphics_timeline_completed_value() const override;
+		uint64_t get_transfer_timeline_value() const override { return transfer_timeline_value; }
+		void wait_transfer_timeline(uint64_t value) override;
 		bool has_dedicated_compute_queue() const override { return has_dedicated_compute_queue_; }
+		bool has_dedicated_transfer_queue() const override { return has_dedicated_copy_queue; }
 
 		VulkanMemoryAllocator* get_memory_allocator() { return memory_allocator.get(); }
 		bud::graphics::ResourcePool* get_resource_pool() override { return resource_pool.get(); }
@@ -189,6 +200,7 @@ namespace bud::graphics::vulkan {
 
 		void cmd_copy_buffer(CommandHandle cmd, bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size) override;
 		void cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) override;
+		void cmd_fill_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, uint32_t data) override;
 		void cmd_copy_image_to_buffer(CommandHandle cmd, TextureHandle src, bud::graphics::BufferHandle dst) override;
 
 		bud::graphics::BufferHandle create_dedicated_upload_buffer(uint64_t size);
@@ -206,6 +218,8 @@ namespace bud::graphics::vulkan {
 
 		VkCommandBuffer begin_single_time_commands();
 		void end_single_time_commands(VkCommandBuffer command_buffer);
+		VkCommandBuffer begin_single_time_transfer_commands();
+		void end_single_time_transfer_commands(VkCommandBuffer command_buffer);
 		// Records staging->image copy + mipmap generation + final transition
 		// into the given command buffer (shared by sync/async texture uploads).
 		void record_texture_upload(VkCommandBuffer cb, class VulkanTexture* tex, VkBuffer staging_buf, uint64_t staging_offset, const TextureDesc& desc);
@@ -238,14 +252,20 @@ namespace bud::graphics::vulkan {
 			VkSemaphore image_available_semaphore = nullptr;
 			VkFence in_flight_fence = nullptr;
 			VkCommandPool main_command_pool = nullptr;
-			VkCommandBuffer main_command_buffer = nullptr;
+			std::vector<VkCommandBuffer> graphics_command_buffers;
+			uint32_t graphics_cb_index = 0;
 			// 2 timestamp queries (frame start / frame end) for GPU frame time.
 			// Read back after the in-flight fence is reached (next begin_frame).
 			VkQueryPool timestamp_pool = nullptr;
 			bool timestamp_ready = false; // true once timestamps were written once
-			// Per-frame async compute command pool/buffer (compute family).
+			// Per-frame async compute command pool/buffers (compute family).
 			VkCommandPool async_command_pool = nullptr;
-			VkCommandBuffer async_command_buffer = nullptr;
+			std::vector<VkCommandBuffer> async_command_buffers;
+			uint32_t async_cb_index = 0;
+			// Per-frame transfer command pool/buffers (copy family).
+			VkCommandPool transfer_command_pool = nullptr;
+			std::vector<VkCommandBuffer> transfer_command_buffers;
+			uint32_t transfer_cb_index = 0;
 			VkBuffer uniform_buffer = nullptr;       // Per-frame UBO (allocated via VMA when available)
 			VmaAllocation uniform_allocation = VK_NULL_HANDLE; // VMA allocation for the UBO (if used)
 			VmaAllocationInfo uniform_alloc_info = {}; // allocation info containing mapped ptr
@@ -253,6 +273,8 @@ namespace bud::graphics::vulkan {
 			VkDescriptorSet global_descriptor_set = VK_NULL_HANDLE;
 		};
 
+		void flush_active_graphics_segment();
+		VkCommandBuffer get_or_allocate_graphics_command_buffer();
 		
 		bud::platform::Window* platform_window = nullptr;
 
@@ -275,6 +297,11 @@ namespace bud::graphics::vulkan {
 		uint32_t graphics_family_index = 0;
 		uint32_t copy_family_index = 0;
 		bool upload_pending_this_frame = false;
+		// Dedicated transfer timeline semaphore (copy queue -> graphics/compute synchronization)
+		VkSemaphore transfer_timeline_semaphore = nullptr;
+		uint64_t transfer_timeline_value = 0;
+		uint64_t graphics_wait_transfer_value = 0;
+		uint64_t compute_wait_transfer_value = 0;
 		// Async compute queue (dedicated compute family) + per-frame async
 		// command pool/buffer + compute timeline semaphore.
 		VkQueue compute_queue = nullptr;
@@ -284,6 +311,13 @@ namespace bud::graphics::vulkan {
 		uint64_t compute_timeline_value = 0;
 		VkSemaphore graphics_timeline_semaphore = nullptr; // main graphics queue
 		uint64_t graphics_timeline_value = 0;
+		VkCommandBuffer current_graphics_cb = VK_NULL_HANDLE;
+		bool graphics_recording = false;
+		bool graphics_has_work = false;
+		bool is_first_graphics_submit_in_frame = true;
+		uint64_t graphics_wait_compute_value = 0;
+		uint64_t compute_wait_graphics_value = 0;
+		VkCommandBuffer current_async_cb = VK_NULL_HANDLE;
 		bool async_recording = false;
 		bool async_compute_pending_this_frame = false;
 
@@ -316,6 +350,7 @@ namespace bud::graphics::vulkan {
 		// Dedicated graphics-family pool for one-time async texture upload cbs
 		// (kept separate from the per-frame main command pools).
 		VkCommandPool texture_upload_pool = VK_NULL_HANDLE;
+		VkCommandPool transfer_command_pool = VK_NULL_HANDLE;
 		VkDebugUtilsMessengerEXT debug_messenger = nullptr;
 		bool enable_validation_layers = false;
 		bool aftermath_initialized = false;
@@ -346,6 +381,7 @@ namespace bud::graphics::vulkan {
 		uint32_t max_frames_in_flight = 2;
 		uint32_t current_frame = 0;
 		uint32_t current_image_index = 0;
+		bool frame_active = false;
 
 		RenderConfig render_config;
 		bud::threading::TaskScheduler* task_scheduler = nullptr;

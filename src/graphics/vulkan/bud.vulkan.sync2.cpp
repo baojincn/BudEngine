@@ -1,4 +1,4 @@
-﻿#include "src/graphics/vulkan/bud.vulkan.sync2.hpp"
+#include "src/graphics/vulkan/bud.vulkan.sync2.hpp"
 #include <vulkan/vulkan.h>
 
 namespace bud::graphics::vulkan::sync2 {
@@ -42,7 +42,9 @@ void cmd_image_barrier2(VkCommandBuffer cmd,
                         VkPipelineStageFlags2 srcStageMask,
                         VkAccessFlags2 srcAccessMask,
                         VkPipelineStageFlags2 dstStageMask,
-                        VkAccessFlags2 dstAccessMask) noexcept {
+                        VkAccessFlags2 dstAccessMask,
+                        uint32_t srcQueueFamilyIndex,
+                        uint32_t dstQueueFamilyIndex) noexcept {
 
     VkImageMemoryBarrier2 barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
     barrier.srcStageMask = srcStageMask;
@@ -51,8 +53,8 @@ void cmd_image_barrier2(VkCommandBuffer cmd,
     barrier.dstAccessMask = dstAccessMask;
     barrier.oldLayout = oldLayout;
     barrier.newLayout = newLayout;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.srcQueueFamilyIndex = srcQueueFamilyIndex;
+    barrier.dstQueueFamilyIndex = dstQueueFamilyIndex;
     barrier.image = image;
     barrier.subresourceRange.aspectMask = aspectMask;
     barrier.subresourceRange.baseMipLevel = baseMipLevel;

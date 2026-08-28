@@ -58,7 +58,7 @@ namespace bud::graphics::vulkan {
     public:
         VulkanMemoryAllocator(VkInstance instance, VkDevice device, VkPhysicalDevice phy_device,
                               uint32_t frames_in_flight, uint32_t api_version = VK_API_VERSION_1_1,
-                              uint32_t graphics_family = 0, uint32_t copy_family = 0,
+                              uint32_t graphics_family = 0, uint32_t compute_family = 0, uint32_t copy_family = 0,
                               bool use_concurrent_sharing = false);
 
 		void init() override;
@@ -86,6 +86,10 @@ namespace bud::graphics::vulkan {
 		bud::graphics::Texture* create_texture(const bud::graphics::TextureDesc& desc) override;
 
         VmaAllocator get_vma_allocator() const { return vma_allocator; }
+        uint32_t get_graphics_family() const { return graphics_family; }
+        uint32_t get_compute_family() const { return compute_family; }
+        uint32_t get_copy_family() const { return copy_family; }
+        bool is_concurrent_sharing_enabled() const { return use_concurrent_sharing; }
 
         // Debug tracking to detect outstanding allocations at cleanup.
         // Use explicit registration for buffer vs image wrappers so cleanup can
@@ -117,8 +121,9 @@ namespace bud::graphics::vulkan {
 		std::mutex mutex;
 		bud::graphics::ResourcePool* resource_pool = nullptr;
 
-		// Queue family info for CONCURRENT sharing (async copy queue access).
+		// Queue family info for CONCURRENT sharing (async copy / compute queue access).
 		uint32_t graphics_family = 0;
+		uint32_t compute_family = 0;
 		uint32_t copy_family = 0;
 		bool use_concurrent_sharing = false;
 

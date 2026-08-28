@@ -186,7 +186,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	// 初始化基础设施 (Subsystems)
 	// 接管内存、资源池、管线缓存、描述符分配
 	memory_allocator = std::make_unique<VulkanMemoryAllocator>(instance, device, physical_device, max_frames_in_flight, device_api_version,
-		graphics_family_index, copy_family_index, has_dedicated_copy_queue);
+		graphics_family_index, compute_family_index, copy_family_index, has_dedicated_copy_queue || has_dedicated_compute_queue_);
 	memory_allocator->init();
 
 	resource_pool = std::make_unique<VulkanResourcePool>(device, memory_allocator.get());
@@ -218,6 +218,16 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		pool_info.queueFamilyIndex = graphics_family_index;
 		if (vkCreateCommandPool(device, &pool_info, nullptr, &texture_upload_pool) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create texture upload command pool!");
+		}
+	}
+
+	// 专用硬件 DMA Transfer 命令池（copy family，独立于 Graphics/Compute）
+	{
+		VkCommandPoolCreateInfo pool_info{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+		pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		pool_info.queueFamilyIndex = copy_family_index;
+		if (vkCreateCommandPool(device, &pool_info, nullptr, &transfer_command_pool) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create transfer command pool!");
 		}
 	}
 
@@ -697,12 +707,20 @@ void VulkanRHI::cleanup() {
         if (frames[i].async_command_pool)
             vkDestroyCommandPool(device, frames[i].async_command_pool, nullptr);
 
+        // Dedicated transfer resources
+        if (frames[i].transfer_command_pool)
+            vkDestroyCommandPool(device, frames[i].transfer_command_pool, nullptr);
+
         if (frames[i].timestamp_pool) {
             vkDestroyQueryPool(device, frames[i].timestamp_pool, nullptr);
             frames[i].timestamp_pool = nullptr;
         }
     }
 
+    if (transfer_timeline_semaphore) {
+        vkDestroySemaphore(device, transfer_timeline_semaphore, nullptr);
+        transfer_timeline_semaphore = nullptr;
+    }
     if (compute_timeline_semaphore) {
         vkDestroySemaphore(device, compute_timeline_semaphore, nullptr);
         compute_timeline_semaphore = nullptr;
@@ -728,6 +746,10 @@ void VulkanRHI::cleanup() {
     if (texture_upload_pool) {
         vkDestroyCommandPool(device, texture_upload_pool, nullptr);
         texture_upload_pool = VK_NULL_HANDLE;
+    }
+    if (transfer_command_pool) {
+        vkDestroyCommandPool(device, transfer_command_pool, nullptr);
+        transfer_command_pool = VK_NULL_HANDLE;
     }
 
     // Resource pool must be cleaned up BEFORE the memory allocator so that
@@ -1422,70 +1444,198 @@ void VulkanRHI::cmd_dispatch(CommandHandle cmd, uint32_t group_x, uint32_t group
 
 // Frame Control
 
+VkCommandBuffer VulkanRHI::get_or_allocate_graphics_command_buffer() {
+    auto& frame = frames[current_frame];
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    if (frame.graphics_cb_index < frame.graphics_command_buffers.size()) {
+        cb = frame.graphics_command_buffers[frame.graphics_cb_index++];
+    } else {
+        VkCommandBufferAllocateInfo alloc_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        alloc_info.commandPool = frame.main_command_pool;
+        alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc_info.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(device, &alloc_info, &cb) != VK_SUCCESS) {
+            bud::eprint("[Vulkan] get_or_allocate_graphics_command_buffer: failed to allocate command buffer");
+            return VK_NULL_HANDLE;
+        }
+        frame.graphics_command_buffers.push_back(cb);
+        frame.graphics_cb_index = static_cast<uint32_t>(frame.graphics_command_buffers.size());
+    }
+    return cb;
+}
+
+CommandHandle VulkanRHI::get_current_graphics_command_buffer() {
+    if (frames.empty()) return nullptr;
+    if (!graphics_recording || current_graphics_cb == VK_NULL_HANDLE) {
+        VkCommandBuffer cb = get_or_allocate_graphics_command_buffer();
+        if (!cb) return nullptr;
+        VkCommandBufferBeginInfo begin_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (vkBeginCommandBuffer(cb, &begin_info) != VK_SUCCESS) {
+            bud::eprint("[Vulkan] get_current_graphics_command_buffer: vkBeginCommandBuffer failed");
+            return nullptr;
+        }
+        current_graphics_cb = cb;
+        graphics_recording = true;
+    }
+    graphics_has_work = true;
+    return current_graphics_cb;
+}
+
+void VulkanRHI::flush_active_graphics_segment() {
+    if (!graphics_recording || !graphics_has_work || current_graphics_cb == VK_NULL_HANDLE) {
+        return;
+    }
+    VkCommandBuffer cb = current_graphics_cb;
+    current_graphics_cb = VK_NULL_HANDLE;
+    graphics_recording = false;
+    graphics_has_work = false;
+
+    if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
+        bud::eprint("[Vulkan] flush_active_graphics_segment: vkEndCommandBuffer failed");
+        return;
+    }
+
+    std::vector<VkSemaphore> wait_semaphores;
+    std::vector<VkPipelineStageFlags> wait_stages;
+    std::vector<uint64_t> wait_values;
+
+    if (is_first_graphics_submit_in_frame) {
+        wait_semaphores.push_back(frames[current_frame].image_available_semaphore);
+        wait_stages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        wait_values.push_back(0);
+        is_first_graphics_submit_in_frame = false;
+    }
+
+    if (graphics_wait_transfer_value > 0 && transfer_timeline_semaphore) {
+        wait_semaphores.push_back(transfer_timeline_semaphore);
+        wait_stages.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        wait_values.push_back(graphics_wait_transfer_value);
+        graphics_wait_transfer_value = 0;
+    }
+
+    if (graphics_wait_compute_value > 0) {
+        wait_semaphores.push_back(compute_timeline_semaphore);
+        wait_stages.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        wait_values.push_back(graphics_wait_compute_value);
+        graphics_wait_compute_value = 0;
+    }
+
+    uint64_t signal_value = ++graphics_timeline_value;
+    VkSemaphore signal_sem = graphics_timeline_semaphore;
+    uint64_t signal_val = signal_value;
+
+    VkTimelineSemaphoreSubmitInfo timeline_info{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+    timeline_info.waitSemaphoreValueCount = static_cast<uint32_t>(wait_values.size());
+    timeline_info.pWaitSemaphoreValues = wait_values.data();
+    timeline_info.signalSemaphoreValueCount = 1;
+    timeline_info.pSignalSemaphoreValues = &signal_val;
+
+    VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    if (!wait_values.empty() || signal_val > 0) {
+        submit_info.pNext = &timeline_info;
+    }
+    submit_info.waitSemaphoreCount = static_cast<uint32_t>(wait_semaphores.size());
+    submit_info.pWaitSemaphores = wait_semaphores.data();
+    submit_info.pWaitDstStageMask = wait_stages.data();
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &cb;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &signal_sem;
+
+    VkResult r;
+    {
+        std::lock_guard lock(queue_submit_mutex);
+        r = vkQueueSubmit(graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    }
+    if (r != VK_SUCCESS) {
+        bud::eprint("[Vulkan] flush_active_graphics_segment vkQueueSubmit failed: {}", (int)r);
+    } else {
+        compute_wait_graphics_value = signal_value;
+    }
+}
+
 CommandHandle VulkanRHI::begin_frame() {
+	// Frame rate independent benchmark: skip presentation and V-Sync stalls in headless benchmark mode
+	// GPU timing & synchronization logic
 	vkWaitForFences(device, 1, &frames[current_frame].in_flight_fence, VK_TRUE, UINT64_MAX);
 
-	// Read back the previous submission's GPU frame time for this slot. The
-	// fence above guarantees the GPU finished it, so the timestamps are valid.
-	// Done AFTER current_stats.reset() (below) so the value survives.
-	float gpu_frame_ms = 0.0f;
-	if (timestamp_queries_supported && frames[current_frame].timestamp_pool && frames[current_frame].timestamp_ready) {
-		uint64_t ts[2] = { 0, 0 };
-		VkResult qr = vkGetQueryPoolResults(device, frames[current_frame].timestamp_pool, 0, 2,
-			sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
-		if (qr == VK_SUCCESS && ts[1] > ts[0]) {
-			gpu_frame_ms = static_cast<float>((ts[1] - ts[0]) * timestamp_period_ns * 1e-6);
+	float last_gpu_time = current_stats.gpu_render_time;
+	current_stats = {};
+	current_stats.gpu_render_time = last_gpu_time;
+
+	if (timestamp_queries_supported && frames[current_frame].timestamp_ready && frames[current_frame].timestamp_pool) {
+		uint64_t timestamps[2] = { 0, 0 };
+		VkResult query_res = vkGetQueryPoolResults(device, frames[current_frame].timestamp_pool, 0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+		if (query_res == VK_SUCCESS) {
+			float gpu_frame_ms = static_cast<float>(timestamps[1] - timestamps[0]) * timestamp_period_ns / 1000000.0f;
+			current_stats.gpu_render_time = gpu_frame_ms;
 		}
 	}
 
 	VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, frames[current_frame].image_available_semaphore, VK_NULL_HANDLE, &current_image_index);
-
 	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
 		swapchain_out_of_date.store(true, std::memory_order_release);
 		return nullptr;
-	}
-	else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+	} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
 		throw std::runtime_error("failed to acquire swap chain image!");
-	}	current_stats.reset();
-	current_stats.gpu_render_time = gpu_frame_ms;
+	}
 
-	// 通知分配器新的一帧开始了 (重置 Linear Allocator)
 	memory_allocator->on_frame_begin(current_frame);
 	descriptor_allocators[current_frame].reset_frame();
 
-	// 使用 init 时分配的持久化 Global Descriptor Set，仅更新 UBO 绑定
-	// Bindless Textures 是持久化的，不需要每一帧重绑一次，否则会丢失状态导致 GPU Hang
-
-	// 更新 Descriptor Set 指向当前帧的 UBO
 	DescriptorWriter writer;
 	writer.write_buffer(0, frames[current_frame].uniform_buffer, VK_WHOLE_SIZE, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
 	writer.update_set(device, frames[current_frame].global_descriptor_set);
 
-	// Apply any finished async texture uploads to this frame's descriptor set
-	// (the set is not yet submitted, so the update is safe).
 	apply_pending_bindless();
 
-	vkResetCommandBuffer(frames[current_frame].main_command_buffer, 0);
+	if (frames[current_frame].async_command_pool) {
+		vkResetCommandPool(device, frames[current_frame].async_command_pool, 0);
+		frames[current_frame].async_cb_index = 0;
+	}
 
+	if (frames[current_frame].transfer_command_pool) {
+		vkResetCommandPool(device, frames[current_frame].transfer_command_pool, 0);
+		frames[current_frame].transfer_cb_index = 0;
+	}
+
+	vkResetCommandPool(device, frames[current_frame].main_command_pool, 0);
+	frames[current_frame].graphics_cb_index = 0;
+
+	is_first_graphics_submit_in_frame = true;
+	graphics_wait_compute_value = 0;
+	compute_wait_graphics_value = 0;
+	graphics_has_work = false;
+	graphics_recording = false;
+	current_graphics_cb = VK_NULL_HANDLE;
+	frame_active = true;
+
+	VkCommandBuffer cb = get_or_allocate_graphics_command_buffer();
 	VkCommandBufferBeginInfo begin_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-	if (vkBeginCommandBuffer(frames[current_frame].main_command_buffer, &begin_info) != VK_SUCCESS) {
+	begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	if (vkBeginCommandBuffer(cb, &begin_info) != VK_SUCCESS) {
 		throw std::runtime_error("failed to begin recording command buffer!");
 	}
+	current_graphics_cb = cb;
+	graphics_recording = true;
 
-	// GPU frame-time timestamps: reset the pool and record the frame start.
 	if (timestamp_queries_supported && frames[current_frame].timestamp_pool) {
-		vkCmdResetQueryPool(frames[current_frame].main_command_buffer, frames[current_frame].timestamp_pool, 0, 2);
-		vkCmdWriteTimestamp(frames[current_frame].main_command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, frames[current_frame].timestamp_pool, 0);
+		vkCmdResetQueryPool(cb, frames[current_frame].timestamp_pool, 0, 2);
+		vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, frames[current_frame].timestamp_pool, 0);
 	}
 
-	return frames[current_frame].main_command_buffer;
+	return current_graphics_cb;
 }
 
 void VulkanRHI::end_frame(CommandHandle cmd) {
-	VkCommandBuffer command_buffer = static_cast<VkCommandBuffer>(cmd);
+	if (frames.empty()) return;
 
-	// Record the end-of-frame timestamp (before vkEndCommandBuffer) so the
-	// query covers the whole main command buffer.
+	if (!graphics_recording || current_graphics_cb == VK_NULL_HANDLE) {
+		get_current_graphics_command_buffer();
+	}
+	VkCommandBuffer command_buffer = current_graphics_cb;
+
 	if (timestamp_queries_supported && frames[current_frame].timestamp_pool) {
 		vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, frames[current_frame].timestamp_pool, 1);
 		frames[current_frame].timestamp_ready = true;
@@ -1494,50 +1644,57 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS)
 		throw std::runtime_error("failed to record command buffer!");
 
-	VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-	// Wait on the async-compute timeline (if this frame recorded async compute)
-	// so the main command buffer is ordered after any compute output it reads.
-	// Value semantics: waiting on an already-reached value returns immediately.
-	VkSemaphore wait_semaphores[2] = {
-		frames[current_frame].image_available_semaphore,
-		compute_timeline_semaphore
-	};
-	VkPipelineStageFlags wait_stages[2] = {
-		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
-	};
-	uint32_t wait_count = 1;
-	uint64_t compute_wait_value = compute_timeline_value;
-	// Vulkan requires waitSemaphoreValueCount == waitSemaphoreCount when any
-	// semaphore is a timeline. Provide a value for every semaphore (the binary
-	// image_available value is ignored).
-	uint64_t wait_values[2] = { 0, compute_wait_value };
-	VkTimelineSemaphoreSubmitInfo timeline_info{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
-	if (async_compute_pending_this_frame) {
-		wait_count = 2;
-		timeline_info.waitSemaphoreValueCount = wait_count;
-		timeline_info.pWaitSemaphoreValues = wait_values;
-	}
-	
-	uint64_t graphics_signal_value = ++graphics_timeline_value;
-	uint64_t signal_values[2] = { 0, graphics_signal_value }; // 0 for binary semaphore, graphics_signal_value for timeline semaphore
-	timeline_info.signalSemaphoreValueCount = 2;
-	timeline_info.pSignalSemaphoreValues = signal_values;
-	submit_info.pNext = &timeline_info;
+	std::vector<VkSemaphore> wait_semaphores;
+	std::vector<VkPipelineStageFlags> wait_stages;
+	std::vector<uint64_t> wait_values;
 
-	submit_info.waitSemaphoreCount = wait_count;
-	submit_info.pWaitSemaphores = wait_semaphores;
-	submit_info.pWaitDstStageMask = wait_stages;
-	submit_info.commandBufferCount = 1;
-	submit_info.pCommandBuffers = &command_buffer;
-	
+	if (is_first_graphics_submit_in_frame) {
+		wait_semaphores.push_back(frames[current_frame].image_available_semaphore);
+		wait_stages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+		wait_values.push_back(0);
+		is_first_graphics_submit_in_frame = false;
+	}
+
+	if (graphics_wait_transfer_value > 0 && transfer_timeline_semaphore) {
+		wait_semaphores.push_back(transfer_timeline_semaphore);
+		wait_stages.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+		wait_values.push_back(graphics_wait_transfer_value);
+		graphics_wait_transfer_value = 0;
+	}
+
+	if (graphics_wait_compute_value > 0) {
+		wait_semaphores.push_back(compute_timeline_semaphore);
+		wait_stages.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+		wait_values.push_back(graphics_wait_compute_value);
+		graphics_wait_compute_value = 0;
+	}
+
+	uint64_t graphics_signal_value = ++graphics_timeline_value;
 	VkSemaphore signal_semaphores[2] = {
 		render_finished_semaphores[current_image_index],
 		graphics_timeline_semaphore
 	};
+	uint64_t signal_values[2] = { 0, graphics_signal_value };
+
+	VkTimelineSemaphoreSubmitInfo timeline_info{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+	timeline_info.waitSemaphoreValueCount = static_cast<uint32_t>(wait_values.size());
+	timeline_info.pWaitSemaphoreValues = wait_values.data();
+	timeline_info.signalSemaphoreValueCount = 2;
+	timeline_info.pSignalSemaphoreValues = signal_values;
+
+	VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	submit_info.pNext = &timeline_info;
+	submit_info.waitSemaphoreCount = static_cast<uint32_t>(wait_semaphores.size());
+	submit_info.pWaitSemaphores = wait_semaphores.data();
+	submit_info.pWaitDstStageMask = wait_stages.data();
+	submit_info.commandBufferCount = 1;
+	submit_info.pCommandBuffers = &command_buffer;
 	submit_info.signalSemaphoreCount = 2;
 	submit_info.pSignalSemaphores = signal_semaphores;
 	async_compute_pending_this_frame = false;
+	current_graphics_cb = VK_NULL_HANDLE;
+	graphics_recording = false;
+	graphics_has_work = false;
 
 	vkResetFences(device, 1, &frames[current_frame].in_flight_fence);
 	VkResult submit_result;
@@ -1545,17 +1702,15 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 		std::lock_guard lock(queue_submit_mutex);
 		submit_result = vkQueueSubmit(graphics_queue, 1, &submit_info, frames[current_frame].in_flight_fence);
 	}
-    if (submit_result != VK_SUCCESS) {
-        std::string err = std::format("VulkanRHI::end_frame vkQueueSubmit failed: {}", (int)submit_result);
-        bud::eprint("{}", err);
+	if (submit_result != VK_SUCCESS) {
+		std::string err = std::format("VulkanRHI::end_frame vkQueueSubmit failed: {}", (int)submit_result);
+		bud::eprint("{}", err);
 #if defined(_DEBUG)
-        throw std::runtime_error(err);
+		throw std::runtime_error(err);
 #else
-        // In Release, skip presenting this frame but keep running
-        this->end_single_time_commands(VK_NULL_HANDLE); // no-op safe call
-        return;
+		return;
 #endif
-    }
+	}
 
 	VkPresentInfoKHR present_info{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
 	present_info.waitSemaphoreCount = 1;
@@ -1565,20 +1720,21 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	present_info.pSwapchains = swap_chains;
 	present_info.pImageIndices = &current_image_index;
 
-    VkResult present_result = vkQueuePresentKHR(present_queue, &present_info);
-    if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
-        swapchain_out_of_date.store(true, std::memory_order_release);
-    } else if (present_result != VK_SUCCESS) {
-        std::string err = std::format("VulkanRHI::end_frame vkQueuePresentKHR failed: {}", (int)present_result);
-        bud::eprint("{}", err);
+	VkResult present_result = vkQueuePresentKHR(present_queue, &present_info);
+	if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
+		swapchain_out_of_date.store(true, std::memory_order_release);
+	} else if (present_result != VK_SUCCESS) {
+		std::string err = std::format("VulkanRHI::end_frame vkQueuePresentKHR failed: {}", (int)present_result);
+		bud::eprint("{}", err);
 #if defined(_DEBUG)
-        throw std::runtime_error(err);
+		throw std::runtime_error(err);
 #else
-        swapchain_out_of_date.store(true, std::memory_order_release);
-        return;
+		swapchain_out_of_date.store(true, std::memory_order_release);
+		return;
 #endif
-    }
+	}
 
+	frame_active = false;
 	current_frame = (current_frame + 1) % max_frames_in_flight;
 }
 
@@ -1776,8 +1932,24 @@ CommandHandle VulkanRHI::begin_async_compute() {
     if (frames.empty() || !frames[current_frame].async_command_pool)
         return nullptr;
 
-    VkCommandBuffer cb = frames[current_frame].async_command_buffer;
-    vkResetCommandBuffer(cb, 0);
+    flush_active_graphics_segment();
+
+    auto& frame = frames[current_frame];
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    if (frame.async_cb_index < frame.async_command_buffers.size()) {
+        cb = frame.async_command_buffers[frame.async_cb_index++];
+    } else {
+        VkCommandBufferAllocateInfo alloc_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        alloc_info.commandPool = frame.async_command_pool;
+        alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc_info.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(device, &alloc_info, &cb) != VK_SUCCESS) {
+            bud::eprint("[Vulkan] begin_async_compute: failed to allocate command buffer");
+            return nullptr;
+        }
+        frame.async_command_buffers.push_back(cb);
+        frame.async_cb_index = static_cast<uint32_t>(frame.async_command_buffers.size());
+    }
 
     VkCommandBufferBeginInfo begin_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1785,13 +1957,15 @@ CommandHandle VulkanRHI::begin_async_compute() {
         bud::eprint("[Vulkan] begin_async_compute: failed to begin command buffer");
         return nullptr;
     }
+    current_async_cb = cb;
     async_recording = true;
     return cb;
 }
 
 void VulkanRHI::end_async_compute() {
-    if (frames.empty() || !async_recording) return;
-    VkCommandBuffer cb = frames[current_frame].async_command_buffer;
+    if (frames.empty() || !async_recording || !current_async_cb) return;
+    VkCommandBuffer cb = current_async_cb;
+    current_async_cb = nullptr;
     if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
         bud::eprint("[Vulkan] end_async_compute: failed to end command buffer");
         async_recording = false;
@@ -1799,22 +1973,55 @@ void VulkanRHI::end_async_compute() {
     }
     async_recording = false;
 
+    std::vector<VkSemaphore> wait_semaphores;
+    std::vector<VkPipelineStageFlags> wait_stages;
+    std::vector<uint64_t> wait_values;
+
+    if (compute_wait_transfer_value > 0 && transfer_timeline_semaphore) {
+        wait_semaphores.push_back(transfer_timeline_semaphore);
+        wait_stages.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        wait_values.push_back(compute_wait_transfer_value);
+        compute_wait_transfer_value = 0;
+    }
+
+    if (compute_wait_graphics_value > 0) {
+        wait_semaphores.push_back(graphics_timeline_semaphore);
+        wait_stages.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        wait_values.push_back(compute_wait_graphics_value);
+        compute_wait_graphics_value = 0;
+    }
+
     uint64_t signal_value = ++compute_timeline_value;
+    VkSemaphore signal_sem = compute_timeline_semaphore;
+    uint64_t signal_val = signal_value;
+
     VkTimelineSemaphoreSubmitInfo timeline_info{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+    timeline_info.waitSemaphoreValueCount = static_cast<uint32_t>(wait_values.size());
+    timeline_info.pWaitSemaphoreValues = wait_values.data();
     timeline_info.signalSemaphoreValueCount = 1;
-    timeline_info.pSignalSemaphoreValues = &signal_value;
+    timeline_info.pSignalSemaphoreValues = &signal_val;
 
     VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    submit_info.pNext = &timeline_info;
+    if (!wait_values.empty() || signal_val > 0) {
+        submit_info.pNext = &timeline_info;
+    }
+    submit_info.waitSemaphoreCount = static_cast<uint32_t>(wait_semaphores.size());
+    submit_info.pWaitSemaphores = wait_semaphores.data();
+    submit_info.pWaitDstStageMask = wait_stages.data();
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &cb;
     submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores = &compute_timeline_semaphore;
+    submit_info.pSignalSemaphores = &signal_sem;
 
-    VkResult r = vkQueueSubmit(compute_queue ? compute_queue : graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    VkResult r;
+    {
+        std::lock_guard lock(queue_submit_mutex);
+        r = vkQueueSubmit(compute_queue ? compute_queue : graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    }
     if (r != VK_SUCCESS) {
         bud::eprint("[Vulkan] end_async_compute: vkQueueSubmit failed, result={}", (int)r);
     } else {
+        graphics_wait_compute_value = signal_value;
         async_compute_pending_this_frame = true;
     }
 }
@@ -1830,11 +2037,62 @@ void VulkanRHI::wait_compute_timeline(uint64_t value) {
     vkWaitSemaphores(device, &wait_info, UINT64_MAX);
 }
 
+void VulkanRHI::wait_transfer_timeline(uint64_t value) {
+    if (!transfer_timeline_semaphore)
+        return;
+    
+    VkSemaphoreWaitInfo wait_info{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+    wait_info.semaphoreCount = 1;
+    wait_info.pSemaphores = &transfer_timeline_semaphore;
+    wait_info.pValues = &value;
+    wait_info.flags = 0;
+    vkWaitSemaphores(device, &wait_info, UINT64_MAX);
+}
+
 uint64_t VulkanRHI::get_graphics_timeline_completed_value() const {
     if (!graphics_timeline_semaphore) return 0;
     uint64_t value = 0;
     vkGetSemaphoreCounterValue(device, graphics_timeline_semaphore, &value);
     return value;
+}
+
+static inline VkPipelineStageFlags2 sanitize_stages_for_queue(VkPipelineStageFlags2 stages, VkAccessFlags2 access, uint32_t queue_family, uint32_t compute_family, uint32_t transfer_family) {
+    if (queue_family == compute_family) {
+        VkPipelineStageFlags2 out_stages = 0;
+        if (stages & (VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT)) out_stages |= (stages & (VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT));
+        if (stages & (VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_HOST_BIT)) out_stages |= (stages & (VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_HOST_BIT));
+        if (stages & (VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT)) out_stages |= (stages & (VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT));
+        if (stages & (VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT)) {
+            out_stages |= VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        }
+        if (stages & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
+            out_stages |= (VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT);
+        }
+        if (access & VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT) {
+            out_stages |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+        }
+        if (out_stages == 0) {
+            out_stages = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        }
+        return out_stages;
+    }
+    if (queue_family == transfer_family) {
+        VkPipelineStageFlags2 out_stages = 0;
+        if (stages & (VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_HOST_BIT)) {
+            out_stages |= (stages & (VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_HOST_BIT));
+        }
+        if (stages & (VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) {
+            out_stages |= VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+        }
+        if (out_stages == 0) {
+            out_stages = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+        }
+        return out_stages;
+    }
+    if (access & VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT) {
+        stages |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+    }
+    return stages;
 }
 
 void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) {
@@ -1845,20 +2103,17 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle 
 		case RS::UnorderedAccess:
 			return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT };
 		case RS::IndirectArgument:
-			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT };
+			return { VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT };
 		case RS::ShaderResource:
-			// ALL_COMMANDS so the barrier is valid on ANY queue (graphics,
-		// compute, copy). Async compute passes record these barriers on the
-		// compute command buffer, where graphics-only stages would be invalid.
-			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT };
+			return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT };
 		case RS::VertexBuffer:
-			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT };
+			return { VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT, VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT };
 		case RS::IndexBuffer:
-			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_INDEX_READ_BIT };
+			return { VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT, VK_ACCESS_2_INDEX_READ_BIT };
 		case RS::TransferSrc:
-			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_TRANSFER_READ_BIT };
+			return { VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT };
 		case RS::TransferDst:
-			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT };
+			return { VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT };
 		default:
 			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT };
 		}
@@ -1866,6 +2121,10 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle 
 
 	auto [src_stage, src_access] = buf_transition(old_state);
 	auto [dst_stage, dst_access] = buf_transition(new_state);
+
+	uint32_t current_cmd_family = (cmd == current_async_cb) ? compute_family_index : graphics_family_index;
+	src_stage = sanitize_stages_for_queue(src_stage, src_access, current_cmd_family, compute_family_index, copy_family_index);
+	dst_stage = sanitize_stages_for_queue(dst_stage, dst_access, current_cmd_family, compute_family_index, copy_family_index);
 
 	VkBufferMemoryBarrier2 barrier{};
 	barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
@@ -1882,6 +2141,110 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle 
     if (!vk_buf || !vk_buf->buffer) return;
 
     barrier.buffer = vk_buf->buffer;
+	barrier.offset = 0;
+	barrier.size = VK_WHOLE_SIZE;
+
+	VkDependencyInfo depInfo{};
+	depInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+	depInfo.bufferMemoryBarrierCount = 1;
+	depInfo.pBufferMemoryBarriers = &barrier;
+
+	vkCmdPipelineBarrier2(static_cast<VkCommandBuffer>(cmd), &depInfo);
+}
+
+void VulkanRHI::resource_barrier_release(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
+	auto buf_transition = [](bud::graphics::ResourceState state) -> std::pair<VkPipelineStageFlags2, VkAccessFlags2> {
+		using RS = bud::graphics::ResourceState;
+		switch (state) {
+		case RS::UnorderedAccess:
+			return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT };
+		case RS::IndirectArgument:
+			return { VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT };
+		case RS::ShaderResource:
+			return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT };
+		case RS::VertexBuffer:
+			return { VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT, VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT };
+		case RS::IndexBuffer:
+			return { VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT, VK_ACCESS_2_INDEX_READ_BIT };
+		case RS::TransferSrc:
+			return { VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT };
+		case RS::TransferDst:
+			return { VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT };
+		default:
+			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT };
+		}
+	};
+
+	auto [src_stage, src_access] = buf_transition(old_state);
+	src_stage = sanitize_stages_for_queue(src_stage, src_access, src_queue_family, compute_family_index, copy_family_index);
+
+	VkBufferMemoryBarrier2 barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+	barrier.srcStageMask = src_stage;
+	barrier.srcAccessMask = src_access;
+	barrier.dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
+	barrier.dstAccessMask = 0;
+	barrier.srcQueueFamilyIndex = src_queue_family;
+	barrier.dstQueueFamilyIndex = dst_queue_family;
+
+	if (!buffer.is_valid()) return;
+
+	auto* vk_buf = get_vulkan_buffer(buffer);
+	if (!vk_buf || !vk_buf->buffer) return;
+
+	barrier.buffer = vk_buf->buffer;
+	barrier.offset = 0;
+	barrier.size = VK_WHOLE_SIZE;
+
+	VkDependencyInfo depInfo{};
+	depInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+	depInfo.bufferMemoryBarrierCount = 1;
+	depInfo.pBufferMemoryBarriers = &barrier;
+
+	vkCmdPipelineBarrier2(static_cast<VkCommandBuffer>(cmd), &depInfo);
+}
+
+void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
+	auto buf_transition = [](bud::graphics::ResourceState state) -> std::pair<VkPipelineStageFlags2, VkAccessFlags2> {
+		using RS = bud::graphics::ResourceState;
+		switch (state) {
+		case RS::UnorderedAccess:
+			return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT };
+		case RS::IndirectArgument:
+			return { VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT };
+		case RS::ShaderResource:
+			return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT };
+		case RS::VertexBuffer:
+			return { VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT, VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT };
+		case RS::IndexBuffer:
+			return { VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT, VK_ACCESS_2_INDEX_READ_BIT };
+		case RS::TransferSrc:
+			return { VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT };
+		case RS::TransferDst:
+			return { VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT };
+		default:
+			return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT };
+		}
+	};
+
+	auto [dst_stage, dst_access] = buf_transition(new_state);
+	dst_stage = sanitize_stages_for_queue(dst_stage, dst_access, dst_queue_family, compute_family_index, copy_family_index);
+
+	VkBufferMemoryBarrier2 barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+	barrier.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+	barrier.srcAccessMask = 0;
+	barrier.dstStageMask = dst_stage;
+	barrier.dstAccessMask = dst_access;
+	barrier.srcQueueFamilyIndex = src_queue_family;
+	barrier.dstQueueFamilyIndex = dst_queue_family;
+
+	if (!buffer.is_valid()) return;
+
+	auto* vk_buf = get_vulkan_buffer(buffer);
+	if (!vk_buf || !vk_buf->buffer) return;
+
+	barrier.buffer = vk_buf->buffer;
 	barrier.offset = 0;
 	barrier.size = VK_WHOLE_SIZE;
 
@@ -2059,11 +2422,73 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, TextureHandle texture, bud::
     VkImageAspectFlags aspect = is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
     if (is_depth && vk_tex->format == TextureFormat::D24_UNORM_S8_UINT) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
 
+    uint32_t current_cmd_family = (cmd == current_async_cb) ? compute_family_index : graphics_family_index;
+    src.stage = sanitize_stages_for_queue(src.stage, src.access, current_cmd_family, compute_family_index, copy_family_index);
+    dst.stage = sanitize_stages_for_queue(dst.stage, dst.access, current_cmd_family, compute_family_index, copy_family_index);
+
     sync2::cmd_image_barrier2(static_cast<VkCommandBuffer>(cmd), vk_tex->image, aspect,
                               0, (vk_tex->mips > 0 ? vk_tex->mips : 1), 0, (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1),
                               oldLayout, newLayout,
                               src.stage, src.access,
                               dst.stage, dst.access);
+}
+
+void VulkanRHI::resource_barrier_release(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
+    auto vk_tex = get_vulkan_texture(texture);
+    if (!vk_tex) return;
+    auto src = sync2::get_transition2(old_state);
+    auto dst = sync2::get_transition2(new_state);
+
+    bool is_depth = (vk_tex->format == TextureFormat::D32_FLOAT || vk_tex->format == TextureFormat::D24_UNORM_S8_UINT);
+    VkImageLayout old_layout = src.layout;
+    VkImageLayout new_layout = dst.layout;
+    if (is_depth && old_state == ResourceState::ShaderResource) {
+        old_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    }
+    if (is_depth && new_state == ResourceState::ShaderResource) {
+        new_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    }
+
+    VkImageAspectFlags aspect = is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    if (is_depth && vk_tex->format == TextureFormat::D24_UNORM_S8_UINT) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+
+    src.stage = sanitize_stages_for_queue(src.stage, src.access, src_queue_family, compute_family_index, copy_family_index);
+
+    sync2::cmd_image_barrier2(static_cast<VkCommandBuffer>(cmd), vk_tex->image, aspect,
+                              0, (vk_tex->mips > 0 ? vk_tex->mips : 1), 0, (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1),
+                              old_layout, new_layout,
+                              src.stage, src.access,
+                              VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0,
+                              src_queue_family, dst_queue_family);
+}
+
+void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
+    auto vk_tex = get_vulkan_texture(texture);
+    if (!vk_tex) return;
+    auto src = sync2::get_transition2(old_state);
+    auto dst = sync2::get_transition2(new_state);
+
+    bool is_depth = (vk_tex->format == TextureFormat::D32_FLOAT || vk_tex->format == TextureFormat::D24_UNORM_S8_UINT);
+    VkImageLayout old_layout = src.layout;
+    VkImageLayout new_layout = dst.layout;
+    if (is_depth && old_state == ResourceState::ShaderResource) {
+        old_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    }
+    if (is_depth && new_state == ResourceState::ShaderResource) {
+        new_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    }
+
+    VkImageAspectFlags aspect = is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    if (is_depth && vk_tex->format == TextureFormat::D24_UNORM_S8_UINT) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+
+    dst.stage = sanitize_stages_for_queue(dst.stage, dst.access, dst_queue_family, compute_family_index, copy_family_index);
+
+    sync2::cmd_image_barrier2(static_cast<VkCommandBuffer>(cmd), vk_tex->image, aspect,
+                              0, (vk_tex->mips > 0 ? vk_tex->mips : 1), 0, (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1),
+                              old_layout, new_layout,
+                              VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                              dst.stage, dst.access,
+                              src_queue_family, dst_queue_family);
 }
 
 TextureHandle VulkanRHI::get_current_swapchain_texture() {
@@ -2349,6 +2774,21 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 			has_dedicated_compute_queue_ ? "yes" : "no");
 	}
 
+	auto pfn_set_name = (PFN_vkSetDebugUtilsObjectNameEXT)vkGetDeviceProcAddr(device, "vkSetDebugUtilsObjectNameEXT");
+	if (pfn_set_name) {
+		auto label_queue = [&](VkQueue q, const char* name) {
+			if (!q) return;
+			VkDebugUtilsObjectNameInfoEXT info{ VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+			info.objectType = VK_OBJECT_TYPE_QUEUE;
+			info.objectHandle = reinterpret_cast<uint64_t>(q);
+			info.pObjectName = name;
+			pfn_set_name(device, &info);
+		};
+		label_queue(graphics_queue, "Vulkan Graphics Queue");
+		label_queue(compute_queue, "Vulkan Compute Queue");
+		label_queue(copy_queue, "Vulkan Transfer Queue");
+	}
+
 	fpCmdPushDescriptorSetKHR = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR");
 	if (!fpCmdPushDescriptorSetKHR) {
 		bud::eprint("[Vulkan] Warning: vkCmdPushDescriptorSetKHR not found, compute bindings may fail!");
@@ -2468,28 +2908,55 @@ void VulkanRHI::create_command_pool() {
 		if (vkCreateCommandPool(device, &async_pool_info, nullptr, &frames[i].async_command_pool) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create async command pool!");
 		}
+
+		// Per-frame transfer command pool (copy family).
+		VkCommandPoolCreateInfo transfer_pool_info{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+		transfer_pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		transfer_pool_info.queueFamilyIndex = copy_family_index;
+
+		if (vkCreateCommandPool(device, &transfer_pool_info, nullptr, &frames[i].transfer_command_pool) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create transfer command pool!");
+		}
 	}
 }
 
 void VulkanRHI::create_command_buffer() {
 	for (int i = 0; i < max_frames_in_flight; i++) {
+		frames[i].graphics_command_buffers.resize(4, VK_NULL_HANDLE);
 		VkCommandBufferAllocateInfo alloc_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
 		alloc_info.commandPool = frames[i].main_command_pool;
 		alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		alloc_info.commandBufferCount = 1;
+		alloc_info.commandBufferCount = 4;
 
-		if (vkAllocateCommandBuffers(device, &alloc_info, &frames[i].main_command_buffer) != VK_SUCCESS) {
+		if (vkAllocateCommandBuffers(device, &alloc_info, frames[i].graphics_command_buffers.data()) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to allocate command buffers!");
 		}
+		frames[i].graphics_cb_index = 0;
 
-		// Allocate the per-frame async compute command buffer.
+		// Pre-allocate initial pool of async compute command buffers.
+		frames[i].async_command_buffers.resize(4, VK_NULL_HANDLE);
 		VkCommandBufferAllocateInfo async_alloc_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
 		async_alloc_info.commandPool = frames[i].async_command_pool;
 		async_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		async_alloc_info.commandBufferCount = 1;
+		async_alloc_info.commandBufferCount = 4;
 
-		if (vkAllocateCommandBuffers(device, &async_alloc_info, &frames[i].async_command_buffer) != VK_SUCCESS) {
-			throw std::runtime_error("Failed to allocate async command buffer!");
+		if (vkAllocateCommandBuffers(device, &async_alloc_info, frames[i].async_command_buffers.data()) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to allocate async command buffers!");
+		}
+		frames[i].async_cb_index = 0;
+
+		// Pre-allocate initial pool of transfer command buffers.
+		if (frames[i].transfer_command_pool) {
+			frames[i].transfer_command_buffers.resize(4, VK_NULL_HANDLE);
+			VkCommandBufferAllocateInfo transfer_alloc_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+			transfer_alloc_info.commandPool = frames[i].transfer_command_pool;
+			transfer_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			transfer_alloc_info.commandBufferCount = 4;
+
+			if (vkAllocateCommandBuffers(device, &transfer_alloc_info, frames[i].transfer_command_buffers.data()) != VK_SUCCESS) {
+				throw std::runtime_error("Failed to allocate transfer command buffers!");
+			}
+			frames[i].transfer_cb_index = 0;
 		}
 	}
 }
@@ -2534,6 +3001,12 @@ void VulkanRHI::create_sync_objects() {
 			throw std::runtime_error("Failed to create render finished semaphores!");
 		}
 	}
+
+	// Dedicated transfer timeline semaphore (value-based, signals transfer completion)
+	if (vkCreateSemaphore(device, &timeline_semaphore_info, nullptr, &transfer_timeline_semaphore) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create transfer timeline semaphore!");
+	}
+	transfer_timeline_value = 0;
 
 	// Async compute timeline semaphore (value-based, signals compute completion
 	// for the frame; graphics waits on the value before consuming compute output).
@@ -2637,6 +3110,115 @@ void VulkanRHI::end_single_time_commands(VkCommandBuffer command_buffer) {
         bud::eprint("VulkanRHI::end_single_time_commands cannot free command buffer: invalid command pool");
     }
     single_time_mutex.unlock();
+}
+
+VkCommandBuffer VulkanRHI::begin_single_time_transfer_commands() {
+	single_time_mutex.lock();
+	if (!device || copy_queue == VK_NULL_HANDLE) {
+		single_time_mutex.unlock();
+		return begin_single_time_commands();
+	}
+
+	VkCommandBuffer cb = VK_NULL_HANDLE;
+
+	if (frame_active && !frames.empty() && current_frame < frames.size() && frames[current_frame].transfer_command_pool) {
+		auto& frame = frames[current_frame];
+		if (frame.transfer_cb_index < frame.transfer_command_buffers.size()) {
+			cb = frame.transfer_command_buffers[frame.transfer_cb_index++];
+		}
+		else {
+			VkCommandBufferAllocateInfo alloc_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+			alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			alloc_info.commandPool = frame.transfer_command_pool;
+			alloc_info.commandBufferCount = 1;
+			if (vkAllocateCommandBuffers(device, &alloc_info, &cb) == VK_SUCCESS) {
+				frame.transfer_command_buffers.push_back(cb);
+				frame.transfer_cb_index = static_cast<uint32_t>(frame.transfer_command_buffers.size());
+			}
+		}
+	}
+	else if (transfer_command_pool != VK_NULL_HANDLE) {
+		VkCommandBufferAllocateInfo alloc_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+		alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		alloc_info.commandPool = transfer_command_pool;
+		alloc_info.commandBufferCount = 1;
+		vkAllocateCommandBuffers(device, &alloc_info, &cb);
+	}
+
+	if (cb == VK_NULL_HANDLE) {
+		single_time_mutex.unlock();
+		return begin_single_time_commands();
+	}
+
+	VkCommandBufferBeginInfo begin_info{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+	begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+	if (vkBeginCommandBuffer(cb, &begin_info) != VK_SUCCESS) {
+		bud::eprint("VulkanRHI::begin_single_time_transfer_commands vkBeginCommandBuffer failed");
+		single_time_mutex.unlock();
+		return VK_NULL_HANDLE;
+	}
+
+	return cb;
+}
+
+void VulkanRHI::end_single_time_transfer_commands(VkCommandBuffer command_buffer) {
+	if (command_buffer == VK_NULL_HANDLE) {
+		single_time_mutex.unlock();
+		return;
+	}
+
+	if (!device || copy_queue == VK_NULL_HANDLE) {
+		end_single_time_commands(command_buffer);
+		return;
+	}
+
+	if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS) {
+		bud::eprint("VulkanRHI::end_single_time_transfer_commands vkEndCommandBuffer failed");
+		single_time_mutex.unlock();
+		return;
+	}
+
+	const bool is_frame_buffer = (frame_active && !frames.empty() && current_frame < frames.size() && frames[current_frame].transfer_command_pool);
+
+	uint64_t signal_value = ++transfer_timeline_value;
+	VkSemaphore signal_sem = transfer_timeline_semaphore;
+	uint64_t signal_val = signal_value;
+
+	VkTimelineSemaphoreSubmitInfo timeline_info{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+	timeline_info.signalSemaphoreValueCount = (signal_sem != VK_NULL_HANDLE) ? 1 : 0;
+	timeline_info.pSignalSemaphoreValues = (signal_sem != VK_NULL_HANDLE) ? &signal_val : nullptr;
+
+	VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	if (signal_sem != VK_NULL_HANDLE) {
+		submit_info.pNext = &timeline_info;
+		submit_info.signalSemaphoreCount = 1;
+		submit_info.pSignalSemaphores = &signal_sem;
+	}
+	submit_info.commandBufferCount = 1;
+	submit_info.pCommandBuffers = &command_buffer;
+
+	{
+		std::lock_guard lock(queue_submit_mutex);
+		VkResult r = vkQueueSubmit(copy_queue, 1, &submit_info, VK_NULL_HANDLE);
+		if (r != VK_SUCCESS) {
+			bud::eprint("[Vulkan] Failed to submit transfer command! result={}", (int)r);
+		}
+		else {
+			if (signal_sem != VK_NULL_HANDLE) {
+				graphics_wait_transfer_value = signal_value;
+				compute_wait_transfer_value = signal_value;
+			}
+			if (!is_frame_buffer) {
+				vkQueueWaitIdle(copy_queue);
+			}
+		}
+	}
+
+	if (!is_frame_buffer && transfer_command_pool != VK_NULL_HANDLE) {
+		vkFreeCommandBuffers(device, transfer_command_pool, 1, &command_buffer);
+	}
+	single_time_mutex.unlock();
 }
 
 
@@ -2858,14 +3440,14 @@ void VulkanRHI::copy_buffer_to_image(VkImage image, VkBuffer buffer, uint64_t bu
 }
 
 void VulkanRHI::copy_buffer_immediate(bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size) {
-	VkCommandBuffer cmd = this->begin_single_time_commands();
+	VkCommandBuffer cmd = this->begin_single_time_transfer_commands();
     if (!src.is_valid() || !dst.is_valid()) {
         std::string err = std::format("copy_buffer_immediate invalid handle: src_valid={} dst_valid={} size={}", src.is_valid(), dst.is_valid(), size);
         bud::eprint("{}", err);
 #if defined(_DEBUG)
         throw std::runtime_error(err);
 #else
-        this->end_single_time_commands(cmd);
+        this->end_single_time_transfer_commands(cmd);
         return;
 #endif
     }
@@ -2881,10 +3463,10 @@ void VulkanRHI::copy_buffer_immediate(bud::graphics::BufferHandle src, bud::grap
 		std::string err = std::format("copy_buffer_immediate null VulkanBuffer: vk_src={} vk_dst={} size={}", (void*)vk_src, (void*)vk_dst, size);
 		bud::eprint("{}", err);
 #if defined(_DEBUG)
-		this->end_single_time_commands(cmd);
+		this->end_single_time_transfer_commands(cmd);
 		throw std::runtime_error(err);
 #else
-		this->end_single_time_commands(cmd);
+		this->end_single_time_transfer_commands(cmd);
 		return;
 #endif
 	}
@@ -2893,17 +3475,17 @@ void VulkanRHI::copy_buffer_immediate(bud::graphics::BufferHandle src, bud::grap
 							(void*)vk_src->buffer, (void*)vk_dst->buffer, size);
 		bud::eprint("{}", err);
 #if defined(_DEBUG)
-		this->end_single_time_commands(cmd);
+		this->end_single_time_transfer_commands(cmd);
 		throw std::runtime_error(err);
 #else
-		this->end_single_time_commands(cmd);
+		this->end_single_time_transfer_commands(cmd);
 		return;
 #endif
 	}
 
 	vkCmdCopyBuffer(cmd, vk_src->buffer, vk_dst->buffer, 1, &copy_region);
 
-	this->end_single_time_commands(cmd);
+	this->end_single_time_transfer_commands(cmd);
 }
 
 void VulkanRHI::copy_buffer_immediate_offset(bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size, uint64_t src_offset, uint64_t dst_offset) {
@@ -2929,7 +3511,7 @@ void VulkanRHI::copy_buffer_immediate_offset(bud::graphics::BufferHandle src, bu
 #endif
     }
 
-	VkCommandBuffer cmd = this->begin_single_time_commands();
+	VkCommandBuffer cmd = this->begin_single_time_transfer_commands();
 
 	VkBufferCopy copy_region{};
     copy_region.srcOffset = static_cast<VkDeviceSize>(src_offset);
@@ -2938,7 +3520,7 @@ void VulkanRHI::copy_buffer_immediate_offset(bud::graphics::BufferHandle src, bu
 
 	vkCmdCopyBuffer(cmd, vk_src->buffer, vk_dst->buffer, 1, &copy_region);
 
-	this->end_single_time_commands(cmd);
+	this->end_single_time_transfer_commands(cmd);
 }
 
 void VulkanRHI::cmd_copy_image(CommandHandle cmd, TextureHandle src, TextureHandle dst) {
@@ -3030,6 +3612,13 @@ void VulkanRHI::cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandl
 #endif
     }
 	vkCmdUpdateBuffer(static_cast<VkCommandBuffer>(cmd), vk_dst->buffer, offset, size, data);
+}
+
+void VulkanRHI::cmd_fill_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, uint32_t data) {
+    if (!dst.is_valid()) return;
+    auto* vk_dst = get_vulkan_buffer(dst);
+    if (!vk_dst || !vk_dst->buffer) return;
+    vkCmdFillBuffer(static_cast<VkCommandBuffer>(cmd), vk_dst->buffer, offset, size, data);
 }
 
 void VulkanRHI::cmd_copy_image_to_buffer(CommandHandle cmd, TextureHandle src, bud::graphics::BufferHandle dst) {

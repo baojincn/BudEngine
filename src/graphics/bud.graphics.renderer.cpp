@@ -551,10 +551,14 @@ namespace bud::graphics {
 
 
 	void Renderer::render(const bud::graphics::RenderScene& render_scene, SceneView& scene_view) {
-		// 先处理所有挂起的上传任务
+		auto cmd = rhi->begin_frame();
+		if (!cmd) {
+			render_graph.reset();
+			return;
+		}
+
+		// 处理当前帧挂起的上传任务（此时当前帧 in_flight_fence 已等待完成，命令池与 staging ring 已重置）
 		flush_upload_queue();
-		// 重置当前帧统计数据
-		rhi->get_render_stats() = {};
 
 		size_t instance_count = render_scene.instance_count.load(std::memory_order_relaxed);
 		const uint32_t cascade_count = std::min(render_config.cascade_count, (uint32_t)MAX_CASCADES);
@@ -756,12 +760,6 @@ namespace bud::graphics {
 			}
 		}
 
-		auto cmd = rhi->begin_frame();
-		if (!cmd) {
-			render_graph.reset(); // Release any transient textures acquired during this frame's setup
-			return;
-		}
-
 		rhi->set_render_config(render_config);
 
 		auto swapchain_tex = rhi->get_current_swapchain_texture();
@@ -799,7 +797,7 @@ namespace bud::graphics {
 			return;
 		}
 
-		auto back_buffer = render_graph.import_texture("Backbuffer", swapchain_tex, ResourceState::RenderTarget);
+		auto back_buffer = render_graph.import_texture("Backbuffer", swapchain_tex, ResourceState::Undefined);
 
 		// Use the render-frame slot (NOT the swapchain image index) to index
 		// per-frame GPU buffers: sync objects (in_flight_fence, upload timeline)
@@ -1469,12 +1467,12 @@ namespace bud::graphics {
 		ui_pass->add_to_graph(render_graph, back_buffer);
 		render_graph.compile();
 
-		rhi->resource_barrier(cmd, swapchain_tex, ResourceState::Undefined, ResourceState::RenderTarget);
 		render_graph.execute(cmd);
 
+		CommandHandle active_cmd = rhi->get_current_graphics_command_buffer();
 		if (rhi->is_headless()) {
 			// Transition to TransferSrc
-			rhi->resource_barrier(cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::TransferSrc);
+			rhi->resource_barrier(active_cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::TransferSrc);
 
 			uint32_t current_idx = rhi->get_current_image_index();
 			if (readback_buffers.size() <= current_idx) {
@@ -1493,18 +1491,18 @@ namespace bud::graphics {
 			}
 
 			// Perform copy
-			rhi->cmd_copy_image_to_buffer(cmd, swapchain_tex, readback_buffers[current_idx]);
+			rhi->cmd_copy_image_to_buffer(active_cmd, swapchain_tex, readback_buffers[current_idx]);
 			// Barrier back to Present/Undefined doesn't strictly matter for offscreen, but we leave it as TransferSrc so it's clean next frame
 		}
 		else {
-			rhi->resource_barrier(cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::Present);
+			rhi->resource_barrier(active_cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::Present);
 		}
 
 		auto& frames = gpu_scene.get_frame_resources();
 		frames[current_idx].submit_timeline_value = rhi->get_graphics_timeline_value() + 1;
 		frames[current_idx].requests_processed = false;
 
-		rhi->end_frame(cmd);
+		rhi->end_frame(active_cmd);
 		render_graph.reset();
 	}
 

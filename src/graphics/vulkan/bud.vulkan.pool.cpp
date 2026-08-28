@@ -523,7 +523,24 @@ namespace bud::graphics::vulkan {
         else if (desc.memory_usage == MemoryUsage::Readback) {
             buffer_info.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         }
-        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        std::vector<uint32_t> queue_family_indices;
+        if (allocator && allocator->is_concurrent_sharing_enabled()) {
+            queue_family_indices.push_back(allocator->get_graphics_family());
+            if (allocator->get_compute_family() != allocator->get_graphics_family())
+                queue_family_indices.push_back(allocator->get_compute_family());
+            if (allocator->get_copy_family() != allocator->get_graphics_family() &&
+                allocator->get_copy_family() != allocator->get_compute_family())
+                queue_family_indices.push_back(allocator->get_copy_family());
+        }
+
+        if (queue_family_indices.size() > 1) {
+            buffer_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+            buffer_info.queueFamilyIndexCount = static_cast<uint32_t>(queue_family_indices.size());
+            buffer_info.pQueueFamilyIndices = queue_family_indices.data();
+        }
+        else {
+            buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
 
         VmaAllocationCreateInfo alloc_info = {};
         if (desc.memory_usage == MemoryUsage::GpuOnly) {

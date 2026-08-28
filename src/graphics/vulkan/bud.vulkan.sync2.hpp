@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <vulkan/vulkan.h>
 #include "src/graphics/vulkan/bud.vulkan.types.hpp"
@@ -27,6 +27,8 @@ void cmd_image_barrier2(VkCommandBuffer cmd,
                         VkPipelineStageFlags2 srcStageMask,
                         VkAccessFlags2 srcAccessMask,
                         VkPipelineStageFlags2 dstStageMask,
-                        VkAccessFlags2 dstAccessMask) noexcept;
+                        VkAccessFlags2 dstAccessMask,
+                        uint32_t srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                        uint32_t dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED) noexcept;
 
 } // namespace bud::graphics::vulkan::sync2

@@ -134,7 +134,6 @@ namespace bud::io {
 		}
 
 		std::filesystem::path resolved_path = *resolved_path_opt;
-		bud::print("[IO] Open binary file: {}", resolved_path.string());
 
 		std::ifstream file;
 		file.open(resolved_path, std::ios::ate | std::ios::binary);
@@ -731,15 +730,6 @@ namespace bud::io {
 			auto img_opt = this->image_loader.load(path);
 
 			if (img_opt) {
-				// Log resolved path for successful image loads
-				auto resolved = this->virtual_file_system->resolve_path(path);
-				if (resolved) {
-					bud::print("[IO] Loaded image (resolved): {}", resolved->string());
-				}
-				else {
-					bud::print("[IO] Loaded image: {}", path);
-				}
-
 				task_scheduler->submit_main_thread_task([on_loaded, img = std::move(*img_opt)]() mutable {
 					on_loaded(std::move(img));
 					});
@@ -761,15 +751,6 @@ namespace bud::io {
 		task_scheduler->spawn("AsyncFileLoad", [this, path, on_loaded]() {
 			auto data_opt = this->virtual_file_system->read_binary(path);
 			if (data_opt) {
-				// Log resolved path for successful file reads
-				auto resolved = this->virtual_file_system->resolve_path(path);
-				if (resolved) {
-					bud::print("[IO] Loaded file (resolved): {}", resolved->string());
-				}
-				else {
-					bud::print("[IO] Loaded file: {}", path);
-				}
-
 				task_scheduler->submit_main_thread_task([on_loaded, data = std::move(*data_opt)]() mutable {
 					on_loaded(std::move(data));
 					});

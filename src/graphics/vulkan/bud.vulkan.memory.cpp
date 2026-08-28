@@ -61,10 +61,10 @@ namespace bud::graphics::vulkan {
     // VulkanMemoryAllocator
 
     VulkanMemoryAllocator::VulkanMemoryAllocator(VkInstance instance, VkDevice device, VkPhysicalDevice phy_device,
-        uint32_t frames_in_flight, uint32_t api_version, uint32_t graphics_family, uint32_t copy_family,
+        uint32_t frames_in_flight, uint32_t api_version, uint32_t graphics_family, uint32_t compute_family, uint32_t copy_family,
         bool use_concurrent_sharing)
         : instance(instance), device(device), phy_device(phy_device), frames_in_flight(frames_in_flight),
-          vulkan_api_version(api_version), graphics_family(graphics_family), copy_family(copy_family),
+          vulkan_api_version(api_version), graphics_family(graphics_family), compute_family(compute_family), copy_family(copy_family),
           use_concurrent_sharing(use_concurrent_sharing) {
 
     }
@@ -87,18 +87,26 @@ namespace bud::graphics::vulkan {
         staging_pages.resize(frames_in_flight);
         deferred_free_buffers.resize(frames_in_flight);
         deferred_free_textures.resize(frames_in_flight);
-        // No allocation tracking initialization required
-        const uint32_t queue_family_indices[2] = { graphics_family, copy_family };
+
+        std::vector<uint32_t> queue_family_indices;
+        queue_family_indices.push_back(graphics_family);
+        if (compute_family != graphics_family) {
+            queue_family_indices.push_back(compute_family);
+        }
+        if (copy_family != graphics_family && copy_family != compute_family) {
+            queue_family_indices.push_back(copy_family);
+        }
+
         for (uint32_t i = 0; i < frames_in_flight; ++i) {
             VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             bufferInfo.size = 64 * 1024 * 1024; // 64 MB
             bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT; // Allow binding as vertex/index buffer
             // Staging is read by the copy queue during async uploads; use
             // CONCURRENT sharing so no ownership transfer is needed.
-            if (use_concurrent_sharing) {
+            if (use_concurrent_sharing && queue_family_indices.size() > 1) {
                 bufferInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
-                bufferInfo.queueFamilyIndexCount = 2;
-                bufferInfo.pQueueFamilyIndices = queue_family_indices;
+                bufferInfo.queueFamilyIndexCount = static_cast<uint32_t>(queue_family_indices.size());
+                bufferInfo.pQueueFamilyIndices = queue_family_indices.data();
             } else {
                 bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             }

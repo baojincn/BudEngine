@@ -77,6 +77,12 @@ namespace bud::graphics {
 		Present,           // Swapchain Present
 	};
 
+	enum class QueueType : uint32_t {
+		Graphics = 0,
+		AsyncCompute = 1,
+		Transfer = 2
+	};
+
 
 	enum class ObjectType {
 		Unknown,

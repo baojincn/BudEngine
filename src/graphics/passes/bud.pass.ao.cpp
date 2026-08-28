@@ -53,6 +53,7 @@ namespace bud::graphics {
 
 		return rg.add_pass("Ambient Occlusion Pass",
 			[=](RGBuilder& builder) {
+				builder.set_queue(QueueType::AsyncCompute);
 				*raw_ao_h = builder.create("RawAOTexture", ao_desc);
 				builder.read(depth_buffer, ResourceState::ShaderResource);
 				builder.write(*raw_ao_h, ResourceState::UnorderedAccess);
@@ -142,6 +143,7 @@ namespace bud::graphics {
 
 		return rg.add_pass("AO Blur Pass",
 			[=](RGBuilder& builder) {
+				builder.set_queue(QueueType::AsyncCompute);
 				*blurred_ao_h = builder.create("BlurredAOTexture", blur_desc);
 				builder.read(raw_ao, ResourceState::UnorderedAccess);
 				builder.read(depth_buffer, ResourceState::ShaderResource);
@@ -256,6 +258,7 @@ namespace bud::graphics {
 
 		rg.add_pass("AO Temporal Accumulation",
 			[=](RGBuilder& builder) {
+				builder.set_queue(QueueType::AsyncCompute);
 				builder.read(raw_ao, ResourceState::ShaderResource);
 				builder.read(depth_buffer, ResourceState::ShaderResource);
 				builder.read(history_read_h, ResourceState::UnorderedAccess);
