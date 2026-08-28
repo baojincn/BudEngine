@@ -169,7 +169,7 @@ bool frustum_cull(vec3 center, float radius) {
 // ---------------------------------------------------------------------------
 
 float calculate_lod_error(vec3 center, float radius, float max_error) {
-    float d = max(length(cam_pos - center) - radius, 0.01);
+    float d = max(length(cam_pos - center), 0.1);
     // Use focal length in pixels for consistent screen-space error metric.
     // proj[1][1] = cot(fov/2); focal_pixels = abs(proj[1][1] * viewport_height * 0.5).
     float focal_pixels = abs(proj[1][1] * push_constants.screen_height * 0.5);
@@ -257,27 +257,7 @@ void traverse_hierarchy(uint instance_id) {
         bool should_render = is_leaf ||
             (err <= inst.error_threshold && push_constants.enable_lod != 0);
 
-// Transition zone: when pixel error is near the threshold, render
-        // BOTH parent (low LOD) and children (high LOD) with a blend factor
-        // for smooth dithering transition.
-        float transition_start = inst.error_threshold * 0.7f;
-        float transition_end   = inst.error_threshold * 1.3f;
-        bool in_transition = !is_leaf && err > transition_start && err < transition_end;
-
-        if (in_transition) {
-            float blend = (err - transition_start) / (transition_end - transition_start);
-            blend = clamp(blend, 0.0, 1.0);
-            for (uint i = 0; i < group.page_index_num; ++i)
-                emit_page(instance_id, group.page_index_start + i, blend);
-            for (uint i = 0; i < group.children_num; ++i) {
-                if (stack_ptr < 256)
-                    stack[stack_ptr++] = group.children_start + i;
-                else
-                    atomicOr(error_flags, 1u);
-            }
-        } else if (should_render) {
-            // Leaf nodes (LOD0) get blend_factor = 0.0 (full high LOD).
-            // Non-leaf nodes (LOD1+) get blend_factor = 1.0 (full low LOD).
+        if (should_render) {
             float blend = is_leaf ? 0.0 : 1.0;
             for (uint i = 0; i < group.page_index_num; ++i)
                 emit_page(instance_id, group.page_index_start + i, blend);

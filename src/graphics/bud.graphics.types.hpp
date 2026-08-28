@@ -209,9 +209,9 @@ namespace bud::graphics {
 		uint32_t shadow_map_size = 2048;
 		float shadow_bias_constant = 1.25f;
 		float shadow_bias_slope = 1.75f;
-		float shadow_ortho_size = 35.0f;
-		float shadow_near_plane = 1.0f;
-		float shadow_far_plane = 3000.0f;
+		float shadow_ortho_size = 35.0f * bud::core::units::m;
+		float shadow_near_plane = 1.0f * bud::core::units::cm;
+		float shadow_far_plane = 30.0f * bud::core::units::m;
 
 		uint32_t cascade_count = 4;
 		float cascade_split_lambda = 0.75f; // Practical Split Scheme
@@ -227,18 +227,16 @@ namespace bud::graphics {
 		bool enable_cluster_visualization = false;
 		bool enable_wireframe = false;
 
-		// CPU-driven page LOD selection by screen-space error (Nanite-style
-		// single threshold): a LOD level L is used while its accumulated
-		// object-space error projects to <= lod_error_threshold_px pixels.
-		// lod_error_lod1/lod_error_lod2 must match BudAssetTool's
-		// lod_target_errors = {0, 1e-3, 5e-3} (per-cluster cluster_error).
-		float lod_error_lod1 = 1e-3f;
-		float lod_error_lod2 = 5e-3f;
-		float lod_error_threshold_px = 2.0f;
+		// Page LOD selection by screen-space error (Nanite-style single threshold):
+		// A LOD level L is used while its accumulated object-space error projects
+		// to <= lod_error_threshold_px pixels on screen.
+		float lod_error_lod1 = 2.0f * bud::core::units::mm; // 0.2 cm
+		float lod_error_lod2 = 10.0f * bud::core::units::mm; // 1.0 cm
+		float lod_error_threshold_px = 2.0f; // in screen pixels
 
 		// Ambient Occlusion
 		AOMode ao_mode = AOMode::GTAO;
-		float ao_radius = 1.0f;
+		float ao_radius = 1.0f * bud::core::units::m; // 100.0 cm (room/architectural scale)
 		float ao_intensity = 0.8f;
 		// 32 samples = 8 steps per slice direction at half-res. Good balance of
 		// quality and cost now that the temporal reprojection is fixed.

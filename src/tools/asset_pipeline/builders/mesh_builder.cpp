@@ -151,6 +151,7 @@ bool MeshBuilder::build(const std::string& input_path, const std::string& output
 
             page_state.flags = bud::asset::VG_PAGE_FLAG_STREAMABLE;
             page_state.raw_vertex_offset = static_cast<uint32_t>(bulk_offset);
+            page_state.size_in_bytes = static_cast<uint32_t>(pdata.size());
             bulk_pages_data.insert(bulk_pages_data.end(), pdata.begin(), pdata.end());
             bulk_offset += pdata.size();
         }
