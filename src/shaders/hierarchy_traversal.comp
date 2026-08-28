@@ -116,6 +116,9 @@ layout(push_constant) uniform Constants {
     uint enable_lod;
     float screen_height; // viewport height in pixels, for focal_pixels calculation
     uint max_requests;   // max page request entries before overflow
+    uint cascade_index;  // 0 = Main Camera View, 1..4 = CSM Cascade 0..3
+    float lod_error_scale; // LOD multiplier (e.g. 1.0 for main, 2.5 for cascade 1, etc.)
+    float ortho_extent;  // World extent of orthographic frustum in cm (for shadow cascades)
 } push_constants;
 
 // ---------------------------------------------------------------------------
@@ -131,7 +134,12 @@ layout(push_constant) uniform Constants {
 //   far  = row3 - row2 (z=1)
 // With reversed-z, near and far are swapped.
 void compute_frustum_planes(out vec4 planes[6]) {
-    mat4 vp = proj * view;
+    mat4 vp;
+    if (push_constants.cascade_index == 0u) {
+        vp = proj * view;
+    } else {
+        vp = cascade_view_proj[push_constants.cascade_index - 1u];
+    }
     mat4 m = transpose(vp);
     planes[0] = m[3] + m[0];
     planes[1] = m[3] - m[0];
@@ -165,15 +173,22 @@ bool frustum_cull(vec3 center, float radius) {
 }
 
 // ---------------------------------------------------------------------------
-// Simple projected-error LOD metric
+// Projected-error LOD metric supporting both Perspective and Orthographic Views
 // ---------------------------------------------------------------------------
 
 float calculate_lod_error(vec3 center, float radius, float max_error) {
-    float d = max(length(cam_pos - center), 0.1);
-    // Use focal length in pixels for consistent screen-space error metric.
-    // proj[1][1] = cot(fov/2); focal_pixels = abs(proj[1][1] * viewport_height * 0.5).
-    float focal_pixels = abs(proj[1][1] * push_constants.screen_height * 0.5);
-    return (max_error * focal_pixels) / d;
+    if (push_constants.cascade_index == 0u) {
+        // Main view: perspective projection error
+        float d = max(length(cam_pos - center), 0.1);
+        float focal_pixels = abs(proj[1][1] * push_constants.screen_height * 0.5);
+        return (max_error * focal_pixels) / d;
+    } else {
+        // Shadow cascade view: orthographic projection error (constant across depth in each cascade)
+        float extent = (push_constants.ortho_extent > 0.0) ? push_constants.ortho_extent : 3500.0;
+        float shadow_res = push_constants.screen_height;
+        float error_multiplier = max(push_constants.lod_error_scale, 0.1);
+        return (max_error * shadow_res) / (extent * error_multiplier);
+    }
 }
 
 // ---------------------------------------------------------------------------

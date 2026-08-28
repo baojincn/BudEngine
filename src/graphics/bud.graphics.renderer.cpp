@@ -1175,23 +1175,23 @@ namespace bud::graphics {
 				if (frame.visible_pages_readback.is_valid()) {
 					if (auto* vp_buf = rhi->get_buffer(frame.visible_pages_readback); vp_buf && vp_buf->mapped_ptr) {
 						const uint32_t* vp_data = static_cast<const uint32_t*>(vp_buf->mapped_ptr);
-						vg_visible_pages = std::min(vp_data[0], 4096u);
+						vg_visible_pages = std::min(vp_data[0], bud::asset::VG_MAX_VISIBLE_PAGES);
 
 						if (auto* pool_buf = rhi->get_buffer(gpu_scene.get_page_pool_buffer()); pool_buf && pool_buf->mapped_ptr) {
 							const uint8_t* pool_base = static_cast<const uint8_t*>(pool_buf->mapped_ptr);
 							for (uint32_t p = 0; p < vg_visible_pages; ++p) {
 								uint32_t pack = vp_data[1 + p];
-								uint32_t page_slot = pack & 0x1FFFu;
+								uint32_t page_slot = pack & bud::asset::VG_PAGE_SLOT_MASK;
 								if (page_slot < GPUScene::PagePool::max_pages) {
 									const auto* ph = reinterpret_cast<const bud::asset::VGPageDataHeader*>(pool_base + page_slot * GPUScene::PagePool::page_size);
-									if (ph && ph->magic == 0x50414745) { // 'PAGE'
+									if (ph && ph->magic == bud::asset::VG_PAGE_MAGIC) {
 										vg_visible_tris += ph->index_count / 3;
 									}
 								}
 							}
 						}
 						if (vg_visible_tris == 0 && vg_visible_pages > 0) {
-							vg_visible_tris = vg_visible_pages * 1280;
+							vg_visible_tris = vg_visible_pages * bud::asset::VG_DEFAULT_ESTIMATED_PAGE_TRIANGLES;
 						}
 					}
 				}
@@ -1315,7 +1315,35 @@ namespace bud::graphics {
 					);
 				}
 
-				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), csm_inst_input, csm_inst_count, csm_split, rg_csm_indirect, rg_csm_static_indirect);
+				std::array<RGHandle, MAX_CASCADES> rg_csm_visible_pages{};
+				if (render_config.enable_virtual_geometry && hierarchy_traversal_pass) {
+					for (uint32_t c_idx = 0; c_idx < cascade_count; ++c_idx) {
+						float lod_error_scale = 2.5f;
+						if (c_idx == 1) lod_error_scale = 5.0f;
+						else if (c_idx == 2) lod_error_scale = 7.5f;
+						else if (c_idx >= 3) lod_error_scale = 10.0f;
+
+						float ortho_extent = render_config.shadow_ortho_size * std::pow(2.0f, static_cast<float>(c_idx));
+						std::string pass_name = "CSM Cascade " + std::to_string(c_idx) + " Traversal";
+						rg_csm_visible_pages[c_idx] = hierarchy_traversal_pass->add_to_graph(
+							render_graph,
+							scene_view,
+							render_config,
+							render_scene,
+							meshes,
+							visible_count,
+							gpu_scene,
+							current_idx,
+							c_idx + 1,
+							lod_error_scale,
+							ortho_extent,
+							frame.csm_visible_pages[c_idx],
+							pass_name
+						);
+					}
+				}
+
+				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), csm_inst_input, csm_inst_count, csm_split, rg_csm_indirect, rg_csm_static_indirect, rg_csm_visible_pages);
 
 				if (is_mesh_shader_vg) {
 					// Mesh shader visibility path (task+mesh shader)

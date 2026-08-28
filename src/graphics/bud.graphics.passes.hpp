@@ -87,7 +87,21 @@ namespace bud::graphics {
 		~HierarchyTraversalPass();
 		void shutdown(RHI* rhi) override;
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, size_t instance_count, const GPUScene& gpu_scene, uint32_t current_frame);
+		RGHandle add_to_graph(
+			RenderGraph& rg,
+			const SceneView& view,
+			const RenderConfig& config,
+			const RenderScene& render_scene,
+			const std::vector<RenderMesh>& meshes,
+			size_t instance_count,
+			const GPUScene& gpu_scene,
+			uint32_t current_frame,
+			uint32_t cascade_index = 0,
+			float lod_error_scale = 1.0f,
+			float ortho_extent = 0.0f,
+			BufferHandle target_visible_pages = {},
+			const std::string& pass_name = "Hierarchy Traversal"
+		);
 	};
 
 	class PageEmitPass : public RenderPass {
@@ -113,6 +127,8 @@ namespace bud::graphics {
 
 	class CSMShadowPass : public RenderPass {
 		PipelineHandle csm_cull_pipeline;
+		PipelineHandle shadow_mesh_pipeline;
+		uint64_t shadow_visibility_set_layout = 0;
 		TextureHandle static_cache_texture;
 		bud::math::vec3 last_light_dir = bud::math::vec3(0.0f);
 		bud::math::mat4 last_view_proj = bud::math::mat4(1.0f);
@@ -138,7 +154,23 @@ namespace bud::graphics {
 		}
 
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		RGHandle add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, std::vector<std::vector<uint32_t>> csm_visible_instances, const GPUScene& gpu_scene, bud::graphics::BufferHandle mega_vertex_buffer, bud::graphics::BufferHandle mega_index_buffer, bud::graphics::RGHandle rg_instance_data, size_t instance_count, size_t split_index = 0, bud::graphics::RGHandle rg_indirect_draw = {}, bud::graphics::RGHandle rg_static_indirect_draw = {});
+		RGHandle add_to_graph(
+			RenderGraph& rg,
+			const SceneView& view,
+			const RenderConfig& config,
+			const RenderScene& render_scene,
+			const std::vector<RenderMesh>& meshes,
+			std::vector<std::vector<uint32_t>> csm_visible_instances,
+			const GPUScene& gpu_scene,
+			bud::graphics::BufferHandle mega_vertex_buffer,
+			bud::graphics::BufferHandle mega_index_buffer,
+			bud::graphics::RGHandle rg_instance_data,
+			size_t instance_count,
+			size_t split_index = 0,
+			bud::graphics::RGHandle rg_indirect_draw = {},
+			bud::graphics::RGHandle rg_static_indirect_draw = {},
+			std::array<bud::graphics::RGHandle, MAX_CASCADES> rg_csm_visible_pages = {}
+		);
 	};
 
 	

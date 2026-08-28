@@ -84,6 +84,7 @@ namespace bud::graphics {
 			BufferHandle page_request_readback;       // Host-visible: copied from page_request_buffer each frame
 			BufferHandle visible_pages;       // Phase 1 GPU-driven (hierarchy_traversal -> page_emit)
 			BufferHandle visible_pages_readback; // Host-visible readback buffer for stats & streaming
+			std::array<BufferHandle, MAX_CASCADES> csm_visible_pages; // Multi-view: Visible pages per CSM cascade
 			BufferHandle visible_clusters;    // Phase 2 GPU-driven (page_emit -> cluster_cull)
 			BufferHandle dynamic_instances;   // Phase 2 GPU-driven dynamic instances per cluster
 			uint64_t submit_timeline_value = 0;

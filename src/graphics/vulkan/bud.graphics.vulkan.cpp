@@ -858,11 +858,11 @@ struct VulkanPipelineObject* VulkanRHI::get_pipeline_obj(PipelineHandle handle) 
 	if (!handle.is_valid() || handle.id >= pipeline_pool.size()) {
 		return nullptr;
 	}
-	const auto& slot = pipeline_pool[handle.id];
+	auto& slot = pipeline_pool[handle.id];
 	if (!slot.in_use) {
 		return nullptr;
 	}
-	return slot.obj.get();
+	return &slot.obj;
 }
 
 class VulkanTexture* VulkanRHI::get_vulkan_texture(TextureHandle handle) {
@@ -1077,8 +1077,6 @@ PipelineHandle VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& d
 	if (taskModule) vkDestroyShaderModule(device, taskModule, nullptr);
 	if (meshModule) vkDestroyShaderModule(device, meshModule, nullptr);
 
-	VulkanPipelineObject* pipeObj = new VulkanPipelineObject{ pipeline, pipelineLayout, VK_PIPELINE_BIND_POINT_GRAPHICS };
-
 	created_layouts.push_back(pipelineLayout);
 
 	// Attach a human-readable debug name to the pipeline
@@ -1101,7 +1099,7 @@ PipelineHandle VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& d
 	}
 
 	auto& slot = pipeline_pool[slot_idx];
-	slot.obj = std::unique_ptr<VulkanPipelineObject>(pipeObj);
+	slot.obj = VulkanPipelineObject{ pipeline, pipelineLayout, VK_PIPELINE_BIND_POINT_GRAPHICS, ComputePipelineDesc::LayoutKind::HiZCulling, push_constant.stageFlags };
 	slot.in_use = true;
 
 	return PipelineHandle{ slot_idx };
@@ -1112,11 +1110,11 @@ void VulkanRHI::destroy_pipeline(PipelineHandle handle) {
 	auto& slot = pipeline_pool[handle.id];
 	if (!slot.in_use) return;
 
-	if (slot.obj) {
+	if (slot.obj.pipeline != VK_NULL_HANDLE) {
 		if (pipeline_cache) {
-			pipeline_cache->release_pipeline(slot.obj->pipeline);
+			pipeline_cache->release_pipeline(slot.obj.pipeline);
 		}
-		slot.obj.reset();
+		slot.obj = {};
 	}
 	slot.in_use = false;
 	free_pipeline_indices.push_back(handle.id);
@@ -1267,8 +1265,6 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 
     vkDestroyShaderModule(device, computeModule, nullptr);
 
-	VulkanPipelineObject* pipeObj = new VulkanPipelineObject{ pipeline, pipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE };
-	pipeObj->compute_layout_kind = desc.layout_kind;
 	created_layouts.push_back(pipelineLayout);
 
 	// Name compute pipeline for external debuggers (Nsight/RenderDoc) so that
@@ -1301,7 +1297,7 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 	}
 
 	auto& slot = pipeline_pool[slot_idx];
-	slot.obj = std::unique_ptr<VulkanPipelineObject>(pipeObj);
+	slot.obj = VulkanPipelineObject{ pipeline, pipelineLayout, VK_PIPELINE_BIND_POINT_COMPUTE, desc.layout_kind, VK_SHADER_STAGE_COMPUTE_BIT };
 	slot.in_use = true;
 
 	return PipelineHandle{ slot_idx };
@@ -1964,9 +1960,11 @@ void VulkanRHI::cmd_push_constants(CommandHandle cmd, PipelineHandle pipeline, u
 		bud::eprint("cmd_push_constants called with invalid pipeline layout");
 		return;
 	}
-	VkShaderStageFlags stage = (pipeObj->bind_point == VK_PIPELINE_BIND_POINT_COMPUTE) 
-		? VK_SHADER_STAGE_COMPUTE_BIT 
-		: (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+	VkShaderStageFlags stage = pipeObj->push_stage_flags ? pipeObj->push_stage_flags : (
+		(pipeObj->bind_point == VK_PIPELINE_BIND_POINT_COMPUTE) 
+			? VK_SHADER_STAGE_COMPUTE_BIT 
+			: (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
+	);
 	vkCmdPushConstants(static_cast<VkCommandBuffer>(cmd), pipeObj->layout, stage, 0, size, data);
 }
 

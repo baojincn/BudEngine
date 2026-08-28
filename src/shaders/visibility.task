@@ -20,6 +20,11 @@ layout(std430, set = 0, binding = 3) readonly buffer InstanceBuffer {
     HierarchyInstance data[];
 } instance_buffer;
 
+layout(push_constant) uniform PushConstants {
+    uint cascade_index;  // 0 = Main Camera View, 1..4 = CSM Cascade 0..3
+    uint is_shadow_pass; // 1 = shadow pass (depth-only), 0 = main visibility pass
+} push;
+
 struct TaskData {
     uint instance_id;
     uint page_slot;
@@ -33,7 +38,7 @@ shared uint visible_cluster_count;
 shared uint visible_cluster_indices[256];
 
 void compute_frustum_planes(out vec4 planes[6]) {
-    mat4 vp = ubo.proj * ubo.view;
+    mat4 vp = (push.cascade_index == 0u) ? (ubo.proj * ubo.view) : ubo.cascade_view_proj[push.cascade_index - 1u];
     mat4 m = transpose(vp);
     planes[0] = m[3] + m[0];
     planes[1] = m[3] - m[0];

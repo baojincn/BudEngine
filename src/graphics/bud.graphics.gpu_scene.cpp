@@ -125,6 +125,9 @@ namespace bud::graphics {
 				if (frame_resource.csm_instance_data.is_valid()) rhi->destroy_buffer(frame_resource.csm_instance_data);
 				if (frame_resource.visible_pages.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages);
 				if (frame_resource.visible_pages_readback.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages_readback);
+				for (auto& csm_vp : frame_resource.csm_visible_pages) {
+					if (csm_vp.is_valid()) rhi->destroy_buffer(csm_vp);
+				}
 				if (frame_resource.visible_clusters.is_valid()) rhi->destroy_buffer(frame_resource.visible_clusters);
 				if (frame_resource.dynamic_instances.is_valid()) rhi->destroy_buffer(frame_resource.dynamic_instances);
 				frame_resource = {};
@@ -302,6 +305,14 @@ namespace bud::graphics {
 				frame_resource.visible_pages = rhi->create_gpu_buffer(vp_size, ResourceState::UnorderedAccess);
 				frame_resource.visible_pages_readback = rhi->create_readback_buffer(vp_size);
 				frame_resource.visible_page_capacity = max_visible_pages;
+			}
+
+			for (size_t c_idx = 0; c_idx < frame_resource.csm_visible_pages.size(); ++c_idx) {
+				if (!frame_resource.csm_visible_pages[c_idx].is_valid()) {
+					constexpr uint32_t max_visible_pages = 65536;
+					uint64_t vp_size = 4 + static_cast<uint64_t>(max_visible_pages) * sizeof(uint32_t);
+					frame_resource.csm_visible_pages[c_idx] = rhi->create_gpu_buffer(vp_size, ResourceState::UnorderedAccess);
+				}
 			}
 
 			if (!frame_resource.visible_clusters.is_valid() || frame_resource.visible_cluster_capacity < desired_cluster_capacity) {

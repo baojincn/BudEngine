@@ -265,6 +265,12 @@ namespace bud::asset {
 	};
 	static_assert(sizeof(VGHeader) == 128, "VGHeader must be 128 bytes");
 
+	inline constexpr uint32_t VG_PAGE_MAGIC = 0x50414745; // 'PAGE'
+	inline constexpr uint32_t VG_PAGE_VERSION = 1;
+	inline constexpr uint32_t VG_PAGE_SLOT_MASK = 0x1FFF; // 13-bit slot index (up to 8192 slots)
+	inline constexpr uint32_t VG_MAX_VISIBLE_PAGES = 4096; // GPU readback clamp
+	inline constexpr uint32_t VG_DEFAULT_ESTIMATED_PAGE_TRIANGLES = 1280; // Fallback triangle estimate per page
+
 	// 1:1 Aligned with UE5 Page Data Header (64 bytes)
 	struct VGPageDataHeader {
 		uint32_t magic;

@@ -119,6 +119,11 @@ namespace bud::graphics {
 				rhi->cmd_set_scissor(cmd, w, h);
 				rhi->cmd_bind_descriptor_set(cmd, active_pipeline, 0, ds);
 				rhi->cmd_bind_descriptor_set(cmd, active_pipeline, 1);
+				struct VisPush {
+					uint32_t cascade_index = 0;
+					uint32_t is_shadow_pass = 0;
+				} vis_push;
+				rhi->cmd_push_constants(cmd, active_pipeline, sizeof(VisPush), &vis_push);
 				uint32_t vpc = gpu_scene.get_frame_resources(rhi->get_current_frame_index()).visible_page_capacity;
 				if (vpc > 0)
 					rhi->cmd_draw_mesh_tasks(cmd, vpc, 1, 1);

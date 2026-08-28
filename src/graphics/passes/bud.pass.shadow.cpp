@@ -46,6 +46,14 @@ namespace bud::graphics {
 			rhi->destroy_texture(static_cache_texture);
 			static_cache_texture.reset();
 		}
+		if (shadow_mesh_pipeline.is_valid()) {
+			rhi->destroy_pipeline(shadow_mesh_pipeline);
+			shadow_mesh_pipeline.reset();
+		}
+		if (shadow_visibility_set_layout) {
+			rhi->destroy_descriptor_set_layout(shadow_visibility_set_layout);
+			shadow_visibility_set_layout = 0;
+		}
 
 		static_cache_texture.reset();
 		cache_initialized = false;
@@ -66,6 +74,34 @@ namespace bud::graphics {
 		}
 
 		stored_rhi = rhi;
+
+		std::vector<DescriptorBinding> bindings = {
+			{1, DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, SHADER_STAGE_TASK_BIT},
+			{2, DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, SHADER_STAGE_TASK_BIT | SHADER_STAGE_MESH_BIT},
+			{3, DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, SHADER_STAGE_TASK_BIT | SHADER_STAGE_MESH_BIT},
+		};
+		shadow_visibility_set_layout = rhi->create_descriptor_set_layout(bindings);
+
+		load_shaders_async(asset_manager, { "src/shaders/visibility.task.spv", "src/shaders/visibility.mesh.spv" }, [this, rhi, config](const auto& shaders) {
+			GraphicsPipelineDesc desc;
+			desc.ts.code = shaders[0];
+			desc.ms.code = shaders[1];
+			desc.depth_test = true;
+			desc.depth_write = true;
+			desc.cull_mode = CullMode::None;
+			desc.color_attachment_format = TextureFormat::Undefined;
+			desc.depth_attachment_format = TextureFormat::D32_FLOAT;
+			desc.depth_compare_op = config.reversed_z ? CompareOp::GreaterEqual : CompareOp::LessEqual;
+			desc.enable_depth_bias = true;
+			desc.vertex_layout = VertexLayoutType::NoVertexInput;
+			desc.custom_set_layouts = { shadow_visibility_set_layout };
+
+			shadow_mesh_pipeline = rhi->create_graphics_pipeline(desc);
+			if (shadow_mesh_pipeline.is_valid()) {
+				bud::print("[CSMShadowPass] VG Shadow Mesh pipeline created: {}", shadow_mesh_pipeline.id);
+			}
+		});
+
 		load_shaders_async(asset_manager, { "src/shaders/shadow.vert.spv", "src/shaders/shadow.frag.spv" }, [this, rhi, config](const auto& shaders) {
 			GraphicsPipelineDesc desc;
 			desc.vs.code = shaders[0];
@@ -80,7 +116,7 @@ namespace bud::graphics {
 			if (pipeline.is_valid()) {
 				bud::print("[CSMShadowPass] Shaders loaded and pipeline created: {}", pipeline.id);
 			}
-			});
+		});
 	}
 
 	RGHandle CSMShadowPass::add_to_graph(RenderGraph& render_graph, const SceneView& view, const RenderConfig& config,
@@ -94,7 +130,8 @@ namespace bud::graphics {
 		size_t instance_count,
 		size_t split_index,
 		bud::graphics::RGHandle rg_indirect_draw,
-		bud::graphics::RGHandle rg_static_indirect_draw)
+		bud::graphics::RGHandle rg_static_indirect_draw,
+		std::array<bud::graphics::RGHandle, MAX_CASCADES> rg_csm_visible_pages)
 	{
 		if (config.shadow_map_size == 0 || config.cascade_count == 0) {
 			bud::eprint("[CSMShadowPass] ERROR: Invalid shadow config (size={}, cascades={}).",
@@ -260,7 +297,7 @@ namespace bud::graphics {
 			}
 		}
 
-		// Main Shadow Pass (Dynamic + Copy)
+		// Main Shadow Pass (Dynamic + VG + Copy)
 		return render_graph.add_pass("CSM Shadow",
 			[&, shadow_map_h](RGBuilder& builder) {
 				*shadow_map_h = builder.create("CSM ShadowMap", desc);
@@ -271,17 +308,18 @@ namespace bud::graphics {
 					builder.read(rg_indirect_draw, ResourceState::IndirectArgument);
 				if (rg_instance_data.is_valid())
 					builder.read(rg_instance_data, ResourceState::ShaderResource);
+				for (uint32_t i = 0; i < config.cascade_count; ++i) {
+					if (rg_csm_visible_pages[i].is_valid()) {
+						builder.read(rg_csm_visible_pages[i], ResourceState::ShaderResource);
+					}
+				}
 
 				return *shadow_map_h;
 			},
 			[=, csm_vis = std::move(csm_visible_instances), &render_graph, &render_scene, &meshes, &view, &gpu_scene](RHI* rhi, CommandHandle cmd) {
 				auto active_map = render_graph.get_texture(*shadow_map_h);
-				if (!pipeline.is_valid()) {
-					if (active_map.is_valid()) {
-						rhi->resource_barrier(cmd, active_map, ResourceState::DepthWrite, ResourceState::DepthRead);
-					}
-					return;
-				}
+				if (!active_map.is_valid()) return;
+
 				bool did_copy = false;
 
 				if (valid_cache && cache_initialized) {
@@ -302,6 +340,8 @@ namespace bud::graphics {
 					}
 				}
 
+				auto& frame = gpu_scene.get_frame_resources(rhi->get_current_frame_index());
+
 				for (uint32_t i = 0; i < config.cascade_count; ++i) {
 					auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
 					bud::math::Frustum cascade_view_frustum_dbg;
@@ -315,90 +355,117 @@ namespace bud::graphics {
 					info.layer_count = 1;
 
 					rhi->cmd_begin_render_pass(cmd, info);
-					rhi->cmd_bind_pipeline(cmd, pipeline);
 					rhi->cmd_set_viewport(cmd, (float)config.shadow_map_size, (float)config.shadow_map_size);
 					rhi->cmd_set_scissor(cmd, config.shadow_map_size, config.shadow_map_size);
-
 					rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, 0.0f, config.shadow_bias_slope);
-					rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
 
-					// Bind global Mega-Buffer once per cascade
-					rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-					rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+					// 1. Virtual Geometry Shadow Pass (Mesh Shader path)
+					if (config.enable_virtual_geometry && config.enable_mesh_shader && shadow_mesh_pipeline.is_valid() && rg_csm_visible_pages[i].is_valid()) {
+						uint64_t ds = rhi->create_descriptor_set(shadow_visibility_set_layout);
+						rhi->update_descriptor_set_buffer(ds, 1, render_graph.get_buffer(rg_csm_visible_pages[i]));
+						rhi->update_descriptor_set_buffer(ds, 2, gpu_scene.get_page_pool_buffer());
+						rhi->update_descriptor_set_buffer(ds, 3, frame.instance_data);
 
-					struct PushConsts {
-						bud::math::mat4 light_view_proj;
-						bud::math::mat4 model;
-						uint32_t material_id;
-						uint32_t use_gpu_driven;
-						uint32_t page_slot;
-					} push_consts;
+						rhi->cmd_bind_pipeline(cmd, shadow_mesh_pipeline);
+						rhi->cmd_bind_descriptor_set(cmd, shadow_mesh_pipeline, 0, ds);
+						rhi->cmd_bind_descriptor_set(cmd, shadow_mesh_pipeline, 1);
 
-					push_consts.light_view_proj = cascade_light_view_proj;
-					push_consts.model = bud::math::mat4(1.0f);
-					push_consts.material_id = 0;
-					push_consts.use_gpu_driven = 1;
-					push_consts.page_slot = ~0u;
+						struct VisPush {
+							uint32_t cascade_index;
+							uint32_t is_shadow_pass;
+						} vis_push;
+						vis_push.cascade_index = i + 1; // 1 = cascade 0, 2 = cascade 1, etc.
+						vis_push.is_shadow_pass = 1;
+						rhi->cmd_push_constants(cmd, shadow_mesh_pipeline, sizeof(VisPush), &vis_push);
 
-					const auto page_pool_buf = gpu_scene.get_page_pool_buffer();
-					auto draw_occluder = [&](size_t idx, bool skip_cached_static) {
-						bool is_static = (render_scene.flags[idx] & 1) != 0;
-						if (skip_cached_static && is_static) return;
+						uint32_t vpc = frame.visible_page_capacity;
+						if (vpc > 0) {
+							rhi->cmd_draw_mesh_tasks(cmd, vpc, 1, 1);
+						}
+					}
 
-						uint32_t mesh_id = render_scene.mesh_indices[idx];
-						if (mesh_id >= meshes.size()) return;
-						const auto& mesh = meshes[mesh_id];
-						if (!mesh.is_valid() || mesh.is_page_based) return;
-
-						// Culling
-						const auto& model_matrix = render_scene.world_matrices[idx];
-						bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
-						if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) return;
-						const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
-
-						push_consts.use_gpu_driven = 0;
-						push_consts.model = model_matrix;
-						push_consts.page_slot = ~0u;
+					// 2. Non-VG Dynamic Mesh Shadow Pass (Traditional Vertex/Indirect path)
+					if (pipeline.is_valid()) {
+						rhi->cmd_bind_pipeline(cmd, pipeline);
+						rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
 
 						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 
-						uint32_t sub_idx = render_scene.submesh_indices[idx];
-						if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
-							const auto& sub = mesh.submeshes[sub_idx];
-							push_consts.material_id = sub.material_id;
-							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)idx);
-						}
-						else {
-							push_consts.material_id = render_scene.material_indices[idx];
-							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)idx);
-						}
-					};
+						struct PushConsts {
+							bud::math::mat4 light_view_proj;
+							bud::math::mat4 model;
+							uint32_t material_id;
+							uint32_t use_gpu_driven;
+							uint32_t page_slot;
+						} push_consts;
 
-					auto& frame = gpu_scene.get_frame_resources(rhi->get_current_frame_index());
-					if (frame.csm_indirect_draw.is_valid()) {
-						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+						push_consts.light_view_proj = cascade_light_view_proj;
+						push_consts.model = bud::math::mat4(1.0f);
+						push_consts.material_id = 0;
+						push_consts.use_gpu_driven = 1;
+						push_consts.page_slot = ~0u;
 
-						if (split_index > 0) {
+						const auto page_pool_buf = gpu_scene.get_page_pool_buffer();
+						auto draw_occluder = [&](size_t idx, bool skip_cached_static) {
+							bool is_static = (render_scene.flags[idx] & 1) != 0;
+							if (skip_cached_static && is_static) return;
+
+							uint32_t mesh_id = render_scene.mesh_indices[idx];
+							if (mesh_id >= meshes.size()) return;
+							const auto& mesh = meshes[mesh_id];
+							if (!mesh.is_valid() || mesh.is_page_based) return;
+
+							// Culling
+							const auto& model_matrix = render_scene.world_matrices[idx];
+							bud::math::BoundingSphere world_sphere = mesh.sphere.transform(model_matrix);
+							if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) return;
+							const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
+
+							push_consts.use_gpu_driven = 0;
+							push_consts.model = model_matrix;
+							push_consts.page_slot = ~0u;
+
 							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 							rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-							rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
-						}
 
-						if (split_index < instance_count && page_pool_buf.is_valid()) {
-							rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
-							rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
-							rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
-						}
-					} else {
-						// Fallback: CPU-driven draw for each visible instance.
-						const auto& visible_instances = csm_vis[i];
-						for (size_t k = 0; k < visible_instances.size(); ++k) {
-							draw_occluder(visible_instances[k], did_copy);
+							uint32_t sub_idx = render_scene.submesh_indices[idx];
+							if (sub_idx != bud::asset::INVALID_INDEX && sub_idx < mesh.submeshes.size()) {
+								const auto& sub = mesh.submeshes[sub_idx];
+								push_consts.material_id = sub.material_id;
+								rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+								rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)idx);
+							}
+							else {
+								push_consts.material_id = render_scene.material_indices[idx];
+								rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)idx);
+							}
+						};
+
+						if (frame.csm_indirect_draw.is_valid()) {
+							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
+
+							if (split_index > 0) {
+								rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+								rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+								rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
+							}
+
+							if (split_index < instance_count && page_pool_buf.is_valid()) {
+								rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
+								rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
+								rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
+							}
+						} else {
+							// Fallback: CPU-driven draw for each visible non-VG instance.
+							const auto& visible_instances = csm_vis[i];
+							for (size_t k = 0; k < visible_instances.size(); ++k) {
+								draw_occluder(visible_instances[k], did_copy);
+							}
 						}
 					}
+
 					rhi->cmd_end_render_pass(cmd);
 				}
 			}
