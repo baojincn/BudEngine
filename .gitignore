@@ -7,9 +7,10 @@ vcpkg/
 vcpkg_installed/
 
 # Generated files
-aftermath_dumps/
-data/
-Cache/
+/aftermath_dumps/
+/data/
+/Cache/
+/AssetCache/
 
 
 # IDE files

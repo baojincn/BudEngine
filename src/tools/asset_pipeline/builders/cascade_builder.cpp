@@ -98,7 +98,7 @@ bool CascadeBuilder::build_package_from_raw(
 
     // 3. Cascade Build: Mesh (with embedded RawMesh Chunk)
     std::string out_mesh_path = (mesh_dir / (stem + ".budasset")).string();
-    std::string temp_raw = (options.cache_root + "/Meshes/" + stem + "_temp.rawmesh");
+    std::string temp_raw = (options.cache_root + "/" + stem + "_temp.rawmesh");
     raw_mesh.save_binary(temp_raw);
 
     MeshBuildOptions mesh_opts{};

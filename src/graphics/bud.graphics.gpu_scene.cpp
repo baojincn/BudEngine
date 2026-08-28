@@ -121,14 +121,24 @@ namespace bud::graphics {
 				if (frame_resource.stats_readback.is_valid()) rhi->destroy_buffer(frame_resource.stats_readback);
 				if (frame_resource.page_request_buffer.is_valid()) rhi->destroy_buffer(frame_resource.page_request_buffer);
 				if (frame_resource.page_request_readback.is_valid()) rhi->destroy_buffer(frame_resource.page_request_readback);
-				if (frame_resource.csm_static_indirect_draw.is_valid()) rhi->destroy_buffer(frame_resource.csm_static_indirect_draw);
 				if (frame_resource.csm_instance_data.is_valid()) rhi->destroy_buffer(frame_resource.csm_instance_data);
 				if (frame_resource.visible_pages.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages);
 				if (frame_resource.visible_pages_readback.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages_readback);
+				for (auto& csm_vp : frame_resource.csm_visible_pages) {
+					if (csm_vp.is_valid()) rhi->destroy_buffer(csm_vp);
+				}
 				if (frame_resource.visible_clusters.is_valid()) rhi->destroy_buffer(frame_resource.visible_clusters);
 				if (frame_resource.dynamic_instances.is_valid()) rhi->destroy_buffer(frame_resource.dynamic_instances);
+				if (frame_resource.page_cluster_mask.is_valid()) rhi->destroy_buffer(frame_resource.page_cluster_mask);
 				frame_resource = {};
 			}
+			for (int i = 0; i < 2; ++i) {
+				if (persistent_hiz_textures[i].is_valid()) {
+					rhi->destroy_texture(persistent_hiz_textures[i]);
+					persistent_hiz_textures[i].reset();
+				}
+			}
+			persistent_hiz_size = 0;
 		}
 
 		mesh_geometries.clear();
@@ -251,18 +261,11 @@ namespace bud::graphics {
 
 		// Full-scene CSM indirect draw buffer for GPU-driven shadow culling.
 		// Size: cascade_count * scene_capacity entries.
-		if (!frame_resource.csm_indirect_draw.is_valid() || frame_resource.csm_indirect_capacity < desired_scene_capacity) {
-			if (frame_resource.csm_indirect_draw.is_valid())
-				rhi->destroy_buffer(frame_resource.csm_indirect_draw);
-			frame_resource.csm_indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * 4 * indirect_draw_stride, ResourceState::IndirectArgument);
+			if (!frame_resource.csm_indirect_draw.is_valid() || frame_resource.csm_indirect_capacity < desired_scene_capacity) {
+				if (frame_resource.csm_indirect_draw.is_valid())
+					rhi->destroy_buffer(frame_resource.csm_indirect_draw);
+				frame_resource.csm_indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * 4 * indirect_draw_stride, ResourceState::IndirectArgument);
 				frame_resource.csm_indirect_capacity = static_cast<uint32_t>(desired_scene_capacity);
-			}
-
-			// Static-only indirect commands for the CSM static cache update.
-			if (!frame_resource.csm_static_indirect_draw.is_valid() || frame_resource.csm_indirect_capacity < desired_scene_capacity) {
-				if (frame_resource.csm_static_indirect_draw.is_valid())
-					rhi->destroy_buffer(frame_resource.csm_static_indirect_draw);
-				frame_resource.csm_static_indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_scene_capacity) * 4 * indirect_draw_stride, ResourceState::IndirectArgument);
 			}
 
 			// Full-scene DrawData for CSM cull (covers out-of-view casters).
@@ -302,6 +305,22 @@ namespace bud::graphics {
 				frame_resource.visible_pages = rhi->create_gpu_buffer(vp_size, ResourceState::UnorderedAccess);
 				frame_resource.visible_pages_readback = rhi->create_readback_buffer(vp_size);
 				frame_resource.visible_page_capacity = max_visible_pages;
+			}
+
+			if (!frame_resource.page_cluster_mask.is_valid() || frame_resource.page_cluster_mask_capacity < frame_resource.visible_page_capacity) {
+				if (frame_resource.page_cluster_mask.is_valid())
+					rhi->destroy_buffer(frame_resource.page_cluster_mask);
+				uint64_t pcm_size = static_cast<uint64_t>(frame_resource.visible_page_capacity) * 2 * sizeof(uint32_t);
+				frame_resource.page_cluster_mask = rhi->create_gpu_buffer(pcm_size, ResourceState::UnorderedAccess);
+				frame_resource.page_cluster_mask_capacity = frame_resource.visible_page_capacity;
+			}
+
+			for (size_t c_idx = 0; c_idx < frame_resource.csm_visible_pages.size(); ++c_idx) {
+				if (!frame_resource.csm_visible_pages[c_idx].is_valid()) {
+					constexpr uint32_t max_visible_pages = 65536;
+					uint64_t vp_size = 4 + static_cast<uint64_t>(max_visible_pages) * sizeof(uint32_t);
+					frame_resource.csm_visible_pages[c_idx] = rhi->create_gpu_buffer(vp_size, ResourceState::UnorderedAccess);
+				}
 			}
 
 			if (!frame_resource.visible_clusters.is_valid() || frame_resource.visible_cluster_capacity < desired_cluster_capacity) {
@@ -355,4 +374,34 @@ namespace bud::graphics {
 		std::lock_guard lock(mutex);
 		free_slots.push_back(page_index);
 	}
+
+	void GPUScene::ensure_hiz_textures(RHI* rhi, uint32_t width, uint32_t height) {
+		if (width == 0 || height == 0 || !rhi)
+			return;
+		uint32_t pot_w = 1 << (uint32_t)std::ceil(std::log2((float)width));
+		uint32_t pot_h = 1 << (uint32_t)std::ceil(std::log2((float)height));
+		uint32_t size = std::max(pot_w, pot_h);
+		if (persistent_hiz_size == size && persistent_hiz_textures[0].is_valid() && persistent_hiz_textures[1].is_valid())
+			return;
+
+		uint32_t mip_count = (uint32_t)std::floor(std::log2((float)size)) + 1;
+		TextureDesc desc;
+		desc.width = size;
+		desc.height = size;
+		desc.mips = mip_count;
+		desc.format = TextureFormat::R32_FLOAT;
+		desc.is_storage = true;
+		desc.initial_state = ResourceState::ShaderResource;
+
+		for (int i = 0; i < 2; ++i) {
+			if (persistent_hiz_textures[i].is_valid()) {
+				rhi->destroy_texture(persistent_hiz_textures[i]);
+				persistent_hiz_textures[i].reset();
+			}
+			persistent_hiz_textures[i] = rhi->create_texture(desc, nullptr, 0);
+		}
+		persistent_hiz_size = size;
+		has_history_hiz_valid = false;
+	}
 }
+

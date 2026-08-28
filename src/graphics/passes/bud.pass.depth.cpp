@@ -242,7 +242,7 @@ namespace bud::graphics {
 			});
 	}
 
-	RGHandle PyramidMipPass::add_to_graph(RenderGraph& rg, RGHandle depth_buffer, const RenderConfig& config) {
+	RGHandle PyramidMipPass::add_to_graph(RenderGraph& rg, RGHandle depth_buffer, const RenderConfig& config, RGHandle target_pyramid) {
 		if (!pipeline.is_valid()) return {};
 
 		auto depth_desc = rg.get_texture_desc(depth_buffer);
@@ -262,12 +262,12 @@ namespace bud::graphics {
 		desc.is_storage = true;
 		desc.initial_state = bud::graphics::ResourceState::Undefined;
 
-		auto pyramid_h_ptr = std::make_shared<RGHandle>();
+		auto pyramid_h_ptr = std::make_shared<RGHandle>(target_pyramid);
 
 		for (uint32_t i = 0; i < mip_count; ++i) {
 			rg.add_pass(std::format("Hi-Z Mip {}", i),
 				[=](RGBuilder& builder) {
-					if (i == 0) {
+					if (i == 0 && !pyramid_h_ptr->is_valid()) {
 						*pyramid_h_ptr = builder.create("HiZPyramid", desc);
 					}
 					RGHandle current_pyramid = *pyramid_h_ptr;

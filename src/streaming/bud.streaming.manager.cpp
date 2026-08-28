@@ -17,8 +17,17 @@ StreamingManager::StreamingManager(bud::io::AssetManager* asset_manager,
 {
 }
 
+StreamingManager::~StreamingManager() {
+	if (alive_flag) {
+		alive_flag->store(false, std::memory_order_release);
+	}
+}
+
 void StreamingManager::register_virtual_geometry_async(const std::string& path) {
-	asset_manager->load_file_async(path, [this, path](std::vector<char> data) {
+	auto alive = alive_flag;
+	asset_manager->load_file_async(path, [this, alive, path](std::vector<char> data) {
+		if (!alive->load(std::memory_order_acquire))
+			return;
 		if (data.empty()) {
 			bud::eprint("[Streaming] Empty asset data for: {}", path);
 			return;
@@ -279,13 +288,12 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 				}
 			}
 			std::string bulk_bin_path = std::filesystem::path(path).replace_extension(".budbulk").generic_string();
-			uint64_t bulk_off = 0;
 			for (uint32_t i = 0; i < asset_ptr->pages.size(); ++i) {
 				StreamingPage sp;
 				sp.asset_id = path;
 				sp.page_id = i;
 				sp.virtual_page_index = base_virtual_page + i;
-				sp.file_offset = bulk_off;
+				sp.file_offset = asset_ptr->pages[i].raw_vertex_offset;
 				sp.capacity = asset_ptr->pages[i].size_in_bytes;
 				sp.bin_path = bulk_bin_path;
 				sp.is_virtual_geometry = true;
@@ -293,8 +301,8 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 				sp.global_aabb = global_aabb;
 				sp.has_aabb = true;
 				sp.dependency_page_id = asset_ptr->pages[i].dependency_page_id;
+				sp.is_root = (asset_ptr->pages[i].dependency_page_id == bud::asset::INVALID_INDEX);
 
-				bulk_off += asset_ptr->pages[i].size_in_bytes;
 				temp_pages.push_back(std::move(sp));
 			}
 
@@ -302,7 +310,7 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 			for (const auto& sp : temp_pages) {
 				all_pages.emplace(sp.get_unique_id(), sp);
 				// Automatically preload pages for root level
-				if (sp.page_id < asset_ptr->pages.size()) {
+				if (sp.is_root) {
 					initial_page_indices.push_back(sp.virtual_page_index);
 				}
 			}
@@ -406,7 +414,13 @@ void StreamingManager::update(const bud::math::vec3& camera_position) {
 			std::clamp(camera_position.z, bmin.z, bmax.z));
 		const float d = bud::math::length(camera_position - closest);
 		const bool resident = residency_sm.count(page_key) && residency_sm[page_key];
-		if (resident && d > unload_radius_) {
+		bool recently_accessed = false;
+		if (auto rec_it = page_access_records.find(page_key); rec_it != page_access_records.end()) {
+			if (current_frame_number - rec_it->second.last_access_frame < 60) {
+				recently_accessed = true;
+			}
+		}
+		if (resident && !sp.is_root && d > unload_radius_ && !recently_accessed) {
 			if (auto it = page_gpu_slots.find(page_key); it != page_gpu_slots.end()) {
 				gpu_scene->update_page_table_entry(sp.virtual_page_index, 0, 0);
 				gpu_scene->get_page_pool().free_page(it->second);
@@ -619,8 +633,11 @@ void StreamingManager::process_gpu_page_requests_from_keys(const std::vector<std
 		pending_loads.insert(p);
 
 		const StreamingPage& sp = page_it->second;
+		auto alive = alive_flag;
 		asset_manager->load_file_chunk_async(sp.bin_path, sp.file_offset, sp.capacity,
-			[this, p, sp](std::vector<char> data) {
+			[this, alive, p, sp](std::vector<char> data) {
+				if (!alive->load(std::memory_order_acquire))
+					return;
 				if (data.empty()) {
 					std::scoped_lock lock(mutex_sm);
 					pending_loads.erase(p);
@@ -669,7 +686,9 @@ void StreamingManager::process_gpu_page_requests_from_keys(const std::vector<std
 				}
 
 				auto page_pool_buf = gpu_scene->get_page_pool_buffer();
-				renderer->enqueue_rhi_command([this, p, sp, slot, gpu_offset, page_pool_buf, data = std::move(data)]() {
+				renderer->enqueue_rhi_command([this, alive, p, sp, slot, gpu_offset, page_pool_buf, data = std::move(data)]() {
+					if (!alive->load(std::memory_order_acquire))
+						return;
 					const size_t src_size = data.size();
 					auto staging = rhi->get_allocator()->alloc_staging(src_size);
 					if (staging.mapped_ptr) {

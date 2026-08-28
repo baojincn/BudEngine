@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <vector>
 #include <string>
 
@@ -6,7 +6,7 @@
 
 namespace bud::scene {
 
-	 class Camera {
+	class Camera {
 	public:
 		bud::math::vec3 position;
 		bud::math::vec3 front;
@@ -53,6 +53,7 @@ namespace bud::scene {
 		// GPU-driven virtual geometry hierarchy parameters
 		uint32_t root_group_index = 0xFFFFFFFF;
 		uint32_t base_virtual_page = 0xFFFFFFFF;
+		float lod_bias = 1.0f;
 	};
 
 	struct DirectionalLight {
@@ -65,6 +66,8 @@ namespace bud::scene {
 		Camera main_camera;
 		DirectionalLight directional_light;
 		float ambient_strength = 0.25f;
+		float lod_error_threshold_px = 2.0f;
+		float streaming_unload_radius = 20.0f; // in meters
 		std::vector<Entity> entities;
 	};
 }

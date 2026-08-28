@@ -30,50 +30,69 @@ namespace bud::graphics {
 		});
 	}
 
-	RGHandle HierarchyTraversalPass::add_to_graph(RenderGraph& rg, const SceneView& view, const RenderConfig& config, const RenderScene& render_scene, const std::vector<RenderMesh>& meshes, size_t instance_count, const GPUScene& gpu_scene, uint32_t current_frame) {
+	RGHandle HierarchyTraversalPass::add_to_graph(
+		RenderGraph& rg,
+		const SceneView& view,
+		const RenderConfig& config,
+		const RenderScene& render_scene,
+		const std::vector<RenderMesh>& meshes,
+		size_t instance_count,
+		const GPUScene& gpu_scene,
+		uint32_t current_frame,
+		uint32_t cascade_index,
+		float lod_error_scale,
+		float ortho_extent,
+		BufferHandle target_visible_pages,
+		const std::string& pass_name)
+	{
 		if (!hierarchy_traversal_pipeline.is_valid())
 			return {};
 
 		const auto& frame = gpu_scene.get_frame_resources(current_frame);
+		BufferHandle active_visible_pages = target_visible_pages.is_valid() ? target_visible_pages : frame.visible_pages;
 
-		if (!frame.visible_pages.is_valid())
+		if (!active_visible_pages.is_valid())
 			return {};
 
-		RGHandle rg_visible_pages = rg.import_buffer("VisiblePages", frame.visible_pages, ResourceState::UnorderedAccess);
+		std::string buf_name = (cascade_index == 0) ? "VisiblePages" : ("CSMVisiblePages_" + std::to_string(cascade_index - 1));
+		RGHandle rg_visible_pages = rg.import_buffer(buf_name, active_visible_pages, ResourceState::UnorderedAccess);
 
-		return rg.add_pass("Hierarchy Traversal",
+		return rg.add_pass(pass_name,
 			[=](RGBuilder& builder) {
 				builder.write(rg_visible_pages, ResourceState::UnorderedAccess);
 				return rg_visible_pages;
 			},
 			[=, &rg, &view, &config, &render_scene, &meshes, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
 				const auto& frame = gpu_scene.get_frame_resources(current_frame);
+				BufferHandle actual_vp = target_visible_pages.is_valid() ? target_visible_pages : frame.visible_pages;
 				uint32_t zero = 0;
 				
 				// Clear atomic counters for GPU driven pipeline
-				rhi->resource_barrier(cmd, frame.visible_pages, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-				rhi->cmd_copy_to_buffer(cmd, frame.visible_pages, 0, sizeof(uint32_t), &zero);
-				rhi->resource_barrier(cmd, frame.visible_pages, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+				rhi->resource_barrier(cmd, actual_vp, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_copy_to_buffer(cmd, actual_vp, 0, sizeof(uint32_t), &zero);
+				rhi->resource_barrier(cmd, actual_vp, ResourceState::TransferDst, ResourceState::UnorderedAccess);
 
-				if (frame.page_request_buffer.is_valid()) {
-					rhi->resource_barrier(cmd, frame.page_request_buffer, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-					// Clear 3 header uints: request_count, overflow_count, error_flags
-					uint32_t zero_buf[3] = {0, 0, 0};
-					rhi->cmd_copy_to_buffer(cmd, frame.page_request_buffer, 0, sizeof(zero_buf), zero_buf);
-					rhi->resource_barrier(cmd, frame.page_request_buffer, ResourceState::TransferDst, ResourceState::UnorderedAccess);
-				}
+				if (cascade_index == 0) {
+					if (frame.page_request_buffer.is_valid()) {
+						rhi->resource_barrier(cmd, frame.page_request_buffer, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+						// Clear 3 header uints: request_count, overflow_count, error_flags
+						uint32_t zero_buf[3] = {0, 0, 0};
+						rhi->cmd_copy_to_buffer(cmd, frame.page_request_buffer, 0, sizeof(zero_buf), zero_buf);
+						rhi->resource_barrier(cmd, frame.page_request_buffer, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+					}
 
-				if (frame.visible_clusters.is_valid()) {
-					rhi->resource_barrier(cmd, frame.visible_clusters, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-					rhi->cmd_copy_to_buffer(cmd, frame.visible_clusters, 0, sizeof(uint32_t), &zero);
-					rhi->resource_barrier(cmd, frame.visible_clusters, ResourceState::TransferDst, ResourceState::UnorderedAccess);
-				}
+					if (frame.visible_clusters.is_valid()) {
+						rhi->resource_barrier(cmd, frame.visible_clusters, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+						rhi->cmd_copy_to_buffer(cmd, frame.visible_clusters, 0, sizeof(uint32_t), &zero);
+						rhi->resource_barrier(cmd, frame.visible_clusters, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+					}
 
-				if (frame.indirect_draw.is_valid()) {
-					// It could be in IndirectArgument state from the end of the previous frame.
-					rhi->resource_barrier(cmd, frame.indirect_draw, ResourceState::IndirectArgument, ResourceState::TransferDst);
-					rhi->cmd_copy_to_buffer(cmd, frame.indirect_draw, 0, sizeof(uint32_t), &zero);
-					rhi->resource_barrier(cmd, frame.indirect_draw, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+					if (frame.indirect_draw.is_valid()) {
+						// It could be in IndirectArgument state from the end of the previous frame.
+						rhi->resource_barrier(cmd, frame.indirect_draw, ResourceState::IndirectArgument, ResourceState::TransferDst);
+						rhi->cmd_copy_to_buffer(cmd, frame.indirect_draw, 0, sizeof(uint32_t), &zero);
+						rhi->resource_barrier(cmd, frame.indirect_draw, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+					}
 				}
 
 				rhi->cmd_bind_pipeline(cmd, hierarchy_traversal_pipeline);
@@ -85,11 +104,10 @@ namespace bud::graphics {
 				rhi->cmd_bind_storage_buffer(cmd, hierarchy_traversal_pipeline, 3, gpu_scene.get_vg_pool().group_buffer); 
 
 				// binding 4 = PageRequestBuffer, binding 5 = VisiblePageBuffer
-				// These match layout: 0=UBO, 1=PageTable, 2=Instance, 3=Group, 4=PageRequest, 5=VisiblePage
 				if (frame.page_request_buffer.is_valid()) {
 					rhi->cmd_bind_storage_buffer(cmd, hierarchy_traversal_pipeline, 4, frame.page_request_buffer);
 				}
-				rhi->cmd_bind_storage_buffer(cmd, hierarchy_traversal_pipeline, 5, frame.visible_pages);
+				rhi->cmd_bind_storage_buffer(cmd, hierarchy_traversal_pipeline, 5, actual_vp);
 
 				struct Push {
 					uint32_t instance_count;
@@ -97,41 +115,47 @@ namespace bud::graphics {
 					uint32_t enable_lod;
 					float screen_height;
 					uint32_t max_requests;
+					uint32_t cascade_index;
+					float lod_error_scale;
+					float ortho_extent;
 				} push;
 				push.instance_count = static_cast<uint32_t>(instance_count);
 				push.enable_frustum_cull = 1u;
 				push.enable_lod = config.enable_virtual_geometry ? 1u : 0u;
-				push.screen_height = view.viewport_height;
-				// Page request buffer: 12 bytes header + 4093 * 4 requests = 16384 total
+				push.screen_height = (cascade_index == 0) ? view.viewport_height : static_cast<float>(config.shadow_map_size);
 				push.max_requests = 4093;
+				push.cascade_index = cascade_index;
+				push.lod_error_scale = lod_error_scale;
+				push.ortho_extent = ortho_extent;
 				rhi->cmd_push_constants(cmd, hierarchy_traversal_pipeline, sizeof(Push), &push);
 
 				rhi->cmd_dispatch(cmd, (push.instance_count + 63) / 64, 1, 1);
 
-				// Copy page requests to host-visible readback buffer.
-				// CPU reads this next frame after the fence wait.
-				if (frame.page_request_readback.is_valid()) {
-					rhi->resource_barrier(cmd, frame.page_request_buffer,
-						ResourceState::UnorderedAccess, ResourceState::TransferSrc);
-					rhi->resource_barrier(cmd, frame.page_request_readback,
-						ResourceState::UnorderedAccess, ResourceState::TransferDst);
-					rhi->cmd_copy_buffer(cmd, frame.page_request_buffer, frame.page_request_readback, 16384);
-					rhi->resource_barrier(cmd, frame.page_request_buffer,
-						ResourceState::TransferSrc, ResourceState::UnorderedAccess);
-					rhi->resource_barrier(cmd, frame.page_request_readback,
-						ResourceState::TransferDst, ResourceState::UnorderedAccess);
-				}
+				// Copy page requests to host-visible readback buffer for main view streaming
+				if (cascade_index == 0) {
+					if (frame.page_request_readback.is_valid()) {
+						rhi->resource_barrier(cmd, frame.page_request_buffer,
+							ResourceState::UnorderedAccess, ResourceState::TransferSrc);
+						rhi->resource_barrier(cmd, frame.page_request_readback,
+							ResourceState::UnorderedAccess, ResourceState::TransferDst);
+						rhi->cmd_copy_buffer(cmd, frame.page_request_buffer, frame.page_request_readback, 16384);
+						rhi->resource_barrier(cmd, frame.page_request_buffer,
+							ResourceState::TransferSrc, ResourceState::UnorderedAccess);
+						rhi->resource_barrier(cmd, frame.page_request_readback,
+							ResourceState::TransferDst, ResourceState::UnorderedAccess);
+					}
 
-				if (frame.visible_pages_readback.is_valid()) {
-					rhi->resource_barrier(cmd, frame.visible_pages,
-						ResourceState::UnorderedAccess, ResourceState::TransferSrc);
-					rhi->resource_barrier(cmd, frame.visible_pages_readback,
-						ResourceState::UnorderedAccess, ResourceState::TransferDst);
-					rhi->cmd_copy_buffer(cmd, frame.visible_pages, frame.visible_pages_readback, 4 + 4096 * sizeof(uint32_t));
-					rhi->resource_barrier(cmd, frame.visible_pages,
-						ResourceState::TransferSrc, ResourceState::UnorderedAccess);
-					rhi->resource_barrier(cmd, frame.visible_pages_readback,
-						ResourceState::TransferDst, ResourceState::UnorderedAccess);
+					if (frame.visible_pages_readback.is_valid()) {
+						rhi->resource_barrier(cmd, frame.visible_pages,
+							ResourceState::UnorderedAccess, ResourceState::TransferSrc);
+						rhi->resource_barrier(cmd, frame.visible_pages_readback,
+							ResourceState::UnorderedAccess, ResourceState::TransferDst);
+						rhi->cmd_copy_buffer(cmd, frame.visible_pages, frame.visible_pages_readback, 4 + 4096 * sizeof(uint32_t));
+						rhi->resource_barrier(cmd, frame.visible_pages,
+							ResourceState::TransferSrc, ResourceState::UnorderedAccess);
+						rhi->resource_barrier(cmd, frame.visible_pages_readback,
+							ResourceState::TransferDst, ResourceState::UnorderedAccess);
+					}
 				}
 			}
 		);

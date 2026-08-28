@@ -1,4 +1,5 @@
 #include "virtual_geometry_builder.hpp"
+#include "src/core/bud.core.hpp"
 #include <meshoptimizer.h>
 #include <metis.h>
 #include <iostream>
@@ -14,6 +15,8 @@
 #include <nlohmann/json.hpp>
 
 namespace bud::asset_pipeline {
+
+using namespace bud::literals;
 
 namespace {
 
@@ -166,13 +169,22 @@ void generate_leaf_clusters(const std::vector<bud::asset::Vertex>& vertices,
     }
 }
 
-std::vector<InternalCluster> simplify_group(const InternalGroup& g, const std::vector<InternalCluster>& clusters, uint32_t level, uint32_t material_index,
+std::vector<InternalCluster> simplify_cluster_set(
+    const std::vector<uint32_t>& cluster_indices,
+    const std::vector<InternalCluster>& clusters,
+    uint32_t level,
+    uint32_t material_index,
+    float group_radius,
     const std::unordered_set<uint64_t>* global_shared_edges = nullptr) {
+
     std::vector<bud::asset::Vertex> merged_v;
     std::vector<uint32_t> merged_i;
     size_t base = 0;
-    for (uint32_t k = 0; k < g.cluster_count; ++k) {
-        const auto& c = clusters[g.cluster_start + k];
+    float max_child_lod_error = 0.0f;
+
+    for (uint32_t ci : cluster_indices) {
+        const auto& c = clusters[ci];
+        max_child_lod_error = std::max(max_child_lod_error, c.lod_error);
         for (const auto& v : c.vertices)
             merged_v.push_back(v);
         for (uint32_t idx : c.indices)
@@ -182,14 +194,6 @@ std::vector<InternalCluster> simplify_group(const InternalGroup& g, const std::v
 
     if (merged_v.empty() || merged_i.empty())
         return {};
-
-    InternalCluster cluster;
-    cluster.material_index = material_index;
-    cluster.level = level;
-
-    float max_child_lod_error = 0.0f;
-    for (uint32_t k = 0; k < g.cluster_count; ++k)
-        max_child_lod_error = std::max(max_child_lod_error, clusters[g.cluster_start + k].lod_error);
 
     meshopt_Stream streams[4];
     streams[0].data = &merged_v[0].position[0];
@@ -216,172 +220,163 @@ std::vector<InternalCluster> simplify_group(const InternalGroup& g, const std::v
     std::vector<uint32_t> deduped_i(merged_i.size());
     meshopt_remapIndexBuffer(deduped_i.data(), merged_i.data(), merged_i.size(), remap.data());
 
-    const uint32_t max_indices = bud::asset::VG_MAX_CLUSTER_TRIANGLES * 3;
-    if (deduped_i.size() <= max_indices && deduped_v.size() <= bud::asset::VG_MAX_CLUSTER_VERTICES) {
-        cluster.vertices = std::move(deduped_v);
-        cluster.indices = std::move(deduped_i);
-        cluster.lod_error = max_child_lod_error;
-    } else {
-        // Lock boundary vertices of ALL original clusters in the group.
-        // This ensures the simplified mesh's boundary matches the adjacent
-        // groups' boundaries, preventing cracks (破面).
-        // For each cluster, lock vertices on edges that appear only once
-        // (boundary edges of that cluster).
-        std::vector<unsigned char> vertex_lock(deduped_v.size(), 0);
-        {
-            // Build a mapping from deduplicated vertex index to the set of
-            // original cluster edges that reference it.
-            uint32_t cluster_base = 0;
-            for (uint32_t k = 0; k < g.cluster_count; ++k) {
-                const auto& c = clusters[g.cluster_start + k];
-                std::unordered_map<uint64_t, uint32_t> local_edge_count;
-                auto add_edge = [&](unsigned int x, unsigned int y) {
-                    const uint64_t key = (static_cast<uint64_t>(x < y ? x : y) << 32) | (x < y ? y : x);
-                    ++local_edge_count[key];
-                };
-                for (size_t t = 0; t + 2 < c.indices.size(); t += 3) {
-                    uint32_t lo = static_cast<uint32_t>(cluster_base + c.indices[t]);
-                    uint32_t l1 = static_cast<uint32_t>(cluster_base + c.indices[t + 1]);
-                    uint32_t l2 = static_cast<uint32_t>(cluster_base + c.indices[t + 2]);
-                    add_edge(lo, l1);
-                    add_edge(l1, l2);
-                    add_edge(l2, lo);
-                }
-                // Lock boundary vertices of this individual cluster.
-                for (const auto& [edge_key, cnt] : local_edge_count) {
-                    if (cnt == 1) {
-                        unsigned int lx = static_cast<unsigned int>(edge_key >> 32);
-                        unsigned int ly = static_cast<unsigned int>(edge_key);
-                        // Map local vertex index to deduplicated index.
-                        if (lx < merged_v.size() && remap[lx] < deduped_v.size())
-                            vertex_lock[remap[lx]] = 1;
-                        if (ly < merged_v.size() && remap[ly] < deduped_v.size())
-                            vertex_lock[remap[ly]] = 1;
-                    }
-                }
-                cluster_base += static_cast<uint32_t>(c.vertices.size());
+    // Lock boundary vertices of the MERGED GROUP (not internal cluster boundaries).
+    std::vector<unsigned char> vertex_lock(deduped_v.size(), 0);
+    {
+        std::unordered_map<uint64_t, uint32_t> group_edge_count;
+        auto add_edge = [&](uint32_t a, uint32_t b) {
+            const uint64_t key = (static_cast<uint64_t>(std::min(a, b)) << 32) | std::max(a, b);
+            ++group_edge_count[key];
+        };
+        for (size_t t = 0; t + 2 < deduped_i.size(); t += 3) {
+            add_edge(deduped_i[t], deduped_i[t + 1]);
+            add_edge(deduped_i[t + 1], deduped_i[t + 2]);
+            add_edge(deduped_i[t + 2], deduped_i[t]);
+        }
+        for (const auto& [edge_key, cnt] : group_edge_count) {
+            if (cnt == 1) {
+                uint32_t v0 = static_cast<uint32_t>(edge_key >> 32);
+                uint32_t v1 = static_cast<uint32_t>(edge_key);
+                if (v0 < vertex_lock.size()) vertex_lock[v0] = 1;
+                if (v1 < vertex_lock.size()) vertex_lock[v1] = 1;
             }
-        }
-
-        // Lock vertices on edges shared with other groups (cross-group seam prevention).
-        // This ensures the simplified mesh's boundary matches adjacent groups' boundaries.
-        if (global_shared_edges && !global_shared_edges->empty()) {
-            // Use the same vertex position hash as in build_mesh_vg_dag
-            auto get_hash = [](const bud::asset::Vertex& v) -> uint32_t {
-                uint32_t hx = *reinterpret_cast<const uint32_t*>(&v.position[0]);
-                uint32_t hy = *reinterpret_cast<const uint32_t*>(&v.position[1]);
-                uint32_t hz = *reinterpret_cast<const uint32_t*>(&v.position[2]);
-                return hx ^ (hy * 16777619u) ^ (hz * 2166136261u);
-            };
-            for (size_t t = 0; t + 2 < deduped_i.size(); t += 3) {
-                uint32_t i0 = deduped_i[t];
-                uint32_t i1 = deduped_i[t + 1];
-                uint32_t i2 = deduped_i[t + 2];
-                auto check_edge = [&](uint32_t a, uint32_t b) {
-                    if (a < deduped_v.size() && b < deduped_v.size()) {
-                        uint32_t ha = get_hash(deduped_v[a]);
-                        uint32_t hb = get_hash(deduped_v[b]);
-                        uint64_t key = (static_cast<uint64_t>(std::min(ha, hb)) << 32) | std::max(ha, hb);
-                        if (global_shared_edges->count(key))
-                            vertex_lock[a] = vertex_lock[b] = 1;
-                    }
-                };
-                check_edge(i0, i1);
-                check_edge(i1, i2);
-                check_edge(i2, i0);
-            }
-        }
-
-        std::vector<unsigned int> simplified(deduped_i.size());
-        std::vector<float> attrs(deduped_v.size() * 5);
-        for (size_t i = 0; i < deduped_v.size(); ++i) {
-            attrs[i * 5 + 0] = deduped_v[i].uv[0];
-            attrs[i * 5 + 1] = deduped_v[i].uv[1];
-            attrs[i * 5 + 2] = deduped_v[i].normal[0];
-            attrs[i * 5 + 3] = deduped_v[i].normal[1];
-            attrs[i * 5 + 4] = deduped_v[i].normal[2];
-        }
-        const float weights[5] = { 1e-1f, 1e-1f, 1.0f, 1.0f, 1.0f };
-        const float level_scale = 1.0f + 0.5f * static_cast<float>(level);
-        // Moderate error threshold: 0.001 allows meaningful simplification while
-        // preserving curved surfaces. Higher levels get slightly more tolerance.
-        // meshopt_simplifyWithAttributes returns the actual max vertex movement
-        // in object-space units (same units as vertex positions), so we do NOT
-        // multiply by group_radius here — that would double-scale the error.
-        const float base_error = 0.001f * level_scale;
-        // Target 50% index reduction. If the error budget is too tight,
-        // meshopt will simply stop early and return whatever reduction it achieved.
-        size_t target_indices = std::max<size_t>(bud::asset::VG_MAX_CLUSTER_TRIANGLES * 3 / 2, deduped_i.size() / 2);
-        float result_error = 0.0f;
-
-        size_t simplified_count = meshopt_simplifyWithAttributes(
-            simplified.data(), deduped_i.data(), deduped_i.size(),
-            &deduped_v[0].position[0], deduped_v.size(), sizeof(bud::asset::Vertex),
-            attrs.data(), sizeof(float) * 5, weights, 5,
-            vertex_lock.data(),
-            target_indices, base_error, 0, &result_error);
-
-        // If the regular simplification couldn't reduce at all, keep the original mesh.
-        // This preserves the vertex_lock implicitly (no vertex movement).
-        // Avoid meshopt_simplifySloppy which does NOT support vertex_lock and would
-        // move boundary vertices, causing visible cracks between LOD levels.
-        if (simplified_count == 0) {
-            simplified_count = deduped_i.size();
-            std::copy(deduped_i.begin(), deduped_i.end(), simplified.begin());
-            result_error = 0.0f;
-        }
-
-        if (simplified_count == 0)
-            return {};
-
-        simplified.resize(simplified_count);
-
-        if (simplified.size() <= max_indices && deduped_v.size() <= bud::asset::VG_MAX_CLUSTER_VERTICES) {
-            cluster.vertices = std::move(deduped_v);
-            cluster.indices = std::move(simplified);
-            cluster.lod_error = max_child_lod_error + result_error;
-        } else {
-            std::vector<unsigned int> cached(simplified.size());
-            meshopt_optimizeVertexCache(cached.data(), simplified.data(), simplified.size(), deduped_v.size());
-
-            size_t max_m = meshopt_buildMeshletsBound(cached.size(), bud::asset::VG_MAX_CLUSTER_VERTICES, bud::asset::VG_MAX_CLUSTER_TRIANGLES);
-            std::vector<meshopt_Meshlet> meshlets(max_m);
-            std::vector<unsigned int> mv(max_m * bud::asset::VG_MAX_CLUSTER_VERTICES);
-            std::vector<unsigned char> mt(max_m * bud::asset::VG_MAX_CLUSTER_TRIANGLES * 3);
-
-            size_t count = meshopt_buildMeshletsScan(meshlets.data(), mv.data(), mt.data(),
-                                                     cached.data(), cached.size(),
-                                                     deduped_v.size(),
-                                                     bud::asset::VG_MAX_CLUSTER_VERTICES, bud::asset::VG_MAX_CLUSTER_TRIANGLES);
-
-            std::vector<InternalCluster> split_res;
-            for (size_t i = 0; i < count; ++i) {
-                auto& m = meshlets[i];
-                meshopt_optimizeMeshlet(&mv[m.vertex_offset], &mt[m.triangle_offset], m.triangle_count, m.vertex_count);
-
-                InternalCluster sc;
-                sc.material_index = material_index;
-                sc.level = level;
-                sc.vertices.reserve(m.vertex_count);
-                sc.indices.reserve(m.triangle_count * 3);
-
-                for (uint32_t v = 0; v < m.vertex_count; ++v)
-                    sc.vertices.push_back(deduped_v[mv[m.vertex_offset + v]]);
-                for (uint32_t t = 0; t < m.triangle_count * 3; ++t)
-                    sc.indices.push_back(mt[m.triangle_offset + t]);
-
-                sc.lod_error = max_child_lod_error + result_error;
-                compute_cluster_bounds(sc);
-                split_res.push_back(std::move(sc));
-            }
-            return split_res;
         }
     }
 
-    compute_cluster_bounds(cluster);
-    std::vector<InternalCluster> single_res;
-    single_res.push_back(std::move(cluster));
-    return single_res;
+    if (global_shared_edges && !global_shared_edges->empty()) {
+        auto get_hash = [](const bud::asset::Vertex& v) -> uint32_t {
+            uint32_t hx = *reinterpret_cast<const uint32_t*>(&v.position[0]);
+            uint32_t hy = *reinterpret_cast<const uint32_t*>(&v.position[1]);
+            uint32_t hz = *reinterpret_cast<const uint32_t*>(&v.position[2]);
+            return hx ^ (hy * 16777619u) ^ (hz * 2166136261u);
+        };
+        for (size_t t = 0; t + 2 < deduped_i.size(); t += 3) {
+            uint32_t i0 = deduped_i[t];
+            uint32_t i1 = deduped_i[t + 1];
+            uint32_t i2 = deduped_i[t + 2];
+            auto check_edge = [&](uint32_t a, uint32_t b) {
+                if (a < deduped_v.size() && b < deduped_v.size()) {
+                    uint32_t ha = get_hash(deduped_v[a]);
+                    uint32_t hb = get_hash(deduped_v[b]);
+                    uint64_t key = (static_cast<uint64_t>(std::min(ha, hb)) << 32) | std::max(ha, hb);
+                    if (global_shared_edges->count(key)) {
+                        vertex_lock[a] = vertex_lock[b] = 1;
+                    }
+                }
+            };
+            check_edge(i0, i1);
+            check_edge(i1, i2);
+            check_edge(i2, i0);
+        }
+    }
+
+    std::vector<unsigned int> simplified(deduped_i.size());
+    std::vector<float> attrs(deduped_v.size() * 5);
+    for (size_t i = 0; i < deduped_v.size(); ++i) {
+        attrs[i * 5 + 0] = deduped_v[i].uv[0];
+        attrs[i * 5 + 1] = deduped_v[i].uv[1];
+        attrs[i * 5 + 2] = deduped_v[i].normal[0];
+        attrs[i * 5 + 3] = deduped_v[i].normal[1];
+        attrs[i * 5 + 4] = deduped_v[i].normal[2];
+    }
+    const float weights[5] = { 0.02f, 0.02f, 0.05f, 0.05f, 0.05f };
+    const float level_scale = 1.0f + 0.8f * static_cast<float>(level);
+
+    // Standard Unit: 1.0f == 1.0 cm.
+    // Target 50% triangle reduction per level
+    size_t target_indices = std::max<size_t>(bud::asset::VG_MAX_CLUSTER_TRIANGLES * 3 / 2, deduped_i.size() / 2);
+    const float base_error = std::max(2.0_mm, group_radius * (0.003f + 0.005f * static_cast<float>(level)));
+    float result_error = 0.0f;
+
+    size_t simplified_count = meshopt_simplifyWithAttributes(
+        simplified.data(), deduped_i.data(), deduped_i.size(),
+        &deduped_v[0].position[0], deduped_v.size(), sizeof(bud::asset::Vertex),
+        attrs.data(), sizeof(float) * 5, weights, 5,
+        vertex_lock.data(),
+        target_indices, base_error, 0, &result_error);
+
+    if (simplified_count == 0 || simplified_count >= deduped_i.size()) {
+        // Retry with relaxed lock for higher levels
+        simplified_count = meshopt_simplifyWithAttributes(
+            simplified.data(), deduped_i.data(), deduped_i.size(),
+            &deduped_v[0].position[0], deduped_v.size(), sizeof(bud::asset::Vertex),
+            attrs.data(), sizeof(float) * 5, weights, 5,
+            nullptr,
+            target_indices, base_error * 2.0f, 0, &result_error);
+    }
+
+    if (simplified_count == 0) {
+        simplified_count = deduped_i.size();
+        std::copy(deduped_i.begin(), deduped_i.end(), simplified.begin());
+        result_error = 0.0f;
+    }
+
+    // Convert meshopt normalized error to object-space error (cm) and scale with level.
+    // Calibrate geometric error step by scale/profile:
+    // Small/medium hero props (R < 2.5m, e.g. Lion, Vases, Columns):
+    //   Level 1: ~1.4 - 1.5 cm (LOD0 -> LOD1 transition around 6.5 - 7.0 meters)
+    //   Level 2: ~3.5 - 3.8 cm (LOD1 -> LOD2 transition around 16 - 18 meters)
+    // Large architecture (R >= 2.5m, e.g. Arches, Ceiling, Roof):
+    //   Level 1: ~1.8 - 2.0 cm (LOD0 -> LOD1 transition around 8.5 - 9.5 meters)
+    //   Level 2: ~4.5 - 5.0 cm (LOD1 -> LOD2 transition around 21 - 24 meters)
+    float level_error_step;
+    float max_level_error;
+    if (group_radius < 250.0_cm) {
+        level_error_step = std::max(5.0_mm, std::min(group_radius * 0.015f, 1.5_cm)) * static_cast<float>(level);
+        max_level_error = 1.6_cm * static_cast<float>(level);
+    } else {
+        level_error_step = std::max(8.0_mm, std::min(group_radius * 0.003f, 1.8_cm)) * static_cast<float>(level);
+        max_level_error = 2.0_cm * static_cast<float>(level);
+    }
+    float added_error = std::min(std::max(result_error * group_radius, level_error_step), max_level_error);
+    float final_lod_error = max_child_lod_error + added_error;
+
+    const uint32_t max_indices = bud::asset::VG_MAX_CLUSTER_TRIANGLES * 3;
+    if (simplified.size() <= max_indices && deduped_v.size() <= bud::asset::VG_MAX_CLUSTER_VERTICES) {
+        InternalCluster cluster;
+        cluster.material_index = material_index;
+        cluster.level = level;
+        cluster.vertices = std::move(deduped_v);
+        cluster.indices = std::move(simplified);
+        cluster.lod_error = final_lod_error;
+        compute_cluster_bounds(cluster);
+        return { std::move(cluster) };
+    }
+
+    std::vector<unsigned int> cached(simplified.size());
+    meshopt_optimizeVertexCache(cached.data(), simplified.data(), simplified.size(), deduped_v.size());
+
+    size_t max_m = meshopt_buildMeshletsBound(cached.size(), bud::asset::VG_MAX_CLUSTER_VERTICES, bud::asset::VG_MAX_CLUSTER_TRIANGLES);
+    std::vector<meshopt_Meshlet> meshlets(max_m);
+    std::vector<unsigned int> mv(max_m * bud::asset::VG_MAX_CLUSTER_VERTICES);
+    std::vector<unsigned char> mt(max_m * bud::asset::VG_MAX_CLUSTER_TRIANGLES * 3);
+
+    size_t count = meshopt_buildMeshletsScan(meshlets.data(), mv.data(), mt.data(),
+                                             cached.data(), cached.size(),
+                                             deduped_v.size(),
+                                             bud::asset::VG_MAX_CLUSTER_VERTICES, bud::asset::VG_MAX_CLUSTER_TRIANGLES);
+
+    std::vector<InternalCluster> split_res;
+    for (size_t i = 0; i < count; ++i) {
+        auto& m = meshlets[i];
+        meshopt_optimizeMeshlet(&mv[m.vertex_offset], &mt[m.triangle_offset], m.triangle_count, m.vertex_count);
+
+        InternalCluster sc;
+        sc.material_index = material_index;
+        sc.level = level;
+        sc.vertices.reserve(m.vertex_count);
+        sc.indices.reserve(m.triangle_count * 3);
+
+        for (uint32_t v = 0; v < m.vertex_count; ++v)
+            sc.vertices.push_back(deduped_v[mv[m.vertex_offset + v]]);
+        for (uint32_t t = 0; t < m.triangle_count * 3; ++t)
+            sc.indices.push_back(mt[m.triangle_offset + t]);
+
+        sc.lod_error = final_lod_error;
+        compute_cluster_bounds(sc);
+        split_res.push_back(std::move(sc));
+    }
+    return split_res;
 }
 
 void build_mesh_vg_dag(
@@ -638,39 +633,20 @@ void build_mesh_vg_dag(
             uint32_t count = std::min(max_children, current_level_group_count - g);
             uint32_t child_start_idx = current_level_group_start + g;
 
-            // Collect all clusters from these 'count' child groups and simplify them
-            std::vector<InternalCluster> combined_simplified;
-            float max_error = 0.0f;
-            for (uint32_t k = 0; k < count; ++k) {
-                const auto& child_grp = out_groups[child_start_idx + k];
-                max_error = std::max(max_error, child_grp.lod_error);
-                std::vector<InternalCluster> simplified = simplify_group(child_grp, out_clusters, level + 1, material_index, &cross_group_edges);
-                for (auto& sc : simplified) {
-                    sc.source_group = child_start_idx + k;
-                    combined_simplified.push_back(std::move(sc));
-                }
-            }
-
-            uint32_t parent_cluster_start = static_cast<uint32_t>(out_clusters.size());
-            uint32_t parent_cluster_count = static_cast<uint32_t>(combined_simplified.size());
-            for (auto& sc : combined_simplified) {
-                out_clusters.push_back(std::move(sc));
-            }
-
-            InternalGroup parent_grp{};
-            parent_grp.level = level + 1;
-            parent_grp.cluster_start = parent_cluster_start;
-            parent_grp.cluster_count = parent_cluster_count;
-            parent_grp.children_start = child_start_idx;
-            parent_grp.children_count = count;
-
-            // Compute parent bounds encompassing child groups
+            // Collect all clusters from these 'count' child groups
+            std::vector<uint32_t> child_clusters;
             float center[3] = { 0.0f, 0.0f, 0.0f };
+            float max_error = 0.0f;
+
             for (uint32_t k = 0; k < count; ++k) {
                 const auto& cg = out_groups[child_start_idx + k];
+                max_error = std::max(max_error, cg.lod_error);
                 center[0] += cg.lod_bounds_center[0];
                 center[1] += cg.lod_bounds_center[1];
                 center[2] += cg.lod_bounds_center[2];
+                for (uint32_t j = 0; j < cg.cluster_count; ++j) {
+                    child_clusters.push_back(cg.cluster_start + j);
+                }
             }
             center[0] /= static_cast<float>(count);
             center[1] /= static_cast<float>(count);
@@ -686,11 +662,24 @@ void build_mesh_vg_dag(
                 max_r = std::max(max_r, dist);
             }
 
-            for (uint32_t k = 0; k < parent_cluster_count; ++k) {
-                const auto& pc = out_clusters[parent_cluster_start + k];
-                max_error = std::max(max_error, pc.lod_error);
+            // Simplify the combined geometry of ALL 'count' child groups
+            std::vector<InternalCluster> simplified = simplify_cluster_set(
+                child_clusters, out_clusters, level + 1, material_index, max_r, &cross_group_edges);
+
+            uint32_t parent_cluster_start = static_cast<uint32_t>(out_clusters.size());
+            uint32_t parent_cluster_count = static_cast<uint32_t>(simplified.size());
+            for (auto& sc : simplified) {
+                sc.source_group = child_start_idx;
+                max_error = std::max(max_error, sc.lod_error);
+                out_clusters.push_back(std::move(sc));
             }
 
+            InternalGroup parent_grp{};
+            parent_grp.level = level + 1;
+            parent_grp.cluster_start = parent_cluster_start;
+            parent_grp.cluster_count = parent_cluster_count;
+            parent_grp.children_start = child_start_idx;
+            parent_grp.children_count = count;
             parent_grp.lod_bounds_center[0] = center[0];
             parent_grp.lod_bounds_center[1] = center[1];
             parent_grp.lod_bounds_center[2] = center[2];
@@ -780,6 +769,8 @@ void assign_vg_pages(
         out_pages[page_id].size_in_bytes = calc_raw_bytes(page_vertex_count, page_tri_count, cc);
     };
 
+    uint32_t current_page_level = bud::asset::INVALID_INDEX;
+
     for (uint32_t ci = 0; ci < static_cast<uint32_t>(clusters.size()); ++ci) {
         const uint32_t cv = static_cast<uint32_t>(clusters[ci].vertices.size());
         const uint32_t ct = static_cast<uint32_t>(clusters[ci].indices.size()) / 3;
@@ -789,13 +780,16 @@ void assign_vg_pages(
         const uint32_t cand_clusters = static_cast<uint32_t>(page_clusters.size()) + 1u;
         const uint32_t cand_bytes = calc_raw_bytes(cand_verts, cand_tris, cand_clusters);
 
-        if (page_id == bud::asset::INVALID_INDEX || cand_bytes > capacity) {
+        const bool level_changed = (current_page_level != bud::asset::INVALID_INDEX && current_page_level != clusters[ci].level);
+
+        if (page_id == bud::asset::INVALID_INDEX || cand_bytes > capacity || level_changed) {
             close_page();
             out_pages.push_back({});
             page_id = static_cast<uint32_t>(out_pages.size()) - 1;
             page_vertex_count = 0;
             page_tri_count = 0;
             page_clusters.clear();
+            current_page_level = clusters[ci].level;
         }
         out_cluster_page[ci] = page_id;
         out_cluster_page_vertex_offset[ci] = page_vertex_count;
@@ -820,24 +814,10 @@ void assign_vg_pages(
 
     for (uint32_t pi = 0; pi < static_cast<uint32_t>(out_pages.size()); ++pi) {
         auto& page = out_pages[pi];
-        uint32_t dep = bud::asset::INVALID_INDEX;
-        uint32_t dep_level = 0xFFFFFFFFu;
-        bool has_root = false;
-
-        for (uint32_t ci : page.clusters) {
-            const uint32_t pc = cluster_parent[ci];
-            if (pc == bud::asset::INVALID_INDEX) {
-                has_root = true;
-                continue;
-            }
-            const uint32_t pcp = out_cluster_page[pc];
-            if (pcp != bud::asset::INVALID_INDEX && pcp != pi && clusters[pc].level < dep_level) {
-                dep = pcp;
-                dep_level = clusters[pc].level;
-            }
-        }
-        page.is_root = has_root;
-        page.dependency_page_id = has_root ? bud::asset::INVALID_INDEX : dep;
+        // Parent / root level pages (LOD >= 1) serve as resident base representations.
+        // Leaf pages (LOD == 0) are dynamically streamed based on camera proximity.
+        page.is_root = (page.lod_level > 0);
+        page.dependency_page_id = page.is_root ? bud::asset::INVALID_INDEX : 0;
     }
 }
 
@@ -1063,30 +1043,6 @@ VGBuildResult VirtualGeometryBuilder::build(const InternalMesh& mesh) {
         sg.lod_error = gb.lod_error;
     }
 
-    // 1:1 UE5 VGPageStreamingState serialization
-    result.pages.resize(pages.size());
-    for (size_t pi = 0; pi < pages.size(); ++pi) {
-        const uint32_t bits = bud::asset::VG_POSITION_BITS;
-        const uint32_t pos_bytes = static_cast<uint32_t>((static_cast<uint64_t>(pages[pi].vertex_count) * bits * 3 + 7) / 8);
-        const uint32_t pos_bytes_aligned = (pos_bytes + 3u) & ~3u;
-        const uint32_t attr_bytes = pages[pi].vertex_count * static_cast<uint32_t>(sizeof(bud::asset::VGPackedVertex));
-        const uint32_t idx_bytes = pages[pi].index_count * 3u * static_cast<uint32_t>(sizeof(uint16_t));
-
-        uint32_t cluster_count = static_cast<uint32_t>(pages[pi].clusters.size());
-        uint32_t cluster_overhead = cluster_count * kClusterGPUOverhead;
-
-        auto& sp = result.pages[pi];
-        sp.raw_vertex_offset = sizeof(bud::asset::VGPageDataHeader) + cluster_overhead;
-        sp.raw_vertex_count = pages[pi].vertex_count;
-        sp.raw_index_offset = sizeof(bud::asset::VGPageDataHeader) + cluster_overhead + pos_bytes_aligned + attr_bytes;
-        sp.raw_index_count = pages[pi].index_count;
-        sp.imposter_offset = 0;
-        sp.imposter_count = 0;
-        sp.flags = pages[pi].lod_level;
-        sp.dependency_page_id = pages[pi].dependency_page_id;
-        sp.size_in_bytes = static_cast<uint32_t>(sizeof(bud::asset::VGPageDataHeader)) + cluster_overhead + pos_bytes_aligned + attr_bytes + idx_bytes;
-    }
-
     // 1:1 UE5 VGPageDependency serialization
     for (size_t pi = 0; pi < pages.size(); ++pi) {
         const uint32_t dep = pages[pi].dependency_page_id;
@@ -1110,7 +1066,8 @@ VGBuildResult VirtualGeometryBuilder::build(const InternalMesh& mesh) {
         }
     }
 
-    // Assemble 128KB raw binary pages
+    // Assemble 128KB raw binary pages & populate VGPageStreamingState
+    result.pages.resize(pages.size());
     result.raw_page_data.resize(pages.size());
     for (size_t pi = 0; pi < pages.size(); ++pi) {
         std::vector<bud::asset::Vertex> page_vertices;
@@ -1134,8 +1091,7 @@ VGBuildResult VirtualGeometryBuilder::build(const InternalMesh& mesh) {
 
         // Calculate adaptive quantization precision based on page extent.
         // Target: 0.1cm (1mm) precision. Unit = cm so 0.1 = 1mm.
-        // Clamp to 8..16 bits. 16 bits max ensures the page fits in the
-        // 128KB slot (calc_raw_bytes uses 16 bits as conservative estimate).
+        // Clamp to 8..16 bits. 16 bits max ensures the page fits in the 128KB slot.
         float max_extent = std::max({ pext[0], pext[1], pext[2] });
         uint32_t bits = 12u; // default
         if (max_extent > 0.0f) {
@@ -1164,18 +1120,32 @@ VGBuildResult VirtualGeometryBuilder::build(const InternalMesh& mesh) {
         const uint32_t pos_bytes_aligned = (pos_bytes + 3u) & ~3u;
         const uint32_t attr_bytes = static_cast<uint32_t>(attr_stream.size() * sizeof(bud::asset::VGPackedVertex));
         const uint32_t idx_bytes = static_cast<uint32_t>(idx_stream.size() * sizeof(uint16_t));
+        const uint32_t cc = static_cast<uint32_t>(pages[pi].clusters.size());
+        const uint32_t overhead = cc * kClusterGPUOverhead;
+
+        const uint32_t actual_page_size = static_cast<uint32_t>(sizeof(bud::asset::VGPageDataHeader)) + overhead + pos_bytes_aligned + attr_bytes + idx_bytes;
+
+        // 1:1 UE5 VGPageStreamingState serialization
+        auto& sp = result.pages[pi];
+        sp.raw_vertex_offset = sizeof(bud::asset::VGPageDataHeader) + overhead;
+        sp.raw_vertex_count = pages[pi].vertex_count;
+        sp.raw_index_offset = sizeof(bud::asset::VGPageDataHeader) + overhead + pos_bytes_aligned + attr_bytes;
+        sp.raw_index_count = pages[pi].index_count;
+        sp.imposter_offset = 0;
+        sp.imposter_count = 0;
+        sp.flags = pages[pi].lod_level;
+        sp.dependency_page_id = pages[pi].dependency_page_id;
+        sp.size_in_bytes = actual_page_size;
 
         bud::asset::VGPageDataHeader pd{};
         pd.magic = bud::asset::VG_PAGE_DATA_MAGIC;
         pd.version = bud::asset::VG_VERSION;
-        uint32_t cc = static_cast<uint32_t>(pages[pi].clusters.size());
-        uint32_t overhead = cc * kClusterGPUOverhead;
         pd.cluster_count = cc;
         pd.vertex_count = pages[pi].vertex_count;
         pd.index_count = pages[pi].index_count;
-        pd.vertex_stream_offset = sizeof(bud::asset::VGPageDataHeader) + overhead;
-        pd.index_stream_offset = sizeof(bud::asset::VGPageDataHeader) + overhead + pos_bytes_aligned + attr_bytes;
-        pd.total_size = pages[pi].size_in_bytes;
+        pd.vertex_stream_offset = sp.raw_vertex_offset;
+        pd.index_stream_offset = sp.raw_index_offset;
+        pd.total_size = actual_page_size;
         pd.flags = pages[pi].is_root ? 1u : 0u;
         pd.position_bits = bits;
         for (int k = 0; k < 3; ++k) {
@@ -1184,7 +1154,7 @@ VGBuildResult VirtualGeometryBuilder::build(const InternalMesh& mesh) {
         }
 
         auto& blob = result.raw_page_data[pi];
-        blob.resize(pages[pi].size_in_bytes, 0);
+        blob.resize(actual_page_size, 0);
         uint8_t* dst = blob.data();
 
         std::memcpy(dst, &pd, sizeof(pd));

@@ -1175,23 +1175,23 @@ namespace bud::graphics {
 				if (frame.visible_pages_readback.is_valid()) {
 					if (auto* vp_buf = rhi->get_buffer(frame.visible_pages_readback); vp_buf && vp_buf->mapped_ptr) {
 						const uint32_t* vp_data = static_cast<const uint32_t*>(vp_buf->mapped_ptr);
-						vg_visible_pages = std::min(vp_data[0], 4096u);
+						vg_visible_pages = std::min(vp_data[0], bud::asset::VG_MAX_VISIBLE_PAGES);
 
 						if (auto* pool_buf = rhi->get_buffer(gpu_scene.get_page_pool_buffer()); pool_buf && pool_buf->mapped_ptr) {
 							const uint8_t* pool_base = static_cast<const uint8_t*>(pool_buf->mapped_ptr);
 							for (uint32_t p = 0; p < vg_visible_pages; ++p) {
 								uint32_t pack = vp_data[1 + p];
-								uint32_t page_slot = pack & 0x1FFFu;
+								uint32_t page_slot = pack & bud::asset::VG_PAGE_SLOT_MASK;
 								if (page_slot < GPUScene::PagePool::max_pages) {
 									const auto* ph = reinterpret_cast<const bud::asset::VGPageDataHeader*>(pool_base + page_slot * GPUScene::PagePool::page_size);
-									if (ph && ph->magic == 0x50414745) { // 'PAGE'
+									if (ph && ph->magic == bud::asset::VG_PAGE_MAGIC) {
 										vg_visible_tris += ph->index_count / 3;
 									}
 								}
 							}
 						}
 						if (vg_visible_tris == 0 && vg_visible_pages > 0) {
-							vg_visible_tris = vg_visible_pages * 1280;
+							vg_visible_tris = vg_visible_pages * bud::asset::VG_DEFAULT_ESTIMATED_PAGE_TRIANGLES;
 						}
 					}
 				}
@@ -1260,87 +1260,115 @@ namespace bud::graphics {
 				const size_t csm_split = csm_instance_h.is_valid() ? scene_split : split_index;
 
 				RGHandle rg_csm_indirect;
-				RGHandle rg_csm_static_indirect;
-				// GPU-driven CSM culling: dispatch csm_cull.comp to populate csm_indirect_draw
+				// GPU-driven CSM culling for traditional dynamic meshes (only when dynamic instances exist)
 				if (csm_cull_pipeline.is_valid() && frame.csm_indirect_draw.is_valid()) {
-					if (render_config.cache_shadows && frame.csm_static_indirect_draw.is_valid()) {
-						rg_csm_static_indirect = render_graph.import_buffer("CSMStaticIndirectDraw", frame.csm_static_indirect_draw, ResourceState::UnorderedAccess);
-						render_graph.add_pass("CSM Static Cull",
+					if (!is_mesh_shader_vg || csm_split > 0) {
+						rg_csm_indirect = render_graph.import_buffer("CSMIndirectDraw", frame.csm_indirect_draw, ResourceState::UnorderedAccess);
+						render_graph.add_pass("CSM Cull",
 							[=](RGBuilder& builder) {
 								builder.read(csm_inst_input, ResourceState::ShaderResource);
-								builder.write(rg_csm_static_indirect, ResourceState::UnorderedAccess);
+								builder.write(rg_csm_indirect, ResourceState::UnorderedAccess);
 							},
 							[=, this](RHI* rhi, CommandHandle cmd) {
 								rhi->cmd_bind_pipeline(cmd, csm_cull_pipeline);
 								rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 0, render_graph.get_buffer(csm_inst_input));
-								rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 2, frame.csm_static_indirect_draw);
+								rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 2, frame.csm_indirect_draw);
 								rhi->cmd_bind_compute_ubo(cmd, csm_cull_pipeline, 4);
 								struct PushConsts {
 									uint32_t total_instances;
 									uint32_t did_copy;
 									uint32_t static_only;
 								} pc;
-								pc.total_instances = static_cast<uint32_t>(csm_inst_count);
+								pc.total_instances = static_cast<uint32_t>(is_mesh_shader_vg ? csm_split : csm_inst_count);
 								pc.did_copy = 0;
-								pc.static_only = 1;
+								pc.static_only = 0;
 								rhi->cmd_push_constants(cmd, csm_cull_pipeline, sizeof(PushConsts), &pc);
-								rhi->cmd_dispatch(cmd, (csm_inst_count + 255) / 256, 1, 1);
+								rhi->cmd_dispatch(cmd, (pc.total_instances + 255) / 256, 1, 1);
 							}
 						);
 					}
-
-					rg_csm_indirect = render_graph.import_buffer("CSMIndirectDraw", frame.csm_indirect_draw, ResourceState::UnorderedAccess);
-					render_graph.add_pass("CSM Cull",
-						[=](RGBuilder& builder) {
-							builder.read(csm_inst_input, ResourceState::ShaderResource);
-							builder.write(rg_csm_indirect, ResourceState::UnorderedAccess);
-						},
-						[=, this](RHI* rhi, CommandHandle cmd) {
-							rhi->cmd_bind_pipeline(cmd, csm_cull_pipeline);
-							rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 0, render_graph.get_buffer(csm_inst_input));
-							rhi->cmd_bind_storage_buffer(cmd, csm_cull_pipeline, 2, frame.csm_indirect_draw);
-							rhi->cmd_bind_compute_ubo(cmd, csm_cull_pipeline, 4);
-							struct PushConsts {
-								uint32_t total_instances;
-								uint32_t did_copy;
-								uint32_t static_only;
-							} pc;
-							pc.total_instances = static_cast<uint32_t>(csm_inst_count);
-							bool cache_active = render_config.cache_shadows && csm_pass->is_cache_valid();
-							pc.did_copy = cache_active ? 1 : 0;
-							pc.static_only = 0;
-							rhi->cmd_push_constants(cmd, csm_cull_pipeline, sizeof(PushConsts), &pc);
-							rhi->cmd_dispatch(cmd, (csm_inst_count + 255) / 256, 1, 1);
-						}
-					);
 				}
 
-				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), csm_inst_input, csm_inst_count, csm_split, rg_csm_indirect, rg_csm_static_indirect);
+				std::array<RGHandle, MAX_CASCADES> rg_csm_visible_pages{};
+				if (render_config.enable_virtual_geometry && hierarchy_traversal_pass) {
+					for (uint32_t c_idx = 0; c_idx < cascade_count; ++c_idx) {
+						float lod_error_scale = 2.5f;
+						if (c_idx == 1) lod_error_scale = 5.0f;
+						else if (c_idx == 2) lod_error_scale = 7.5f;
+						else if (c_idx >= 3) lod_error_scale = 10.0f;
+
+						float ortho_extent = render_config.shadow_ortho_size * std::pow(2.0f, static_cast<float>(c_idx));
+						std::string pass_name = "CSM Cascade " + std::to_string(c_idx) + " Traversal";
+						rg_csm_visible_pages[c_idx] = hierarchy_traversal_pass->add_to_graph(
+							render_graph,
+							scene_view,
+							render_config,
+							render_scene,
+							meshes,
+							visible_count,
+							gpu_scene,
+							current_idx,
+							c_idx + 1,
+							lod_error_scale,
+							ortho_extent,
+							frame.csm_visible_pages[c_idx],
+							pass_name
+						);
+					}
+				}
+
+				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), csm_inst_input, csm_inst_count, csm_split, rg_csm_indirect, rg_csm_visible_pages);
 
 				if (is_mesh_shader_vg) {
 					// Mesh shader visibility path (task+mesh shader)
 					RGHandle rg_visible_pages{};
-					if (hierarchy_traversal_pass) {
+					if (hierarchy_traversal_pass)
 						rg_visible_pages = hierarchy_traversal_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, visible_count, gpu_scene, current_idx);
+
+					gpu_scene.ensure_hiz_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
+
+					RGHandle rg_history_hiz{};
+					if (gpu_scene.has_history_hiz() && render_config.enable_hiz_culling) {
+						auto hist_tex = gpu_scene.get_history_hiz(current_idx);
+						if (hist_tex.is_valid())
+							rg_history_hiz = render_graph.import_texture("HistoryHiZ", hist_tex, ResourceState::ShaderResource);
 					}
 
 					if (rg_visible_pages.is_valid() && visibility_pass) {
 						RGHandle rg_depth{};
+						// Phase 1: Visibility Pass using History Hi-Z
 						auto rg_visibility = visibility_pass->add_to_graph(render_graph, back_buffer, rg_depth,
-							scene_view, render_config, rg_visible_pages, RGHandle{}, gpu_scene, &rg_depth);
+							scene_view, render_config, rg_visible_pages, rg_history_hiz, gpu_scene, &rg_depth);
+
+						// Build Current Frame Hi-Z Pyramid from Phase 1 Depth Buffer
+						RGHandle rg_current_hiz{};
+						if (rg_depth.is_valid() && pyramid_mip_pass) {
+							RGHandle target_hiz{};
+							auto curr_tex = gpu_scene.get_current_hiz(current_idx);
+							if (curr_tex.is_valid())
+								target_hiz = render_graph.import_texture("CurrentHiZ", curr_tex, ResourceState::Undefined);
+							rg_current_hiz = pyramid_mip_pass->add_to_graph(render_graph, rg_depth, render_config, target_hiz);
+						}
+
+						// Phase 2: Incremental Visibility Pass using Current Hi-Z
+						if (rg_current_hiz.is_valid()) {
+							gpu_scene.mark_history_hiz_valid();
+							visibility_pass->add_phase2_to_graph(render_graph, rg_visibility, rg_depth,
+								scene_view, render_config, rg_visible_pages, rg_current_hiz, gpu_scene);
+
+							if (render_config.debug_hiz && pyramid_mip_debug_pass)
+								pyramid_mip_debug_pass->add_to_graph(render_graph, back_buffer, rg_current_hiz, render_config.debug_hiz_mip);
+						}
 
 						RGHandle rg_ao{};
 						if (rg_depth.is_valid() && ao_pass && render_config.ao_mode != AOMode::Disabled) {
 							RGHandle raw_ao = ao_pass->add_to_graph(render_graph, rg_depth, scene_view, render_config);
-							if (raw_ao.is_valid() && ao_temporal_pass) {
+							if (raw_ao.is_valid() && ao_temporal_pass)
 								raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
-							}
-							if (raw_ao.is_valid() && ao_blur_pass) {
+							if (raw_ao.is_valid() && ao_blur_pass)
 								rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
-							}
-							else {
+							else
 								rg_ao = raw_ao;
-							}
 						}
 
 						if (rg_visibility.is_valid() && resolve_pass) {

@@ -38,6 +38,7 @@ struct StreamingPage {
 	// Optional dependency: the page that must be loaded before this one.
 	// INVALID_INDEX means no dependency (root page).
 	uint32_t dependency_page_id = bud::asset::INVALID_INDEX;
+	bool is_root = false;
 	std::string get_unique_id() const { return asset_id + ":page_" + std::to_string(page_id); }
 };
 
@@ -67,6 +68,7 @@ public:
 		bud::graphics::GPUScene* gpu_scene,
 		bud::graphics::Renderer* renderer,
 		bud::graphics::RHI* rhi);
+	~StreamingManager();
 
 	void set_asset_registered_callback(AssetRegisteredCallback cb) { asset_registered_callback = std::move(cb); }
 
@@ -86,6 +88,9 @@ public:
 	// camera. Loading itself is demand-driven by GPU page faults.
 	void update(const bud::math::vec3& camera_position);
 	bool is_page_resident(const std::string& page_key) const;
+
+	void set_unload_radius(float r) { unload_radius_ = r; }
+	float get_unload_radius() const { return unload_radius_; }
 
 private:
 	bud::io::AssetManager* asset_manager = nullptr;
@@ -112,10 +117,8 @@ private:
 
 	AssetRegisteredCallback asset_registered_callback;
 
-	// Eviction threshold in world units (≈1 unit = 1 cm). Sponza's exported
-	// scene spans ~3700 units (BudAssetTool keeps the obj scale). 2500 keeps
-	// the whole scene resident while the camera is inside it.
-	float unload_radius_ = 2500.0f;
+	// Eviction threshold in world units (1 unit = 1 cm). Set to 10m for testing dynamic streaming.
+	float unload_radius_ = 20.0f * bud::core::units::m;
 
 	// Retry queue for page requests that failed due to pool exhaustion.
 	// These will be retried in the next frame's process_gpu_page_requests().
@@ -142,6 +145,9 @@ private:
 
 	// Process page requests from a list of page keys (used by retry queue).
 	void process_gpu_page_requests_from_keys(const std::vector<std::string>& page_keys);
+
+	// Lifetime tracking to prevent use-after-free during asynchronous loads on shutdown
+	std::shared_ptr<std::atomic<bool>> alive_flag = std::make_shared<std::atomic<bool>>(true);
 };
 
 } // namespace bud::streaming

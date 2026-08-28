@@ -44,6 +44,7 @@ namespace bud::graphics::vulkan {
 		VkPipelineLayout layout = VK_NULL_HANDLE;
 		VkPipelineBindPoint bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
 		ComputePipelineDesc::LayoutKind compute_layout_kind = ComputePipelineDesc::LayoutKind::HiZCulling;
+		VkShaderStageFlags push_stage_flags = 0;
 	};
 
 	 using VkInstance = struct VkInstance_T*;
@@ -358,7 +359,7 @@ namespace bud::graphics::vulkan {
 		std::vector<VulkanDescriptorAllocator> descriptor_allocators;
 
 		struct VulkanPipelineSlot {
-			std::unique_ptr<struct VulkanPipelineObject> obj;
+			struct VulkanPipelineObject obj{};
 			bool in_use = false;
 		};
 		std::vector<VulkanPipelineSlot> pipeline_pool;
