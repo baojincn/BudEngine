@@ -189,6 +189,10 @@ namespace bud::graphics {
 		bool vsync = false;
 		bool is_puppet_mode = false;
 		bool is_headless = false;
+
+		// Standard World Spatial & Physical Units (1.0f == 1.0 cm)
+		float world_unit_scale_cm = bud::core::units::cm;
+		float default_gravity = -bud::core::units::gravity; // -980.665 cm/s^2
 	};
 
 	enum class AOMode : uint32_t {
