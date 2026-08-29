@@ -1,8 +1,11 @@
 #include "gltf_importer.hpp"
+#include "texture_importer.hpp"
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
+#include <nlohmann/json.hpp>
 #include <iostream>
+#include <fstream>
 #include <functional>
 #include <algorithm>
 
@@ -36,6 +39,17 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
 
     raw_mesh.textures.push_back("data/textures/default.png");
 
+    // Parse glTF JSON directly for full extension support (e.g. KHR_materials_pbrSpecularGlossiness, explicit alphaMode, etc.)
+    nlohmann::json gltf_json;
+    bool has_gltf_json = false;
+    std::ifstream gltf_in(filepath);
+    if (gltf_in.is_open()) {
+        try {
+            gltf_in >> gltf_json;
+            has_gltf_json = true;
+        } catch (...) {}
+    }
+
     for (unsigned int i = 0; i < scene->mNumMaterials; ++i) {
         aiMaterial* mat = scene->mMaterials[i];
         RawMaterial rm;
@@ -55,9 +69,111 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
             rm.base_color_texture_path = raw_mesh.textures[0];
         }
 
+        // 1. Detect Alpha Mode & Cutoff from glTF Material Properties
         rm.alpha_mode = bud::asset::AlphaMode::Opaque;
-        rm.double_sided = false;
         rm.alpha_cutoff = 0.5f;
+        rm.double_sided = false;
+
+        aiString alpha_mode_str;
+        if (mat->Get("$mat.gltf.alphaMode", 0, 0, alpha_mode_str) == AI_SUCCESS) {
+            std::string mode_s = alpha_mode_str.C_Str();
+            if (mode_s == "MASK") {
+                rm.alpha_mode = bud::asset::AlphaMode::Mask;
+            } else if (mode_s == "BLEND") {
+                rm.alpha_mode = bud::asset::AlphaMode::Blend;
+            }
+        }
+
+        int alpha_mode_int = 0;
+        if (mat->Get("$mat.gltf.alphaMode", 0, 0, alpha_mode_int) == AI_SUCCESS) {
+            if (alpha_mode_int == 1) {
+                rm.alpha_mode = bud::asset::AlphaMode::Mask;
+            } else if (alpha_mode_int == 2) {
+                rm.alpha_mode = bud::asset::AlphaMode::Blend;
+            }
+        }
+
+        float cutoff = 0.5f;
+        if (mat->Get("$mat.gltf.alphaCutoff", 0, 0, cutoff) == AI_SUCCESS) {
+            rm.alpha_cutoff = cutoff;
+        }
+
+        float opacity = 1.0f;
+        if (mat->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS) {
+            if (opacity < 0.99f && rm.alpha_mode == bud::asset::AlphaMode::Opaque) {
+                rm.alpha_mode = bud::asset::AlphaMode::Blend;
+            }
+        }
+
+        int two_sided = 0;
+        if (mat->Get(AI_MATKEY_TWOSIDED, two_sided) == AI_SUCCESS) {
+            rm.double_sided = (two_sided != 0);
+        }
+
+        // glTF JSON Extension & Fallback Extraction
+        if (has_gltf_json && gltf_json.contains("materials") && i < gltf_json["materials"].size()) {
+            const auto& gj_mat = gltf_json["materials"][i];
+
+            // Resolve diffuse/albedo texture from extensions (e.g. KHR_materials_pbrSpecularGlossiness)
+            if (rm.base_color_texture_path.empty() || rm.base_color_texture_path == raw_mesh.textures[0]) {
+                int tex_idx = -1;
+                if (gj_mat.contains("pbrMetallicRoughness") && gj_mat["pbrMetallicRoughness"].contains("baseColorTexture")) {
+                    tex_idx = gj_mat["pbrMetallicRoughness"]["baseColorTexture"].value("index", -1);
+                } else if (gj_mat.contains("extensions") && gj_mat["extensions"].contains("KHR_materials_pbrSpecularGlossiness")) {
+                    const auto& spec_gloss = gj_mat["extensions"]["KHR_materials_pbrSpecularGlossiness"];
+                    if (spec_gloss.contains("diffuseTexture")) {
+                        tex_idx = spec_gloss["diffuseTexture"].value("index", -1);
+                    }
+                }
+
+                if (tex_idx >= 0 && gltf_json.contains("textures") && tex_idx < static_cast<int>(gltf_json["textures"].size())) {
+                    int img_idx = gltf_json["textures"][tex_idx].value("source", -1);
+                    if (img_idx >= 0 && gltf_json.contains("images") && img_idx < static_cast<int>(gltf_json["images"].size())) {
+                        std::string uri = gltf_json["images"][img_idx].value("uri", "");
+                        if (!uri.empty()) {
+                            std::string p = uri;
+                            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0)
+                                p = base_dir + p;
+                            rm.base_color_texture_path = p;
+                            raw_mesh.textures.push_back(p);
+                        }
+                    }
+                }
+            }
+
+            if (gj_mat.contains("alphaMode")) {
+                std::string mode_str = gj_mat["alphaMode"].get<std::string>();
+                if (mode_str == "MASK") {
+                    rm.alpha_mode = bud::asset::AlphaMode::Mask;
+                } else if (mode_str == "BLEND") {
+                    rm.alpha_mode = bud::asset::AlphaMode::Blend;
+                } else if (mode_str == "OPAQUE") {
+                    rm.alpha_mode = bud::asset::AlphaMode::Opaque;
+                }
+            }
+
+            if (gj_mat.contains("alphaCutoff")) {
+                rm.alpha_cutoff = gj_mat["alphaCutoff"].get<float>();
+            }
+
+            if (gj_mat.contains("doubleSided")) {
+                rm.double_sided = gj_mat["doubleSided"].get<bool>();
+            }
+        }
+
+        // 2. Texture Pixel Alpha Analysis (100% Data-driven):
+        // Inspect the actual alpha channel pixels of the base color texture.
+        if (rm.alpha_mode == bud::asset::AlphaMode::Opaque && !rm.base_color_texture_path.empty() && rm.base_color_texture_path != raw_mesh.textures[0]) {
+            auto alpha_info = TextureImporter::analyze_alpha(rm.base_color_texture_path);
+            if (alpha_info.has_alpha) {
+                rm.alpha_mode = alpha_info.alpha_mode;
+                rm.alpha_cutoff = alpha_info.alpha_cutoff;
+                if (rm.alpha_mode == bud::asset::AlphaMode::Mask) {
+                    rm.double_sided = true;
+                }
+            }
+        }
+
         raw_mesh.materials.push_back(std::move(rm));
     }
 

@@ -184,7 +184,7 @@ float calculate_lod_error(vec3 center, float radius, float max_error) {
         return (max_error * focal_pixels) / d;
     } else {
         // Shadow cascade view: orthographic projection error (constant across depth in each cascade)
-        float extent = (push_constants.ortho_extent > 0.0) ? push_constants.ortho_extent : 3500.0;
+        float extent = (push_constants.ortho_extent > 0.0) ? push_constants.ortho_extent : 35.0;
         float shadow_res = push_constants.screen_height;
         float error_multiplier = max(push_constants.lod_error_scale, 0.1);
         return (max_error * shadow_res) / (extent * error_multiplier);

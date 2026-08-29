@@ -59,9 +59,21 @@ bool CascadeBuilder::build_package_from_raw(
         uint64_t tex_id = hasher(tex_path);
         texture_id_map[tex_path] = tex_id;
 
-        if (std::filesystem::exists(tex_path)) {
-            if (TextureBuilder::build_from_file(tex_path, out_tex_path, tex_opts)) {
-                support::log_info("[BudAssetPipeline] Cooked Texture: " + tex_path + " -> " + out_tex_path);
+        std::string resolved_path = tex_path;
+        if (!std::filesystem::exists(resolved_path)) {
+            const std::string extensions[] = { ".dds", ".png", ".jpg", ".jpeg", ".tga", ".bmp" };
+            for (const auto& ext : extensions) {
+                auto cand = std::filesystem::path(tex_path).replace_extension(ext).string();
+                if (std::filesystem::exists(cand)) {
+                    resolved_path = cand;
+                    break;
+                }
+            }
+        }
+
+        if (std::filesystem::exists(resolved_path)) {
+            if (TextureBuilder::build_from_file(resolved_path, out_tex_path, tex_opts)) {
+                support::log_info("[BudAssetPipeline] Cooked Texture: " + resolved_path + " -> " + out_tex_path);
 
                 AssetRegistryEntry entry;
                 entry.asset_path = out_tex_path;
@@ -99,7 +111,18 @@ bool CascadeBuilder::build_package_from_raw(
     // 3. Cascade Build: Mesh (with embedded RawMesh Chunk)
     std::string out_mesh_path = (mesh_dir / (stem + ".budasset")).string();
     std::string temp_raw = (options.cache_root + "/" + stem + "_temp.rawmesh");
-    raw_mesh.save_binary(temp_raw);
+    if (options.scale != 1.0f && options.scale > 0.0f) {
+        RawMesh scaled_raw = raw_mesh;
+        for (auto& v : scaled_raw.vertices) {
+            v.position[0] *= options.scale;
+            v.position[1] *= options.scale;
+            v.position[2] *= options.scale;
+        }
+        scaled_raw.compute_bounds();
+        scaled_raw.save_binary(temp_raw);
+    } else {
+        raw_mesh.save_binary(temp_raw);
+    }
 
     MeshBuildOptions mesh_opts{};
     mesh_opts.enable_virtual_geometry = true;

@@ -8,7 +8,7 @@ namespace bud::asset_pipeline {
 
 class FbxImporter {
 public:
-    static std::optional<RawMesh> import_from_file(const std::string& filepath);
+    static std::optional<RawMesh> import_from_file(const std::string& filepath, float scale = 1.0f);
 };
 
 } // namespace bud::asset_pipeline

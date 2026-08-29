@@ -1,0 +1,46 @@
+{
+    "name": "Amazon Bistro Virtual Geometry Scene",
+    "ambient_strength": 0.12,
+    "lod_error_threshold_px": 2.0,
+    "streaming_unload_radius": 60.0,
+    "directional_light": {
+        "color": [
+            1.0,
+            0.98,
+            0.92
+        ],
+        "direction": [
+            80.0,
+            180.0,
+            -120.0
+        ],
+        "intensity": 3.5
+    },
+    "entities": [
+        {
+            "asset_path": "Content/Bistro/Meshes/bistro.budasset",
+            "is_active": true,
+            "is_static": true,
+            "material_index": 0,
+            "mesh_index": 0,
+            "transform": [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0
+            ]
+        }
+    ],
+    "main_camera": {
+        "pitch": 0.0,
+        "position": [
+            -8.0,
+            2.0,
+            0.0
+        ],
+        "yaw": 90.0,
+        "zoom": 45.0,
+        "speed": 5.0,
+        "sensitivity": 0.1
+    }
+}

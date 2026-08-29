@@ -121,6 +121,15 @@ namespace bud::io {
 		if (check_exists(candidate))
 			return normalize(candidate);
 
+		// Fallback check against Content directory
+		auto content_cand = root_path / "Content" / path;
+		if (check_exists(content_cand))
+			return normalize(content_cand);
+
+		auto content_tex_cand = root_path / "Content/Textures" / path.filename();
+		if (check_exists(content_tex_cand))
+			return normalize(content_tex_cand);
+
 		bud::eprint("[IO] {} doesn't exist", candidate.string());
 		return std::nullopt;
 	}
@@ -134,9 +143,7 @@ namespace bud::io {
 		}
 
 		std::filesystem::path resolved_path = *resolved_path_opt;
-
-		std::ifstream file;
-		file.open(resolved_path, std::ios::ate | std::ios::binary);
+		std::ifstream file(resolved_path.string(), std::ios::binary | std::ios::ate);
 		if (!file.is_open()) {
 			// Check if path is a regular file and report errno for more info
 			std::error_code ec;
@@ -287,6 +294,18 @@ namespace bud::io {
 		Image img;
 		auto resolved_opt = virtual_file_system->resolve_path(path);
 		if (!resolved_opt) {
+			std::string fn = path.filename().string();
+			if (fn == "default.png" || fn == "default.budasset" || fn == "default") {
+				// Fallback programmatic default texture (neutral 4x4 RGBA)
+				img.width = 4;
+				img.height = 4;
+				img.channels = 4;
+				img.pixels = static_cast<unsigned char*>(std::malloc(4 * 4 * 4));
+				if (img.pixels) {
+					std::memset(img.pixels, 220, 4 * 4 * 4);
+					return std::move(img);
+				}
+			}
 			bud::eprint("[IO] Image not found: {} (could not resolve)", path.string());
 			return std::nullopt;
 		}

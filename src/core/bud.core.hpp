@@ -29,17 +29,18 @@ namespace bud::core {
 
 namespace bud::core::units {
     // -----------------------------------------------------------------------
-    // Standard Coordinate & Physical Units Specification (1 Unit == 1 cm):
-    // Length: 1.0f == 1.0 cm (Centimeter, UE5 standard)
+    // Standard Coordinate & Physical Units Specification (1 Unit == 1 m):
+    // Length: 1.0f == 1.0 m  (Meter, SI standard)
     // Time:   1.0f == 1.0 s  (Second)
     // Mass:   1.0f == 1.0 kg (Kilogram)
     // Angle:  Radians internally; degree conversion multipliers provided.
     // -----------------------------------------------------------------------
 
-    // Spatial Length (Base: cm)
-    inline constexpr float cm = 1.0f;
-    inline constexpr float mm = 0.1f * cm;
-    inline constexpr float m  = 100.0f * cm;
+    // Spatial Length (Base: m)
+    inline constexpr float m  = 1.0f;
+    inline constexpr float dm = 0.1f * m;
+    inline constexpr float cm = 0.01f * m;
+    inline constexpr float mm = 0.001f * m;
     inline constexpr float km = 1000.0f * m;
 
     // Time (Base: s)
@@ -48,13 +49,13 @@ namespace bud::core::units {
     inline constexpr float min = 60.0f * s;
     inline constexpr float h   = 3600.0f * s;
 
-    // Speed / Velocity (Base: cm/s)
-    inline constexpr float cm_per_s = cm / s;
+    // Speed / Velocity (Base: m/s)
     inline constexpr float m_per_s  = m / s;
-    inline constexpr float km_per_h = km / h;
+    inline constexpr float cm_per_s = cm / s;
+    inline constexpr float km_per_h = km / (3600.0f * s);
 
-    // Acceleration (Base: cm/s^2)
-    inline constexpr float gravity = 9.80665f * m_per_s / s; // 980.665 cm/s^2
+    // Acceleration (Base: m/s^2)
+    inline constexpr float gravity = 9.80665f * m_per_s / s; // 9.80665 m/s^2
 
     // Angle conversions
     inline constexpr float pi = 3.14159265358979323846f;
@@ -63,33 +64,33 @@ namespace bud::core::units {
 }
 
 namespace bud::literals {
-    // Length Literals
-    constexpr float operator""_cm(long double val) {
+    // Length Literals (Base: Meter)
+    constexpr float operator""_m(long double val) {
         return static_cast<float>(val);
     }
-    constexpr float operator""_cm(unsigned long long val) {
+    constexpr float operator""_m(unsigned long long val) {
         return static_cast<float>(val);
+    }
+
+    constexpr float operator""_cm(long double val) {
+        return static_cast<float>(val * 0.01);
+    }
+    constexpr float operator""_cm(unsigned long long val) {
+        return static_cast<float>(val) * 0.01f;
     }
 
     constexpr float operator""_mm(long double val) {
-        return static_cast<float>(val * 0.1);
+        return static_cast<float>(val * 0.001);
     }
     constexpr float operator""_mm(unsigned long long val) {
-        return static_cast<float>(val) * 0.1f;
-    }
-
-    constexpr float operator""_m(long double val) {
-        return static_cast<float>(val * 100.0);
-    }
-    constexpr float operator""_m(unsigned long long val) {
-        return static_cast<float>(val) * 100.0f;
+        return static_cast<float>(val) * 0.001f;
     }
 
     constexpr float operator""_km(long double val) {
-        return static_cast<float>(val * 100000.0);
+        return static_cast<float>(val * 1000.0);
     }
     constexpr float operator""_km(unsigned long long val) {
-        return static_cast<float>(val) * 100000.0f;
+        return static_cast<float>(val) * 1000.0f;
     }
 
     // Time Literals

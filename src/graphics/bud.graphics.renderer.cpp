@@ -570,6 +570,15 @@ namespace bud::graphics {
 		size_t split_index = 0;
 		std::vector<std::vector<uint32_t>> culled_results(1 + cascade_count);
 
+		// Advance 24H time cycle if enabled
+		if (render_config.sky_config.enable_sky && render_config.sky_config.time_mode == SkyTimeMode::Cycle24H) {
+			render_config.sky_config.time_of_day += scene_view.delta_time * render_config.sky_config.time_speed;
+			if (render_config.sky_config.time_of_day >= 24.0f)
+				render_config.sky_config.time_of_day = std::fmod(render_config.sky_config.time_of_day, 24.0f);
+			else if (render_config.sky_config.time_of_day < 0.0f)
+				render_config.sky_config.time_of_day += 24.0f;
+		}
+
 		if (instance_count > 0) {
 			update_cascades(scene_view, render_config, render_scene.scene_bounds);
 
@@ -1290,9 +1299,9 @@ namespace bud::graphics {
 				std::array<RGHandle, MAX_CASCADES> rg_csm_visible_pages{};
 				if (render_config.enable_virtual_geometry && hierarchy_traversal_pass) {
 					for (uint32_t c_idx = 0; c_idx < cascade_count; ++c_idx) {
-						float lod_error_scale = 2.5f;
-						if (c_idx == 1) lod_error_scale = 5.0f;
-						else if (c_idx == 2) lod_error_scale = 7.5f;
+						float lod_error_scale = 1.0f;
+						if (c_idx == 1) lod_error_scale = 2.5f;
+						else if (c_idx == 2) lod_error_scale = 5.0f;
 						else if (c_idx >= 3) lod_error_scale = 10.0f;
 
 						float ortho_extent = render_config.shadow_ortho_size * std::pow(2.0f, static_cast<float>(c_idx));

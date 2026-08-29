@@ -1,14 +1,16 @@
 #include "fbx_importer.hpp"
+#include "texture_importer.hpp"
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
 #include <iostream>
 #include <functional>
 #include <algorithm>
+#include <filesystem>
 
 namespace bud::asset_pipeline {
 
-std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath) {
+std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath, float scale) {
     Assimp::Importer importer;
     unsigned int flags = aiProcess_Triangulate |
                          aiProcess_GenSmoothNormals |
@@ -36,6 +38,47 @@ std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath
 
     raw_mesh.textures.push_back("data/textures/default.png");
 
+    auto resolve_texture_file = [&](const std::string& raw_tex_path) -> std::string {
+        if (raw_tex_path.empty())
+            return "";
+
+        std::filesystem::path tp(raw_tex_path);
+        std::string fname = tp.filename().string();
+        std::string stem = tp.stem().string();
+
+        std::vector<std::string> search_dirs = {
+            base_dir,
+            base_dir + "Textures/",
+            base_dir + "textures/",
+            base_dir + "../Textures/",
+            base_dir + "../textures/",
+            base_dir + "../../Textures/",
+            base_dir + "../../textures/"
+        };
+
+        std::vector<std::string> search_exts = {
+            tp.extension().string(),
+            ".dds", ".DDS", ".png", ".PNG", ".tga", ".TGA", ".jpg", ".JPG"
+        };
+
+        // 1. Direct check
+        if (std::filesystem::exists(raw_tex_path))
+            return raw_tex_path;
+        if (!base_dir.empty() && std::filesystem::exists(base_dir + raw_tex_path))
+            return base_dir + raw_tex_path;
+
+        // 2. Search candidates in nearby texture directories
+        for (const auto& sdir : search_dirs) {
+            for (const auto& sext : search_exts) {
+                std::string candidate = sdir + stem + sext;
+                if (std::filesystem::exists(candidate))
+                    return candidate;
+            }
+        }
+
+        return "";
+    };
+
     for (unsigned int i = 0; i < scene->mNumMaterials; ++i) {
         aiMaterial* mat = scene->mMaterials[i];
         RawMaterial rm;
@@ -46,18 +89,65 @@ std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath
         aiString tex_path;
         if (mat->GetTexture(aiTextureType_DIFFUSE, 0, &tex_path) == AI_SUCCESS ||
             mat->GetTexture(aiTextureType_BASE_COLOR, 0, &tex_path) == AI_SUCCESS) {
-            std::string p = tex_path.C_Str();
-            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0)
-                p = base_dir + p;
-            rm.base_color_texture_path = p;
-            raw_mesh.textures.push_back(p);
+            std::string resolved = resolve_texture_file(tex_path.C_Str());
+            if (!resolved.empty()) {
+                rm.base_color_texture_path = resolved;
+                raw_mesh.textures.push_back(resolved);
+            } else {
+                std::string p = tex_path.C_Str();
+                if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0)
+                    p = base_dir + p;
+                rm.base_color_texture_path = p;
+                raw_mesh.textures.push_back(p);
+            }
         } else {
-            rm.base_color_texture_path = raw_mesh.textures[0];
+            // Check all other texture slots as fallback
+            for (unsigned int tt = 1; tt <= 18; ++tt) {
+                if (mat->GetTexture(static_cast<aiTextureType>(tt), 0, &tex_path) == AI_SUCCESS) {
+                    std::string resolved = resolve_texture_file(tex_path.C_Str());
+                    if (!resolved.empty()) {
+                        rm.base_color_texture_path = resolved;
+                        raw_mesh.textures.push_back(resolved);
+                        break;
+                    }
+                }
+            }
+
+            if (rm.base_color_texture_path.empty())
+                rm.base_color_texture_path = raw_mesh.textures[0];
         }
 
         rm.alpha_mode = bud::asset::AlphaMode::Opaque;
         rm.double_sided = false;
         rm.alpha_cutoff = 0.5f;
+
+        // 1. Assimp material properties
+        float opacity = 1.0f;
+        if (mat->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS) {
+            if (opacity < 0.99f) {
+                rm.alpha_mode = bud::asset::AlphaMode::Mask;
+                rm.alpha_cutoff = 0.5f;
+                rm.double_sided = true;
+            }
+        }
+        int two_sided = 0;
+        if (mat->Get(AI_MATKEY_TWOSIDED, two_sided) == AI_SUCCESS) {
+            if (two_sided != 0)
+                rm.double_sided = true;
+        }
+
+        // 2. Texture Pixel Alpha Analysis & Companion Mask
+        if (!rm.base_color_texture_path.empty() && rm.base_color_texture_path != raw_mesh.textures[0]) {
+            auto alpha_info = TextureImporter::analyze_alpha(rm.base_color_texture_path);
+            if (alpha_info.has_alpha) {
+                rm.alpha_mode = alpha_info.alpha_mode;
+                rm.alpha_cutoff = alpha_info.alpha_cutoff;
+                if (rm.alpha_mode == bud::asset::AlphaMode::Mask) {
+                    rm.double_sided = true;
+                }
+            }
+        }
+
         raw_mesh.materials.push_back(std::move(rm));
     }
 
@@ -83,6 +173,38 @@ std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath
     };
     collect_instances(scene->mRootNode, aiMatrix4x4());
 
+    float effective_scale = scale;
+    if (effective_scale <= 0.0f) {
+        // Auto-detect unit from FBX metadata or bounding box
+        double unit_scale_factor = 1.0;
+        if (scene->mMetaData && scene->mMetaData->Get("UnitScaleFactor", unit_scale_factor)) {
+            if (unit_scale_factor >= 99.0 && unit_scale_factor <= 101.0) {
+                effective_scale = 0.01f; // Centimeters to meters
+            } else if (unit_scale_factor >= 2.5 && unit_scale_factor <= 2.6) {
+                effective_scale = 0.0254f; // Inches to meters
+            } else if (unit_scale_factor > 0.0) {
+                effective_scale = static_cast<float>(1.0 / unit_scale_factor);
+            } else {
+                effective_scale = 1.0f;
+            }
+            std::cout << "[BudAssetPipeline] FBX UnitScaleFactor = " << unit_scale_factor << ", resolved scale = " << effective_scale << std::endl;
+        } else {
+            float max_dim = 0.0f;
+            for (unsigned int m = 0; m < scene->mNumMeshes; ++m) {
+                for (unsigned int v = 0; v < scene->mMeshes[m]->mNumVertices; ++v) {
+                    const auto& pos = scene->mMeshes[m]->mVertices[v];
+                    max_dim = std::max({ max_dim, std::abs(pos.x), std::abs(pos.y), std::abs(pos.z) });
+                }
+            }
+            if (max_dim > 100.0f) {
+                effective_scale = 0.01f; // Presumed centimeters
+                std::cout << "[BudAssetPipeline] Auto-detected centimeter scale in FBX (max_dim = " << max_dim << "), applying scale = 0.01 to convert to meters." << std::endl;
+            } else {
+                effective_scale = 1.0f;
+            }
+        }
+    }
+
     for (const auto& inst : instances) {
         const aiMesh* mesh = scene->mMeshes[inst.mesh_index];
         uint32_t vertex_base = static_cast<uint32_t>(raw_mesh.vertices.size());
@@ -94,9 +216,9 @@ std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath
         for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
             RawVertex rv{};
             aiVector3D pos = inst.transform * mesh->mVertices[v];
-            rv.position[0] = pos.x;
-            rv.position[1] = pos.y;
-            rv.position[2] = pos.z;
+            rv.position[0] = pos.x * effective_scale;
+            rv.position[1] = pos.y * effective_scale;
+            rv.position[2] = pos.z * effective_scale;
 
             if (mesh->HasNormals()) {
                 aiVector3D n = normal_matrix * mesh->mNormals[v];

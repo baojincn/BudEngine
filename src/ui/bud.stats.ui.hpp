@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "src/graphics/bud.graphics.types.hpp"
 #include <functional>

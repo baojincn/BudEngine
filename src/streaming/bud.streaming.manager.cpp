@@ -94,6 +94,7 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 		if (asset.materials.empty()) {
 			std::filesystem::path asset_p(path);
 			std::filesystem::path mat_dir = asset_p.parent_path().parent_path() / "Materials";
+			std::filesystem::path tex_dir = asset_p.parent_path().parent_path() / "Textures";
 			if (std::filesystem::exists(mat_dir) && std::filesystem::is_directory(mat_dir)) {
 				for (const auto& entry : std::filesystem::directory_iterator(mat_dir)) {
 					if (entry.path().extension() == ".budasset" && asset_manager && asset_manager->get_vfs()) {
@@ -111,36 +112,13 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 										md.double_sided = rmh->double_sided;
 
 										std::string mat_stem = entry.path().stem().string();
-										std::string tex_name;
-										if (mat_stem == "bricks") tex_name = "spnza_bricks_a_diff.budasset";
-										else if (mat_stem == "arch") tex_name = "sponza_arch_diff.budasset";
-										else if (mat_stem == "ceiling") tex_name = "sponza_ceiling_a_diff.budasset";
-										else if (mat_stem == "column_a") tex_name = "sponza_column_a_diff.budasset";
-										else if (mat_stem == "column_b") tex_name = "sponza_column_b_diff.budasset";
-										else if (mat_stem == "column_c") tex_name = "sponza_column_c_diff.budasset";
-										else if (mat_stem == "floor") tex_name = "sponza_floor_a_diff.budasset";
-										else if (mat_stem == "roof") tex_name = "sponza_roof_diff.budasset";
-										else if (mat_stem == "details") tex_name = "sponza_details_diff.budasset";
-										else if (mat_stem == "flagpole") tex_name = "sponza_flagpole_diff.budasset";
-										else if (mat_stem == "chain") tex_name = "chain_texture.budasset";
-										else if (mat_stem == "vase") tex_name = "vase_dif.budasset";
-										else if (mat_stem == "vase_hanging") tex_name = "vase_hanging.budasset";
-										else if (mat_stem == "vase_round") tex_name = "vase_round.budasset";
-										else if (mat_stem == "leaf") tex_name = "vase_plant.budasset";
-										else if (mat_stem == "fabric_a") tex_name = "sponza_fabric_diff.budasset";
-										else if (mat_stem == "fabric_c") tex_name = "sponza_curtain_diff.budasset";
-										else if (mat_stem == "fabric_d") tex_name = "sponza_curtain_blue_diff.budasset";
-										else if (mat_stem == "fabric_e") tex_name = "sponza_curtain_green_diff.budasset";
-										else if (mat_stem == "fabric_f") tex_name = "sponza_fabric_blue_diff.budasset";
-										else if (mat_stem == "fabric_g") tex_name = "sponza_fabric_green_diff.budasset";
-										else if (mat_stem == "Material__25") tex_name = "lion.budasset";
-										else if (mat_stem == "Material__298") tex_name = "background.budasset";
-										else if (mat_stem == "Material__47") tex_name = "sponza_thorn_diff.budasset";
-										else tex_name = "default.budasset";
+										std::filesystem::path tex_path = tex_dir / (mat_stem + ".budasset");
+										if (!std::filesystem::exists(tex_path)) {
+											tex_path = tex_dir / "default.budasset";
+										}
 
-										std::string full_tex_path = (asset_p.parent_path().parent_path() / "Textures" / tex_name).generic_string();
 										uint32_t tidx = static_cast<uint32_t>(asset.textures.size());
-										asset.textures.push_back(full_tex_path);
+										asset.textures.push_back(tex_path.generic_string());
 										md.base_color_texture = tidx;
 										asset.materials.push_back(md);
 										break;
@@ -153,7 +131,7 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 			}
 		}
 
-		// Register materials into GPUScene
+		// Register materials into GPUScene using asset-driven material descriptors
 		for (size_t mi = 0; mi < asset.materials.size(); ++mi) {
 			const auto& mat_desc = asset.materials[mi];
 			bud::graphics::GPUMaterialData gpu_mat;
@@ -180,16 +158,6 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 						tex_path = candidate2.generic_string();
 					} else if (std::filesystem::exists(candidate3)) {
 						tex_path = candidate3.generic_string();
-					}
-
-					std::string lower_stem = stem;
-					std::transform(lower_stem.begin(), lower_stem.end(), lower_stem.begin(), ::tolower);
-					if (lower_stem.find("leaf") != std::string::npos ||
-					    lower_stem.find("plant") != std::string::npos ||
-					    lower_stem.find("chain") != std::string::npos ||
-					    lower_stem.find("thorn") != std::string::npos ||
-					    lower_stem.find("flagpole") != std::string::npos) {
-						gpu_mat.alpha_mode = 1; // Mask
 					}
 
 					gpu_mat.albedo_texture_id = renderer->bind_texture_async(tex_path);

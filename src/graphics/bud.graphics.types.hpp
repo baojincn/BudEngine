@@ -207,6 +207,31 @@ namespace bud::graphics {
 		GTAO = 2
 	};
 
+	enum class SkyTimeMode {
+		Day = 0,      // 正午白天预设
+		Sunset = 1,   // 黄昏日落预设
+		Night = 2,    // 深邃暗夜预设
+		Manual = 3,   // 手动滑块调节 (Elevation / Azimuth)
+		Cycle24H = 4  // 24小时昼夜连续交替流逝
+	};
+
+	struct SkyConfig {
+		bool enable_sky = true;
+		bool enable_clouds = true;
+		SkyTimeMode time_mode = SkyTimeMode::Manual;
+		float time_of_day = 12.0f; // 0.0 ~ 24.0 hours (12.0 = Noon, 18.0 = Sunset, 0.0 = Midnight)
+		float time_speed = 0.5f;   // Hours per second during 24H cycle
+		float sun_elevation = 55.0f; // Degrees (-90.0 ~ 90.0)
+		float sun_azimuth = 25.0f;   // Degrees (0.0 ~ 360.0)
+		float sun_intensity = 1.3f;
+		bud::math::vec3 sun_color = bud::math::vec3(1.0f, 0.98f, 0.95f);
+		float rayleigh_density = 1.0f;
+		float mie_density = 1.0f;
+		float ozone_density = 1.0f;
+		float cloud_coverage = 0.45f;
+		float cloud_speed = 0.08f;
+	};
+
 	struct RenderConfig {
 		float fixed_logic_timestep = 1.0f / 60.0f;
 		float time_scale = 1.0f;
@@ -216,8 +241,8 @@ namespace bud::graphics {
 		float shadow_bias_constant = 1.25f;
 		float shadow_bias_slope = 1.75f;
 		float shadow_ortho_size = 35.0f * bud::core::units::m;
-		float shadow_near_plane = 1.0f * bud::core::units::cm;
-		float shadow_far_plane = 30.0f * bud::core::units::m;
+		float shadow_near_plane = 0.1f * bud::core::units::m;
+		float shadow_far_plane = 60.0f * bud::core::units::m;
 
 		uint32_t cascade_count = 4;
 		float cascade_split_lambda = 0.75f; // Practical Split Scheme
@@ -236,13 +261,13 @@ namespace bud::graphics {
 		// Page LOD selection by screen-space error (Nanite-style single threshold):
 		// A LOD level L is used while its accumulated object-space error projects
 		// to <= lod_error_threshold_px pixels on screen.
-		float lod_error_lod1 = 2.0f * bud::core::units::mm; // 0.2 cm
-		float lod_error_lod2 = 10.0f * bud::core::units::mm; // 1.0 cm
+		float lod_error_lod1 = 2.0f * bud::core::units::mm; // 0.002 m
+		float lod_error_lod2 = 10.0f * bud::core::units::mm; // 0.010 m
 		float lod_error_threshold_px = 2.0f; // in screen pixels
 
 		// Ambient Occlusion
 		AOMode ao_mode = AOMode::GTAO;
-		float ao_radius = 1.0f * bud::core::units::m; // 100.0 cm (room/architectural scale)
+		float ao_radius = 1.2f * bud::core::units::m; // 1.2 m (architectural scale)
 		float ao_intensity = 0.8f;
 		// 32 samples = 8 steps per slice direction at half-res. Good balance of
 		// quality and cost now that the temporal reprojection is fixed.
@@ -257,6 +282,9 @@ namespace bud::graphics {
         uint32_t heuristic_occluder_min_count = 1;
         uint32_t heuristic_occluder_max_count = 500;
         float heuristic_occluder_tri_weight = 1e-4f; // multiplier for triangle count in score
+
+		// Sky & Physical Atmosphere
+		SkyConfig sky_config;
 	};
 
 	struct SceneView {

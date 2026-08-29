@@ -9,6 +9,7 @@ namespace bud::asset_pipeline {
 struct CascadeBuildOptions {
     bool dump_text = false;
     bool use_cache = true;
+    float scale = 1.0f;
     std::string cache_root = "Cache";
 };
 

@@ -54,7 +54,7 @@ namespace bud::graphics {
 				RenderPassBeginInfo rp_info;
 				rp_info.color_attachments.push_back(render_graph.get_texture(backbuffer));
 				rp_info.clear_color = true;
-				rp_info.clear_color_value = { 0.1f, 0.1f, 0.15f, 1.0f };
+				rp_info.clear_color_value = { 0.05f, 0.05f, 0.08f, 1.0f };
 				rp_info.render_width = view.viewport_width;
 				rp_info.render_height = view.viewport_height;
 				rp_info.base_array_layer = 0;

@@ -1,0 +1,46 @@
+{
+    "name": "Sun Temple Virtual Geometry Scene",
+    "ambient_strength": 0.25,
+    "lod_error_threshold_px": 2.0,
+    "streaming_unload_radius": 500.0,
+    "directional_light": {
+        "color": [
+            1.0,
+            0.95,
+            0.85
+        ],
+        "direction": [
+            100.0,
+            250.0,
+            80.0
+        ],
+        "intensity": 3.2
+    },
+    "entities": [
+        {
+            "asset_path": "Content/SunTemple/Meshes/SunTemple.budasset",
+            "is_active": true,
+            "is_static": true,
+            "material_index": 0,
+            "mesh_index": 0,
+            "transform": [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0
+            ]
+        }
+    ],
+    "main_camera": {
+        "pitch": 0.0,
+        "position": [
+            5.0,
+            5.0,
+            0.0
+        ],
+        "yaw": -180.0,
+        "zoom": 45.0,
+        "speed": 1.0,
+        "sensitivity": 0.1
+    }
+}
