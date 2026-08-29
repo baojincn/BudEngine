@@ -39,22 +39,37 @@ namespace bud::scene {
     // NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE requires the type to be in the same namespace or accessible
     // Entity
     inline void to_json(nlohmann::json& j, const Entity& e) {
+        std::string rt = "VirtualGeometry";
+        if (e.render_type == RenderType::Translucent) rt = "Translucent";
+        else if (e.render_type == RenderType::Dynamic) rt = "Dynamic";
+        else if (e.render_type == RenderType::Custom) rt = "Custom";
+
         j = nlohmann::json{
+            {"name", e.name},
             {"asset_path", e.asset_path},
             {"mesh_index", e.mesh_index},
             {"material_index", e.material_index},
+            {"render_type", rt},
             {"transform", e.transform},
             {"is_static", e.is_static},
             {"is_active", e.is_active}
         };
     }
     inline void from_json(const nlohmann::json& j, Entity& e) {
+        if (j.contains("name")) j.at("name").get_to(e.name);
         j.at("asset_path").get_to(e.asset_path);
         j.at("mesh_index").get_to(e.mesh_index);
         j.at("material_index").get_to(e.material_index);
         j.at("transform").get_to(e.transform);
         j.at("is_static").get_to(e.is_static);
         j.at("is_active").get_to(e.is_active);
+        if (j.contains("render_type")) {
+            std::string rt = j.at("render_type").get<std::string>();
+            if (rt == "Translucent") e.render_type = RenderType::Translucent;
+            else if (rt == "Dynamic") e.render_type = RenderType::Dynamic;
+            else if (rt == "Custom") e.render_type = RenderType::Custom;
+            else e.render_type = RenderType::VirtualGeometry;
+        }
         if (j.contains("lod_bias")) j.at("lod_bias").get_to(e.lod_bias);
     }
 
@@ -106,11 +121,11 @@ namespace bud::scene {
         };
     }
     inline void from_json(const nlohmann::json& j, Scene& s) {
-        j.at("main_camera").get_to(s.main_camera);
-        j.at("directional_light").get_to(s.directional_light);
-        j.at("ambient_strength").get_to(s.ambient_strength);
+        if (j.contains("main_camera")) j.at("main_camera").get_to(s.main_camera);
+        if (j.contains("directional_light")) j.at("directional_light").get_to(s.directional_light);
+        if (j.contains("ambient_strength")) j.at("ambient_strength").get_to(s.ambient_strength);
         if (j.contains("lod_error_threshold_px")) j.at("lod_error_threshold_px").get_to(s.lod_error_threshold_px);
         if (j.contains("streaming_unload_radius")) j.at("streaming_unload_radius").get_to(s.streaming_unload_radius);
-        j.at("entities").get_to(s.entities);
+        if (j.contains("entities")) j.at("entities").get_to(s.entities);
     }
 }

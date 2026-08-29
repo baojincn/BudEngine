@@ -275,7 +275,20 @@ namespace bud::graphics {
 	}
 
 	uint32_t Renderer::bind_texture_async(const std::string& path) {
+		if (path.empty()) return 0;
+		{
+			std::lock_guard lock(texture_slot_mutex);
+			auto it = bound_texture_slots.find(path);
+			if (it != bound_texture_slots.end()) {
+				return it->second;
+			}
+		}
+
 		uint32_t current_slot = next_bindless_slot.fetch_add(1, std::memory_order_relaxed);
+		{
+			std::lock_guard lock(texture_slot_mutex);
+			bound_texture_slots[path] = current_slot;
+		}
 
 		auto queue = upload_queue;
 		auto queue_weak = std::weak_ptr<UploadQueue>(upload_queue);

@@ -24,6 +24,18 @@ StreamingManager::~StreamingManager() {
 }
 
 void StreamingManager::register_virtual_geometry_async(const std::string& path) {
+	{
+		std::scoped_lock lock(mutex_sm);
+		auto it = registered_info_map.find(path);
+		if (it != registered_info_map.end()) {
+			if (asset_registered_callback) {
+				const auto& info = it->second;
+				asset_registered_callback(path, info.mesh_id, info.global_aabb, info.root_group_index, info.base_virtual_page);
+			}
+			return;
+		}
+	}
+
 	auto alive = alive_flag;
 	asset_manager->load_file_async(path, [this, alive, path](std::vector<char> data) {
 		if (!alive->load(std::memory_order_acquire))
@@ -35,6 +47,7 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 
 		const char* base = data.data();
 		uint64_t page_data_base_offset = 0;
+		bool has_vg_chunk = false;
 
 		if (data.size() >= sizeof(bud::asset::BudAssetHeader)) {
 			const auto* asset_header = reinterpret_cast<const bud::asset::BudAssetHeader*>(data.data());
@@ -45,11 +58,17 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 						if (chunks[c].chunk_type == static_cast<uint32_t>(bud::asset::AssetChunkType::VirtualGeometry)) {
 							base = data.data() + chunks[c].offset;
 							page_data_base_offset = chunks[c].offset;
+							has_vg_chunk = true;
 							break;
 						}
 					}
 				}
 			}
+		}
+
+		if (!has_vg_chunk) {
+			// Standard / translucent mesh asset without Virtual Geometry DAG
+			return;
 		}
 
 		if (reinterpret_cast<const uintptr_t>(base) + sizeof(bud::asset::VGHeader) > reinterpret_cast<const uintptr_t>(data.data() + data.size())) {
@@ -90,38 +109,6 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 			}
 		}
 
-		// Fallback: If no embedded materials in VG chunk, discover from package Materials folder
-		if (asset.materials.empty()) {
-			std::filesystem::path asset_p(path);
-			std::filesystem::path mat_dir = asset_p.parent_path().parent_path() / "Materials";
-			if (std::filesystem::exists(mat_dir) && std::filesystem::is_directory(mat_dir)) {
-				for (const auto& entry : std::filesystem::directory_iterator(mat_dir)) {
-					if (entry.path().extension() == ".budasset" && asset_manager && asset_manager->get_vfs()) {
-						auto mat_data = asset_manager->get_vfs()->read_binary(entry.path().generic_string());
-						if (mat_data && mat_data->size() >= sizeof(bud::asset::BudAssetHeader)) {
-							const auto* ah = reinterpret_cast<const bud::asset::BudAssetHeader*>(mat_data->data());
-							if (ah->magic == bud::asset::BUD_ASSET_MAGIC) {
-								const auto* chunks = reinterpret_cast<const bud::asset::AssetChunkEntry*>(mat_data->data() + ah->chunk_table_offset);
-								for (uint32_t c = 0; c < ah->chunk_count; ++c) {
-									if (chunks[c].chunk_type == static_cast<uint32_t>(bud::asset::AssetChunkType::Material)) {
-										const auto* rmh = reinterpret_cast<const bud::asset::RuntimeMaterialHeader*>(mat_data->data() + chunks[c].offset);
-										bud::asset::MaterialDescriptor md{};
-										md.alpha_mode = rmh->alpha_mode;
-										md.alpha_cutoff = rmh->alpha_cutoff;
-										md.double_sided = rmh->double_sided;
-										md.metallic_factor = rmh->metallic_factor;
-										md.roughness_factor = rmh->roughness_factor;
-										asset.materials.push_back(md);
-										break;
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
 		// Register materials into GPUScene using asset-driven material descriptors
 		for (size_t mi = 0; mi < asset.materials.size(); ++mi) {
 			const auto& mat_desc = asset.materials[mi];
@@ -134,25 +121,8 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 
 			auto resolve_and_bind_texture = [&](uint32_t tex_idx) -> uint32_t {
 				if (tex_idx >= asset.textures.size() || !renderer) return 0;
-				const std::string& raw_tex_path = asset.textures[tex_idx];
-				if (raw_tex_path.empty()) return 0;
-
-				std::string tex_path = raw_tex_path;
-				std::filesystem::path tp(raw_tex_path);
-				std::string stem = tp.stem().string();
-				std::filesystem::path asset_p(path);
-				std::filesystem::path candidate1 = asset_p.parent_path().parent_path() / "Textures" / (stem + ".budasset");
-				std::filesystem::path candidate2 = asset_p.parent_path() / "Textures" / (stem + ".budasset");
-				std::filesystem::path candidate3 = asset_p.parent_path() / (stem + ".budasset");
-
-				if (std::filesystem::exists(candidate1)) {
-					tex_path = candidate1.generic_string();
-				} else if (std::filesystem::exists(candidate2)) {
-					tex_path = candidate2.generic_string();
-				} else if (std::filesystem::exists(candidate3)) {
-					tex_path = candidate3.generic_string();
-				}
-
+				const std::string& tex_path = asset.textures[tex_idx];
+				if (tex_path.empty()) return 0;
 				return renderer->bind_texture_async(tex_path);
 			};
 
@@ -313,7 +283,15 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 					page_submeshes,
 					{},
 					dummy_errs);
-				asset_registered_callback(mesh_id, global_aabb, root_group_index + asset_ptr->root_group_index, base_virtual_page);
+
+				RegisteredVGAssetInfo rinfo;
+				rinfo.mesh_id = mesh_id;
+				rinfo.global_aabb = global_aabb;
+				rinfo.root_group_index = root_group_index + asset_ptr->root_group_index;
+				rinfo.base_virtual_page = base_virtual_page;
+				registered_info_map[path] = rinfo;
+
+				asset_registered_callback(path, mesh_id, global_aabb, rinfo.root_group_index, base_virtual_page);
 			}
 		}
 

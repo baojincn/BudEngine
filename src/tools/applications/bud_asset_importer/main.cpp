@@ -97,7 +97,47 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // 2. 3D Model Import (Enforce Full Package Cascade Import)
+    if (output_dir.empty()) {
+        if (!output_path.empty()) {
+            std::filesystem::path out_p(output_path);
+            if (out_p.has_extension()) {
+                std::string parent_name = out_p.parent_path().filename().string();
+                if (parent_name == "Meshes" || parent_name == "meshes") {
+                    output_dir = out_p.parent_path().parent_path().string();
+                } else {
+                    output_dir = out_p.parent_path().string();
+                }
+            } else {
+                output_dir = output_path;
+            }
+        }
+        if (output_dir.empty()) {
+            output_dir = "Content/" + stem;
+        }
+    }
+
+    bud::asset_pipeline::CascadeBuildOptions cascade_opts{};
+    cascade_opts.cache_root = cache_dir;
+    cascade_opts.use_cache = use_cache;
+    cascade_opts.dump_text = dump_text;
+    cascade_opts.scale = scale;
+
+    // 2. Scene Import with 1:1 Directory Mirroring (glTF / glb)
+    if (ext == ".gltf" || ext == ".glb") {
+        auto raw_scene_opt = bud::asset_pipeline::GltfImporter::import_scene_from_file(input_path);
+        if (raw_scene_opt && raw_scene_opt->instances.size() > 1) {
+            std::cout << "[BudAssetImporter] Importing scene package for " << stem << " -> " << output_dir << std::endl;
+            if (bud::asset_pipeline::CascadeBuilder::build_scene_package(*raw_scene_opt, output_dir, cascade_opts)) {
+                std::cout << "[BudAssetImporter] Successfully imported full scene package to: " << output_dir << std::endl;
+                return 0;
+            } else {
+                std::cerr << "[BudAssetImporter] Failed to import scene package." << std::endl;
+                return 1;
+            }
+        }
+    }
+
+    // 3. Fallback / Single Mesh Package Import
     std::optional<bud::asset_pipeline::RawMesh> raw_mesh_opt;
     if (ext == ".obj") {
         raw_mesh_opt = bud::asset_pipeline::ObjImporter::import_from_file(input_path, scale);
@@ -108,16 +148,6 @@ int main(int argc, char* argv[]) {
     } else if (ext == ".rawmesh") {
         raw_mesh_opt = bud::asset_pipeline::RawMesh::load_from_file(input_path);
     } else if (ext == ".budasset") {
-        bud::asset_pipeline::CascadeBuildOptions cascade_opts{};
-        cascade_opts.cache_root = cache_dir;
-        cascade_opts.use_cache = use_cache;
-        cascade_opts.dump_text = dump_text;
-        cascade_opts.scale = scale;
-
-        if (output_dir.empty()) {
-            output_dir = "Content/" + stem;
-        }
-
         if (bud::asset_pipeline::CascadeBuilder::build_package(input_path, output_dir, cascade_opts)) {
             std::cout << "[BudAssetImporter] Successfully imported full asset package to: " << output_dir << std::endl;
             return 0;
@@ -135,33 +165,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (output_dir.empty()) {
-        if (!output_path.empty()) {
-            std::filesystem::path out_p(output_path);
-            if (out_p.has_extension()) {
-                // e.g. Content/Cryteksponza/Meshes/sponza.budasset -> Content/Cryteksponza
-                std::string parent_name = out_p.parent_path().filename().string();
-                if (parent_name == "Meshes" || parent_name == "meshes") {
-                    output_dir = out_p.parent_path().parent_path().string();
-                } else {
-                    output_dir = out_p.parent_path().string();
-                }
-            } else {
-                output_dir = output_path;
-            }
-        }
-        if (output_dir.empty()) {
-            output_dir = "Content/" + stem;
-        }
-    }
-
     std::cout << "[BudAssetImporter] Importing complete package for " << stem << " -> " << output_dir << std::endl;
-
-    bud::asset_pipeline::CascadeBuildOptions cascade_opts{};
-    cascade_opts.cache_root = cache_dir;
-    cascade_opts.use_cache = use_cache;
-    cascade_opts.dump_text = dump_text;
-    cascade_opts.scale = scale;
 
     if (bud::asset_pipeline::CascadeBuilder::build_package_from_raw(*raw_mesh_opt, output_dir, cascade_opts)) {
         std::cout << "[BudAssetImporter] Successfully imported full asset package to: " << output_dir << std::endl;

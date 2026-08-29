@@ -30,10 +30,10 @@ void TriangleApp::on_init(const AppConfig& config) {
 
 	renderer->set_streaming_manager(streaming_manager.get());
 
-	streaming_manager->set_asset_registered_callback([engine](uint32_t mesh_id, const bud::math::AABB&, uint32_t root_group_index, uint32_t base_virtual_page) {
+	streaming_manager->set_asset_registered_callback([engine](const std::string& path, uint32_t mesh_id, const bud::math::AABB&, uint32_t root_group_index, uint32_t base_virtual_page) {
 		auto& s = engine->get_scene();
 		bud::scene::Entity e;
-		e.asset_path = "[asset_streaming]";
+		e.asset_path = path;
 		e.mesh_index = mesh_id;
 		e.material_index = 0;
 		e.is_active = true;
@@ -42,7 +42,6 @@ void TriangleApp::on_init(const AppConfig& config) {
 		e.root_group_index = root_group_index;
 		e.base_virtual_page = base_virtual_page;
 		s.entities.push_back(std::move(e));
-		//bud::print("[TriangleApp] Asset entity added: mesh_id={} total_entities={}", mesh_id, s.entities.size());
 	});
 
 	// 1. Initial Render Config
@@ -81,33 +80,39 @@ void TriangleApp::on_init(const AppConfig& config) {
 				};
 
 				if (streaming_manager) {
-					streaming_manager->set_asset_registered_callback([this, engine, renderer](uint32_t mesh_id, const bud::math::AABB& aabb, uint32_t root_group_index, uint32_t base_virtual_page) {
+					streaming_manager->set_asset_registered_callback([this, engine, renderer](const std::string& path, uint32_t mesh_id, const bud::math::AABB& aabb, uint32_t root_group_index, uint32_t base_virtual_page) {
 						renderer->register_mesh_bounds(mesh_id, aabb);
 						auto& s = engine->get_scene();
 						for (auto& ent : s.entities) {
-							if (!ent.asset_path.empty() && (ent.asset_path.ends_with(".budasset") || ent.asset_path.ends_with(".budmesh"))) {
+							if (ent.asset_path == path) {
 								ent.mesh_index = mesh_id;
 								ent.root_group_index = root_group_index;
 								ent.base_virtual_page = base_virtual_page;
 							}
 						}
-						bud::print("[TriangleApp] Virtual Geometry mesh registered: mesh_id={}, root_group={}, base_page={}", mesh_id, root_group_index, base_virtual_page);
+						bud::print("[TriangleApp] Virtual Geometry mesh registered: {} (mesh_id={}, root_group={}, base_page={})", path, mesh_id, root_group_index, base_virtual_page);
 					});
 				}
 
-				// Route Virtual Geometry assets (.budasset / .budmesh) through GPU page streaming;
-				// everything else loads as a traditional dynamic mesh below.
+				// Route Virtual Geometry assets through GPU page streaming;
+				// everything else (Translucent, Dynamic, etc.) loads as traditional mesh below.
+				std::unordered_set<std::string> unique_vg_paths;
 				for (auto& e : scene.entities) {
-					if (!e.asset_path.empty() && is_vg_asset(e.asset_path)) {
-						if (streaming_manager)
-							streaming_manager->register_virtual_geometry_async(e.asset_path);
+					if (!e.asset_path.empty() && e.render_type == bud::scene::RenderType::VirtualGeometry) {
+						unique_vg_paths.insert(e.asset_path);
 						e.mesh_index = bud::asset::INVALID_INDEX;
+					}
+				}
+
+				if (streaming_manager) {
+					for (const auto& path : unique_vg_paths) {
+						streaming_manager->register_virtual_geometry_async(path);
 					}
 				}
 
 				int count = 0;
 				for (auto& e : scene.entities)
-					if (!e.asset_path.empty() && !is_vg_asset(e.asset_path))
+					if (!e.asset_path.empty() && e.render_type != bud::scene::RenderType::VirtualGeometry)
 						++count;
 
 				pending_mesh_loads->store(count);
@@ -119,7 +124,7 @@ void TriangleApp::on_init(const AppConfig& config) {
 
 				for (size_t i = 0; i < scene.entities.size(); ++i) {
 					const auto asset_path = scene.entities[i].asset_path;
-					if (asset_path.empty() || is_vg_asset(asset_path)) continue;
+					if (asset_path.empty() || scene.entities[i].render_type == bud::scene::RenderType::VirtualGeometry) continue;
 
 					asset_manager->load_mesh_async(asset_path, [this, engine, renderer, pending_mesh = pending_mesh_loads, asset_path, i](bud::io::MeshData mesh) mutable {
 						auto mesh_handle = renderer->upload_mesh(mesh);

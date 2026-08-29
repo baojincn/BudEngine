@@ -12,44 +12,18 @@
 
 namespace bud::asset_pipeline {
 
-std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepath) {
-    Assimp::Importer importer;
-    unsigned int flags = aiProcess_Triangulate |
-                         aiProcess_GenSmoothNormals |
-                         aiProcess_CalcTangentSpace |
-                         aiProcess_JoinIdenticalVertices;
-    const aiScene* scene = importer.ReadFile(filepath, flags);
+namespace {
 
-    if (!scene || !scene->mRootNode || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE)) {
-        std::cerr << "[BudAssetPipeline] Assimp error reading " << filepath << ": " << importer.GetErrorString() << std::endl;
-        return std::nullopt;
-    }
+void extract_materials_and_textures(
+    const aiScene* scene,
+    const std::string& filepath,
+    const std::string& base_dir,
+    const nlohmann::json& gltf_json,
+    bool has_gltf_json,
+    std::vector<RawMaterial>& out_materials,
+    std::vector<std::string>& out_textures) {
 
-    if (scene->mNumMeshes == 0) {
-        std::cerr << "[BudAssetPipeline] No meshes found in: " << filepath << std::endl;
-        return std::nullopt;
-    }
-
-    RawMesh raw_mesh;
-    raw_mesh.source_path = filepath;
-
-    std::string base_dir;
-    size_t last_slash = filepath.find_last_of("\\/");
-    if (last_slash != std::string::npos)
-        base_dir = filepath.substr(0, last_slash + 1);
-
-    raw_mesh.textures.push_back("data/textures/default.png");
-
-    // Parse glTF JSON directly for full extension support (e.g. KHR_materials_pbrSpecularGlossiness, MSFT_texture_dds, explicit alphaMode, etc.)
-    nlohmann::json gltf_json;
-    bool has_gltf_json = false;
-    std::ifstream gltf_in(filepath);
-    if (gltf_in.is_open()) {
-        try {
-            gltf_in >> gltf_json;
-            has_gltf_json = true;
-        } catch (...) {}
-    }
+    out_textures.push_back("data/textures/default.png");
 
     auto resolve_gltf_texture_path = [&](int tex_idx) -> std::string {
         if (tex_idx < 0 || !has_gltf_json || !gltf_json.contains("textures") ||
@@ -60,11 +34,9 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
         const auto& tex_obj = gltf_json["textures"][tex_idx];
         int img_idx = -1;
 
-        // Check MSFT_texture_dds extension first
         if (tex_obj.contains("extensions") && tex_obj["extensions"].contains("MSFT_texture_dds")) {
             img_idx = tex_obj["extensions"]["MSFT_texture_dds"].value("source", -1);
         }
-        // Fallback to standard source
         if (img_idx < 0) {
             img_idx = tex_obj.value("source", -1);
         }
@@ -78,7 +50,6 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
                     p = base_dir + p;
                 }
 
-                // If file does not exist directly, try alternate extensions (.dds / .png / .jpg / .tga)
                 if (!std::filesystem::exists(p)) {
                     const std::string exts[] = { ".dds", ".png", ".jpg", ".tga", ".jpeg" };
                     for (const auto& ext : exts) {
@@ -109,12 +80,11 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
             if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0)
                 p = base_dir + p;
             rm.base_color_texture_path = p;
-            raw_mesh.textures.push_back(p);
+            out_textures.push_back(p);
         } else {
-            rm.base_color_texture_path = raw_mesh.textures[0];
+            rm.base_color_texture_path = out_textures[0];
         }
 
-        // 1. Detect Alpha Mode & Cutoff from glTF Material Properties
         rm.alpha_mode = bud::asset::AlphaMode::Opaque;
         rm.alpha_cutoff = 0.5f;
         rm.double_sided = false;
@@ -155,7 +125,6 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
             rm.double_sided = (two_sided != 0);
         }
 
-        // PBR Textures from Assimp
         aiString norm_path;
         if (mat->GetTexture(aiTextureType_NORMALS, 0, &norm_path) == AI_SUCCESS ||
             mat->GetTexture(aiTextureType_HEIGHT, 0, &norm_path) == AI_SUCCESS) {
@@ -189,25 +158,22 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
             rm.roughness_factor = roughness_factor;
         }
 
-        // 2. glTF JSON Deep Extension & Specular-Glossiness / Metallic-Roughness Extraction
+        // glTF JSON Extension & Specular-Glossiness / Metallic-Roughness Extraction
         if (has_gltf_json && gltf_json.contains("materials") && i < gltf_json["materials"].size()) {
             const auto& gj_mat = gltf_json["materials"][i];
 
-            // A. Specular-Glossiness Extension (Automatic Conversion to Metallic-Roughness)
             if (gj_mat.contains("extensions") && gj_mat["extensions"].contains("KHR_materials_pbrSpecularGlossiness")) {
                 const auto& spec_gloss = gj_mat["extensions"]["KHR_materials_pbrSpecularGlossiness"];
 
-                // Diffuse / BaseColor Texture
                 if (spec_gloss.contains("diffuseTexture")) {
                     int tex_idx = spec_gloss["diffuseTexture"].value("index", -1);
                     std::string diff_p = resolve_gltf_texture_path(tex_idx);
                     if (!diff_p.empty()) {
                         rm.base_color_texture_path = diff_p;
-                        raw_mesh.textures.push_back(diff_p);
+                        out_textures.push_back(diff_p);
                     }
                 }
 
-                // Diffuse Factor
                 if (spec_gloss.contains("diffuseFactor")) {
                     auto df = spec_gloss["diffuseFactor"];
                     if (df.is_array() && df.size() >= 3) {
@@ -218,11 +184,9 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
                     }
                 }
 
-                // Glossiness Factor -> Roughness Factor (Roughness = 1.0 - Glossiness)
                 float gloss = spec_gloss.value("glossinessFactor", 1.0f);
                 rm.roughness_factor = std::clamp(1.0f - gloss, 0.0f, 1.0f);
 
-                // Specular Factor -> Metallic Factor
                 if (spec_gloss.contains("specularFactor")) {
                     auto sf = spec_gloss["specularFactor"];
                     if (sf.is_array() && sf.size() >= 3) {
@@ -235,7 +199,6 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
                     }
                 }
 
-                // Specular-Glossiness Texture -> Convert to Standard Metallic-Roughness Texture
                 if (spec_gloss.contains("specularGlossinessTexture")) {
                     int sg_idx = spec_gloss["specularGlossinessTexture"].value("index", -1);
                     std::string sg_path = resolve_gltf_texture_path(sg_idx);
@@ -248,16 +211,14 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
                         }
                     }
                 }
-            }
-            // B. Standard Metallic-Roughness Workflow
-            else if (gj_mat.contains("pbrMetallicRoughness")) {
+            } else if (gj_mat.contains("pbrMetallicRoughness")) {
                 const auto& pbr_mr = gj_mat["pbrMetallicRoughness"];
                 if (pbr_mr.contains("baseColorTexture")) {
                     int tex_idx = pbr_mr["baseColorTexture"].value("index", -1);
                     std::string diff_p = resolve_gltf_texture_path(tex_idx);
                     if (!diff_p.empty()) {
                         rm.base_color_texture_path = diff_p;
-                        raw_mesh.textures.push_back(diff_p);
+                        out_textures.push_back(diff_p);
                     }
                 }
                 if (pbr_mr.contains("metallicRoughnessTexture")) {
@@ -284,7 +245,6 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
                 }
             }
 
-            // Normal Texture
             if (gj_mat.contains("normalTexture")) {
                 int tex_idx = gj_mat["normalTexture"].value("index", -1);
                 std::string norm_p = resolve_gltf_texture_path(tex_idx);
@@ -293,7 +253,6 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
                 }
             }
 
-            // Emissive Texture
             if (gj_mat.contains("emissiveTexture")) {
                 int tex_idx = gj_mat["emissiveTexture"].value("index", -1);
                 std::string em_p = resolve_gltf_texture_path(tex_idx);
@@ -302,7 +261,6 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
                 }
             }
 
-            // Alpha Mode & Cutoff
             if (gj_mat.contains("alphaMode")) {
                 std::string mode_str = gj_mat["alphaMode"].get<std::string>();
                 if (mode_str == "MASK") {
@@ -323,8 +281,8 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
             }
         }
 
-        // 3. Auto-scan companion PBR textures (_N, _R, _M, _E)
-        if (!rm.base_color_texture_path.empty() && rm.base_color_texture_path != raw_mesh.textures[0]) {
+        // Auto-scan companion PBR textures
+        if (!rm.base_color_texture_path.empty() && rm.base_color_texture_path != out_textures[0]) {
             auto companions = TextureImporter::find_companion_pbr_textures(rm.base_color_texture_path);
             if (rm.normal_texture_path.empty()) rm.normal_texture_path = companions.normal_path;
             if (rm.metallic_roughness_texture_path.empty()) {
@@ -334,8 +292,8 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
             if (rm.emissive_texture_path.empty()) rm.emissive_texture_path = companions.emissive_path;
         }
 
-        // 4. Texture Pixel Alpha Analysis (100% Data-driven):
-        if (rm.alpha_mode == bud::asset::AlphaMode::Opaque && !rm.base_color_texture_path.empty() && rm.base_color_texture_path != raw_mesh.textures[0]) {
+        // Alpha Analysis
+        if (rm.alpha_mode == bud::asset::AlphaMode::Opaque && !rm.base_color_texture_path.empty() && rm.base_color_texture_path != out_textures[0]) {
             auto alpha_info = TextureImporter::analyze_alpha(rm.base_color_texture_path);
             if (alpha_info.has_alpha) {
                 rm.alpha_mode = alpha_info.alpha_mode;
@@ -346,15 +304,56 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
             }
         }
 
-        raw_mesh.materials.push_back(std::move(rm));
+        out_materials.push_back(std::move(rm));
     }
 
-    if (raw_mesh.materials.empty()) {
+    if (out_materials.empty()) {
         RawMaterial def_mat;
         def_mat.name = "default_material";
-        def_mat.base_color_texture_path = raw_mesh.textures[0];
-        raw_mesh.materials.push_back(std::move(def_mat));
+        def_mat.base_color_texture_path = out_textures[0];
+        out_materials.push_back(std::move(def_mat));
     }
+}
+
+} // namespace
+
+std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepath) {
+    Assimp::Importer importer;
+    unsigned int flags = aiProcess_Triangulate |
+                         aiProcess_GenSmoothNormals |
+                         aiProcess_CalcTangentSpace |
+                         aiProcess_JoinIdenticalVertices;
+    const aiScene* scene = importer.ReadFile(filepath, flags);
+
+    if (!scene || !scene->mRootNode || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE)) {
+        std::cerr << "[BudAssetPipeline] Assimp error reading " << filepath << ": " << importer.GetErrorString() << std::endl;
+        return std::nullopt;
+    }
+
+    if (scene->mNumMeshes == 0) {
+        std::cerr << "[BudAssetPipeline] No meshes found in: " << filepath << std::endl;
+        return std::nullopt;
+    }
+
+    RawMesh raw_mesh;
+    raw_mesh.source_path = filepath;
+
+    std::string base_dir;
+    size_t last_slash = filepath.find_last_of("\\/");
+    if (last_slash != std::string::npos)
+        base_dir = filepath.substr(0, last_slash + 1);
+
+    nlohmann::json gltf_json;
+    bool has_gltf_json = false;
+    std::ifstream gltf_in(filepath);
+    if (gltf_in.is_open()) {
+        try {
+            gltf_in >> gltf_json;
+            has_gltf_json = true;
+        } catch (...) {}
+    }
+
+    extract_materials_and_textures(scene, filepath, base_dir, gltf_json, has_gltf_json, raw_mesh.materials, raw_mesh.textures);
 
     struct NodeInstance {
         unsigned int mesh_index;
@@ -443,6 +442,167 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
 
     raw_mesh.compute_bounds();
     return raw_mesh;
+}
+
+std::optional<RawScene> GltfImporter::import_scene_from_file(const std::string& filepath) {
+    Assimp::Importer importer;
+    unsigned int flags = aiProcess_Triangulate |
+                         aiProcess_GenSmoothNormals |
+                         aiProcess_CalcTangentSpace |
+                         aiProcess_JoinIdenticalVertices;
+    const aiScene* scene = importer.ReadFile(filepath, flags);
+
+    if (!scene || !scene->mRootNode || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE)) {
+        std::cerr << "[BudAssetPipeline] Assimp error reading " << filepath << ": " << importer.GetErrorString() << std::endl;
+        return std::nullopt;
+    }
+
+    if (scene->mNumMeshes == 0) {
+        std::cerr << "[BudAssetPipeline] No meshes found in: " << filepath << std::endl;
+        return std::nullopt;
+    }
+
+    RawScene raw_scene;
+    raw_scene.name = std::filesystem::path(filepath).stem().string();
+    raw_scene.source_path = filepath;
+
+    std::string base_dir;
+    size_t last_slash = filepath.find_last_of("\\/");
+    if (last_slash != std::string::npos)
+        base_dir = filepath.substr(0, last_slash + 1);
+
+    nlohmann::json gltf_json;
+    bool has_gltf_json = false;
+    std::ifstream gltf_in(filepath);
+    if (gltf_in.is_open()) {
+        try {
+            gltf_in >> gltf_json;
+            has_gltf_json = true;
+        } catch (...) {}
+    }
+
+    extract_materials_and_textures(scene, filepath, base_dir, gltf_json, has_gltf_json, raw_scene.materials, raw_scene.textures);
+
+    // 1. Build local-space RawSceneMesh for each unique aiMesh
+    for (unsigned int mi = 0; mi < scene->mNumMeshes; ++mi) {
+        const aiMesh* mesh = scene->mMeshes[mi];
+        RawSceneMesh sm;
+        sm.mesh_index = mi;
+        std::string raw_name = mesh->mName.length > 0 ? mesh->mName.C_Str() : "submesh";
+        sm.name = "mesh_" + std::to_string(mi) + "_" + raw_name;
+        
+        // Find relative directory based on material's base_color_texture_path
+        uint32_t mat_idx = mesh->mMaterialIndex < raw_scene.materials.size() ? mesh->mMaterialIndex : 0;
+        const auto& mat = raw_scene.materials[mat_idx];
+        sm.is_translucent = (mat.alpha_mode == bud::asset::AlphaMode::Blend);
+
+        if (!mat.base_color_texture_path.empty() && mat.base_color_texture_path != raw_scene.textures[0]) {
+            std::error_code ec;
+            std::filesystem::path rel = std::filesystem::relative(mat.base_color_texture_path, base_dir, ec);
+            if (!ec && !rel.empty() && rel.has_parent_path()) {
+                sm.relative_dir = rel.parent_path().generic_string();
+            }
+        }
+
+        // Fill local space mesh data
+        sm.mesh.source_path = filepath + "#" + sm.name;
+        sm.mesh.materials = raw_scene.materials;
+        sm.mesh.textures = raw_scene.textures;
+
+        for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
+            RawVertex rv{};
+            rv.position[0] = mesh->mVertices[v].x;
+            rv.position[1] = mesh->mVertices[v].y;
+            rv.position[2] = mesh->mVertices[v].z;
+
+            if (mesh->HasNormals()) {
+                rv.normal[0] = mesh->mNormals[v].x;
+                rv.normal[1] = mesh->mNormals[v].y;
+                rv.normal[2] = mesh->mNormals[v].z;
+            } else {
+                rv.normal[0] = 0.0f;
+                rv.normal[1] = 1.0f;
+                rv.normal[2] = 0.0f;
+            }
+
+            if (mesh->HasTextureCoords(0)) {
+                rv.uv[0] = mesh->mTextureCoords[0][v].x;
+                rv.uv[1] = mesh->mTextureCoords[0][v].y;
+            } else {
+                rv.uv[0] = 0.0f;
+                rv.uv[1] = 0.0f;
+            }
+
+            if (mesh->HasTangentsAndBitangents()) {
+                rv.tangent[0] = mesh->mTangents[v].x;
+                rv.tangent[1] = mesh->mTangents[v].y;
+                rv.tangent[2] = mesh->mTangents[v].z;
+                rv.tangent[3] = 1.0f;
+            } else {
+                rv.tangent[0] = 1.0f;
+                rv.tangent[1] = 0.0f;
+                rv.tangent[2] = 0.0f;
+                rv.tangent[3] = 1.0f;
+            }
+
+            sm.mesh.vertices.push_back(rv);
+        }
+
+        for (unsigned int f = 0; f < mesh->mNumFaces; ++f) {
+            const aiFace& face = mesh->mFaces[f];
+            if (face.mNumIndices == 3) {
+                sm.mesh.indices.push_back(face.mIndices[0]);
+                sm.mesh.indices.push_back(face.mIndices[1]);
+                sm.mesh.indices.push_back(face.mIndices[2]);
+            }
+        }
+
+        RawSubmesh submesh{};
+        submesh.name = sm.name;
+        submesh.index_offset = 0;
+        submesh.index_count = static_cast<uint32_t>(sm.mesh.indices.size());
+        submesh.material_index = mat_idx;
+        sm.mesh.submeshes.push_back(submesh);
+        sm.mesh.compute_bounds();
+
+        raw_scene.meshes.push_back(std::move(sm));
+    }
+
+    // 2. Collect instances from Node hierarchy
+    std::function<void(aiNode*, aiMatrix4x4)> collect_scene_instances = [&](aiNode* node, aiMatrix4x4 parent_xf) {
+        aiMatrix4x4 cur_xf = parent_xf * node->mTransformation;
+        for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
+            unsigned int mi = node->mMeshes[i];
+            if (mi < raw_scene.meshes.size()) {
+                RawSceneInstance inst;
+                inst.name = node->mName.length > 0 ? (std::string(node->mName.C_Str()) + "_" + std::to_string(i)) : ("instance_" + std::to_string(raw_scene.instances.size()));
+                inst.mesh_index = mi;
+                inst.mesh_name = raw_scene.meshes[mi].name;
+                inst.relative_dir = raw_scene.meshes[mi].relative_dir;
+                inst.is_translucent = raw_scene.meshes[mi].is_translucent;
+
+                // Column-major 4x4 matrix for GPU shaders / GLM
+                inst.transform[0] = cur_xf.a1; inst.transform[1] = cur_xf.b1; inst.transform[2] = cur_xf.c1; inst.transform[3] = cur_xf.d1;
+                inst.transform[4] = cur_xf.a2; inst.transform[5] = cur_xf.b2; inst.transform[6] = cur_xf.c2; inst.transform[7] = cur_xf.d2;
+                inst.transform[8] = cur_xf.a3; inst.transform[9] = cur_xf.b3; inst.transform[10] = cur_xf.c3; inst.transform[11] = cur_xf.d3;
+                inst.transform[12] = cur_xf.a4; inst.transform[13] = cur_xf.b4; inst.transform[14] = cur_xf.c4; inst.transform[15] = cur_xf.d4;
+
+                raw_scene.instances.push_back(inst);
+            }
+        }
+        for (unsigned int i = 0; i < node->mNumChildren; ++i) {
+            collect_scene_instances(node->mChildren[i], cur_xf);
+        }
+    };
+    collect_scene_instances(scene->mRootNode, aiMatrix4x4());
+
+    raw_scene.compute_bounds();
+    std::cout << "[BudAssetPipeline] Parsed Scene: " << raw_scene.name << " ("
+              << raw_scene.meshes.size() << " unique meshes, "
+              << raw_scene.instances.size() << " instances, "
+              << raw_scene.materials.size() << " materials)" << std::endl;
+
+    return raw_scene;
 }
 
 } // namespace bud::asset_pipeline

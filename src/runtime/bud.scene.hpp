@@ -42,13 +42,22 @@ namespace bud::scene {
 		void update_camera_vectors();
 	};
 
-	 struct Entity {
+	enum class RenderType : uint32_t {
+		VirtualGeometry = 0,
+		Translucent = 1,
+		Dynamic = 2,
+		Custom = 3
+	};
+
+	struct Entity {
+		std::string name = "";
 		std::string asset_path = "";
 		uint32_t mesh_index = 0xFFFFFFFF;
 		uint32_t material_index = 0;
 		bud::math::mat4 transform = bud::math::mat4(1.0f);
 		bool is_static = true;
 		bool is_active = true;
+		RenderType render_type = RenderType::VirtualGeometry;
 		
 		// GPU-driven virtual geometry hierarchy parameters
 		uint32_t root_group_index = 0xFFFFFFFF;
