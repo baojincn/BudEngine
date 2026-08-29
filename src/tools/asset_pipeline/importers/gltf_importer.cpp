@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <functional>
 #include <algorithm>
 
@@ -39,7 +40,7 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
 
     raw_mesh.textures.push_back("data/textures/default.png");
 
-    // Parse glTF JSON directly for full extension support (e.g. KHR_materials_pbrSpecularGlossiness, explicit alphaMode, etc.)
+    // Parse glTF JSON directly for full extension support (e.g. KHR_materials_pbrSpecularGlossiness, MSFT_texture_dds, explicit alphaMode, etc.)
     nlohmann::json gltf_json;
     bool has_gltf_json = false;
     std::ifstream gltf_in(filepath);
@@ -49,6 +50,50 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
             has_gltf_json = true;
         } catch (...) {}
     }
+
+    auto resolve_gltf_texture_path = [&](int tex_idx) -> std::string {
+        if (tex_idx < 0 || !has_gltf_json || !gltf_json.contains("textures") ||
+            tex_idx >= static_cast<int>(gltf_json["textures"].size())) {
+            return "";
+        }
+
+        const auto& tex_obj = gltf_json["textures"][tex_idx];
+        int img_idx = -1;
+
+        // Check MSFT_texture_dds extension first
+        if (tex_obj.contains("extensions") && tex_obj["extensions"].contains("MSFT_texture_dds")) {
+            img_idx = tex_obj["extensions"]["MSFT_texture_dds"].value("source", -1);
+        }
+        // Fallback to standard source
+        if (img_idx < 0) {
+            img_idx = tex_obj.value("source", -1);
+        }
+
+        if (img_idx >= 0 && gltf_json.contains("images") &&
+            img_idx < static_cast<int>(gltf_json["images"].size())) {
+            std::string uri = gltf_json["images"][img_idx].value("uri", "");
+            if (!uri.empty()) {
+                std::string p = uri;
+                if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) {
+                    p = base_dir + p;
+                }
+
+                // If file does not exist directly, try alternate extensions (.dds / .png / .jpg / .tga)
+                if (!std::filesystem::exists(p)) {
+                    const std::string exts[] = { ".dds", ".png", ".jpg", ".tga", ".jpeg" };
+                    for (const auto& ext : exts) {
+                        auto cand = std::filesystem::path(p).replace_extension(ext).string();
+                        if (std::filesystem::exists(cand)) {
+                            p = cand;
+                            break;
+                        }
+                    }
+                }
+                return p;
+            }
+        }
+        return "";
+    };
 
     for (unsigned int i = 0; i < scene->mNumMaterials; ++i) {
         aiMaterial* mat = scene->mMaterials[i];
@@ -110,7 +155,7 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
             rm.double_sided = (two_sided != 0);
         }
 
-        // 1. PBR Textures from Assimp
+        // PBR Textures from Assimp
         aiString norm_path;
         if (mat->GetTexture(aiTextureType_NORMALS, 0, &norm_path) == AI_SUCCESS ||
             mat->GetTexture(aiTextureType_HEIGHT, 0, &norm_path) == AI_SUCCESS) {
@@ -139,79 +184,125 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
         if (mat->Get(AI_MATKEY_METALLIC_FACTOR, metallic_factor) == AI_SUCCESS) {
             rm.metallic_factor = metallic_factor;
         }
-        float roughness_factor = 0.5f;
+        float roughness_factor = 0.85f;
         if (mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness_factor) == AI_SUCCESS) {
             rm.roughness_factor = roughness_factor;
         }
 
-        // 2. glTF JSON Extension & Fallback Extraction
+        // 2. glTF JSON Deep Extension & Specular-Glossiness / Metallic-Roughness Extraction
         if (has_gltf_json && gltf_json.contains("materials") && i < gltf_json["materials"].size()) {
             const auto& gj_mat = gltf_json["materials"][i];
 
-            // Resolve diffuse/albedo texture from extensions
-            if (rm.base_color_texture_path.empty() || rm.base_color_texture_path == raw_mesh.textures[0]) {
-                int tex_idx = -1;
-                if (gj_mat.contains("pbrMetallicRoughness") && gj_mat["pbrMetallicRoughness"].contains("baseColorTexture")) {
-                    tex_idx = gj_mat["pbrMetallicRoughness"]["baseColorTexture"].value("index", -1);
-                } else if (gj_mat.contains("extensions") && gj_mat["extensions"].contains("KHR_materials_pbrSpecularGlossiness")) {
-                    const auto& spec_gloss = gj_mat["extensions"]["KHR_materials_pbrSpecularGlossiness"];
-                    if (spec_gloss.contains("diffuseTexture")) {
-                        tex_idx = spec_gloss["diffuseTexture"].value("index", -1);
+            // A. Specular-Glossiness Extension (Automatic Conversion to Metallic-Roughness)
+            if (gj_mat.contains("extensions") && gj_mat["extensions"].contains("KHR_materials_pbrSpecularGlossiness")) {
+                const auto& spec_gloss = gj_mat["extensions"]["KHR_materials_pbrSpecularGlossiness"];
+
+                // Diffuse / BaseColor Texture
+                if (spec_gloss.contains("diffuseTexture")) {
+                    int tex_idx = spec_gloss["diffuseTexture"].value("index", -1);
+                    std::string diff_p = resolve_gltf_texture_path(tex_idx);
+                    if (!diff_p.empty()) {
+                        rm.base_color_texture_path = diff_p;
+                        raw_mesh.textures.push_back(diff_p);
                     }
                 }
 
-                if (tex_idx >= 0 && gltf_json.contains("textures") && tex_idx < static_cast<int>(gltf_json["textures"].size())) {
-                    int img_idx = gltf_json["textures"][tex_idx].value("source", -1);
-                    if (img_idx >= 0 && gltf_json.contains("images") && img_idx < static_cast<int>(gltf_json["images"].size())) {
-                        std::string uri = gltf_json["images"][img_idx].value("uri", "");
-                        if (!uri.empty()) {
-                            std::string p = uri;
-                            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0)
-                                p = base_dir + p;
-                            rm.base_color_texture_path = p;
-                            raw_mesh.textures.push_back(p);
+                // Diffuse Factor
+                if (spec_gloss.contains("diffuseFactor")) {
+                    auto df = spec_gloss["diffuseFactor"];
+                    if (df.is_array() && df.size() >= 3) {
+                        rm.base_color_factor[0] = df[0].get<float>();
+                        rm.base_color_factor[1] = df[1].get<float>();
+                        rm.base_color_factor[2] = df[2].get<float>();
+                        rm.base_color_factor[3] = (df.size() >= 4) ? df[3].get<float>() : 1.0f;
+                    }
+                }
+
+                // Glossiness Factor -> Roughness Factor (Roughness = 1.0 - Glossiness)
+                float gloss = spec_gloss.value("glossinessFactor", 1.0f);
+                rm.roughness_factor = std::clamp(1.0f - gloss, 0.0f, 1.0f);
+
+                // Specular Factor -> Metallic Factor
+                if (spec_gloss.contains("specularFactor")) {
+                    auto sf = spec_gloss["specularFactor"];
+                    if (sf.is_array() && sf.size() >= 3) {
+                        float max_spec = std::max({ sf[0].get<float>(), sf[1].get<float>(), sf[2].get<float>() });
+                        if (max_spec > 0.08f) {
+                            rm.metallic_factor = std::clamp((max_spec - 0.04f) / 0.96f, 0.0f, 1.0f);
+                        } else {
+                            rm.metallic_factor = 0.0f;
+                        }
+                    }
+                }
+
+                // Specular-Glossiness Texture -> Convert to Standard Metallic-Roughness Texture
+                if (spec_gloss.contains("specularGlossinessTexture")) {
+                    int sg_idx = spec_gloss["specularGlossinessTexture"].value("index", -1);
+                    std::string sg_path = resolve_gltf_texture_path(sg_idx);
+                    if (!sg_path.empty()) {
+                        std::string mr_path = TextureImporter::convert_spec_gloss_to_metallic_roughness(sg_path);
+                        if (!mr_path.empty()) {
+                            rm.metallic_roughness_texture_path = mr_path;
+                            rm.roughness_factor = 1.0f;
+                            rm.metallic_factor = 1.0f;
                         }
                     }
                 }
             }
+            // B. Standard Metallic-Roughness Workflow
+            else if (gj_mat.contains("pbrMetallicRoughness")) {
+                const auto& pbr_mr = gj_mat["pbrMetallicRoughness"];
+                if (pbr_mr.contains("baseColorTexture")) {
+                    int tex_idx = pbr_mr["baseColorTexture"].value("index", -1);
+                    std::string diff_p = resolve_gltf_texture_path(tex_idx);
+                    if (!diff_p.empty()) {
+                        rm.base_color_texture_path = diff_p;
+                        raw_mesh.textures.push_back(diff_p);
+                    }
+                }
+                if (pbr_mr.contains("metallicRoughnessTexture")) {
+                    int tex_idx = pbr_mr["metallicRoughnessTexture"].value("index", -1);
+                    std::string mr_p = resolve_gltf_texture_path(tex_idx);
+                    if (!mr_p.empty()) {
+                        rm.metallic_roughness_texture_path = mr_p;
+                    }
+                }
+                if (pbr_mr.contains("baseColorFactor")) {
+                    auto bcf = pbr_mr["baseColorFactor"];
+                    if (bcf.is_array() && bcf.size() >= 3) {
+                        rm.base_color_factor[0] = bcf[0].get<float>();
+                        rm.base_color_factor[1] = bcf[1].get<float>();
+                        rm.base_color_factor[2] = bcf[2].get<float>();
+                        rm.base_color_factor[3] = (bcf.size() >= 4) ? bcf[3].get<float>() : 1.0f;
+                    }
+                }
+                if (pbr_mr.contains("metallicFactor")) {
+                    rm.metallic_factor = pbr_mr["metallicFactor"].get<float>();
+                }
+                if (pbr_mr.contains("roughnessFactor")) {
+                    rm.roughness_factor = pbr_mr["roughnessFactor"].get<float>();
+                }
+            }
 
-            if (rm.normal_texture_path.empty() && gj_mat.contains("normalTexture")) {
+            // Normal Texture
+            if (gj_mat.contains("normalTexture")) {
                 int tex_idx = gj_mat["normalTexture"].value("index", -1);
-                if (tex_idx >= 0 && gltf_json.contains("textures") && tex_idx < static_cast<int>(gltf_json["textures"].size())) {
-                    int img_idx = gltf_json["textures"][tex_idx].value("source", -1);
-                    if (img_idx >= 0 && gltf_json.contains("images") && img_idx < static_cast<int>(gltf_json["images"].size())) {
-                        std::string uri = gltf_json["images"][img_idx].value("uri", "");
-                        if (!uri.empty()) {
-                            std::string p = uri;
-                            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
-                            rm.normal_texture_path = p;
-                        }
-                    }
+                std::string norm_p = resolve_gltf_texture_path(tex_idx);
+                if (!norm_p.empty()) {
+                    rm.normal_texture_path = norm_p;
                 }
             }
 
-            if (rm.metallic_roughness_texture_path.empty() && gj_mat.contains("pbrMetallicRoughness") && gj_mat["pbrMetallicRoughness"].contains("metallicRoughnessTexture")) {
-                int tex_idx = gj_mat["pbrMetallicRoughness"]["metallicRoughnessTexture"].value("index", -1);
-                if (tex_idx >= 0 && gltf_json.contains("textures") && tex_idx < static_cast<int>(gltf_json["textures"].size())) {
-                    int img_idx = gltf_json["textures"][tex_idx].value("source", -1);
-                    if (img_idx >= 0 && gltf_json.contains("images") && img_idx < static_cast<int>(gltf_json["images"].size())) {
-                        std::string uri = gltf_json["images"][img_idx].value("uri", "");
-                        if (!uri.empty()) {
-                            std::string p = uri;
-                            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
-                            rm.metallic_roughness_texture_path = p;
-                        }
-                    }
+            // Emissive Texture
+            if (gj_mat.contains("emissiveTexture")) {
+                int tex_idx = gj_mat["emissiveTexture"].value("index", -1);
+                std::string em_p = resolve_gltf_texture_path(tex_idx);
+                if (!em_p.empty()) {
+                    rm.emissive_texture_path = em_p;
                 }
             }
 
-            if (gj_mat.contains("pbrMetallicRoughness")) {
-                if (gj_mat["pbrMetallicRoughness"].contains("metallicFactor"))
-                    rm.metallic_factor = gj_mat["pbrMetallicRoughness"]["metallicFactor"].get<float>();
-                if (gj_mat["pbrMetallicRoughness"].contains("roughnessFactor"))
-                    rm.roughness_factor = gj_mat["pbrMetallicRoughness"]["roughnessFactor"].get<float>();
-            }
-
+            // Alpha Mode & Cutoff
             if (gj_mat.contains("alphaMode")) {
                 std::string mode_str = gj_mat["alphaMode"].get<std::string>();
                 if (mode_str == "MASK") {
@@ -332,22 +423,21 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
             raw_mesh.vertices.push_back(rv);
         }
 
-        uint32_t indices_added = 0;
         for (unsigned int f = 0; f < mesh->mNumFaces; ++f) {
             const aiFace& face = mesh->mFaces[f];
             if (face.mNumIndices == 3) {
                 raw_mesh.indices.push_back(vertex_base + face.mIndices[0]);
                 raw_mesh.indices.push_back(vertex_base + face.mIndices[1]);
                 raw_mesh.indices.push_back(vertex_base + face.mIndices[2]);
-                indices_added += 3;
             }
         }
 
-        RawSubmesh submesh;
-        submesh.name = mesh->mName.C_Str();
+        RawSubmesh submesh{};
+        submesh.name = mesh->mName.length > 0 ? mesh->mName.C_Str() : ("submesh_" + std::to_string(raw_mesh.submeshes.size()));
         submesh.index_offset = index_base;
-        submesh.index_count = indices_added;
-        submesh.material_index = std::min<uint32_t>(mesh->mMaterialIndex, static_cast<uint32_t>(raw_mesh.materials.size() - 1));
+        submesh.index_count = static_cast<uint32_t>(raw_mesh.indices.size() - index_base);
+        submesh.material_index = mesh->mMaterialIndex < raw_mesh.materials.size() ? mesh->mMaterialIndex : 0;
+
         raw_mesh.submeshes.push_back(submesh);
     }
 

@@ -99,7 +99,7 @@ static std::optional<RawMesh> import_assimp_common(const std::string& filepath, 
         if (mat->Get(AI_MATKEY_METALLIC_FACTOR, metallic_factor) == AI_SUCCESS) {
             rm.metallic_factor = metallic_factor;
         }
-        float roughness_factor = 0.5f;
+        float roughness_factor = 0.85f;
         if (mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness_factor) == AI_SUCCESS) {
             rm.roughness_factor = roughness_factor;
         }

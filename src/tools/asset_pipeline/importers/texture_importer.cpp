@@ -2,6 +2,9 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
+
 #define BCDEC_IMPLEMENTATION
 #include "../../../third_party/bcdec.h"
 
@@ -11,6 +14,8 @@
 #include <vector>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
+#include <unordered_set>
 
 namespace bud::asset_pipeline {
 
@@ -77,6 +82,28 @@ enum class DdsCompressionType {
     RGBA8,
     BGRA8
 };
+
+void normalize_ddna_normals_if_needed(RawTexture& tex, const std::string& path) {
+    std::string lower_path = path;
+    std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
+    if (lower_path.find("_ddna") != std::string::npos || lower_path.find("_ddn") != std::string::npos) {
+        size_t total_px = static_cast<size_t>(tex.width) * tex.height;
+        if (tex.pixels.size() >= total_px * 4) {
+            uint8_t* p = tex.pixels.data();
+            for (size_t k = 0; k < total_px; ++k) {
+                float nx = (p[k * 4 + 0] / 255.0f) * 2.0f - 1.0f;
+                float ny = (p[k * 4 + 1] / 255.0f) * 2.0f - 1.0f;
+                float nz = std::sqrt(std::max(0.0f, 1.0f - nx * nx - ny * ny));
+
+                p[k * 4 + 0] = static_cast<uint8_t>(std::clamp((nx * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+                p[k * 4 + 1] = static_cast<uint8_t>(std::clamp((ny * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+                p[k * 4 + 2] = static_cast<uint8_t>(std::clamp((nz * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+                p[k * 4 + 3] = 255;
+            }
+            tex.is_srgb = false;
+        }
+    }
+}
 
 std::optional<RawTexture> load_dds_file(const std::string& path, const std::vector<uint8_t>& file_data) {
     if (file_data.size() < sizeof(uint32_t) + sizeof(DDS_HEADER)) {
@@ -151,228 +178,173 @@ std::optional<RawTexture> load_dds_file(const std::string& path, const std::vect
                 compression = DdsCompressionType::RGBA8;
                 is_srgb = (dxt10->dxgiFormat == 29);
                 break;
-            case 87: case 91: // B8G8R8A8
+            case 87: case 90: case 91: // B8G8R8A8
                 compression = DdsCompressionType::BGRA8;
-                is_srgb = (dxt10->dxgiFormat == 91);
+                is_srgb = (dxt10->dxgiFormat == 90 || dxt10->dxgiFormat == 91);
                 break;
             default:
-                std::cerr << "[BudAssetPipeline] Unsupported DXGI format (" << dxt10->dxgiFormat << ") in: " << path << std::endl;
+                std::cerr << "[BudAssetPipeline] Unsupported DXGI format: " << dxt10->dxgiFormat << " in: " << path << std::endl;
                 return std::nullopt;
             }
         }
     } else if (header->ddspf.dwFlags & 0x40) { // DDPF_RGB
         if (header->ddspf.dwRGBBitCount == 32) {
-            if (header->ddspf.dwRBitMask == 0x000000FF && header->ddspf.dwBBitMask == 0x00FF0000)
-                compression = DdsCompressionType::RGBA8;
-            else if (header->ddspf.dwRBitMask == 0x00FF0000 && header->ddspf.dwBBitMask == 0x000000FF)
+            if (header->ddspf.dwRBitMask == 0x00FF0000 && header->ddspf.dwBBitMask == 0x000000FF) {
                 compression = DdsCompressionType::BGRA8;
-            else
+            } else {
                 compression = DdsCompressionType::RGBA8;
+            }
         }
     }
 
     if (compression == DdsCompressionType::None) {
-        std::cerr << "[BudAssetPipeline] Unknown or unsupported DDS format in: " << path << std::endl;
+        std::cerr << "[BudAssetPipeline] Unsupported or uncompressed DDS format in: " << path << std::endl;
         return std::nullopt;
     }
 
-    RawTexture raw_tex;
-    raw_tex.source_path = path;
-    raw_tex.width = width;
-    raw_tex.height = height;
-    raw_tex.channels = 4;
-    raw_tex.is_srgb = is_srgb;
-    raw_tex.pixels.resize(static_cast<size_t>(width) * height * 4);
+    RawTexture tex;
+    tex.source_path = path;
+    tex.width = width;
+    tex.height = height;
+    tex.channels = 4;
+    tex.is_srgb = is_srgb;
+    tex.pixels.resize(static_cast<size_t>(width) * height * 4);
 
     const uint8_t* src_ptr = file_data.data() + header_offset;
-
-    if (compression == DdsCompressionType::RGBA8) {
-        size_t copy_size = std::min(raw_tex.pixels.size(), file_data.size() - header_offset);
-        std::memcpy(raw_tex.pixels.data(), src_ptr, copy_size);
-        return raw_tex;
-    } else if (compression == DdsCompressionType::BGRA8) {
-        size_t pixel_count = static_cast<size_t>(width) * height;
-        for (size_t p = 0; p < pixel_count; ++p) {
-            raw_tex.pixels[p * 4 + 0] = src_ptr[p * 4 + 2]; // R
-            raw_tex.pixels[p * 4 + 1] = src_ptr[p * 4 + 1]; // G
-            raw_tex.pixels[p * 4 + 2] = src_ptr[p * 4 + 0]; // B
-            raw_tex.pixels[p * 4 + 3] = src_ptr[p * 4 + 3]; // A
-        }
-        return raw_tex;
-    }
-
-    // Decompress block-compressed textures (BC1..BC7) using bcdec
     uint32_t blocks_x = (width + 3) / 4;
     uint32_t blocks_y = (height + 3) / 4;
-    int dst_pitch = static_cast<int>(width * 4);
+
+    if (compression == DdsCompressionType::RGBA8 || compression == DdsCompressionType::BGRA8) {
+        size_t expected_size = static_cast<size_t>(width) * height * 4;
+        if (file_data.size() < header_offset + expected_size) {
+            std::cerr << "[BudAssetPipeline] Incomplete uncompressed DDS data in: " << path << std::endl;
+            return std::nullopt;
+        }
+        if (compression == DdsCompressionType::BGRA8) {
+            for (size_t p = 0; p < static_cast<size_t>(width) * height; ++p) {
+                tex.pixels[p * 4 + 0] = src_ptr[p * 4 + 2];
+                tex.pixels[p * 4 + 1] = src_ptr[p * 4 + 1];
+                tex.pixels[p * 4 + 2] = src_ptr[p * 4 + 0];
+                tex.pixels[p * 4 + 3] = src_ptr[p * 4 + 3];
+            }
+        } else {
+            std::memcpy(tex.pixels.data(), src_ptr, expected_size);
+        }
+        normalize_ddna_normals_if_needed(tex, path);
+        return tex;
+    }
+
+    size_t block_bytes = (compression == DdsCompressionType::BC1 || compression == DdsCompressionType::BC4) ? 8 : 16;
+    size_t required_bytes = static_cast<size_t>(blocks_x) * blocks_y * block_bytes;
+    if (file_data.size() < header_offset + required_bytes) {
+        std::cerr << "[BudAssetPipeline] Incomplete block compressed DDS data in: " << path << std::endl;
+        return std::nullopt;
+    }
+
+    uint8_t decompressed_block[16 * 4];
 
     for (uint32_t by = 0; by < blocks_y; ++by) {
         for (uint32_t bx = 0; bx < blocks_x; ++bx) {
-            uint32_t px = bx * 4;
-            uint32_t py = by * 4;
-            uint8_t* dst_block = &raw_tex.pixels[(py * width + px) * 4];
+            const uint8_t* block_src = src_ptr + (by * blocks_x + bx) * block_bytes;
 
             switch (compression) {
             case DdsCompressionType::BC1:
-                bcdec_bc1(src_ptr, dst_block, dst_pitch);
-                src_ptr += BCDEC_BC1_BLOCK_SIZE;
+                bcdec_bc1(block_src, decompressed_block, 4 * 4);
                 break;
             case DdsCompressionType::BC2:
-                bcdec_bc2(src_ptr, dst_block, dst_pitch);
-                src_ptr += BCDEC_BC2_BLOCK_SIZE;
+                bcdec_bc2(block_src, decompressed_block, 4 * 4);
                 break;
             case DdsCompressionType::BC3:
-                bcdec_bc3(src_ptr, dst_block, dst_pitch);
-                src_ptr += BCDEC_BC3_BLOCK_SIZE;
+                bcdec_bc3(block_src, decompressed_block, 4 * 4);
                 break;
-            case DdsCompressionType::BC4:
-            {
+            case DdsCompressionType::BC4: {
                 uint8_t r_block[16];
-                bcdec_bc4(src_ptr, r_block, 4);
-                src_ptr += BCDEC_BC4_BLOCK_SIZE;
-                for (int row = 0; row < 4 && (py + row) < height; ++row) {
-                    for (int col = 0; col < 4 && (px + col) < width; ++col) {
-                        uint8_t val = r_block[row * 4 + col];
-                        uint8_t* out = &dst_block[row * dst_pitch + col * 4];
-                        out[0] = val; out[1] = val; out[2] = val; out[3] = 255;
-                    }
+                bcdec_bc4(block_src, r_block, 4);
+                for (int k = 0; k < 16; ++k) {
+                    decompressed_block[k * 4 + 0] = r_block[k];
+                    decompressed_block[k * 4 + 1] = r_block[k];
+                    decompressed_block[k * 4 + 2] = r_block[k];
+                    decompressed_block[k * 4 + 3] = 255;
                 }
                 break;
             }
-            case DdsCompressionType::BC5:
-            {
-                uint8_t rg_block[32];
-                bcdec_bc5(src_ptr, rg_block, 8);
-                src_ptr += BCDEC_BC5_BLOCK_SIZE;
-                for (int row = 0; row < 4 && (py + row) < height; ++row) {
-                    for (int col = 0; col < 4 && (px + col) < width; ++col) {
-                        uint8_t r = rg_block[(row * 4 + col) * 2 + 0];
-                        uint8_t g = rg_block[(row * 4 + col) * 2 + 1];
-                        uint8_t* out = &dst_block[row * dst_pitch + col * 4];
-                        out[0] = r; out[1] = g; out[2] = 255; out[3] = 255;
-                    }
+            case DdsCompressionType::BC5: {
+                uint8_t rg_block[16 * 2];
+                bcdec_bc5(block_src, rg_block, 4 * 2);
+                for (int k = 0; k < 16; ++k) {
+                    float nx = (rg_block[k * 2 + 0] / 255.0f) * 2.0f - 1.0f;
+                    float ny = (rg_block[k * 2 + 1] / 255.0f) * 2.0f - 1.0f;
+                    float nz = std::sqrt(std::max(0.0f, 1.0f - nx * nx - ny * ny));
+                    decompressed_block[k * 4 + 0] = rg_block[k * 2 + 0];
+                    decompressed_block[k * 4 + 1] = rg_block[k * 2 + 1];
+                    decompressed_block[k * 4 + 2] = static_cast<uint8_t>((nz * 0.5f + 0.5f) * 255.0f + 0.5f);
+                    decompressed_block[k * 4 + 3] = 255;
                 }
                 break;
             }
             case DdsCompressionType::BC7:
-                bcdec_bc7(src_ptr, dst_block, dst_pitch);
-                src_ptr += BCDEC_BC7_BLOCK_SIZE;
+                bcdec_bc7(block_src, decompressed_block, 4 * 4);
                 break;
             default:
                 break;
             }
+
+            for (uint32_t py = 0; py < 4; ++py) {
+                uint32_t y = by * 4 + py;
+                if (y >= height) break;
+                for (uint32_t px = 0; px < 4; ++px) {
+                    uint32_t x = bx * 4 + px;
+                    if (x >= width) break;
+                    size_t dst_idx = (static_cast<size_t>(y) * width + x) * 4;
+                    size_t src_idx = (static_cast<size_t>(py) * 4 + px) * 4;
+                    tex.pixels[dst_idx + 0] = decompressed_block[src_idx + 0];
+                    tex.pixels[dst_idx + 1] = decompressed_block[src_idx + 1];
+                    tex.pixels[dst_idx + 2] = decompressed_block[src_idx + 2];
+                    tex.pixels[dst_idx + 3] = decompressed_block[src_idx + 3];
+                }
+            }
         }
     }
 
-    return raw_tex;
+    normalize_ddna_normals_if_needed(tex, path);
+    return tex;
 }
 
-static void apply_companion_mask_if_present(RawTexture& tex, const std::string& resolved_path) {
-    if (tex.pixels.empty() || tex.width == 0 || tex.height == 0)
-        return;
+void apply_companion_mask_if_present(RawTexture& tex, const std::string& path) {
+    if (tex.pixels.empty() || tex.channels < 4) return;
 
-    // Check if current texture already has significant alpha variation
     size_t total_px = static_cast<size_t>(tex.width) * tex.height;
-    size_t non_solid_alpha = 0;
+    bool all_opaque = true;
+    const uint8_t* p = tex.pixels.data();
     for (size_t k = 0; k < total_px; ++k) {
-        if (tex.pixels[k * 4 + 3] < 250) {
-            non_solid_alpha++;
-            if (non_solid_alpha > total_px / 1000)
-                return; // Already has true alpha channel
+        if (p[k * 4 + 3] < 250) {
+            all_opaque = false;
+            break;
         }
     }
 
-    std::filesystem::path p(resolved_path);
-    std::string stem = p.stem().string();
-    std::string ext = p.extension().string();
-    auto parent = p.parent_path();
+    if (!all_opaque) return;
 
-    std::vector<std::string> mask_candidates;
-    const std::string test_exts[] = { ext, ".tga", ".TGA", ".png", ".PNG", ".dds", ".DDS", ".jpg", ".JPG" };
+    std::filesystem::path p_path(path);
+    std::filesystem::path dir = p_path.parent_path();
+    std::string stem = p_path.stem().string();
 
-    auto add_stem_candidates = [&](const std::string& base) {
-        for (const auto& e : test_exts) {
-            mask_candidates.push_back((parent / (base + e)).string());
-        }
+    std::vector<std::string> mask_candidates = {
+        stem + "_mask.png", stem + "_mask.dds", stem + "_mask.tga", stem + "_mask.jpg",
+        stem + "_a.png", stem + "_a.dds", stem + "_alpha.png", stem + "_alpha.dds"
     };
 
-    // 1. _0_D -> _0_A or _D -> _A
-    if (stem.ends_with("_D") || stem.ends_with("_d")) {
-        std::string s = stem;
-        s.back() = (stem.back() == 'D') ? 'A' : 'a';
-        add_stem_candidates(s);
-    }
-    if (stem.find("_0_D") != std::string::npos) {
-        std::string s = stem;
-        auto pos = s.find("_0_D");
-        s.replace(pos, 4, "_0_A");
-        add_stem_candidates(s);
-    }
-    if (stem.find("_0_d") != std::string::npos) {
-        std::string s = stem;
-        auto pos = s.find("_0_d");
-        s.replace(pos, 4, "_0_a");
-        add_stem_candidates(s);
-    }
-
-    // 2. _diff -> _mask / _opacity / _alpha
-    if (stem.find("_diff") != std::string::npos) {
-        std::string s = stem;
-        auto pos = s.find("_diff");
-        std::string prefix = s.substr(0, pos);
-        std::string suffix = s.substr(pos + 5);
-        add_stem_candidates(prefix + "_mask" + suffix);
-        add_stem_candidates(prefix + "_opacity" + suffix);
-        add_stem_candidates(prefix + "_alpha" + suffix);
-    }
-
-    // 3. _Albedo / _albedo / _BaseColor / _basecolor -> _Opacity / _opacity / _Mask / _mask
-    if (stem.find("_Albedo") != std::string::npos) {
-        std::string s = stem;
-        auto pos = s.find("_Albedo");
-        std::string prefix = s.substr(0, pos);
-        std::string suffix = s.substr(pos + 7);
-        add_stem_candidates(prefix + "_Opacity" + suffix);
-        add_stem_candidates(prefix + "_Mask" + suffix);
-        add_stem_candidates(prefix + "_Alpha" + suffix);
-    }
-    if (stem.find("_albedo") != std::string::npos) {
-        std::string s = stem;
-        auto pos = s.find("_albedo");
-        std::string prefix = s.substr(0, pos);
-        std::string suffix = s.substr(pos + 7);
-        add_stem_candidates(prefix + "_opacity" + suffix);
-        add_stem_candidates(prefix + "_mask" + suffix);
-        add_stem_candidates(prefix + "_alpha" + suffix);
-    }
-
-    // 4. General suffix append
-    add_stem_candidates(stem + "_mask");
-    add_stem_candidates(stem + "_Mask");
-    add_stem_candidates(stem + "_opacity");
-    add_stem_candidates(stem + "_Opacity");
-    add_stem_candidates(stem + "_alpha");
-    add_stem_candidates(stem + "_Alpha");
-
-    for (const auto& mcand : mask_candidates) {
-        if (std::filesystem::exists(mcand) && mcand != resolved_path) {
-            int mw = 0, mh = 0, mc = 0;
-            stbi_uc* mdata = stbi_load(mcand.c_str(), &mw, &mh, &mc, 1);
-            if (mdata && mw > 0 && mh > 0) {
-                if (mw == static_cast<int>(tex.width) && mh == static_cast<int>(tex.height)) {
-                    for (size_t k = 0; k < total_px; ++k) {
-                        tex.pixels[k * 4 + 3] = mdata[k];
-                    }
-                } else {
-                    for (uint32_t y = 0; y < tex.height; ++y) {
-                        int my = std::min(mh - 1, static_cast<int>((static_cast<uint64_t>(y) * mh) / tex.height));
-                        for (uint32_t x = 0; x < tex.width; ++x) {
-                            int mx = std::min(mw - 1, static_cast<int>((static_cast<uint64_t>(x) * mw) / tex.width));
-                            tex.pixels[(y * tex.width + x) * 4 + 3] = mdata[my * mw + mx];
-                        }
-                    }
+    for (const auto& mc : mask_candidates) {
+        std::filesystem::path mask_file = dir / mc;
+        if (std::filesystem::exists(mask_file)) {
+            int mw = 0, mh = 0, mc_channels = 0;
+            stbi_uc* mdata = stbi_load(mask_file.string().c_str(), &mw, &mh, &mc_channels, 1);
+            if (mdata && static_cast<uint32_t>(mw) == tex.width && static_cast<uint32_t>(mh) == tex.height) {
+                std::cout << "[BudAssetPipeline] Merged companion alpha mask: " << mask_file.string() << " -> " << path << std::endl;
+                uint8_t* dst = tex.pixels.data();
+                for (size_t k = 0; k < total_px; ++k) {
+                    dst[k * 4 + 3] = mdata[k];
                 }
-                std::cout << "[BudAssetPipeline] Merged companion alpha mask: " << mcand << " -> " << resolved_path << std::endl;
                 stbi_image_free(mdata);
                 break;
             }
@@ -447,6 +419,9 @@ std::optional<RawTexture> TextureImporter::import_from_file(const std::string& p
     std::memcpy(tex.pixels.data(), data, byte_count);
     stbi_image_free(data);
 
+    // Normalize DDNA normals if present
+    normalize_ddna_normals_if_needed(tex, resolved_path);
+
     // Apply companion mask if alpha is completely solid
     apply_companion_mask_if_present(tex, resolved_path);
 
@@ -481,12 +456,10 @@ TextureAlphaInfo TextureImporter::analyze_alpha(const RawTexture& tex) {
     // If at least 0.05% of the texture has transparency:
     if (transparent_px + semi_transparent_px > (total_px / 2000)) {
         info.has_alpha = true;
-        // If there are significant fully transparent void pixels (cutout foliage / thorns / vines / fences):
         if (transparent_px > (total_px / 1000)) {
             info.alpha_mode = bud::asset::AlphaMode::Mask;
             info.alpha_cutoff = 0.5f;
         } else if (semi_transparent_px > (total_px / 20)) {
-            // Smooth translucent tint without empty void (e.g. tinted glass pane):
             info.alpha_mode = bud::asset::AlphaMode::Blend;
         } else {
             info.alpha_mode = bud::asset::AlphaMode::Mask;
@@ -504,6 +477,122 @@ TextureAlphaInfo TextureImporter::analyze_alpha(const std::string& path) {
     return analyze_alpha(*tex);
 }
 
+TextureSemantic TextureImporter::detect_semantic_from_filename(const std::string& filename) {
+    std::string s = filename;
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    std::filesystem::path fp(s);
+    std::string stem = fp.stem().string();
+
+    // Check composite packed formats first
+    if (stem.find("_orm") != std::string::npos || stem.find("_arm") != std::string::npos ||
+        stem.find("_mro") != std::string::npos || stem.find("metallicroughness") != std::string::npos ||
+        stem.find("metallic_roughness") != std::string::npos) {
+        return TextureSemantic::MetallicRoughness;
+    }
+
+    // Split stem into tokens separated by '_', '-', '.', ' '
+    std::vector<std::string> tokens;
+    std::string cur;
+    for (char c : stem) {
+        if (c == '_' || c == '-' || c == '.' || c == ' ') {
+            if (!cur.empty()) { tokens.push_back(cur); cur.clear(); }
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) tokens.push_back(cur);
+
+    for (const auto& tok : tokens) {
+        // Normal
+        if (tok == "ddna" || tok == "ddn" || tok == "normal" || tok == "norm" || tok == "nrm" ||
+            tok == "nor" || tok == "nm" || tok == "bump" || tok == "n") {
+            return TextureSemantic::Normal;
+        }
+        // Specular / Glossiness
+        if (tok == "spec" || tok == "specular" || tok == "spc") {
+            return TextureSemantic::SpecularGlossiness;
+        }
+        // Roughness
+        if (tok == "rough" || tok == "roughness" || tok == "rgh" || tok == "gloss" ||
+            tok == "glossiness" || tok == "gls" || tok == "smoothness" || tok == "r") {
+            return TextureSemantic::Roughness;
+        }
+        // Metallic
+        if (tok == "metal" || tok == "metallic" || tok == "metalness" || tok == "met" || tok == "m") {
+            return TextureSemantic::Metallic;
+        }
+        // Emissive
+        if (tok == "em" || tok == "emissive" || tok == "emit" || tok == "glow" ||
+            tok == "illum" || tok == "light" || tok == "e") {
+            return TextureSemantic::Emissive;
+        }
+        // AO
+        if (tok == "ao" || tok == "occ" || tok == "occlusion" || tok == "ambientocclusion") {
+            return TextureSemantic::Occlusion;
+        }
+        // Mask / Alpha
+        if (tok == "mask" || tok == "alpha" || tok == "opacity" || tok == "cutout" || tok == "a") {
+            return TextureSemantic::AlphaMask;
+        }
+        // Albedo / Diffuse
+        if (tok == "diff" || tok == "diffuse" || tok == "albedo" || tok == "alb" ||
+            tok == "color" || tok == "col" || tok == "basecolor" || tok == "base_color" ||
+            tok == "bc" || tok == "d") {
+            return TextureSemantic::Albedo;
+        }
+    }
+
+    return TextureSemantic::Unknown;
+}
+
+TextureSemantic TextureImporter::detect_semantic_from_pixels(const RawTexture& tex) {
+    if (tex.pixels.empty() || tex.width == 0 || tex.height == 0)
+        return TextureSemantic::Unknown;
+
+    // Sparse sampling: 16x16 grid = 256 samples (< 0.001 ms)
+    uint32_t step_x = std::max(1u, tex.width / 16);
+    uint32_t step_y = std::max(1u, tex.height / 16);
+
+    uint32_t sample_count = 0;
+    float sum_r = 0, sum_g = 0, sum_b = 0;
+    uint32_t normal_like_count = 0;
+    uint32_t grayscale_count = 0;
+
+    for (uint32_t y = step_y / 2; y < tex.height; y += step_y) {
+        for (uint32_t x = step_x / 2; x < tex.width; x += step_x) {
+            size_t idx = (static_cast<size_t>(y) * tex.width + x) * 4;
+            uint8_t r = tex.pixels[idx + 0];
+            uint8_t g = tex.pixels[idx + 1];
+            uint8_t b = tex.pixels[idx + 2];
+
+            sum_r += r; sum_g += g; sum_b += b;
+            sample_count++;
+
+            // Tangent space normal signature: R ~ 128, G ~ 128, B > 180
+            if (b > 180 && r >= 90 && r <= 165 && g >= 90 && g <= 165) {
+                normal_like_count++;
+            }
+
+            // Grayscale signature: R ~= G ~= B
+            if (std::abs(static_cast<int>(r) - g) <= 6 && std::abs(static_cast<int>(g) - b) <= 6) {
+                grayscale_count++;
+            }
+        }
+    }
+
+    if (sample_count == 0) return TextureSemantic::Unknown;
+
+    if (normal_like_count > sample_count * 0.75f) {
+        return TextureSemantic::Normal;
+    }
+
+    if (grayscale_count > sample_count * 0.90f) {
+        return TextureSemantic::Roughness;
+    }
+
+    return TextureSemantic::Albedo;
+}
+
 PBRCompanionTextures TextureImporter::find_companion_pbr_textures(const std::string& base_color_path) {
     PBRCompanionTextures pbr{};
     if (base_color_path.empty())
@@ -513,144 +602,181 @@ PBRCompanionTextures TextureImporter::find_companion_pbr_textures(const std::str
     std::filesystem::path dir = p.parent_path();
     std::string stem = p.stem().string();
 
-    const std::vector<std::string> exts = { ".tga", ".TGA", ".dds", ".DDS", ".png", ".PNG", ".jpg", ".JPG" };
+    // Extract prefix stem by stripping known albedo suffixes
+    std::string base_prefix = stem;
+    const std::string albedo_suffixes[] = {
+        "_diff", "_diffuse", "_albedo", "_alb", "_color", "_col",
+        "_basecolor", "_base_color", "_bc", "_d", "_d_0", "_0_d", "_D"
+    };
+    for (const auto& suf : albedo_suffixes) {
+        size_t pos = base_prefix.rfind(suf);
+        if (pos != std::string::npos && pos + suf.length() == base_prefix.length()) {
+            base_prefix = base_prefix.substr(0, pos);
+            break;
+        }
+    }
 
-    auto find_existing_candidate = [&](const std::vector<std::string>& stem_candidates) -> std::string {
-        for (const auto& sc : stem_candidates) {
-            for (const auto& ext : exts) {
-                auto cand = dir / (sc + ext);
-                if (std::filesystem::exists(cand)) {
-                    return cand.generic_string();
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec))
+        return pbr;
+
+    std::vector<std::filesystem::path> candidates;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (entry.is_regular_file()) {
+            std::string estem = entry.path().stem().string();
+            if (estem.rfind(base_prefix, 0) == 0) { // Starts with base_prefix
+                candidates.push_back(entry.path());
+            }
+        }
+    }
+
+    // Also check sibling "textures/" folder if applicable
+    std::filesystem::path sibling_tex_dir = dir / "textures";
+    if (std::filesystem::exists(sibling_tex_dir, ec)) {
+        for (const auto& entry : std::filesystem::directory_iterator(sibling_tex_dir, ec)) {
+            if (entry.is_regular_file()) {
+                std::string estem = entry.path().stem().string();
+                if (estem.rfind(base_prefix, 0) == 0) {
+                    candidates.push_back(entry.path());
                 }
             }
         }
-        return "";
-    };
+    }
 
-    // 1. Normal Map Candidates
-    std::vector<std::string> normal_stems;
-    if (stem.find("_0_D") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_0_D"), 4, "_0_N");
-        normal_stems.push_back(s);
-    }
-    if (stem.find("_D") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_D"), 2, "_N");
-        normal_stems.push_back(s);
-    }
-    if (stem.find("_diff") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_diff"), 5, "_norm");
-        normal_stems.push_back(s);
-        s = stem;
-        s.replace(s.find("_diff"), 5, "_ddn");
-        normal_stems.push_back(s);
-    }
-    if (stem.find("_Albedo") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_Albedo"), 7, "_Normal");
-        normal_stems.push_back(s);
-        s = stem;
-        s.replace(s.find("_Albedo"), 7, "_NRM");
-        normal_stems.push_back(s);
-    }
-    if (stem.find("_BaseColor") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_BaseColor"), 10, "_Normal");
-        normal_stems.push_back(s);
-    }
-    normal_stems.push_back(stem + "_normal");
-    normal_stems.push_back(stem + "_Normal");
-    normal_stems.push_back(stem + "_N");
-    pbr.normal_path = find_existing_candidate(normal_stems);
+    for (const auto& cand : candidates) {
+        std::string cand_path = cand.generic_string();
+        if (cand_path == base_color_path) continue;
 
-    // 2. Roughness Map Candidates
-    std::vector<std::string> rough_stems;
-    if (stem.find("_0_D") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_0_D"), 4, "_0_R");
-        rough_stems.push_back(s);
-    }
-    if (stem.find("_D") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_D"), 2, "_R");
-        rough_stems.push_back(s);
-    }
-    if (stem.find("_diff") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_diff"), 5, "_rough");
-        rough_stems.push_back(s);
-    }
-    if (stem.find("_Albedo") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_Albedo"), 7, "_Roughness");
-        rough_stems.push_back(s);
-    }
-    if (stem.find("_BaseColor") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_BaseColor"), 10, "_Roughness");
-        rough_stems.push_back(s);
-    }
-    rough_stems.push_back(stem + "_roughness");
-    rough_stems.push_back(stem + "_Roughness");
-    rough_stems.push_back(stem + "_R");
-    pbr.roughness_path = find_existing_candidate(rough_stems);
+        TextureSemantic sem = detect_semantic_from_filename(cand.filename().string());
 
-    // 3. Metallic Map Candidates
-    std::vector<std::string> metal_stems;
-    if (stem.find("_0_D") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_0_D"), 4, "_0_M");
-        metal_stems.push_back(s);
-    }
-    if (stem.find("_D") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_D"), 2, "_M");
-        metal_stems.push_back(s);
-    }
-    if (stem.find("_diff") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_diff"), 5, "_metal");
-        metal_stems.push_back(s);
-    }
-    if (stem.find("_Albedo") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_Albedo"), 7, "_Metallic");
-        metal_stems.push_back(s);
-    }
-    if (stem.find("_BaseColor") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_BaseColor"), 10, "_Metallic");
-        metal_stems.push_back(s);
-    }
-    metal_stems.push_back(stem + "_metallic");
-    metal_stems.push_back(stem + "_Metallic");
-    metal_stems.push_back(stem + "_M");
-    pbr.metallic_path = find_existing_candidate(metal_stems);
+        // Tier 3: If unknown, sparsely probe pixels
+        if (sem == TextureSemantic::Unknown) {
+            auto tex_opt = import_from_file(cand_path);
+            if (tex_opt) {
+                sem = detect_semantic_from_pixels(*tex_opt);
+            }
+        }
 
-    // 4. Emissive Map Candidates
-    std::vector<std::string> emissive_stems;
-    if (stem.find("_0_D") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_0_D"), 4, "_0_E");
-        emissive_stems.push_back(s);
+        switch (sem) {
+        case TextureSemantic::Normal:
+            if (pbr.normal_path.empty()) pbr.normal_path = cand_path;
+            break;
+        case TextureSemantic::Roughness:
+            if (pbr.roughness_path.empty()) pbr.roughness_path = cand_path;
+            break;
+        case TextureSemantic::Metallic:
+            if (pbr.metallic_path.empty()) pbr.metallic_path = cand_path;
+            break;
+        case TextureSemantic::MetallicRoughness:
+            if (pbr.roughness_path.empty()) pbr.roughness_path = cand_path;
+            break;
+        case TextureSemantic::SpecularGlossiness:
+            if (pbr.roughness_path.empty()) {
+                std::string mr = convert_spec_gloss_to_metallic_roughness(cand_path);
+                if (!mr.empty()) pbr.roughness_path = mr;
+            }
+            break;
+        case TextureSemantic::Emissive:
+            if (pbr.emissive_path.empty()) pbr.emissive_path = cand_path;
+            break;
+        default:
+            break;
+        }
     }
-    if (stem.find("_D") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_D"), 2, "_E");
-        emissive_stems.push_back(s);
-    }
-    if (stem.find("_diff") != std::string::npos) {
-        std::string s = stem;
-        s.replace(s.find("_diff"), 5, "_emit");
-        emissive_stems.push_back(s);
-    }
-    emissive_stems.push_back(stem + "_emissive");
-    emissive_stems.push_back(stem + "_Emissive");
-    pbr.emissive_path = find_existing_candidate(emissive_stems);
 
     return pbr;
+}
+
+std::string TextureImporter::convert_spec_gloss_to_metallic_roughness(const std::string& spec_gloss_path, const std::string& output_dir) {
+    if (spec_gloss_path.empty()) return "";
+
+    std::filesystem::path p(spec_gloss_path);
+    std::error_code ec;
+    std::filesystem::create_directories(output_dir, ec);
+    std::string out_filename = p.stem().string() + "_metallicRoughness.png";
+    std::string out_full_path = (std::filesystem::path(output_dir) / out_filename).generic_string();
+
+    if (std::filesystem::exists(out_full_path)) {
+        return out_full_path;
+    }
+
+    auto tex_opt = import_from_file(spec_gloss_path);
+    if (!tex_opt || tex_opt->pixels.empty()) {
+        return "";
+    }
+
+    // Look for companion _ddna texture to extract high-res glossiness if spec alpha is solid
+    std::filesystem::path dir = p.parent_path();
+    std::string stem = p.stem().string();
+    std::string ddna_path;
+    size_t spec_pos = stem.rfind("_spec");
+    if (spec_pos != std::string::npos) {
+        std::string ddna_stem = stem.substr(0, spec_pos) + "_ddna";
+        const std::string exts[] = { ".dds", ".png", ".tga" };
+        for (const auto& ext : exts) {
+            auto cand = dir / (ddna_stem + ext);
+            if (std::filesystem::exists(cand)) {
+                ddna_path = cand.generic_string();
+                break;
+            }
+        }
+    }
+
+    std::optional<RawTexture> ddna_tex_opt;
+    if (!ddna_path.empty()) {
+        ddna_tex_opt = import_from_file(ddna_path);
+    }
+
+    RawTexture mr_tex;
+    mr_tex.width = tex_opt->width;
+    mr_tex.height = tex_opt->height;
+    mr_tex.channels = 4;
+    mr_tex.is_srgb = false;
+    mr_tex.pixels.resize(static_cast<size_t>(mr_tex.width) * mr_tex.height * 4);
+
+    const uint8_t* src = tex_opt->pixels.data();
+    uint8_t* dst = mr_tex.pixels.data();
+    size_t pixel_count = static_cast<size_t>(mr_tex.width) * mr_tex.height;
+
+    for (size_t i = 0; i < pixel_count; ++i) {
+        float r = src[i * 4 + 0] / 255.0f;
+        float g = src[i * 4 + 1] / 255.0f;
+        float b = src[i * 4 + 2] / 255.0f;
+        float a = (tex_opt->channels >= 4) ? (src[i * 4 + 3] / 255.0f) : 1.0f;
+
+        // If specular alpha is solid, check if ddna glossiness is available
+        if (a > 0.98f && ddna_tex_opt && ddna_tex_opt->pixels.size() == tex_opt->pixels.size()) {
+            a = ddna_tex_opt->pixels[i * 4 + 3] / 255.0f;
+        }
+
+        // Calculate physical Roughness: Roughness = 1.0 - Glossiness
+        // Ensure dielectric surfaces (leather, paint, plastic) don't become mirror 0.05
+        float roughness = std::clamp(1.0f - a * 0.85f, 0.15f, 0.95f);
+
+        // Dielectric F0 is ~0.04 (4%). Values significantly higher (> 0.45) indicate conductive metals.
+        float max_spec = std::max({ r, g, b });
+        float metallic = 0.0f;
+        if (max_spec > 0.55f) {
+            metallic = std::clamp((max_spec - 0.55f) / 0.45f, 0.0f, 1.0f);
+            roughness = std::clamp(1.0f - a, 0.04f, 1.0f);
+        }
+
+        // Channel R (Red) = Occlusion (1.0 default)
+        // Channel G (Green) = Roughness
+        // Channel B (Blue) = Metallic
+        // Channel A (Alpha) = 1.0
+        dst[i * 4 + 0] = 255;
+        dst[i * 4 + 1] = static_cast<uint8_t>(std::clamp(roughness * 255.0f, 0.0f, 255.0f));
+        dst[i * 4 + 2] = static_cast<uint8_t>(std::clamp(metallic * 255.0f, 0.0f, 255.0f));
+        dst[i * 4 + 3] = 255;
+    }
+
+    if (stbi_write_png(out_full_path.c_str(), static_cast<int>(mr_tex.width), static_cast<int>(mr_tex.height), 4, dst, static_cast<int>(mr_tex.width * 4))) {
+        std::cout << "[BudAssetPipeline] Baked Specular-Glossiness -> Standard Metallic-Roughness: "
+                  << spec_gloss_path << " -> " << out_full_path << std::endl;
+        return out_full_path;
+    }
+    return "";
 }
 
 } // namespace bud::asset_pipeline

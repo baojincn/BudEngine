@@ -1,7 +1,8 @@
-#version 450
+#version 460
+#extension GL_GOOGLE_include_directive : enable
 #extension GL_EXT_nonuniform_qualifier : enable
 
-layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform sampler2D depth_sampler;
 layout(set = 0, binding = 1) uniform sampler2D color_sampler;
@@ -17,16 +18,15 @@ layout(push_constant) uniform SSRPushConsts {
     uint binary_steps;
     float intensity;
     uint reversed_z;
-    float roughness_threshold;
-    float padding;
+    vec2 padding;
 } pc;
 
-vec3 reconstruct_view_pos(vec2 uv, float depth) {
-    vec4 clip_pos = vec4(uv * 2.0 - 1.0, depth, 1.0);
-    vec4 view_pos = pc.inv_proj * clip_pos;
-    if (abs(view_pos.w) > 1e-6)
-        view_pos /= view_pos.w;
-    return view_pos.xyz;
+vec3 reconstruct_view_pos(vec2 uv, float raw_depth) {
+    vec4 clip = vec4(uv * 2.0 - 1.0, raw_depth, 1.0);
+    vec4 view = pc.inv_proj * clip;
+    if (abs(view.w) > 1e-6)
+        view /= view.w;
+    return view.xyz;
 }
 
 vec3 reconstruct_view_normal(vec2 uv, float raw_depth) {
@@ -57,35 +57,29 @@ vec3 reconstruct_view_normal(vec2 uv, float raw_depth) {
 }
 
 void main() {
-    ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
-    if (pixel_coords.x >= int(pc.screen_size.x) || pixel_coords.y >= int(pc.screen_size.y)) {
+    ivec2 pixel_coord = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel_coord.x >= int(pc.screen_size.x) || pixel_coord.y >= int(pc.screen_size.y))
         return;
-    }
 
-    vec2 uv = (vec2(pixel_coords) + 0.5) / pc.screen_size;
-    float depth = texture(depth_sampler, uv).r;
+    vec2 uv = (vec2(pixel_coord) + 0.5) / pc.screen_size;
+    float raw_depth = texture(depth_sampler, uv).r;
 
-    bool is_sky = (pc.reversed_z != 0u) ? (depth <= 1e-6) : (depth >= 1.0 - 1e-6);
+    // Check if background / sky
+    bool is_sky = (pc.reversed_z != 0u) ? (raw_depth <= 1e-6) : (raw_depth >= 1.0 - 1e-6);
     if (is_sky) {
-        imageStore(out_ssr_image, pixel_coords, vec4(0.0));
+        imageStore(out_ssr_image, pixel_coord, vec4(0.0));
         return;
     }
 
-    vec3 view_pos = reconstruct_view_pos(uv, depth);
-    vec3 N = reconstruct_view_normal(uv, depth);
+    vec3 view_pos = reconstruct_view_pos(uv, raw_depth);
+    vec3 N = reconstruct_view_normal(uv, raw_depth);
     vec3 V = normalize(-view_pos);
-
-    // If surface faces away from camera, reject
-    if (dot(N, V) <= 0.0) {
-        imageStore(out_ssr_image, pixel_coords, vec4(0.0));
-        return;
-    }
 
     vec3 R = reflect(-V, N);
 
-    // If reflection ray points backwards into the surface, reject
-    if (dot(N, R) <= 0.0) {
-        imageStore(out_ssr_image, pixel_coords, vec4(0.0));
+    // If reflection vector points into geometry surface, discard
+    if (dot(R, N) <= 0.01) {
+        imageStore(out_ssr_image, pixel_coord, vec4(0.0));
         return;
     }
 
@@ -93,8 +87,9 @@ void main() {
     float max_dist = max(5.0, pc.max_distance);
     uint steps = clamp(pc.max_steps, 16u, 64u);
     float step_size = max_dist / float(steps);
-    // Adaptive starting bias to prevent self-intersection of floor
-    vec3 ray_start = view_pos + N * (0.05 + 0.03 * clamp(abs(view_pos.z) * 0.02, 0.0, 0.5));
+
+    // Adaptive starting bias to prevent self-intersection of floor/walls
+    vec3 ray_start = view_pos + N * (0.04 + 0.02 * clamp(abs(view_pos.z) * 0.02, 0.0, 0.5));
     float current_dist = step_size * 0.5;
 
     bool hit = false;
@@ -128,7 +123,9 @@ void main() {
         // In view space, negative Z is in front of camera.
         // If ray point is behind the surface depth:
         float depth_diff = sample_pos.z - sampled_view_pos.z;
-        if (depth_diff < 0.0 && abs(depth_diff) < pc.thickness && current_dist > 0.08) {
+        float adaptive_thickness = max(pc.thickness, abs(sample_pos.z) * 0.05 + 0.1);
+
+        if (depth_diff < 0.0 && abs(depth_diff) < adaptive_thickness && current_dist > 0.08) {
             // Reject backfaces of foreground objects (avoids ghosting/glass overlay artifacts)
             vec3 sampled_normal = reconstruct_view_normal(sample_uv, sampled_raw_depth);
             if (dot(sampled_normal, -R) < 0.1) {
@@ -136,17 +133,27 @@ void main() {
                 continue;
             }
 
-            // Binary refinement
-            float min_dist = current_dist - step_size;
+            // Binary refinement (strictly bounded to [min_dist, max_dist_bin])
+            float min_dist = max(0.0, current_dist - step_size);
             float max_dist_bin = current_dist;
 
             for (uint b = 0u; b < pc.binary_steps; ++b) {
                 float mid_dist = (min_dist + max_dist_bin) * 0.5;
                 vec3 mid_pos = ray_start + R * mid_dist;
                 vec4 mid_clip = pc.proj * vec4(mid_pos, 1.0);
+                if (mid_clip.w <= 0.001)
+                    break;
                 vec2 mid_uv = (mid_clip.xy / mid_clip.w) * 0.5 + 0.5;
+                if (mid_uv.x < 0.0 || mid_uv.x > 1.0 || mid_uv.y < 0.0 || mid_uv.y > 1.0)
+                    break;
 
                 float mid_raw_depth = texture(depth_sampler, mid_uv).r;
+                bool is_mid_sky = (pc.reversed_z != 0u) ? (mid_raw_depth <= 1e-6) : (mid_raw_depth >= 1.0 - 1e-6);
+                if (is_mid_sky) {
+                    min_dist = mid_dist;
+                    continue;
+                }
+
                 vec3 mid_sampled_pos = reconstruct_view_pos(mid_uv, mid_raw_depth);
 
                 if (mid_pos.z < mid_sampled_pos.z) {
@@ -170,17 +177,18 @@ void main() {
     if (hit) {
         // Screen-edge attenuation (smooth fade out near screen borders)
         vec2 edge_dist = min(hit_uv, 1.0 - hit_uv);
-        float edge_factor = smoothstep(0.0, 0.1, min(edge_dist.x, edge_dist.y));
+        float edge_factor = smoothstep(0.0, 0.08, min(edge_dist.x, edge_dist.y));
 
         // Distance attenuation
         float dist_factor = clamp(1.0 - (current_dist / max_dist), 0.0, 1.0);
+        dist_factor *= dist_factor;
 
         // Sample scene color
         vec3 reflection_color = texture(color_sampler, hit_uv).rgb;
         float alpha = edge_factor * dist_factor * pc.intensity;
 
-        imageStore(out_ssr_image, pixel_coords, vec4(reflection_color, alpha));
+        imageStore(out_ssr_image, pixel_coord, vec4(reflection_color, alpha));
     } else {
-        imageStore(out_ssr_image, pixel_coords, vec4(0.0));
+        imageStore(out_ssr_image, pixel_coord, vec4(0.0));
     }
 }

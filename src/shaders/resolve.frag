@@ -146,7 +146,7 @@ void main() {
     vec3 V = normalize(ubo.cam_pos - world_pos);
     vec3 F0 = mix(vec3(0.04), albedo_sample.rgb, metallic);
     vec3 F_ssr = FresnelSchlick(max(dot(N, V), 0.0), F0);
-    float roughness_fade = clamp(1.0 - roughness * 1.5, 0.0, 1.0);
+    float roughness_fade = smoothstep(0.4, 0.05, roughness);
     vec3 specular_tint = mix(vec3(1.0), albedo_sample.rgb, metallic);
     vec3 ssr_reflection = ssr_sample.rgb * F_ssr * roughness_fade * specular_tint * ssr_sample.a;
 
