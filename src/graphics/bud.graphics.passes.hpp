@@ -159,8 +159,7 @@ namespace bud::graphics {
 		);
 	};
 
-	
-	class MainPass : public RenderPass {
+	class ForwardMainPass : public RenderPass {
 	public:
 		PipelineHandle pipeline_wireframe;
 		bool is_ready() const { return pipeline.is_valid() && pipeline_wireframe.is_valid(); }
@@ -180,6 +179,8 @@ namespace bud::graphics {
 			bud::graphics::BufferHandle mega_vertex_buffer,
 			bud::graphics::BufferHandle mega_index_buffer,
 			bud::graphics::RGHandle ao_map = {},
+			bud::graphics::RGHandle ssr_map = {},
+			bud::graphics::RGHandle ssgi_map = {},
 			size_t split_index = 0);
 	};
 

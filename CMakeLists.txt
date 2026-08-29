@@ -241,7 +241,7 @@ target_sources(bud_engine_core
 		"src/graphics/passes/bud.pass.depth.cpp"
 		"src/graphics/passes/bud.pass.virtual_geometry.cpp"
 		"src/graphics/passes/bud.pass.shadow.cpp"
-		"src/graphics/passes/bud.pass.main.cpp"
+		"src/graphics/passes/bud.pass.forward_main.cpp"
 		"src/graphics/passes/bud.pass.ao.cpp"
 		"src/graphics/passes/bud.pass.visibility.cpp"
 		"src/graphics/passes/bud.pass.ssr.cpp"
@@ -266,6 +266,7 @@ target_sources(bud_engine_core
 		"src/graphics/vulkan/bud.vulkan.pool.cpp"
 
 		"src/io/bud.io.cpp"
+		"src/tools/asset_pipeline/core/raw_mesh.cpp"
 		"src/threading/bud.threading.cpp"
         "src/third_party/bud_third_party.cpp"
 

@@ -97,6 +97,15 @@ Rendering is implemented as a scalable multi-profile pipeline:
   - Physical camera stack (`bloom`, `depth of field`, `auto exposure`).
   - In-house CNN neural super-resolution as primary path, with optional external upscaling backend adapters where platform support allows.
 
+- **Material & Translucency Track (Modular Shading Architecture)**
+  - Extraction of core BRDF and optical functions into reusable GLSL modules (`pbr_brdf.glsl`, `translucency.glsl`, `fresnel.glsl`).
+  - Separation of material passes: dedicated `TranslucentPass` / `GlassPass` isolated from `ForwardMainPass` (Opaque).
+  - Physical Thin-Glass & Dielectric Transmission model:
+    - Screen-space pixel normal offset refraction sampling background `CurrentSceneColor`.
+    - Beer-Lambert law medium absorption ($e^{-\sigma_a d}$).
+    - Additive/Premultiplied Alpha reflection blending with SSR and analytical specular.
+  - Future shading models: ClearCoat (dual-layer specular), Subsurface Scattering (skin/foliage), Sheen (cloth/velvet).
+
 See `doc/Graphics.md` for pass-level data flow and implementation details.
 
 ## Blender Live Link Roadmap (External Editor Strategy)

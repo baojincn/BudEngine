@@ -2705,6 +2705,7 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 
     VkPhysicalDeviceVulkan11Features features11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
     features11.pNext = nullptr;
+    features11.shaderDrawParameters = VK_TRUE;
 
     // Mesh shader features (EXT extension)
     VkPhysicalDeviceMeshShaderFeaturesEXT mesh_shader_features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT };

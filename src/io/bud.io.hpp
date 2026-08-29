@@ -130,13 +130,10 @@ private:
 
 	class ModelLoader {
 	public:
-    ModelLoader(VirtualFileSystem* virtual_file_system);
-    std::optional<MeshData> load_obj(const std::filesystem::path& path);
-    std::optional<MeshData> load_gltf(const std::filesystem::path& path);
-    std::optional<MeshData> load_bud_mesh(const std::filesystem::path& path);
-	private:
-		MeshData convert_to_mesh_data(const tinygltf::Model& model);
+		ModelLoader(VirtualFileSystem* virtual_file_system);
+		std::optional<MeshData> load_bud_asset(const std::filesystem::path& path);
 
+	private:
 		VirtualFileSystem* virtual_file_system;
 	};
 

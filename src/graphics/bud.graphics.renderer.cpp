@@ -61,7 +61,7 @@ namespace bud::graphics {
 		hierarchy_traversal_pass = std::make_unique<HierarchyTraversalPass>();
 		page_emit_pass = std::make_unique<PageEmitPass>();
 		cluster_cull_pass = std::make_unique<ClusterCullPass>();
-		main_pass = std::make_unique<MainPass>();
+		forward_main_pass = std::make_unique<ForwardMainPass>();
 		cluster_visualization_pass = std::make_unique<ClusterVisualizationPass>();
 		ui_pass = std::make_unique<UIPass>();
 		visibility_pass = std::make_unique<VisibilityPass>();
@@ -80,7 +80,7 @@ namespace bud::graphics {
 		hierarchy_traversal_pass->init(rhi, render_config, asset_manager);
 		page_emit_pass->init(rhi, render_config, asset_manager);
 		cluster_cull_pass->init(rhi, render_config, asset_manager);
-		main_pass->init(rhi, render_config, asset_manager);
+		forward_main_pass->init(rhi, render_config, asset_manager);
 		cluster_visualization_pass->init(rhi, render_config, asset_manager);
 		ui_pass->init(rhi, render_config, asset_manager);
 		visibility_pass->init(rhi, render_config, asset_manager);
@@ -121,7 +121,7 @@ namespace bud::graphics {
 		if (hierarchy_traversal_pass) hierarchy_traversal_pass->shutdown(rhi);
 		if (page_emit_pass) page_emit_pass->shutdown(rhi);
 		if (cluster_cull_pass) cluster_cull_pass->shutdown(rhi);
-		if (main_pass) main_pass->shutdown(rhi);
+		if (forward_main_pass) forward_main_pass->shutdown(rhi);
 		if (cluster_visualization_pass) cluster_visualization_pass->shutdown(rhi);
 		if (visibility_pass) visibility_pass->shutdown(rhi);
 		if (ssr_pass) ssr_pass->shutdown(rhi);
@@ -361,53 +361,14 @@ namespace bud::graphics {
 		auto rhi_ptr = rhi;
 
 		if (!mesh_data.texture_paths.empty()) {
-
 			for (size_t i = 0; i < mesh_data.texture_paths.size(); ++i) {
-				uint32_t current_slot = next_bindless_slot.fetch_add(1, std::memory_order_relaxed);
+				const auto& tex_path = mesh_data.texture_paths[i];
+				uint32_t current_slot = bind_texture_async(tex_path);
 				texture_slot_map.push_back(current_slot);
 
 				if (i == 0) {
 					base_material_id = current_slot;
 				}
-
-				{
-					std::lock_guard lock(queue->mutex);
-					queue->commands.push_back([rhi_ptr, current_slot]() {
-						rhi_ptr->queue_bindless_fallback(current_slot, rhi_ptr->get_fallback_texture());
-					});
-				}
-
-				auto tex_path = mesh_data.texture_paths[i];
-
-				asset_manager->load_image_async(tex_path,
-					[queue_weak, rhi_ptr, current_slot, tex_path](bud::io::Image img) {
-						auto img_ptr = std::make_shared<bud::io::Image>(std::move(img));
-
-						auto queue_locked = queue_weak.lock();
-						if (!queue_locked) {
-							std::string err = "Renderer::upload_mesh upload queue was destroyed before callback";
-							bud::eprint("{}", err);
-#if defined(_DEBUG)
-							throw std::runtime_error(err);
-#else
-							return;
-#endif
-						}
-
-						std::lock_guard lock(queue_locked->mutex);
-						queue_locked->commands.push_back([rhi_ptr, current_slot, tex_path, img_ptr]() {
-							bud::graphics::TextureDesc desc{};
-							desc.width = (uint32_t)img_ptr->width;
-							desc.height = (uint32_t)img_ptr->height;
-							desc.format = bud::graphics::TextureFormat::RGBA8_SRGB;
-							desc.mips = static_cast<uint32_t>(std::floor(std::log2(std::max(desc.width, desc.height)))) + 1;
-
-							auto tex = rhi_ptr->create_texture_async(desc, (const void*)img_ptr->pixels,
-								(uint64_t)img_ptr->width * img_ptr->height * 4, current_slot);
-							rhi_ptr->set_debug_name(tex, ObjectType::Texture, tex_path);
-						});
-					}
-				);
 			}
 		}
 
@@ -518,7 +479,12 @@ namespace bud::graphics {
 					new_mesh.submeshes.push_back(sub);
 				}
 
-				meshes.push_back(std::move(new_mesh));
+				{
+					std::lock_guard mesh_lock(mesh_mutex);
+					if (assigned_mesh_id >= meshes.size())
+						meshes.resize(assigned_mesh_id + 1);
+					meshes[assigned_mesh_id] = std::move(new_mesh);
+				}
 			});
 		}
 
@@ -550,7 +516,8 @@ namespace bud::graphics {
 		}
 
 		for (const auto& rhi_cmd : commands_to_run) {
-			rhi_cmd();
+			if (rhi_cmd)
+				rhi_cmd();
 		}
 	}
 
@@ -1419,6 +1386,20 @@ namespace bud::graphics {
 							resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
 								scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 							has_main_pass = true;
+
+							if (render_config.enable_cluster_visualization && cluster_visualization_pass) {
+								cluster_visualization_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+									render_scene, scene_view, render_config, meshes, sort_list,
+									visible_count, rg_draw, rg_inst, gpu_scene,
+									gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), split_index);
+							}
+							else if (forward_main_pass) {
+								forward_main_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
+									render_scene, scene_view, render_config, meshes, sort_list,
+									visible_count, rg_draw, rg_inst, gpu_scene,
+									gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(),
+									rg_ao, rg_ssr, rg_ssgi, split_index);
+							}
 						}
 					}
 				}
@@ -1493,6 +1474,20 @@ namespace bud::graphics {
 								resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
 									scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 								has_main_pass = true;
+
+								if (render_config.enable_cluster_visualization && cluster_visualization_pass) {
+									cluster_visualization_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+										render_scene, scene_view, render_config, meshes, sort_list,
+										visible_count, rg_draw, rg_instance_data, gpu_scene,
+										gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), split_index);
+								}
+								else if (forward_main_pass) {
+									forward_main_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
+										render_scene, scene_view, render_config, meshes, sort_list,
+										visible_count, rg_draw, rg_instance_data, gpu_scene,
+										gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(),
+										rg_ao, rg_ssr, rg_ssgi, split_index);
+								}
 							}
 						}
 					}

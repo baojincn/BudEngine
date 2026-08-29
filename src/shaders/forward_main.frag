@@ -52,12 +52,6 @@ layout(std430, set = 0, binding = 7) readonly buffer MaterialBuffer {
 
 #include "lighting.glsl"
 
-// Golden-angle based dithering threshold for LOD transitions
-float golden_noise(ivec2 coord) {
-    const float PHI = 1.61803398874989484820459;
-    return fract(sin(dot(vec2(coord), vec2(12.9898, 78.233))) * 43758.5453);
-}
-
 void main() {
     GPUMaterialData mat;
     if (frag_material_id < materials.length())
@@ -81,13 +75,7 @@ void main() {
     if (mat.alpha_mode == 1u && albedo_sample.a < mat.alpha_cutoff)
         discard;
 
-    // LOD dithering: when blend_factor is between 0 and 1, use screen-space
-    // golden noise to smoothly transition between LOD levels.
-    // blend_factor = 0.0 → full high LOD (keep all fragments)
-    // blend_factor = 1.0 → full low LOD (discard all fragments)
-    // In transition, noise < blend_factor → discard (low LOD pixels fade out)
     if (frag_blend_factor > 0.0 && frag_blend_factor < 1.0) {
-        // Golden noise (better spectral properties than IGN, reduces moire)
         float noise = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
         if (noise < frag_blend_factor)
             discard;
@@ -105,12 +93,28 @@ void main() {
     roughness = clamp(roughness, 0.04, 1.0);
     metallic = clamp(metallic, 0.0, 1.0);
 
-    // Screen-space AO sampling from bindless slot 998 (slot 999 is reserved for ImGui Font Atlas)
+    // Screen-space AO sampling from bindless slot 998
     ivec2 ao_tex_size = textureSize(tex_samplers[998], 0);
     float ao = 1.0;
+    vec2 screen_uv = gl_FragCoord.xy;
     if (ao_tex_size.x > 1 && ao_tex_size.y > 1) {
-        vec2 screen_uv = gl_FragCoord.xy / vec2(ao_tex_size);
+        screen_uv = gl_FragCoord.xy / vec2(ao_tex_size);
         ao = texture(tex_samplers[998], screen_uv).r;
+    }
+
+    // Screen-Space Global Illumination (SSGI) from bindless slot 996
+    vec4 ssgi_sample = vec4(0.0);
+    ivec2 ssgi_tex_size = textureSize(tex_samplers[996], 0);
+    if (ssgi_tex_size.x > 1 && ssgi_tex_size.y > 1) {
+        ssgi_sample = texture(tex_samplers[996], screen_uv);
+    }
+    vec3 ssgi_diffuse = ssgi_sample.rgb * albedo_sample.rgb * (1.0 - metallic);
+
+    // Screen-Space Reflections (SSR) from bindless slot 997
+    vec4 ssr_sample = vec4(0.0);
+    ivec2 ssr_tex_size = textureSize(tex_samplers[997], 0);
+    if (ssr_tex_size.x > 1 && ssr_tex_size.y > 1) {
+        ssr_sample = texture(tex_samplers[997], screen_uv);
     }
 
     vec3 N = normalize(frag_normal);
@@ -126,7 +130,15 @@ void main() {
         N = normalize(TBN * normal_sample);
     }
 
+    vec3 V = normalize(ubo.cam_pos - frag_world_pos);
+    vec3 F0 = mix(vec3(0.04), albedo_sample.rgb, metallic);
+    vec3 F_ssr = FresnelSchlick(max(dot(N, V), 0.0), F0);
+    float roughness_fade = smoothstep(0.4, 0.05, roughness);
+    vec3 specular_tint = mix(vec3(1.0), albedo_sample.rgb, metallic);
+    vec3 ssr_reflection = ssr_sample.rgb * F_ssr * roughness_fade * specular_tint * ssr_sample.a;
+
     vec3 color = calculate_lighting(frag_world_pos, N, frag_tex_coord, mat, albedo, ao, metallic, roughness);
+    color += ssr_reflection + ssgi_diffuse;
     color = apply_tonemap_and_gamma(color * frag_color);
     out_color = vec4(color, albedo_sample.a);
 }
