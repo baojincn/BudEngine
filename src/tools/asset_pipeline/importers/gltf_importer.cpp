@@ -110,11 +110,45 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
             rm.double_sided = (two_sided != 0);
         }
 
-        // glTF JSON Extension & Fallback Extraction
+        // 1. PBR Textures from Assimp
+        aiString norm_path;
+        if (mat->GetTexture(aiTextureType_NORMALS, 0, &norm_path) == AI_SUCCESS ||
+            mat->GetTexture(aiTextureType_HEIGHT, 0, &norm_path) == AI_SUCCESS) {
+            std::string p = norm_path.C_Str();
+            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+            rm.normal_texture_path = p;
+        }
+
+        aiString rough_path;
+        if (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &rough_path) == AI_SUCCESS ||
+            mat->GetTexture(aiTextureType_SHININESS, 0, &rough_path) == AI_SUCCESS ||
+            mat->GetTexture(aiTextureType_METALNESS, 0, &rough_path) == AI_SUCCESS) {
+            std::string p = rough_path.C_Str();
+            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+            rm.metallic_roughness_texture_path = p;
+        }
+
+        aiString emissive_path;
+        if (mat->GetTexture(aiTextureType_EMISSIVE, 0, &emissive_path) == AI_SUCCESS) {
+            std::string p = emissive_path.C_Str();
+            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+            rm.emissive_texture_path = p;
+        }
+
+        float metallic_factor = 0.0f;
+        if (mat->Get(AI_MATKEY_METALLIC_FACTOR, metallic_factor) == AI_SUCCESS) {
+            rm.metallic_factor = metallic_factor;
+        }
+        float roughness_factor = 0.5f;
+        if (mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness_factor) == AI_SUCCESS) {
+            rm.roughness_factor = roughness_factor;
+        }
+
+        // 2. glTF JSON Extension & Fallback Extraction
         if (has_gltf_json && gltf_json.contains("materials") && i < gltf_json["materials"].size()) {
             const auto& gj_mat = gltf_json["materials"][i];
 
-            // Resolve diffuse/albedo texture from extensions (e.g. KHR_materials_pbrSpecularGlossiness)
+            // Resolve diffuse/albedo texture from extensions
             if (rm.base_color_texture_path.empty() || rm.base_color_texture_path == raw_mesh.textures[0]) {
                 int tex_idx = -1;
                 if (gj_mat.contains("pbrMetallicRoughness") && gj_mat["pbrMetallicRoughness"].contains("baseColorTexture")) {
@@ -141,6 +175,43 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
                 }
             }
 
+            if (rm.normal_texture_path.empty() && gj_mat.contains("normalTexture")) {
+                int tex_idx = gj_mat["normalTexture"].value("index", -1);
+                if (tex_idx >= 0 && gltf_json.contains("textures") && tex_idx < static_cast<int>(gltf_json["textures"].size())) {
+                    int img_idx = gltf_json["textures"][tex_idx].value("source", -1);
+                    if (img_idx >= 0 && gltf_json.contains("images") && img_idx < static_cast<int>(gltf_json["images"].size())) {
+                        std::string uri = gltf_json["images"][img_idx].value("uri", "");
+                        if (!uri.empty()) {
+                            std::string p = uri;
+                            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+                            rm.normal_texture_path = p;
+                        }
+                    }
+                }
+            }
+
+            if (rm.metallic_roughness_texture_path.empty() && gj_mat.contains("pbrMetallicRoughness") && gj_mat["pbrMetallicRoughness"].contains("metallicRoughnessTexture")) {
+                int tex_idx = gj_mat["pbrMetallicRoughness"]["metallicRoughnessTexture"].value("index", -1);
+                if (tex_idx >= 0 && gltf_json.contains("textures") && tex_idx < static_cast<int>(gltf_json["textures"].size())) {
+                    int img_idx = gltf_json["textures"][tex_idx].value("source", -1);
+                    if (img_idx >= 0 && gltf_json.contains("images") && img_idx < static_cast<int>(gltf_json["images"].size())) {
+                        std::string uri = gltf_json["images"][img_idx].value("uri", "");
+                        if (!uri.empty()) {
+                            std::string p = uri;
+                            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+                            rm.metallic_roughness_texture_path = p;
+                        }
+                    }
+                }
+            }
+
+            if (gj_mat.contains("pbrMetallicRoughness")) {
+                if (gj_mat["pbrMetallicRoughness"].contains("metallicFactor"))
+                    rm.metallic_factor = gj_mat["pbrMetallicRoughness"]["metallicFactor"].get<float>();
+                if (gj_mat["pbrMetallicRoughness"].contains("roughnessFactor"))
+                    rm.roughness_factor = gj_mat["pbrMetallicRoughness"]["roughnessFactor"].get<float>();
+            }
+
             if (gj_mat.contains("alphaMode")) {
                 std::string mode_str = gj_mat["alphaMode"].get<std::string>();
                 if (mode_str == "MASK") {
@@ -161,8 +232,18 @@ std::optional<RawMesh> GltfImporter::import_from_file(const std::string& filepat
             }
         }
 
-        // 2. Texture Pixel Alpha Analysis (100% Data-driven):
-        // Inspect the actual alpha channel pixels of the base color texture.
+        // 3. Auto-scan companion PBR textures (_N, _R, _M, _E)
+        if (!rm.base_color_texture_path.empty() && rm.base_color_texture_path != raw_mesh.textures[0]) {
+            auto companions = TextureImporter::find_companion_pbr_textures(rm.base_color_texture_path);
+            if (rm.normal_texture_path.empty()) rm.normal_texture_path = companions.normal_path;
+            if (rm.metallic_roughness_texture_path.empty()) {
+                if (!companions.roughness_path.empty()) rm.metallic_roughness_texture_path = companions.roughness_path;
+                else if (!companions.metallic_path.empty()) rm.metallic_roughness_texture_path = companions.metallic_path;
+            }
+            if (rm.emissive_texture_path.empty()) rm.emissive_texture_path = companions.emissive_path;
+        }
+
+        // 4. Texture Pixel Alpha Analysis (100% Data-driven):
         if (rm.alpha_mode == bud::asset::AlphaMode::Opaque && !rm.base_color_texture_path.empty() && rm.base_color_texture_path != raw_mesh.textures[0]) {
             auto alpha_info = TextureImporter::analyze_alpha(rm.base_color_texture_path);
             if (alpha_info.has_alpha) {

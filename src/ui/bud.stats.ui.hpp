@@ -19,9 +19,17 @@ namespace bud::ui {
                            std::function<void(float)> set_occluder = nullptr,
                            float current_occluder = -1.0f,
                            std::function<void(bool)> set_occluder_enable = nullptr,
-					bool current_occluder_enable = true,
-					std::function<void(bud::graphics::AOMode)> set_ao_mode = nullptr,
-					bud::graphics::AOMode current_ao_mode = bud::graphics::AOMode::GTAO);
+                           bool current_occluder_enable = true,
+                           std::function<void(bud::graphics::AOMode)> set_ao_mode = nullptr,
+                           bud::graphics::AOMode current_ao_mode = bud::graphics::AOMode::GTAO,
+                           std::function<void(bool)> set_ssr_enable = nullptr,
+                           bool current_ssr_enable = true,
+                           std::function<void(bool)> set_ssgi_enable = nullptr,
+                           bool current_ssgi_enable = true,
+                           std::function<void(float)> set_ssgi_intensity = nullptr,
+                           float current_ssgi_intensity = 1.5f,
+                           std::function<void(float)> set_ssgi_blend = nullptr,
+                           float current_ssgi_blend = 0.05f);
     };
 
 }

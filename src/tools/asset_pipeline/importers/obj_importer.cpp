@@ -53,6 +53,57 @@ static std::optional<RawMesh> import_assimp_common(const std::string& filepath, 
             rm.base_color_texture_path = raw_mesh.textures[0];
         }
 
+        // 1. PBR Textures from Assimp
+        aiString norm_path;
+        if (mat->GetTexture(aiTextureType_NORMALS, 0, &norm_path) == AI_SUCCESS ||
+            mat->GetTexture(aiTextureType_HEIGHT, 0, &norm_path) == AI_SUCCESS) {
+            std::string p = norm_path.C_Str();
+            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+            rm.normal_texture_path = p;
+        }
+
+        aiString rough_path;
+        if (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &rough_path) == AI_SUCCESS ||
+            mat->GetTexture(aiTextureType_SHININESS, 0, &rough_path) == AI_SUCCESS) {
+            std::string p = rough_path.C_Str();
+            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+            rm.metallic_roughness_texture_path = p;
+        }
+
+        aiString metal_path;
+        if (mat->GetTexture(aiTextureType_METALNESS, 0, &metal_path) == AI_SUCCESS) {
+            std::string p = metal_path.C_Str();
+            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+            if (rm.metallic_roughness_texture_path.empty()) rm.metallic_roughness_texture_path = p;
+        }
+
+        aiString emissive_path;
+        if (mat->GetTexture(aiTextureType_EMISSIVE, 0, &emissive_path) == AI_SUCCESS) {
+            std::string p = emissive_path.C_Str();
+            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+            rm.emissive_texture_path = p;
+        }
+
+        // 2. Auto-scan companion PBR textures (_N, _R, _M, _E)
+        if (!rm.base_color_texture_path.empty() && rm.base_color_texture_path != raw_mesh.textures[0]) {
+            auto companions = TextureImporter::find_companion_pbr_textures(rm.base_color_texture_path);
+            if (rm.normal_texture_path.empty()) rm.normal_texture_path = companions.normal_path;
+            if (rm.metallic_roughness_texture_path.empty()) {
+                if (!companions.roughness_path.empty()) rm.metallic_roughness_texture_path = companions.roughness_path;
+                else if (!companions.metallic_path.empty()) rm.metallic_roughness_texture_path = companions.metallic_path;
+            }
+            if (rm.emissive_texture_path.empty()) rm.emissive_texture_path = companions.emissive_path;
+        }
+
+        float metallic_factor = 0.0f;
+        if (mat->Get(AI_MATKEY_METALLIC_FACTOR, metallic_factor) == AI_SUCCESS) {
+            rm.metallic_factor = metallic_factor;
+        }
+        float roughness_factor = 0.5f;
+        if (mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness_factor) == AI_SUCCESS) {
+            rm.roughness_factor = roughness_factor;
+        }
+
         rm.alpha_mode = bud::asset::AlphaMode::Opaque;
         rm.double_sided = false;
         rm.alpha_cutoff = 0.5f;

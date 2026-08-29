@@ -283,6 +283,23 @@ namespace bud::graphics {
         uint32_t heuristic_occluder_max_count = 500;
         float heuristic_occluder_tri_weight = 1e-4f; // multiplier for triangle count in score
 
+		// Screen-Space Reflections (SSR)
+		bool enable_ssr = true;
+		float ssr_max_distance = 30.0f * bud::core::units::m;
+		float ssr_thickness = 0.35f * bud::core::units::m;
+		uint32_t ssr_max_steps = 48;
+		uint32_t ssr_binary_steps = 8;
+		float ssr_intensity = 1.0f;
+
+		// Screen-Space Global Illumination (SSGI)
+		bool enable_ssgi = true;
+		float ssgi_radius = 8.0f * bud::core::units::m;
+		float ssgi_thickness = 0.5f * bud::core::units::m;
+		uint32_t ssgi_ray_count = 8;
+		uint32_t ssgi_max_steps = 24;
+		float ssgi_intensity = 1.5f;
+		float ssgi_temporal_blend = 0.05f;
+
 		// Sky & Physical Atmosphere
 		SkyConfig sky_config;
 	};
@@ -386,7 +403,11 @@ namespace bud::graphics {
 			PageEmit,
 			ClusterCull,
 			ClearStats,
-			CSMCulling
+			CSMCulling,
+			ScreenSpaceReflections,
+			ScreenSpaceGlobalIllumination,
+			SSGIDenoise,
+			SSGITemporal
 		};
 
 		ShaderStage cs;

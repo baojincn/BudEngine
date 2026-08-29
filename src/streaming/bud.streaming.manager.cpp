@@ -94,7 +94,6 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 		if (asset.materials.empty()) {
 			std::filesystem::path asset_p(path);
 			std::filesystem::path mat_dir = asset_p.parent_path().parent_path() / "Materials";
-			std::filesystem::path tex_dir = asset_p.parent_path().parent_path() / "Textures";
 			if (std::filesystem::exists(mat_dir) && std::filesystem::is_directory(mat_dir)) {
 				for (const auto& entry : std::filesystem::directory_iterator(mat_dir)) {
 					if (entry.path().extension() == ".budasset" && asset_manager && asset_manager->get_vfs()) {
@@ -110,16 +109,8 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 										md.alpha_mode = rmh->alpha_mode;
 										md.alpha_cutoff = rmh->alpha_cutoff;
 										md.double_sided = rmh->double_sided;
-
-										std::string mat_stem = entry.path().stem().string();
-										std::filesystem::path tex_path = tex_dir / (mat_stem + ".budasset");
-										if (!std::filesystem::exists(tex_path)) {
-											tex_path = tex_dir / "default.budasset";
-										}
-
-										uint32_t tidx = static_cast<uint32_t>(asset.textures.size());
-										asset.textures.push_back(tex_path.generic_string());
-										md.base_color_texture = tidx;
+										md.metallic_factor = rmh->metallic_factor;
+										md.roughness_factor = rmh->roughness_factor;
 										asset.materials.push_back(md);
 										break;
 									}
@@ -138,31 +129,37 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 			gpu_mat.alpha_mode = static_cast<uint32_t>(mat_desc.alpha_mode);
 			gpu_mat.alpha_cutoff = (mat_desc.alpha_cutoff > 0.0f) ? mat_desc.alpha_cutoff : 0.5f;
 			gpu_mat.base_color_factor = glm::vec4(1.0f);
-			gpu_mat.metallic_factor = 0.0f;
-			gpu_mat.roughness_factor = 0.5f;
+			gpu_mat.metallic_factor = mat_desc.metallic_factor;
+			gpu_mat.roughness_factor = mat_desc.roughness_factor;
 
-			if (mat_desc.base_color_texture < asset.textures.size() && renderer) {
-				const std::string& raw_tex_path = asset.textures[mat_desc.base_color_texture];
-				if (!raw_tex_path.empty()) {
-					std::string tex_path = raw_tex_path;
-					std::filesystem::path tp(raw_tex_path);
-					std::string stem = tp.stem().string();
-					std::filesystem::path asset_p(path);
-					std::filesystem::path candidate1 = asset_p.parent_path().parent_path() / "Textures" / (stem + ".budasset");
-					std::filesystem::path candidate2 = asset_p.parent_path() / "Textures" / (stem + ".budasset");
-					std::filesystem::path candidate3 = asset_p.parent_path() / (stem + ".budasset");
+			auto resolve_and_bind_texture = [&](uint32_t tex_idx) -> uint32_t {
+				if (tex_idx >= asset.textures.size() || !renderer) return 0;
+				const std::string& raw_tex_path = asset.textures[tex_idx];
+				if (raw_tex_path.empty()) return 0;
 
-					if (std::filesystem::exists(candidate1)) {
-						tex_path = candidate1.generic_string();
-					} else if (std::filesystem::exists(candidate2)) {
-						tex_path = candidate2.generic_string();
-					} else if (std::filesystem::exists(candidate3)) {
-						tex_path = candidate3.generic_string();
-					}
+				std::string tex_path = raw_tex_path;
+				std::filesystem::path tp(raw_tex_path);
+				std::string stem = tp.stem().string();
+				std::filesystem::path asset_p(path);
+				std::filesystem::path candidate1 = asset_p.parent_path().parent_path() / "Textures" / (stem + ".budasset");
+				std::filesystem::path candidate2 = asset_p.parent_path() / "Textures" / (stem + ".budasset");
+				std::filesystem::path candidate3 = asset_p.parent_path() / (stem + ".budasset");
 
-					gpu_mat.albedo_texture_id = renderer->bind_texture_async(tex_path);
+				if (std::filesystem::exists(candidate1)) {
+					tex_path = candidate1.generic_string();
+				} else if (std::filesystem::exists(candidate2)) {
+					tex_path = candidate2.generic_string();
+				} else if (std::filesystem::exists(candidate3)) {
+					tex_path = candidate3.generic_string();
 				}
-			}
+
+				return renderer->bind_texture_async(tex_path);
+			};
+
+			gpu_mat.albedo_texture_id = resolve_and_bind_texture(mat_desc.base_color_texture);
+			gpu_mat.normal_texture_id = resolve_and_bind_texture(mat_desc.normal_texture);
+			gpu_mat.metallic_roughness_id = resolve_and_bind_texture(mat_desc.metallic_roughness_texture);
+			gpu_mat.emissive_texture_id = resolve_and_bind_texture(mat_desc.emissive_texture);
 
 			if (gpu_scene) {
 				uint32_t id = gpu_scene->register_material(gpu_mat);

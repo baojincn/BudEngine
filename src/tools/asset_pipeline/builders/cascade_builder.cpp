@@ -40,7 +40,21 @@ bool CascadeBuilder::build_package_from_raw(
     std::filesystem::create_directories(mat_dir, ec);
     std::filesystem::create_directories(mesh_dir, ec);
 
-    // 1. Cascade Build: Textures
+    // 1. Cascade Build: Textures (Gather all channels from mesh and materials)
+    std::vector<std::string> all_textures = raw_mesh.textures;
+    auto add_unique_texture = [&](const std::string& p) {
+        if (p.empty()) return;
+        if (std::find(all_textures.begin(), all_textures.end(), p) == all_textures.end()) {
+            all_textures.push_back(p);
+        }
+    };
+    for (const auto& mat : raw_mesh.materials) {
+        add_unique_texture(mat.base_color_texture_path);
+        add_unique_texture(mat.normal_texture_path);
+        add_unique_texture(mat.metallic_roughness_texture_path);
+        add_unique_texture(mat.emissive_texture_path);
+    }
+
     std::unordered_map<std::string, uint64_t> texture_id_map;
     std::hash<std::string> hasher;
 
@@ -48,7 +62,7 @@ bool CascadeBuilder::build_package_from_raw(
     tex_opts.use_cache = options.use_cache;
     tex_opts.cache_root = options.cache_root;
 
-    for (const auto& tex_path : raw_mesh.textures) {
+    for (const auto& tex_path : all_textures) {
         if (tex_path.empty())
             continue;
 

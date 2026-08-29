@@ -38,6 +38,22 @@ std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath
 
     raw_mesh.textures.push_back("data/textures/default.png");
 
+    std::unordered_map<std::string, std::string> texture_files_map;
+    if (!base_dir.empty() && std::filesystem::exists(base_dir)) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(base_dir)) {
+            if (entry.is_regular_file()) {
+                std::string ext = entry.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext == ".dds" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp") {
+                    std::string s = entry.path().stem().string();
+                    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+                    texture_files_map[s] = entry.path().generic_string();
+                    texture_files_map[entry.path().filename().string()] = entry.path().generic_string();
+                }
+            }
+        }
+    }
+
     auto resolve_texture_file = [&](const std::string& raw_tex_path) -> std::string {
         if (raw_tex_path.empty())
             return "";
@@ -45,36 +61,18 @@ std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath
         std::filesystem::path tp(raw_tex_path);
         std::string fname = tp.filename().string();
         std::string stem = tp.stem().string();
+        std::string lower_stem = stem;
+        std::transform(lower_stem.begin(), lower_stem.end(), lower_stem.begin(), ::tolower);
 
-        std::vector<std::string> search_dirs = {
-            base_dir,
-            base_dir + "Textures/",
-            base_dir + "textures/",
-            base_dir + "../Textures/",
-            base_dir + "../textures/",
-            base_dir + "../../Textures/",
-            base_dir + "../../textures/"
-        };
-
-        std::vector<std::string> search_exts = {
-            tp.extension().string(),
-            ".dds", ".DDS", ".png", ".PNG", ".tga", ".TGA", ".jpg", ".JPG"
-        };
-
-        // 1. Direct check
         if (std::filesystem::exists(raw_tex_path))
             return raw_tex_path;
         if (!base_dir.empty() && std::filesystem::exists(base_dir + raw_tex_path))
             return base_dir + raw_tex_path;
 
-        // 2. Search candidates in nearby texture directories
-        for (const auto& sdir : search_dirs) {
-            for (const auto& sext : search_exts) {
-                std::string candidate = sdir + stem + sext;
-                if (std::filesystem::exists(candidate))
-                    return candidate;
-            }
-        }
+        if (auto it = texture_files_map.find(fname); it != texture_files_map.end())
+            return it->second;
+        if (auto it = texture_files_map.find(lower_stem); it != texture_files_map.end())
+            return it->second;
 
         return "";
     };
@@ -117,11 +115,57 @@ std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath
                 rm.base_color_texture_path = raw_mesh.textures[0];
         }
 
+        // 1. PBR Textures from Assimp
+        aiString norm_path;
+        if (mat->GetTexture(aiTextureType_NORMALS, 0, &norm_path) == AI_SUCCESS ||
+            mat->GetTexture(aiTextureType_HEIGHT, 0, &norm_path) == AI_SUCCESS) {
+            rm.normal_texture_path = resolve_texture_file(norm_path.C_Str());
+        }
+
+        aiString rough_path;
+        if (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &rough_path) == AI_SUCCESS ||
+            mat->GetTexture(aiTextureType_SHININESS, 0, &rough_path) == AI_SUCCESS) {
+            rm.metallic_roughness_texture_path = resolve_texture_file(rough_path.C_Str());
+        }
+
+        aiString metal_path;
+        if (mat->GetTexture(aiTextureType_METALNESS, 0, &metal_path) == AI_SUCCESS) {
+            if (rm.metallic_roughness_texture_path.empty()) {
+                rm.metallic_roughness_texture_path = resolve_texture_file(metal_path.C_Str());
+            }
+        }
+
+        aiString emissive_path;
+        if (mat->GetTexture(aiTextureType_EMISSIVE, 0, &emissive_path) == AI_SUCCESS) {
+            rm.emissive_texture_path = resolve_texture_file(emissive_path.C_Str());
+        }
+
+        // 2. Auto-scan companion PBR textures (_N, _R, _M, _E)
+        if (!rm.base_color_texture_path.empty() && rm.base_color_texture_path != raw_mesh.textures[0]) {
+            auto companions = TextureImporter::find_companion_pbr_textures(rm.base_color_texture_path);
+            if (rm.normal_texture_path.empty()) rm.normal_texture_path = companions.normal_path;
+            if (rm.metallic_roughness_texture_path.empty()) {
+                if (!companions.roughness_path.empty()) rm.metallic_roughness_texture_path = companions.roughness_path;
+                else if (!companions.metallic_path.empty()) rm.metallic_roughness_texture_path = companions.metallic_path;
+            }
+            if (rm.emissive_texture_path.empty()) rm.emissive_texture_path = companions.emissive_path;
+        }
+
+        // 3. PBR Factors
+        float metallic_factor = 0.0f;
+        if (mat->Get(AI_MATKEY_METALLIC_FACTOR, metallic_factor) == AI_SUCCESS) {
+            rm.metallic_factor = metallic_factor;
+        }
+        float roughness_factor = 0.5f;
+        if (mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness_factor) == AI_SUCCESS) {
+            rm.roughness_factor = roughness_factor;
+        }
+
         rm.alpha_mode = bud::asset::AlphaMode::Opaque;
         rm.double_sided = false;
         rm.alpha_cutoff = 0.5f;
 
-        // 1. Assimp material properties
+        // 4. Assimp material properties (Opacity & TwoSided)
         float opacity = 1.0f;
         if (mat->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS) {
             if (opacity < 0.99f) {
@@ -136,7 +180,7 @@ std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath
                 rm.double_sided = true;
         }
 
-        // 2. Texture Pixel Alpha Analysis & Companion Mask
+        // 5. Texture Pixel Alpha Analysis & Companion Mask
         if (!rm.base_color_texture_path.empty() && rm.base_color_texture_path != raw_mesh.textures[0]) {
             auto alpha_info = TextureImporter::analyze_alpha(rm.base_color_texture_path);
             if (alpha_info.has_alpha) {

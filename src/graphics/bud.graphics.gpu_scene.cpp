@@ -137,8 +137,14 @@ namespace bud::graphics {
 					rhi->destroy_texture(persistent_hiz_textures[i]);
 					persistent_hiz_textures[i].reset();
 				}
+				if (persistent_color_textures[i].is_valid()) {
+					rhi->destroy_texture(persistent_color_textures[i]);
+					persistent_color_textures[i].reset();
+				}
 			}
 			persistent_hiz_size = 0;
+			persistent_color_width = 0;
+			persistent_color_height = 0;
 		}
 
 		mesh_geometries.clear();
@@ -402,6 +408,34 @@ namespace bud::graphics {
 		}
 		persistent_hiz_size = size;
 		has_history_hiz_valid = false;
+	}
+
+	void GPUScene::ensure_color_textures(RHI* rhi, uint32_t width, uint32_t height) {
+		if (width == 0 || height == 0 || !rhi)
+			return;
+		if (persistent_color_width == width && persistent_color_height == height &&
+			persistent_color_textures[0].is_valid() && persistent_color_textures[1].is_valid())
+			return;
+
+		TextureDesc desc;
+		desc.width = width;
+		desc.height = height;
+		desc.mips = 1;
+		desc.format = TextureFormat::RGBA8_SRGB;
+		desc.is_storage = false;
+		desc.is_transfer_src = true;
+		desc.initial_state = ResourceState::ShaderResource;
+
+		for (int i = 0; i < 2; ++i) {
+			if (persistent_color_textures[i].is_valid()) {
+				rhi->destroy_texture(persistent_color_textures[i]);
+				persistent_color_textures[i].reset();
+			}
+			persistent_color_textures[i] = rhi->create_texture(desc, nullptr, 0);
+		}
+		persistent_color_width = width;
+		persistent_color_height = height;
+		has_history_color_valid = false;
 	}
 }
 

@@ -414,6 +414,10 @@ namespace bud::graphics::vulkan {
 		VkDescriptorSetLayout compute_cluster_cull_set_layout = VK_NULL_HANDLE;
 		VkDescriptorSetLayout compute_clear_stats_set_layout = VK_NULL_HANDLE;
 		VkDescriptorSetLayout compute_csm_cull_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_ssr_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_ssgi_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_ssgi_denoise_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_ssgi_temporal_set_layout = VK_NULL_HANDLE;
 		VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
 		VkSampler default_sampler = VK_NULL_HANDLE;
 		VkSampler point_sampler = VK_NULL_HANDLE;

@@ -20,6 +20,13 @@ struct RawVertex {
 struct RawMaterial {
     std::string name;
     std::string base_color_texture_path;
+    std::string normal_texture_path;
+    std::string metallic_roughness_texture_path;
+    std::string emissive_texture_path;
+    float metallic_factor = 0.0f;
+    float roughness_factor = 0.5f;
+    float base_color_factor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float emissive_factor[3] = { 0.0f, 0.0f, 0.0f };
     bud::asset::AlphaMode alpha_mode = bud::asset::AlphaMode::Opaque;
     bool double_sided = false;
     float alpha_cutoff = 0.5f;

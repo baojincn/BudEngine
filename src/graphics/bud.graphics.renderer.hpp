@@ -107,6 +107,8 @@ namespace bud::graphics {
 		std::unique_ptr<MainPass> main_pass;
 		std::unique_ptr<UIPass> ui_pass;
 		std::unique_ptr<VisibilityPass> visibility_pass;
+		std::unique_ptr<ScreenSpaceReflectionPass> ssr_pass;
+		std::unique_ptr<ScreenSpaceGlobalIlluminationPass> ssgi_pass;
 		std::unique_ptr<ResolvePass> resolve_pass;
 		bool has_mesh_shader = false;
 

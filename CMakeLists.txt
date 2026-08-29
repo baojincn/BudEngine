@@ -244,6 +244,8 @@ target_sources(bud_engine_core
 		"src/graphics/passes/bud.pass.main.cpp"
 		"src/graphics/passes/bud.pass.ao.cpp"
 		"src/graphics/passes/bud.pass.visibility.cpp"
+		"src/graphics/passes/bud.pass.ssr.cpp"
+		"src/graphics/passes/bud.pass.ssgi.cpp"
 		"src/graphics/passes/bud.pass.resolve.cpp"
 		"src/graphics/passes/bud.pass.ui.cpp"
 		"src/graphics/bud.graphics.graph.cpp"

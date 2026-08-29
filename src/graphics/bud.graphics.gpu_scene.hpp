@@ -172,7 +172,18 @@ namespace bud::graphics {
 		}
 		void mark_history_hiz_valid() { has_history_hiz_valid = true; }
 		void reset_history_hiz() { has_history_hiz_valid = false; }
+		TextureHandle get_history_color(uint32_t frame_index) const {
+			return persistent_color_textures[(frame_index + 1) % 2];
+		}
+		TextureHandle get_current_color(uint32_t frame_index) const {
+			return persistent_color_textures[frame_index % 2];
+		}
+		bool has_history_color() const {
+			return has_history_color_valid && persistent_color_textures[0].is_valid();
+		}
+		void mark_history_color_valid() { has_history_color_valid = true; }
 		void ensure_hiz_textures(RHI* rhi, uint32_t width, uint32_t height);
+		void ensure_color_textures(RHI* rhi, uint32_t width, uint32_t height);
 
 	private:
 		GeometryPool geometry_pool;
@@ -183,6 +194,10 @@ namespace bud::graphics {
 		std::array<TextureHandle, 2> persistent_hiz_textures;
 		uint32_t persistent_hiz_size = 0;
 		bool has_history_hiz_valid = false;
+		std::array<TextureHandle, 2> persistent_color_textures;
+		uint32_t persistent_color_width = 0;
+		uint32_t persistent_color_height = 0;
+		bool has_history_color_valid = false;
 		std::vector<GPUMaterialData> cpu_materials;
 		std::mutex materials_mutex;
 		std::vector<MeshGeometry> mesh_geometries;

@@ -182,8 +182,34 @@ bool MeshBuilder::build(const std::string& input_path, const std::string& output
         off += vg_result.pages.size() * sizeof(bud::asset::VGPageStreamingState);
         const uint64_t dependency_offset = off;
         off += vg_result.dependencies.size() * sizeof(bud::asset::VGPageDependency);
+
+        auto find_or_add_tex = [&](const std::string& path) -> uint32_t {
+            if (path.empty()) return 0xFFFFFFFF;
+            for (size_t ti = 0; ti < internal_mesh.textures.size(); ++ti) {
+                if (internal_mesh.textures[ti] == path) return static_cast<uint32_t>(ti);
+            }
+            uint32_t new_idx = static_cast<uint32_t>(internal_mesh.textures.size());
+            internal_mesh.textures.push_back(path);
+            return new_idx;
+        };
+
+        std::vector<bud::asset::MaterialDescriptor> mat_descs(internal_mesh.materials.size());
+        for (size_t mi = 0; mi < internal_mesh.materials.size(); ++mi) {
+            const auto& src_m = internal_mesh.materials[mi];
+            mat_descs[mi].alpha_mode = static_cast<uint8_t>(src_m.alpha_mode);
+            mat_descs[mi].alpha_cutoff = src_m.alpha_cutoff;
+            mat_descs[mi].double_sided = src_m.double_sided ? 1 : 0;
+            mat_descs[mi].metallic_factor = src_m.metallic_factor;
+            mat_descs[mi].roughness_factor = src_m.roughness_factor;
+            mat_descs[mi].base_color_texture = find_or_add_tex(src_m.base_color_texture_path);
+            if (mat_descs[mi].base_color_texture == 0xFFFFFFFF) mat_descs[mi].base_color_texture = 0;
+            mat_descs[mi].normal_texture = find_or_add_tex(src_m.normal_texture_path);
+            mat_descs[mi].metallic_roughness_texture = find_or_add_tex(src_m.metallic_roughness_texture_path);
+            mat_descs[mi].emissive_texture = find_or_add_tex(src_m.emissive_texture_path);
+        }
+
         const uint64_t material_offset = off;
-        off += internal_mesh.materials.size() * sizeof(bud::asset::MaterialDescriptor);
+        off += mat_descs.size() * sizeof(bud::asset::MaterialDescriptor);
         const uint64_t texture_offset = off;
         size_t tex_string_table_size = 0;
         for (const auto& t : internal_mesh.textures) {
@@ -191,21 +217,6 @@ bool MeshBuilder::build(const std::string& input_path, const std::string& output
         }
         off += tex_string_table_size;
         const uint64_t page_data_offset = off;
-
-        std::vector<bud::asset::MaterialDescriptor> mat_descs(internal_mesh.materials.size());
-        for (size_t mi = 0; mi < internal_mesh.materials.size(); ++mi) {
-            const auto& src_m = internal_mesh.materials[mi];
-            mat_descs[mi].alpha_mode = static_cast<uint32_t>(src_m.alpha_mode);
-            mat_descs[mi].alpha_cutoff = src_m.alpha_cutoff;
-            mat_descs[mi].double_sided = src_m.double_sided ? 1 : 0;
-            mat_descs[mi].base_color_texture = 0;
-            for (size_t ti = 0; ti < internal_mesh.textures.size(); ++ti) {
-                if (internal_mesh.textures[ti] == src_m.base_color_texture_path) {
-                    mat_descs[mi].base_color_texture = static_cast<uint32_t>(ti);
-                    break;
-                }
-            }
-        }
 
         size_t total_vg_size = static_cast<size_t>(page_data_offset);
         std::vector<uint8_t> vg_chunk(total_vg_size, 0);

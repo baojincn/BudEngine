@@ -18,22 +18,35 @@ bool MaterialAssetBuilder::build(
     header.alpha_mode = static_cast<uint8_t>(raw.alpha_mode);
     header.double_sided = raw.double_sided ? 1 : 0;
     header.shading_model = 0; // Standard PBR Default Lit
-    header.base_color_factor[0] = 1.0f;
-    header.base_color_factor[1] = 1.0f;
-    header.base_color_factor[2] = 1.0f;
-    header.base_color_factor[3] = 1.0f;
-    header.metallic_factor = 0.0f;
-    header.roughness_factor = 0.5f;
+    header.base_color_factor[0] = raw.base_color_factor[0];
+    header.base_color_factor[1] = raw.base_color_factor[1];
+    header.base_color_factor[2] = raw.base_color_factor[2];
+    header.base_color_factor[3] = raw.base_color_factor[3];
+    header.metallic_factor = raw.metallic_factor;
+    header.roughness_factor = raw.roughness_factor;
     header.alpha_cutoff = raw.alpha_cutoff;
 
     // Slot 0: Base Color Texture
-    if (!raw.base_color_texture_path.empty()) {
-        auto it = texture_ids.find(raw.base_color_texture_path);
-        if (it != texture_ids.end()) {
-            header.texture_count = 1;
-            header.texture_asset_ids[0] = it->second;
+    // Slot 1: Normal Texture
+    // Slot 2: Metallic / Roughness Texture
+    // Slot 3: Emissive Texture
+    header.texture_count = 0;
+    for (int s = 0; s < 8; ++s) header.texture_asset_ids[s] = 0;
+
+    auto bind_slot = [&](size_t slot, const std::string& path) {
+        if (!path.empty()) {
+            auto it = texture_ids.find(path);
+            if (it != texture_ids.end()) {
+                header.texture_asset_ids[slot] = it->second;
+                if (slot + 1 > header.texture_count) header.texture_count = static_cast<uint32_t>(slot + 1);
+            }
         }
-    }
+    };
+
+    bind_slot(0, raw.base_color_texture_path);
+    bind_slot(1, raw.normal_texture_path);
+    bind_slot(2, raw.metallic_roughness_texture_path);
+    bind_slot(3, raw.emissive_texture_path);
 
     std::vector<uint8_t> payload(sizeof(header));
     std::memcpy(payload.data(), &header, sizeof(header));

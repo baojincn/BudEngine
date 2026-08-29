@@ -192,9 +192,25 @@ vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
     // Apply Shadow
     Lo *= (1.0 - shadow);
 
-    float ao_factor = mix(0.35, 1.0, clamp(ao, 0.0, 1.0));
-    vec3 ambient = vec3(ubo.ambient_strength) * albedo * ao_factor;
-    vec3 color = ambient + Lo;
+    // Hemispheric Sky/Ground Ambient Irradiance (prevents indoor pitch-black shadows)
+    vec3 sky_ambient = vec3(0.7, 0.8, 1.0) * max(ubo.ambient_strength, 0.45);
+    vec3 ground_ambient = vec3(0.5, 0.42, 0.35) * max(ubo.ambient_strength, 0.45);
+    float hemi = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 ambient_irradiance = mix(ground_ambient, sky_ambient, hemi);
+
+    float ao_factor = mix(0.4, 1.0, clamp(ao, 0.0, 1.0));
+    vec3 ambient = ambient_irradiance * albedo * ao_factor;
+
+    // Ambient Specular Reflection for smooth surfaces
+    vec3 ambient_specular = mix(vec3(0.04), albedo, metallic) * ambient_irradiance * (1.0 - roughness) * 0.5;
+
+    vec3 color = ambient + ambient_specular + Lo;
+
+    // Emissive contribution (e.g. fire pit)
+    if (mat.emissive_texture_id > 0u && mat.emissive_texture_id < 900u) {
+        vec3 emissive_sample = texture(tex_samplers[nonuniformEXT(mat.emissive_texture_id)], tex_coord).rgb;
+        color += emissive_sample * 5.0;
+    }
 
     // [DEBUG] Toggle this to visualize cascades
     if (ubo.debug_cascades > 0) {
@@ -218,10 +234,10 @@ vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
         color = mix(color, albedo * cascadeColors[debugLayer], 0.5);
     }
 
-    color = ACESFilm(color);
-
-    // Gamma Correction (Linear -> sRGB)
-    color = pow(color, vec3(1.0/2.2));
-
     return color;
+}
+
+vec3 apply_tonemap_and_gamma(vec3 linear_color) {
+    vec3 mapped = ACESFilm(linear_color);
+    return pow(mapped, vec3(1.0 / 2.2));
 }

@@ -65,6 +65,8 @@ namespace bud::graphics {
 		cluster_visualization_pass = std::make_unique<ClusterVisualizationPass>();
 		ui_pass = std::make_unique<UIPass>();
 		visibility_pass = std::make_unique<VisibilityPass>();
+		ssr_pass = std::make_unique<ScreenSpaceReflectionPass>();
+		ssgi_pass = std::make_unique<ScreenSpaceGlobalIlluminationPass>();
 		resolve_pass = std::make_unique<ResolvePass>();
 
 		csm_pass->init(rhi, render_config, asset_manager);
@@ -82,6 +84,8 @@ namespace bud::graphics {
 		cluster_visualization_pass->init(rhi, render_config, asset_manager);
 		ui_pass->init(rhi, render_config, asset_manager);
 		visibility_pass->init(rhi, render_config, asset_manager);
+		ssr_pass->init(rhi, render_config, asset_manager);
+		ssgi_pass->init(rhi, render_config, asset_manager);
 		resolve_pass->init(rhi, render_config, asset_manager);
 
 		has_mesh_shader = true; // GPU supports mesh shaders (NV / EXT)
@@ -120,6 +124,8 @@ namespace bud::graphics {
 		if (main_pass) main_pass->shutdown(rhi);
 		if (cluster_visualization_pass) cluster_visualization_pass->shutdown(rhi);
 		if (visibility_pass) visibility_pass->shutdown(rhi);
+		if (ssr_pass) ssr_pass->shutdown(rhi);
+		if (ssgi_pass) ssgi_pass->shutdown(rhi);
 		if (resolve_pass) resolve_pass->shutdown(rhi);
 		if (csm_cull_pipeline.is_valid()) {
 			rhi->destroy_pipeline(csm_cull_pipeline);
@@ -1333,12 +1339,20 @@ namespace bud::graphics {
 						rg_visible_pages = hierarchy_traversal_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, visible_count, gpu_scene, current_idx);
 
 					gpu_scene.ensure_hiz_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
+					gpu_scene.ensure_color_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
 
 					RGHandle rg_history_hiz{};
 					if (gpu_scene.has_history_hiz() && render_config.enable_hiz_culling) {
 						auto hist_tex = gpu_scene.get_history_hiz(current_idx);
 						if (hist_tex.is_valid())
 							rg_history_hiz = render_graph.import_texture("HistoryHiZ", hist_tex, ResourceState::ShaderResource);
+					}
+
+					RGHandle rg_history_color{};
+					if (gpu_scene.has_history_color() && (render_config.enable_ssr || render_config.enable_ssgi)) {
+						auto hist_col_tex = gpu_scene.get_history_color(current_idx);
+						if (hist_col_tex.is_valid())
+							rg_history_color = render_graph.import_texture("HistorySceneColor", hist_col_tex, ResourceState::ShaderResource);
 					}
 
 					if (rg_visible_pages.is_valid() && visibility_pass) {
@@ -1378,9 +1392,19 @@ namespace bud::graphics {
 								rg_ao = raw_ao;
 						}
 
+						RGHandle rg_ssr{};
+						if (rg_depth.is_valid() && ssr_pass && render_config.enable_ssr) {
+							rg_ssr = ssr_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
+						}
+
+						RGHandle rg_ssgi{};
+						if (rg_depth.is_valid() && ssgi_pass && render_config.enable_ssgi) {
+							rg_ssgi = ssgi_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
+						}
+
 						if (rg_visibility.is_valid() && resolve_pass) {
 							resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
-								scene_view, render_config, gpu_scene, shadow_map, rg_ao);
+								scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 							has_main_pass = true;
 						}
 					}
@@ -1435,12 +1459,48 @@ namespace bud::graphics {
 								}
 							}
 
+							RGHandle rg_history_color{};
+							if (gpu_scene.has_history_color() && (render_config.enable_ssr || render_config.enable_ssgi)) {
+								auto hist_col_tex = gpu_scene.get_history_color(current_idx);
+								if (hist_col_tex.is_valid())
+									rg_history_color = render_graph.import_texture("HistorySceneColor", hist_col_tex, ResourceState::ShaderResource);
+							}
+
+							RGHandle rg_ssr{};
+							if (rg_depth.is_valid() && ssr_pass && render_config.enable_ssr) {
+								rg_ssr = ssr_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
+							}
+
+							RGHandle rg_ssgi{};
+							if (rg_depth.is_valid() && ssgi_pass && render_config.enable_ssgi) {
+								rg_ssgi = ssgi_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
+							}
+
 							if (rg_visibility.is_valid()) {
 								resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
-									scene_view, render_config, gpu_scene, shadow_map, rg_ao);
+									scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 								has_main_pass = true;
 							}
 						}
+					}
+				}
+
+				if (has_main_pass && (render_config.enable_ssr || render_config.enable_ssgi)) {
+					gpu_scene.mark_history_color_valid();
+					auto curr_col_tex = gpu_scene.get_current_color(current_idx);
+					if (curr_col_tex.is_valid()) {
+						auto rg_curr_color = render_graph.import_texture("CurrentSceneColor", curr_col_tex, ResourceState::Undefined);
+						render_graph.add_pass("Capture Scene Color",
+							[=](RGBuilder& builder) {
+								builder.read(back_buffer, ResourceState::TransferSrc);
+								builder.write(rg_curr_color, ResourceState::TransferDst);
+								return rg_curr_color;
+							},
+							[=](RHI* rhi, CommandHandle cmd) {
+								rhi->cmd_copy_image(cmd, render_graph.get_texture(back_buffer), render_graph.get_texture(rg_curr_color));
+								rhi->resource_barrier(cmd, render_graph.get_texture(rg_curr_color), ResourceState::TransferDst, ResourceState::ShaderResource);
+							}
+						);
 					}
 				}
 			}

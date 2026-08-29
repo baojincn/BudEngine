@@ -36,7 +36,7 @@ namespace bud::graphics {
 		resolve_set_layout = 0;
 	}
 	RGHandle ResolvePass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer, RGHandle visibility_buffer,
-		const SceneView& view, const RenderConfig& config, const GPUScene& gpu_scene, RGHandle shadow_map, RGHandle ao_map) {
+		const SceneView& view, const RenderConfig& config, const GPUScene& gpu_scene, RGHandle shadow_map, RGHandle ao_map, RGHandle ssr_map, RGHandle ssgi_map) {
 		if (!resolve_pipeline.is_valid() || !visibility_buffer.is_valid())
 			return {};
 
@@ -47,6 +47,10 @@ namespace bud::graphics {
 					builder.read(shadow_map, ResourceState::ShaderResource);
 				if (ao_map.is_valid())
 					builder.read(ao_map, ResourceState::ShaderResource);
+				if (ssr_map.is_valid())
+					builder.read(ssr_map, ResourceState::ShaderResource);
+				if (ssgi_map.is_valid())
+					builder.read(ssgi_map, ResourceState::ShaderResource);
 				builder.write(backbuffer, ResourceState::RenderTarget);
 				return backbuffer;
 			},
@@ -73,6 +77,24 @@ namespace bud::graphics {
 				}
 				else {
 					rhi->update_bindless_texture_current_frame(998, rhi->get_fallback_texture());
+				}
+
+				if (ssr_map.is_valid()) {
+					TextureHandle ssr_tex = render_graph.get_texture(ssr_map);
+					if (ssr_tex.is_valid())
+						rhi->update_bindless_texture_current_frame(997, ssr_tex);
+				}
+				else {
+					rhi->update_bindless_texture_current_frame(997, rhi->get_fallback_texture());
+				}
+
+				if (ssgi_map.is_valid()) {
+					TextureHandle ssgi_tex = render_graph.get_texture(ssgi_map);
+					if (ssgi_tex.is_valid())
+						rhi->update_bindless_texture_current_frame(996, ssgi_tex);
+				}
+				else {
+					rhi->update_bindless_texture_current_frame(996, rhi->get_fallback_texture());
 				}
 
 				rhi->cmd_begin_render_pass(cmd, rp_info);

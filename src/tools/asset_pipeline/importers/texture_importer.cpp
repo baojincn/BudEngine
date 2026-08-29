@@ -504,4 +504,153 @@ TextureAlphaInfo TextureImporter::analyze_alpha(const std::string& path) {
     return analyze_alpha(*tex);
 }
 
+PBRCompanionTextures TextureImporter::find_companion_pbr_textures(const std::string& base_color_path) {
+    PBRCompanionTextures pbr{};
+    if (base_color_path.empty())
+        return pbr;
+
+    std::filesystem::path p(base_color_path);
+    std::filesystem::path dir = p.parent_path();
+    std::string stem = p.stem().string();
+
+    const std::vector<std::string> exts = { ".tga", ".TGA", ".dds", ".DDS", ".png", ".PNG", ".jpg", ".JPG" };
+
+    auto find_existing_candidate = [&](const std::vector<std::string>& stem_candidates) -> std::string {
+        for (const auto& sc : stem_candidates) {
+            for (const auto& ext : exts) {
+                auto cand = dir / (sc + ext);
+                if (std::filesystem::exists(cand)) {
+                    return cand.generic_string();
+                }
+            }
+        }
+        return "";
+    };
+
+    // 1. Normal Map Candidates
+    std::vector<std::string> normal_stems;
+    if (stem.find("_0_D") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_0_D"), 4, "_0_N");
+        normal_stems.push_back(s);
+    }
+    if (stem.find("_D") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_D"), 2, "_N");
+        normal_stems.push_back(s);
+    }
+    if (stem.find("_diff") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_diff"), 5, "_norm");
+        normal_stems.push_back(s);
+        s = stem;
+        s.replace(s.find("_diff"), 5, "_ddn");
+        normal_stems.push_back(s);
+    }
+    if (stem.find("_Albedo") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_Albedo"), 7, "_Normal");
+        normal_stems.push_back(s);
+        s = stem;
+        s.replace(s.find("_Albedo"), 7, "_NRM");
+        normal_stems.push_back(s);
+    }
+    if (stem.find("_BaseColor") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_BaseColor"), 10, "_Normal");
+        normal_stems.push_back(s);
+    }
+    normal_stems.push_back(stem + "_normal");
+    normal_stems.push_back(stem + "_Normal");
+    normal_stems.push_back(stem + "_N");
+    pbr.normal_path = find_existing_candidate(normal_stems);
+
+    // 2. Roughness Map Candidates
+    std::vector<std::string> rough_stems;
+    if (stem.find("_0_D") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_0_D"), 4, "_0_R");
+        rough_stems.push_back(s);
+    }
+    if (stem.find("_D") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_D"), 2, "_R");
+        rough_stems.push_back(s);
+    }
+    if (stem.find("_diff") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_diff"), 5, "_rough");
+        rough_stems.push_back(s);
+    }
+    if (stem.find("_Albedo") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_Albedo"), 7, "_Roughness");
+        rough_stems.push_back(s);
+    }
+    if (stem.find("_BaseColor") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_BaseColor"), 10, "_Roughness");
+        rough_stems.push_back(s);
+    }
+    rough_stems.push_back(stem + "_roughness");
+    rough_stems.push_back(stem + "_Roughness");
+    rough_stems.push_back(stem + "_R");
+    pbr.roughness_path = find_existing_candidate(rough_stems);
+
+    // 3. Metallic Map Candidates
+    std::vector<std::string> metal_stems;
+    if (stem.find("_0_D") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_0_D"), 4, "_0_M");
+        metal_stems.push_back(s);
+    }
+    if (stem.find("_D") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_D"), 2, "_M");
+        metal_stems.push_back(s);
+    }
+    if (stem.find("_diff") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_diff"), 5, "_metal");
+        metal_stems.push_back(s);
+    }
+    if (stem.find("_Albedo") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_Albedo"), 7, "_Metallic");
+        metal_stems.push_back(s);
+    }
+    if (stem.find("_BaseColor") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_BaseColor"), 10, "_Metallic");
+        metal_stems.push_back(s);
+    }
+    metal_stems.push_back(stem + "_metallic");
+    metal_stems.push_back(stem + "_Metallic");
+    metal_stems.push_back(stem + "_M");
+    pbr.metallic_path = find_existing_candidate(metal_stems);
+
+    // 4. Emissive Map Candidates
+    std::vector<std::string> emissive_stems;
+    if (stem.find("_0_D") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_0_D"), 4, "_0_E");
+        emissive_stems.push_back(s);
+    }
+    if (stem.find("_D") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_D"), 2, "_E");
+        emissive_stems.push_back(s);
+    }
+    if (stem.find("_diff") != std::string::npos) {
+        std::string s = stem;
+        s.replace(s.find("_diff"), 5, "_emit");
+        emissive_stems.push_back(s);
+    }
+    emissive_stems.push_back(stem + "_emissive");
+    emissive_stems.push_back(stem + "_Emissive");
+    pbr.emissive_path = find_existing_candidate(emissive_stems);
+
+    return pbr;
+}
+
 } // namespace bud::asset_pipeline

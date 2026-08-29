@@ -1,0 +1,112 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_nonuniform_qualifier : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D in_raw_ssgi;
+layout(set = 0, binding = 1) uniform sampler2D in_depth_sampler;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D out_denoised_ssgi;
+
+layout(push_constant) uniform SSGIDenoisePushConsts {
+    mat4 inv_proj;
+    vec2 screen_size;
+    vec2 inv_screen_size;
+    float depth_threshold;
+    float normal_threshold;
+    float pass_radius;
+    uint reversed_z;
+} pc;
+
+vec3 reconstruct_view_pos(vec2 uv, float raw_depth) {
+    vec4 clip = vec4(uv * 2.0 - 1.0, raw_depth, 1.0);
+    vec4 view = pc.inv_proj * clip;
+    if (abs(view.w) > 1e-6)
+        view /= view.w;
+    return view.xyz;
+}
+
+vec3 reconstruct_view_normal(vec2 uv, float raw_depth) {
+    vec2 texel = pc.inv_screen_size;
+    float d_r = texture(in_depth_sampler, uv + vec2(texel.x, 0.0)).r;
+    float d_l = texture(in_depth_sampler, uv - vec2(texel.x, 0.0)).r;
+    float d_u = texture(in_depth_sampler, uv + vec2(0.0, texel.y)).r;
+    float d_d = texture(in_depth_sampler, uv - vec2(0.0, texel.y)).r;
+
+    vec3 p_c = reconstruct_view_pos(uv, raw_depth);
+    vec3 p_r = reconstruct_view_pos(uv + vec2(texel.x, 0.0), d_r);
+    vec3 p_l = reconstruct_view_pos(uv - vec2(texel.x, 0.0), d_l);
+    vec3 p_u = reconstruct_view_pos(uv + vec2(0.0, texel.y), d_u);
+    vec3 p_d = reconstruct_view_pos(uv - vec2(0.0, texel.y), d_d);
+
+    vec3 dx = (abs(p_r.z - p_c.z) < abs(p_l.z - p_c.z)) ? (p_r - p_c) : (p_c - p_l);
+    vec3 dy = (abs(p_u.z - p_c.z) < abs(p_d.z - p_c.z)) ? (p_u - p_c) : (p_c - p_d);
+
+    vec3 n = cross(dx, dy);
+    // Ensure normal points TOWARDS camera in view space
+    if (dot(n, -p_c) < 0.0) {
+        n = -n;
+    }
+    float len = length(n);
+    if (len > 1e-5)
+        return normalize(n);
+    return vec3(0.0, 0.0, 1.0);
+}
+
+void main() {
+    ivec2 pixel_coord = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel_coord.x >= int(pc.screen_size.x) || pixel_coord.y >= int(pc.screen_size.y))
+        return;
+
+    vec2 center_uv = (vec2(pixel_coord) + 0.5) * pc.inv_screen_size;
+    float center_depth = texture(in_depth_sampler, center_uv).r;
+
+    bool is_sky = (pc.reversed_z != 0u) ? (center_depth <= 1e-6) : (center_depth >= 1.0 - 1e-6);
+    if (is_sky) {
+        imageStore(out_denoised_ssgi, pixel_coord, vec4(0.0));
+        return;
+    }
+
+    vec3 center_pos = reconstruct_view_pos(center_uv, center_depth);
+    vec3 center_normal = reconstruct_view_normal(center_uv, center_depth);
+    vec4 center_ssgi = texture(in_raw_ssgi, center_uv);
+
+    vec3 total_color = vec3(0.0);
+    float total_weight = 0.0;
+
+    // B3 Spline A-Trous filter kernel: [0.0625, 0.25, 0.375, 0.25, 0.0625]
+    const float kernel_weights[3] = float[3](0.375, 0.25, 0.0625);
+    float radius = max(1.0, pc.pass_radius);
+
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            vec2 offset_uv = center_uv + vec2(float(x), float(y)) * pc.inv_screen_size * radius;
+            if (offset_uv.x < 0.0 || offset_uv.x > 1.0 || offset_uv.y < 0.0 || offset_uv.y > 1.0)
+                continue;
+
+            float sample_depth = texture(in_depth_sampler, offset_uv).r;
+            vec3 sample_pos = reconstruct_view_pos(offset_uv, sample_depth);
+            vec3 sample_normal = reconstruct_view_normal(offset_uv, sample_depth);
+            vec4 sample_ssgi = texture(in_raw_ssgi, offset_uv);
+
+            // B3 Spline spatial weight
+            float spatial_w = kernel_weights[abs(x)] * kernel_weights[abs(y)];
+
+            // Normal similarity weight
+            float normal_dot = max(0.0, dot(center_normal, sample_normal));
+            float normal_w = pow(normal_dot, 4.0);
+
+            // Depth edge weight (scaled smoothly by camera distance)
+            float depth_diff = abs(center_pos.z - sample_pos.z);
+            float depth_w = exp(-depth_diff / (abs(center_pos.z) * 0.12 + 0.05));
+
+            float w = spatial_w * normal_w * depth_w;
+
+            total_color += sample_ssgi.rgb * w;
+            total_weight += w;
+        }
+    }
+
+    vec3 final_color = (total_weight > 0.001) ? (total_color / total_weight) : center_ssgi.rgb;
+    imageStore(out_denoised_ssgi, pixel_coord, vec4(final_color, 1.0));
+}

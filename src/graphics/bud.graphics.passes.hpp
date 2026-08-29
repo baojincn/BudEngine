@@ -343,6 +343,40 @@ namespace bud::graphics {
 			RGHandle* out_depth = nullptr);
 	};
 
+	class ScreenSpaceReflectionPass : public RenderPass {
+		PipelineHandle ssr_pipeline;
+
+	public:
+		~ScreenSpaceReflectionPass() = default;
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle depth_buffer, RGHandle scene_color,
+			const SceneView& view, const RenderConfig& config);
+	};
+
+	class ScreenSpaceGlobalIlluminationPass : public RenderPass {
+		PipelineHandle ssgi_pipeline;
+		PipelineHandle denoise_pipeline;
+		PipelineHandle temporal_pipeline;
+
+		TextureHandle history_textures[2];
+		uint32_t history_read_index = 0;
+		bool has_valid_history = false;
+		uint32_t history_width = 0;
+		uint32_t history_height = 0;
+		bud::math::mat4 last_view_proj = bud::math::mat4(1.0f);
+		bud::math::mat4 last_view = bud::math::mat4(1.0f);
+		bool has_last_view = false;
+		RHI* stored_rhi = nullptr;
+
+	public:
+		~ScreenSpaceGlobalIlluminationPass() = default;
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle depth_buffer, RGHandle scene_color,
+			const SceneView& view, const RenderConfig& config);
+	};
+
 	class ResolvePass : public RenderPass {
 		PipelineHandle resolve_pipeline;
 		uint64_t resolve_set_layout = 0;
@@ -357,6 +391,8 @@ namespace bud::graphics {
 			const RenderConfig& config,
 			const GPUScene& gpu_scene,
 			RGHandle shadow_map = {},
-			RGHandle ao_map = {});
+			RGHandle ao_map = {},
+			RGHandle ssr_map = {},
+			RGHandle ssgi_map = {});
 	};
 }

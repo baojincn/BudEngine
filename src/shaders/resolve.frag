@@ -128,7 +128,31 @@ void main() {
         ao = texture(tex_samplers[998], screen_uv).r;
     }
 
+    // Screen-Space Global Illumination (SSGI) from bindless slot 996
+    vec4 ssgi_sample = vec4(0.0);
+    ivec2 ssgi_tex_size = textureSize(tex_samplers[996], 0);
+    if (ssgi_tex_size.x > 1 && ssgi_tex_size.y > 1) {
+        ssgi_sample = texture(tex_samplers[996], screen_uv);
+    }
+    vec3 ssgi_diffuse = ssgi_sample.rgb * albedo_sample.rgb * (1.0 - metallic);
+
+    // Screen-Space Reflections (SSR) from bindless slot 997
+    vec4 ssr_sample = vec4(0.0);
+    ivec2 ssr_tex_size = textureSize(tex_samplers[997], 0);
+    if (ssr_tex_size.x > 1 && ssr_tex_size.y > 1) {
+        ssr_sample = texture(tex_samplers[997], screen_uv);
+    }
+
+    vec3 V = normalize(ubo.cam_pos - world_pos);
+    vec3 F0 = mix(vec3(0.04), albedo_sample.rgb, metallic);
+    vec3 F_ssr = FresnelSchlick(max(dot(N, V), 0.0), F0);
+    float roughness_fade = clamp(1.0 - roughness * 1.5, 0.0, 1.0);
+    vec3 specular_tint = mix(vec3(1.0), albedo_sample.rgb, metallic);
+    vec3 ssr_reflection = ssr_sample.rgb * F_ssr * roughness_fade * specular_tint * ssr_sample.a;
+
     vec3 albedo = albedo_sample.rgb;
     vec3 color = calculate_lighting(world_pos, N, uv, mat, albedo, ao, metallic, roughness);
+    color += ssr_reflection + ssgi_diffuse;
+    color = apply_tonemap_and_gamma(color);
     out_color = vec4(color, albedo_sample.a);
 }

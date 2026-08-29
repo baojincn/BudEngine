@@ -453,7 +453,35 @@ namespace bud::engine {
 			};
 			bud::graphics::AOMode current_ao_mode = renderer->get_config().ao_mode;
 
-			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_ao_mode, current_ao_mode);
+			auto set_ssr_enable = [this](bool v) {
+				auto cfg = renderer->get_config();
+				cfg.enable_ssr = v;
+				renderer->set_config(cfg);
+			};
+			bool current_ssr_enable = renderer->get_config().enable_ssr;
+
+			auto set_ssgi_enable = [this](bool v) {
+				auto cfg = renderer->get_config();
+				cfg.enable_ssgi = v;
+				renderer->set_config(cfg);
+			};
+			bool current_ssgi_enable = renderer->get_config().enable_ssgi;
+
+			auto set_ssgi_intensity = [this](float v) {
+				auto cfg = renderer->get_config();
+				cfg.ssgi_intensity = v;
+				renderer->set_config(cfg);
+			};
+			float current_ssgi_intensity = renderer->get_config().ssgi_intensity;
+
+			auto set_ssgi_blend = [this](float v) {
+				auto cfg = renderer->get_config();
+				cfg.ssgi_temporal_blend = v;
+				renderer->set_config(cfg);
+			};
+			float current_ssgi_blend = renderer->get_config().ssgi_temporal_blend;
+
+			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_ao_mode, current_ao_mode, set_ssr_enable, current_ssr_enable, set_ssgi_enable, current_ssgi_enable, set_ssgi_intensity, current_ssgi_intensity, set_ssgi_blend, current_ssgi_blend);
 
             ImGui::Render();
 

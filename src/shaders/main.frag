@@ -126,7 +126,7 @@ void main() {
         N = normalize(TBN * normal_sample);
     }
 
-        vec3 color = calculate_lighting(frag_world_pos, N, frag_tex_coord, mat, albedo, ao, metallic, roughness);
-
-    out_color = vec4(color * frag_color, albedo_sample.a);
+    vec3 color = calculate_lighting(frag_world_pos, N, frag_tex_coord, mat, albedo, ao, metallic, roughness);
+    color = apply_tonemap_and_gamma(color * frag_color);
+    out_color = vec4(color, albedo_sample.a);
 }

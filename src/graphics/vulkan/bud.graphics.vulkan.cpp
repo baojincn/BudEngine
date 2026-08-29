@@ -398,6 +398,43 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	};
 	compute_csm_cull_set_layout = build_csm_cull_compute_layout();
 
+	auto build_ssr_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+	compute_ssr_set_layout = build_ssr_compute_layout();
+
+	auto build_ssgi_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+	compute_ssgi_set_layout = build_ssgi_compute_layout();
+
+	auto build_ssgi_denoise_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+	compute_ssgi_denoise_set_layout = build_ssgi_denoise_compute_layout();
+
+	auto build_ssgi_temporal_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+	compute_ssgi_temporal_set_layout = build_ssgi_temporal_compute_layout();
+
 	// 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
 	for (auto& frame : frames) {
@@ -800,11 +837,19 @@ void VulkanRHI::cleanup() {
 	if (compute_cluster_cull_set_layout) vkDestroyDescriptorSetLayout(device, compute_cluster_cull_set_layout, nullptr);
 	if (compute_clear_stats_set_layout) vkDestroyDescriptorSetLayout(device, compute_clear_stats_set_layout, nullptr);
 	if (compute_csm_cull_set_layout) vkDestroyDescriptorSetLayout(device, compute_csm_cull_set_layout, nullptr);
+	if (compute_ssr_set_layout) vkDestroyDescriptorSetLayout(device, compute_ssr_set_layout, nullptr);
+	if (compute_ssgi_set_layout) vkDestroyDescriptorSetLayout(device, compute_ssgi_set_layout, nullptr);
+	if (compute_ssgi_denoise_set_layout) vkDestroyDescriptorSetLayout(device, compute_ssgi_denoise_set_layout, nullptr);
+	if (compute_ssgi_temporal_set_layout) vkDestroyDescriptorSetLayout(device, compute_ssgi_temporal_set_layout, nullptr);
 	compute_hierarchy_traversal_set_layout = VK_NULL_HANDLE;
 	compute_page_emit_set_layout = VK_NULL_HANDLE;
 	compute_cluster_cull_set_layout = VK_NULL_HANDLE;
 	compute_clear_stats_set_layout = VK_NULL_HANDLE;
 	compute_csm_cull_set_layout = VK_NULL_HANDLE;
+	compute_ssr_set_layout = VK_NULL_HANDLE;
+	compute_ssgi_set_layout = VK_NULL_HANDLE;
+	compute_ssgi_denoise_set_layout = VK_NULL_HANDLE;
+	compute_ssgi_temporal_set_layout = VK_NULL_HANDLE;
 
 	// Device & Instance
 	if (shadow_sampler)
@@ -1253,6 +1298,18 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 		break;
 	case ComputePipelineDesc::LayoutKind::CSMCulling:
 		chosen_layout = compute_csm_cull_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::ScreenSpaceReflections:
+		chosen_layout = compute_ssr_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::ScreenSpaceGlobalIllumination:
+		chosen_layout = compute_ssgi_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::SSGIDenoise:
+		chosen_layout = compute_ssgi_denoise_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::SSGITemporal:
+		chosen_layout = compute_ssgi_temporal_set_layout;
 		break;
 	default:
 		chosen_layout = compute_hiz_cull_set_layout;
@@ -2821,6 +2878,9 @@ void VulkanRHI::create_swapchain(bud::platform::Window* window) {
 	create_info.imageExtent = extent;
 	create_info.imageArrayLayers = 1;
 	create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT; // 允许作为 Blit 目标
+	if (swapchain_support.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) {
+		create_info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	}
 
 	QueueFamilyIndices indices = find_queue_families(physical_device);
 	uint32_t queue_family_indices[] = { indices.graphics_family.value(), indices.present_family.value() };
