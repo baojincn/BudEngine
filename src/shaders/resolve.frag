@@ -4,6 +4,7 @@
 
 #include "common.glsl"
 #include "vg_common.glsl"
+// Recompile with spherical rotation-invariant CSM shadow calculation
 
 layout(location = 0) in vec2 in_uv;
 layout(location = 0) out vec4 out_color;
@@ -146,9 +147,7 @@ void main() {
     vec3 V = normalize(ubo.cam_pos - world_pos);
     vec3 F0 = mix(vec3(0.04), albedo_sample.rgb, metallic);
     vec3 F_ssr = FresnelSchlick(max(dot(N, V), 0.0), F0);
-    float roughness_fade = smoothstep(0.4, 0.05, roughness);
-    vec3 specular_tint = mix(vec3(1.0), albedo_sample.rgb, metallic);
-    vec3 ssr_reflection = ssr_sample.rgb * F_ssr * roughness_fade * specular_tint * ssr_sample.a;
+    vec3 ssr_reflection = eval_ssr_reflection(ssr_sample, F_ssr, roughness, albedo_sample.rgb, metallic);
 
     vec3 albedo = albedo_sample.rgb;
     vec3 color = calculate_lighting(world_pos, N, uv, mat, albedo, ao, metallic, roughness);

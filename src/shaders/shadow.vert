@@ -80,9 +80,7 @@ void main() {
     if (page_slot != 0xFFFFFFFFu) {
         uint pool_bytes = page_slot * 131072u;
         uint base_word = pool_bytes / 4u;
-        uint magic = page_pool.data[base_word + 0u];
-
-        if (magic == 0x50475642u) { // "BVGP" Virtual Geometry Page Data Magic
+        if (base_word + 16u < page_pool.data.length() && page_pool.data[base_word + 0u] == 0x50475642u) { // "BVGP" Virtual Geometry Page Data Magic
             uint vertex_count = page_pool.data[base_word + 3u];
             uint v_stream_off = page_pool.data[base_word + 5u];
             uint bits = page_pool.data[base_word + 9u];

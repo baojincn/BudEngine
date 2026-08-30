@@ -7,7 +7,7 @@
 layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_normal;
 layout(location = 2) in vec2 in_tex_coord;
-layout(location = 3) in vec4 in_tangent;
+layout(location = 3) in vec3 in_color;
 
 layout(location = 0) out vec3 frag_world_pos;
 layout(location = 1) out vec3 frag_normal;
@@ -19,6 +19,7 @@ layout(location = 5) flat out float frag_blend_factor;
 layout(binding = 0) uniform UniformBufferObject {
 	mat4 view;
 	mat4 proj;
+	mat4 prev_view_proj;
 	// [CSM]
 	mat4 cascade_view_proj[4];
 	vec4 cascade_split_depths;
@@ -31,7 +32,9 @@ layout(binding = 0) uniform UniformBufferObject {
 	uint cascade_count;
 	uint debug_cascades;
 	uint reversed_z;
-	uint padding[3];
+	float shadow_bias_constant;
+	float shadow_bias_slope;
+	uint debug_cluster;
 } ubo;
 
 struct InstanceData {
@@ -75,7 +78,7 @@ void main() {
 	frag_normal = normalize(normal_matrix * in_normal);
 
 	frag_tex_coord = in_tex_coord;
-	frag_color = vec3(1.0);
+	frag_color = in_color;
 	frag_material_id = material_id;
 	frag_blend_factor = blend_factor;
 }

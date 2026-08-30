@@ -77,6 +77,45 @@ std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath
         return "";
     };
 
+    auto find_texture_by_keyword = [&](const std::string& mat_name, const std::string& suffix) -> std::string {
+        if (mat_name.empty()) return "";
+        std::string lower_mat = mat_name;
+        std::transform(lower_mat.begin(), lower_mat.end(), lower_mat.begin(), ::tolower);
+        std::string clean_name = lower_mat;
+        if (clean_name.starts_with("m_")) clean_name = clean_name.substr(2);
+        
+        // 1. Try clean_name with suffix
+        for (const auto& [stem, full_path] : texture_files_map) {
+            if (stem.find(clean_name) != std::string::npos && stem.find(suffix) != std::string::npos) {
+                return full_path;
+            }
+        }
+        
+        // 2. Try prefix before trailing numbers/inst
+        std::string base_word = clean_name;
+        size_t under = base_word.rfind('_');
+        if (under != std::string::npos && under > 2) {
+            std::string sub = base_word.substr(0, under);
+            for (const auto& [stem, full_path] : texture_files_map) {
+                if (stem.find(sub) != std::string::npos && stem.find(suffix) != std::string::npos) {
+                    return full_path;
+                }
+            }
+        }
+
+        // 3. Try primary word
+        size_t first_under = clean_name.find('_');
+        if (first_under != std::string::npos && first_under > 2) {
+            std::string root = clean_name.substr(0, first_under);
+            for (const auto& [stem, full_path] : texture_files_map) {
+                if (stem.find(root) != std::string::npos && stem.find(suffix) != std::string::npos) {
+                    return full_path;
+                }
+            }
+        }
+        return "";
+    };
+
     for (unsigned int i = 0; i < scene->mNumMaterials; ++i) {
         aiMaterial* mat = scene->mMaterials[i];
         RawMaterial rm;
@@ -111,8 +150,15 @@ std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath
                 }
             }
 
-            if (rm.base_color_texture_path.empty())
-                rm.base_color_texture_path = raw_mesh.textures[0];
+            if (rm.base_color_texture_path.empty()) {
+                std::string fuzzy_d = find_texture_by_keyword(rm.name, "_d");
+                if (!fuzzy_d.empty()) {
+                    rm.base_color_texture_path = fuzzy_d;
+                    raw_mesh.textures.push_back(fuzzy_d);
+                } else {
+                    rm.base_color_texture_path = raw_mesh.textures[0];
+                }
+            }
         }
 
         // 1. PBR Textures from Assimp
@@ -121,11 +167,17 @@ std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath
             mat->GetTexture(aiTextureType_HEIGHT, 0, &norm_path) == AI_SUCCESS) {
             rm.normal_texture_path = resolve_texture_file(norm_path.C_Str());
         }
+        if (rm.normal_texture_path.empty()) {
+            rm.normal_texture_path = find_texture_by_keyword(rm.name, "_n");
+        }
 
         aiString rough_path;
         if (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &rough_path) == AI_SUCCESS ||
             mat->GetTexture(aiTextureType_SHININESS, 0, &rough_path) == AI_SUCCESS) {
             rm.metallic_roughness_texture_path = resolve_texture_file(rough_path.C_Str());
+        }
+        if (rm.metallic_roughness_texture_path.empty()) {
+            rm.metallic_roughness_texture_path = find_texture_by_keyword(rm.name, "_r");
         }
 
         aiString metal_path;
@@ -138,6 +190,9 @@ std::optional<RawMesh> FbxImporter::import_from_file(const std::string& filepath
         aiString emissive_path;
         if (mat->GetTexture(aiTextureType_EMISSIVE, 0, &emissive_path) == AI_SUCCESS) {
             rm.emissive_texture_path = resolve_texture_file(emissive_path.C_Str());
+        }
+        if (rm.emissive_texture_path.empty()) {
+            rm.emissive_texture_path = find_texture_by_keyword(rm.name, "_e");
         }
 
         // 2. Auto-scan companion PBR textures (_N, _R, _M, _E)

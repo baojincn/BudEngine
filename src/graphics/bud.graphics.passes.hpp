@@ -159,7 +159,7 @@ namespace bud::graphics {
 		);
 	};
 
-	class ForwardMainPass : public RenderPass {
+	class ForwardTranslucentPass : public RenderPass {
 	public:
 		PipelineHandle pipeline_wireframe;
 		bool is_ready() const { return pipeline.is_valid() && pipeline_wireframe.is_valid(); }
@@ -172,7 +172,7 @@ namespace bud::graphics {
 			const RenderConfig& config,
 			const std::vector<RenderMesh>& meshes,
 			const std::vector<SortItem>& sort_list,
-			size_t instance_count,
+			const SceneDrawRanges& ranges,
 			bud::graphics::RGHandle indirect_draw_buffer,
 			bud::graphics::RGHandle instance_data,
 			const GPUScene& gpu_scene,
@@ -181,7 +181,7 @@ namespace bud::graphics {
 			bud::graphics::RGHandle ao_map = {},
 			bud::graphics::RGHandle ssr_map = {},
 			bud::graphics::RGHandle ssgi_map = {},
-			size_t split_index = 0);
+			bud::graphics::RGHandle opaque_scene_color = {});
 	};
 
 	class ClusterVisualizationPass : public RenderPass {
@@ -319,6 +319,10 @@ namespace bud::graphics {
 			RGHandle rg_visible_pages,
 			RGHandle rg_hiz_pyramid,
 			const GPUScene& gpu_scene,
+			const SceneDrawRanges& ranges = {},
+			BufferHandle mega_vertex_buffer = {},
+			BufferHandle mega_index_buffer = {},
+			RGHandle rg_draw = {},
 			RGHandle* out_depth = nullptr);
 		void add_phase2_to_graph(RenderGraph& rg,
 			RGHandle visibility_buffer,
@@ -334,13 +338,12 @@ namespace bud::graphics {
 			const RenderScene& render_scene,
 			const std::vector<RenderMesh>& meshes,
 			const std::vector<SortItem>& sort_list,
-			size_t draw_count,
+			const SceneDrawRanges& ranges,
 			RGHandle rg_draw,
 			RGHandle rg_instance_data,
 			const GPUScene& gpu_scene,
 			BufferHandle mega_vertex_buffer,
 			BufferHandle mega_index_buffer,
-			size_t split_index,
 			RGHandle* out_depth = nullptr);
 	};
 

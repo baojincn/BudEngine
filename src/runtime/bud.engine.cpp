@@ -418,6 +418,9 @@ namespace bud::engine {
 		view_snapshot.show_debug_stats = show_debug_stats;
 
 		view_snapshot.update_matrices();
+		view_snapshot.prev_view_proj_matrix = has_last_view_proj ? last_view_proj_matrix : view_snapshot.view_proj_matrix;
+		last_view_proj_matrix = view_snapshot.view_proj_matrix;
+		has_last_view_proj = true;
 
 		render_inflight_index.store(render_scene_index, std::memory_order_release);
 

@@ -75,32 +75,32 @@ namespace bud::graphics::vulkan {
 
         switch (key.vertex_layout) {
         case VertexLayoutType::Default:
-            bindingDescription.stride = sizeof(bud::asset::Vertex);
+            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, position)},
-                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, normal)},
-                {2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::asset::Vertex, uv)},
-                {3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(bud::asset::Vertex, tangent)}
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)},
+                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, normal)},
+                {2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::io::MeshData::Vertex, texture_uv)},
+                {3, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, color)}
             };
             break;
         case VertexLayoutType::PositionOnly:
-            bindingDescription.stride = sizeof(bud::asset::Vertex);
+            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, position)}
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)}
             };
             break;
         case VertexLayoutType::PositionUV:
-            bindingDescription.stride = sizeof(bud::asset::Vertex);
+            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, position)},
-                {2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::asset::Vertex, uv)}
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)},
+                {2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(bud::io::MeshData::Vertex, texture_uv)}
             };
             break;
         case VertexLayoutType::PositionNormal:
-            bindingDescription.stride = sizeof(bud::asset::Vertex);
+            bindingDescription.stride = sizeof(bud::io::MeshData::Vertex);
             attributeDescriptions = {
-                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, position)},
-                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::asset::Vertex, normal)}
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, pos)},
+                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(bud::io::MeshData::Vertex, normal)}
             };
             break;
         case VertexLayoutType::NoVertexInput:
@@ -160,13 +160,29 @@ namespace bud::graphics::vulkan {
 
         VkPipelineColorBlendAttachmentState colorBlendAttachment{};
         colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        if (key.blending_enable) {
+        if (key.blend_mode == BlendMode::PremultipliedAlpha) {
+            colorBlendAttachment.blendEnable = VK_TRUE;
+            colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+            colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        } else if (key.blend_mode == BlendMode::Alpha || key.blending_enable) {
             colorBlendAttachment.blendEnable = VK_TRUE;
             colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
             colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
             colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        } else if (key.blend_mode == BlendMode::Additive) {
+            colorBlendAttachment.blendEnable = VK_TRUE;
+            colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+            colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
         } else {
             colorBlendAttachment.blendEnable = VK_FALSE;

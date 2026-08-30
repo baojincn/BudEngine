@@ -238,11 +238,21 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 				temp_pages.push_back(std::move(sp));
 			}
 
+			if (asset_ptr->root_group_index < asset_ptr->groups.size()) {
+				const auto& root_grp = asset_ptr->groups[asset_ptr->root_group_index];
+				for (uint32_t p = 0; p < root_grp.page_index_num; ++p) {
+					uint32_t page_local_idx = root_grp.page_index_start + p;
+					if (page_local_idx < temp_pages.size()) {
+						temp_pages[page_local_idx].is_root = true;
+					}
+				}
+			}
+
 			initial_page_indices.clear();
 			for (const auto& sp : temp_pages) {
 				all_pages.emplace(sp.get_unique_id(), sp);
-				// Automatically preload pages for root level
-				if (sp.is_root) {
+				// Automatically preload all pages if asset fits within pool capacity, ensuring complete shadow casters
+				if (temp_pages.size() <= 4000 || sp.is_root) {
 					initial_page_indices.push_back(sp.virtual_page_index);
 				}
 			}
@@ -501,6 +511,7 @@ void StreamingManager::evict_furthest_pages(uint32_t count, const bud::math::vec
 			auto it = all_pages.find(page_key);
 			if (it == all_pages.end()) continue;
 			const auto& sp = it->second;
+			if (sp.is_root) continue; // Coarse LOD root pages are pinned permanently in memory
 			bud::math::vec3 bmin = sp.has_aabb ? sp.aabb.min : sp.global_aabb.min;
 			bud::math::vec3 bmax = sp.has_aabb ? sp.aabb.max : sp.global_aabb.max;
 			bud::math::vec3 closest(

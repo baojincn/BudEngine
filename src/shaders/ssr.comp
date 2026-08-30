@@ -11,6 +11,7 @@ layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D out_ssr_image;
 layout(push_constant) uniform SSRPushConsts {
     mat4 proj;
     mat4 inv_proj;
+    mat4 reproj_view_to_prev_clip;
     vec2 screen_size;
     float max_distance;
     float thickness;
@@ -18,7 +19,8 @@ layout(push_constant) uniform SSRPushConsts {
     uint binary_steps;
     float intensity;
     uint reversed_z;
-    vec2 padding;
+    float roughness_threshold;
+    float padding;
 } pc;
 
 vec3 reconstruct_view_pos(vec2 uv, float raw_depth) {
@@ -78,7 +80,7 @@ void main() {
     vec3 R = reflect(-V, N);
 
     // If reflection vector points into geometry surface, discard
-    if (dot(R, N) <= 0.01) {
+    if (dot(R, N) <= 0.02) {
         imageStore(out_ssr_image, pixel_coord, vec4(0.0));
         return;
     }
@@ -89,11 +91,12 @@ void main() {
     float step_size = max_dist / float(steps);
 
     // Adaptive starting bias to prevent self-intersection of floor/walls
-    vec3 ray_start = view_pos + N * (0.04 + 0.02 * clamp(abs(view_pos.z) * 0.02, 0.0, 0.5));
+    vec3 ray_start = view_pos + N * (0.05 + 0.02 * clamp(abs(view_pos.z) * 0.02, 0.0, 0.5));
     float current_dist = step_size * 0.5;
 
     bool hit = false;
     vec2 hit_uv = vec2(0.0);
+    vec3 hit_pos = vec3(0.0);
 
     for (uint i = 0u; i < steps; ++i) {
         vec3 sample_pos = ray_start + R * current_dist;
@@ -126,8 +129,15 @@ void main() {
         float adaptive_thickness = max(pc.thickness, abs(sample_pos.z) * 0.05 + 0.1);
 
         if (depth_diff < 0.0 && abs(depth_diff) < adaptive_thickness && current_dist > 0.08) {
-            // Reject backfaces of foreground objects (avoids ghosting/glass overlay artifacts)
             vec3 sampled_normal = reconstruct_view_normal(sample_uv, sampled_raw_depth);
+
+            // Reject self-intersection of the same planar surface (e.g. flat floor)
+            if (dot(sampled_normal, N) > 0.85 && current_dist < 1.5) {
+                current_dist += step_size;
+                continue;
+            }
+
+            // Reject backfaces of foreground objects (avoids ghosting/glass overlay artifacts)
             if (dot(sampled_normal, -R) < 0.1) {
                 current_dist += step_size;
                 continue;
@@ -164,8 +174,8 @@ void main() {
             }
 
             float final_dist = (min_dist + max_dist_bin) * 0.5;
-            vec3 final_pos = ray_start + R * final_dist;
-            vec4 final_clip = pc.proj * vec4(final_pos, 1.0);
+            hit_pos = ray_start + R * final_dist;
+            vec4 final_clip = pc.proj * vec4(hit_pos, 1.0);
             hit_uv = (final_clip.xy / final_clip.w) * 0.5 + 0.5;
             hit = true;
             break;
@@ -183,8 +193,18 @@ void main() {
         float dist_factor = clamp(1.0 - (current_dist / max_dist), 0.0, 1.0);
         dist_factor *= dist_factor;
 
-        // Sample scene color
-        vec3 reflection_color = texture(color_sampler, hit_uv).rgb;
+        // Reproject final hit position to previous frame screen UV
+        vec4 prev_clip = pc.reproj_view_to_prev_clip * vec4(hit_pos, 1.0);
+        vec2 sample_color_uv = hit_uv;
+        if (prev_clip.w > 0.001) {
+            vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
+            if (prev_uv.x >= 0.0 && prev_uv.x <= 1.0 && prev_uv.y >= 0.0 && prev_uv.y <= 1.0) {
+                sample_color_uv = prev_uv;
+            }
+        }
+
+        // Sample history scene color using reprojected UV
+        vec3 reflection_color = texture(color_sampler, sample_color_uv).rgb;
         float alpha = edge_factor * dist_factor * pc.intensity;
 
         imageStore(out_ssr_image, pixel_coord, vec4(reflection_color, alpha));

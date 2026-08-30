@@ -237,7 +237,8 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	// Binding 2: ShadowMap (Sampler2DShadow)
 
 	DescriptorLayoutBuilder layout_builder;
-	layout_builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT);
+	layout_builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT, 1,
+		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	layout_builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1000,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	layout_builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1,
@@ -1114,8 +1115,10 @@ PipelineHandle VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& d
     key.render_pass = VK_NULL_HANDLE;
     key.depth_test = desc.depth_test ? VK_TRUE : VK_FALSE;
     key.depth_write = desc.depth_write ? VK_TRUE : VK_FALSE;
-    key.depth_bias_enable = desc.enable_depth_bias ? VK_TRUE : VK_FALSE;
-    key.blending_enable = desc.blending_enable ? VK_TRUE : VK_FALSE;
+    key.blending_enable = (desc.blending_enable || desc.blend_mode != BlendMode::Disabled) ? VK_TRUE : VK_FALSE;
+    key.blend_mode = desc.blend_mode;
+    if (desc.blending_enable && desc.blend_mode == BlendMode::Disabled)
+        key.blend_mode = BlendMode::Alpha;
     key.vertex_layout = desc.vertex_layout;
     
     switch (desc.depth_compare_op) {
@@ -1614,8 +1617,33 @@ void VulkanRHI::flush_active_graphics_segment() {
 
 CommandHandle VulkanRHI::begin_frame() {
 	// Frame rate independent benchmark: skip presentation and V-Sync stalls in headless benchmark mode
-	// GPU timing & synchronization logic
-	vkWaitForFences(device, 1, &frames[current_frame].in_flight_fence, VK_TRUE, UINT64_MAX);
+	// GPU timing & synchronization logic using Timeline Semaphores
+	if (graphics_timeline_semaphore && frames[current_frame].graphics_timeline_value > 0) {
+		uint64_t val = frames[current_frame].graphics_timeline_value;
+		VkSemaphoreWaitInfo wait_info{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+		wait_info.semaphoreCount = 1;
+		wait_info.pSemaphores = &graphics_timeline_semaphore;
+		wait_info.pValues = &val;
+		vkWaitSemaphores(device, &wait_info, UINT64_MAX);
+	}
+
+	if (compute_timeline_semaphore && frames[current_frame].compute_timeline_value > 0) {
+		uint64_t val = frames[current_frame].compute_timeline_value;
+		VkSemaphoreWaitInfo wait_info{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+		wait_info.semaphoreCount = 1;
+		wait_info.pSemaphores = &compute_timeline_semaphore;
+		wait_info.pValues = &val;
+		vkWaitSemaphores(device, &wait_info, UINT64_MAX);
+	}
+
+	if (transfer_timeline_semaphore && frames[current_frame].transfer_timeline_value > 0) {
+		uint64_t val = frames[current_frame].transfer_timeline_value;
+		VkSemaphoreWaitInfo wait_info{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+		wait_info.semaphoreCount = 1;
+		wait_info.pSemaphores = &transfer_timeline_semaphore;
+		wait_info.pValues = &val;
+		vkWaitSemaphores(device, &wait_info, UINT64_MAX);
+	}
 
 	float last_gpu_time = current_stats.gpu_render_time;
 	current_stats = {};
@@ -1753,11 +1781,10 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	graphics_recording = false;
 	graphics_has_work = false;
 
-	vkResetFences(device, 1, &frames[current_frame].in_flight_fence);
 	VkResult submit_result;
 	{
 		std::lock_guard lock(queue_submit_mutex);
-		submit_result = vkQueueSubmit(graphics_queue, 1, &submit_info, frames[current_frame].in_flight_fence);
+		submit_result = vkQueueSubmit(graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
 	}
 	if (submit_result != VK_SUCCESS) {
 		std::string err = std::format("VulkanRHI::end_frame vkQueueSubmit failed: {}", (int)submit_result);
@@ -1791,6 +1818,9 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 #endif
 	}
 
+	frames[current_frame].graphics_timeline_value = graphics_signal_value;
+	frames[current_frame].compute_timeline_value = compute_timeline_value;
+	frames[current_frame].transfer_timeline_value = transfer_timeline_value;
 	frame_active = false;
 	current_frame = (current_frame + 1) % max_frames_in_flight;
 }
@@ -1837,6 +1867,27 @@ void VulkanRHI::resize_swapchain(uint32_t width, uint32_t height) {
 	}
 	render_finished_semaphores.clear();
 
+	for (int i = 0; i < max_frames_in_flight; i++) {
+		if (frames[i].image_available_semaphore) {
+			vkDestroySemaphore(device, frames[i].image_available_semaphore, nullptr);
+			frames[i].image_available_semaphore = VK_NULL_HANDLE;
+		}
+		if (frames[i].in_flight_fence) {
+			vkDestroyFence(device, frames[i].in_flight_fence, nullptr);
+			frames[i].in_flight_fence = VK_NULL_HANDLE;
+		}
+		VkSemaphoreCreateInfo sem_info{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+		VkFenceCreateInfo fence_info{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+		fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+		if (vkCreateSemaphore(device, &sem_info, nullptr, &frames[i].image_available_semaphore) != VK_SUCCESS ||
+			vkCreateFence(device, &fence_info, nullptr, &frames[i].in_flight_fence) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to recreate sync objects in resize_swapchain!");
+		}
+		frames[i].compute_timeline_value = 0;
+		frames[i].transfer_timeline_value = 0;
+	}
+	current_frame = 0;
+
 	if (swapchain) {
 		vkDestroySwapchainKHR(device, swapchain, nullptr);
 		swapchain = VK_NULL_HANDLE;
@@ -1854,6 +1905,7 @@ void VulkanRHI::resize_swapchain(uint32_t width, uint32_t height) {
 	}
 
 	current_image_index = 0;
+	current_frame = 0;
 }
 
 
@@ -1926,9 +1978,11 @@ void VulkanRHI::cmd_begin_render_pass(CommandHandle cmd, const RenderPassBeginIn
 				depth_attach.imageView = vk_depth->view;
 			}
 
-			depth_attach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+			depth_attach.imageLayout = info.depth_read_only
+				? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+				: VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 			depth_attach.loadOp = info.clear_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-			depth_attach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			depth_attach.storeOp = info.depth_read_only ? VK_ATTACHMENT_STORE_OP_NONE : VK_ATTACHMENT_STORE_OP_STORE;
 			depth_attach.clearValue.depthStencil = { info.clear_depth_value, 0 };
 			rendering_info.pDepthAttachment = &depth_attach;
 		}
@@ -2113,7 +2167,7 @@ uint64_t VulkanRHI::get_graphics_timeline_completed_value() const {
     return value;
 }
 
-static inline VkPipelineStageFlags2 sanitize_stages_for_queue(VkPipelineStageFlags2 stages, VkAccessFlags2 access, uint32_t queue_family, uint32_t compute_family, uint32_t transfer_family) {
+static inline VkPipelineStageFlags2 sanitize_stages_for_queue(VkPipelineStageFlags2 stages, VkAccessFlags2& access, uint32_t queue_family, uint32_t compute_family, uint32_t transfer_family) {
     if (queue_family == compute_family) {
         VkPipelineStageFlags2 out_stages = 0;
         if (stages & (VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT)) out_stages |= (stages & (VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT));
@@ -2131,6 +2185,8 @@ static inline VkPipelineStageFlags2 sanitize_stages_for_queue(VkPipelineStageFla
         if (out_stages == 0) {
             out_stages = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         }
+        access &= ~(VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                    VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         return out_stages;
     }
     if (queue_family == transfer_family) {
@@ -2144,6 +2200,7 @@ static inline VkPipelineStageFlags2 sanitize_stages_for_queue(VkPipelineStageFla
         if (out_stages == 0) {
             out_stages = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
         }
+        access &= (VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_HOST_WRITE_BIT);
         return out_stages;
     }
     if (access & VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT) {
@@ -4182,6 +4239,7 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	UniformBufferObject ubo{};
 	ubo.view = scene_view.view_matrix;
 	ubo.proj = scene_view.proj_matrix;
+	ubo.prev_view_proj = scene_view.prev_view_proj_matrix;
 
 	for (uint32_t i = 0; i < MAX_CASCADES; ++i) {
 		ubo.cascade_view_proj[i] = scene_view.cascade_view_proj_matrices[i];

@@ -73,20 +73,22 @@ namespace bud::graphics {
 				rhi->cmd_fill_buffer(cmd, actual_vp, 0, sizeof(uint32_t), 0);
 				rhi->resource_barrier(cmd, actual_vp, ResourceState::TransferDst, ResourceState::UnorderedAccess);
 
-				if (cascade_index == 0) {
+				if (cascade_index == 1 || (cascade_index == 0 && config.cascade_count == 0)) {
 					if (frame.page_request_buffer.is_valid()) {
 						rhi->resource_barrier(cmd, frame.page_request_buffer, ResourceState::UnorderedAccess, ResourceState::TransferDst);
 						// Clear 3 header uints: request_count, overflow_count, error_flags
 						rhi->cmd_fill_buffer(cmd, frame.page_request_buffer, 0, 3 * sizeof(uint32_t), 0);
 						rhi->resource_barrier(cmd, frame.page_request_buffer, ResourceState::TransferDst, ResourceState::UnorderedAccess);
 					}
+				}
 
-					if (frame.visible_clusters.is_valid()) {
-						rhi->resource_barrier(cmd, frame.visible_clusters, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-						rhi->cmd_fill_buffer(cmd, frame.visible_clusters, 0, sizeof(uint32_t), 0);
-						rhi->resource_barrier(cmd, frame.visible_clusters, ResourceState::TransferDst, ResourceState::UnorderedAccess);
-					}
+				if (frame.visible_clusters.is_valid()) {
+					rhi->resource_barrier(cmd, frame.visible_clusters, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+					rhi->cmd_fill_buffer(cmd, frame.visible_clusters, 0, sizeof(uint32_t), 0);
+					rhi->resource_barrier(cmd, frame.visible_clusters, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+				}
 
+				if (cascade_index == 0) {
 					if (frame.indirect_draw.is_valid()) {
 						// It could be in IndirectArgument state from the end of the previous frame.
 						rhi->resource_barrier(cmd, frame.indirect_draw, ResourceState::IndirectArgument, ResourceState::TransferDst);

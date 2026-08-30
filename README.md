@@ -67,12 +67,14 @@ A full fiber-based task driven lightweight 3D Game Engine.
 
   * **Virtual Texture Streaming**: Sparse binding support for massive textures.
 
+Sun Temple - SSGI + SSR
+![](samples/screenshots/sun_temple.png)
+
 Cluster Visualization
-![](samples/screenshots/cluster_debug.png)
+![img](samples/screenshots/cluster_debug.png)
 
 Cluster Wireframe Visualization
 ![](samples/screenshots/cluster_wireframe_debug.png)
-
 
 CSM Debug
 ![](samples/screenshots/csm_shadow_debug.png)

@@ -84,7 +84,7 @@ void TriangleApp::on_init(const AppConfig& config) {
 						renderer->register_mesh_bounds(mesh_id, aabb);
 						auto& s = engine->get_scene();
 						for (auto& ent : s.entities) {
-							if (ent.asset_path == path) {
+							if (ent.asset_path == path && ent.render_type == bud::scene::RenderType::VirtualGeometry) {
 								ent.mesh_index = mesh_id;
 								ent.root_group_index = root_group_index;
 								ent.base_virtual_page = base_virtual_page;

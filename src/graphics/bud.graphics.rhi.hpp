@@ -16,6 +16,7 @@ namespace bud::graphics {
 		TextureHandle depth_attachment;
 		bool clear_color = false;
 		bool clear_depth = false;
+		bool depth_read_only = false;
 		bud::math::vec4 clear_color_value = { 0, 0, 0, 1 };
 		float clear_depth_value = 1.0f;
 		uint32_t base_array_layer = 0;

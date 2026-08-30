@@ -103,7 +103,7 @@ namespace bud::graphics {
 		std::unique_ptr<HierarchyTraversalPass> hierarchy_traversal_pass;
 		std::unique_ptr<PageEmitPass> page_emit_pass;
 		std::unique_ptr<ClusterCullPass> cluster_cull_pass;
-		std::unique_ptr<ForwardMainPass> forward_main_pass;
+		std::unique_ptr<ForwardTranslucentPass> forward_translucent_pass;
 		std::unique_ptr<ClusterVisualizationPass> cluster_visualization_pass;
 		std::unique_ptr<UIPass> ui_pass;
 		std::unique_ptr<VisibilityPass> visibility_pass;

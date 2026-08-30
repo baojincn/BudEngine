@@ -427,6 +427,7 @@ namespace bud::io {
 
 		const auto& raw = *raw_mesh_opt;
 		MeshData mesh;
+		mesh.source_path = path.generic_string();
 		mesh.vertices.resize(raw.vertices.size());
 		for (size_t i = 0; i < raw.vertices.size(); ++i) {
 			mesh.vertices[i].pos = glm::vec3(raw.vertices[i].position[0], raw.vertices[i].position[1], raw.vertices[i].position[2]);
@@ -453,14 +454,29 @@ namespace bud::io {
 			mesh.materials[i].alpha_mode = static_cast<uint8_t>(raw.materials[i].alpha_mode);
 			mesh.materials[i].alpha_cutoff = raw.materials[i].alpha_cutoff;
 			mesh.materials[i].double_sided = raw.materials[i].double_sided ? 1 : 0;
-			uint32_t tex_idx = 0;
-			for (size_t t = 0; t < raw.textures.size(); ++t) {
-				if (raw.textures[t] == raw.materials[i].base_color_texture_path) {
-					tex_idx = static_cast<uint32_t>(t);
-					break;
+			mesh.materials[i].metallic_factor = raw.materials[i].metallic_factor;
+			mesh.materials[i].roughness_factor = raw.materials[i].roughness_factor;
+			mesh.materials[i].base_color_factor = glm::vec4(
+				raw.materials[i].base_color_factor[0],
+				raw.materials[i].base_color_factor[1],
+				raw.materials[i].base_color_factor[2],
+				raw.materials[i].base_color_factor[3]
+			);
+			mesh.materials[i].name = raw.materials[i].name;
+
+			auto find_tex_idx = [&](const std::string& tex_path) -> uint32_t {
+				if (tex_path.empty()) return 0xFFFFFFFF;
+				for (size_t t = 0; t < raw.textures.size(); ++t) {
+					if (raw.textures[t] == tex_path) return static_cast<uint32_t>(t);
 				}
-			}
-			mesh.materials[i].base_color_texture = tex_idx;
+				return 0xFFFFFFFF;
+			};
+
+			uint32_t base_tex = find_tex_idx(raw.materials[i].base_color_texture_path);
+			mesh.materials[i].base_color_texture = (base_tex != 0xFFFFFFFF) ? base_tex : 0;
+			mesh.materials[i].normal_texture = find_tex_idx(raw.materials[i].normal_texture_path);
+			mesh.materials[i].metallic_roughness_texture = find_tex_idx(raw.materials[i].metallic_roughness_texture_path);
+			mesh.materials[i].emissive_texture = find_tex_idx(raw.materials[i].emissive_texture_path);
 		}
 
 		mesh.texture_paths = raw.textures;

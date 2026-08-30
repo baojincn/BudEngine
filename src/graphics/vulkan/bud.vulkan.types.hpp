@@ -37,6 +37,7 @@ namespace bud::graphics::vulkan {
 	struct UniformBufferObject {
 		alignas(16) bud::math::mat4 view;
 		alignas(16) bud::math::mat4 proj;
+		alignas(16) bud::math::mat4 prev_view_proj;
 
 		alignas(16) bud::math::mat4 cascade_view_proj[MAX_CASCADES];
 		alignas(16) bud::math::vec4 cascade_split_depths; // Pack 4 depths into vec4 (x,y,z,w)

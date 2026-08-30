@@ -271,6 +271,9 @@ namespace bud::graphics::vulkan {
 			VmaAllocationInfo uniform_alloc_info = {}; // allocation info containing mapped ptr
 			void* uniform_mapped = nullptr;          // Persistently mapped (points to alloc_info.pMappedData when VMA is used)
 			VkDescriptorSet global_descriptor_set = VK_NULL_HANDLE;
+			uint64_t graphics_timeline_value = 0;
+			uint64_t compute_timeline_value = 0;
+			uint64_t transfer_timeline_value = 0;
 		};
 
 		void flush_active_graphics_segment();

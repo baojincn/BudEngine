@@ -18,13 +18,15 @@ namespace bud::graphics {
 		rhi_ptr = rhi;
 		frame_resources.resize(inflight_frame_count);
 
-		if (!rhi || geometry_pool.initialized) {
+		if (!rhi) {
 			return;
 		}
 
-		geometry_pool.vertex_buffer = rhi->create_gpu_buffer(GeometryPool::vertex_pool_size, ResourceState::VertexBuffer);
-		geometry_pool.index_buffer = rhi->create_gpu_buffer(GeometryPool::index_pool_size, ResourceState::IndexBuffer);
-		geometry_pool.initialized = geometry_pool.vertex_buffer.is_valid() && geometry_pool.index_buffer.is_valid();
+		if (!geometry_pool.initialized) {
+			geometry_pool.vertex_buffer = rhi->create_gpu_buffer(GeometryPool::vertex_pool_size, ResourceState::VertexBuffer);
+			geometry_pool.index_buffer = rhi->create_gpu_buffer(GeometryPool::index_pool_size, ResourceState::IndexBuffer);
+			geometry_pool.initialized = geometry_pool.vertex_buffer.is_valid() && geometry_pool.index_buffer.is_valid();
+		}
 
 		if (!page_pool.initialized) {
 			page_pool.page_pool_buffer = rhi->create_gpu_buffer(PagePool::page_pool_size, ResourceState::UnorderedAccess);
@@ -38,7 +40,7 @@ namespace bud::graphics {
 		}
 
 		if (!page_table_buffer.is_valid()) {
-			page_table_buffer = rhi->create_upload_buffer(static_cast<uint64_t>(max_page_table_entries) * 12);
+			page_table_buffer = rhi->create_upload_buffer(static_cast<uint64_t>(max_page_table_entries) * sizeof(PageTableEntry));
 		}
 		
 		if (!vg_pool.group_buffer.is_valid()) {

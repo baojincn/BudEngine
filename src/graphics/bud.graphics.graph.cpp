@@ -234,23 +234,12 @@ namespace bud::graphics {
 				QueueType old_queue = resource_states[rid].last_queue;
 				uint32_t old_family = get_family(old_queue);
 
-				bool queue_family_changed = (old_family != current_family) && (old_state != ResourceState::Undefined) && (resource_states[rid].last_pass_idx >= 0);
-				bool needs_barrier = (old_state != new_state) || (old_state == ResourceState::RenderTarget) || (old_state == ResourceState::Undefined) || queue_family_changed;
+				bool needs_barrier = (old_state != new_state) || (old_state == ResourceState::RenderTarget) || (old_state == ResourceState::Undefined);
 
 				if (needs_barrier) {
-					if (queue_family_changed) {
-						auto& prod_pass = passes[resource_states[rid].last_pass_idx];
-						prod_pass.after_barriers.push_back({
-							access.handle, old_state, new_state, old_family, current_family, true, false
-						});
-						pass.before_barriers.push_back({
-							access.handle, old_state, new_state, old_family, current_family, false, true
-						});
-					} else {
-						pass.before_barriers.push_back({
-							access.handle, old_state, new_state, 0xFFFFFFFF, 0xFFFFFFFF, false, false
-						});
-					}
+					pass.before_barriers.push_back({
+						access.handle, old_state, new_state, 0xFFFFFFFF, 0xFFFFFFFF, false, false
+					});
 					resource_states[rid].current_state = new_state;
 					resource_states[rid].last_queue = pass.queue_type;
 					resource_states[rid].last_pass_idx = pass_idx;

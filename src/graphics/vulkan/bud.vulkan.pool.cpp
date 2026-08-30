@@ -251,7 +251,23 @@ namespace bud::graphics::vulkan {
         image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         image_info.usage = usage;
         image_info.samples = VK_SAMPLE_COUNT_1_BIT;
-        image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        std::vector<uint32_t> queue_family_indices;
+        if (allocator && allocator->is_concurrent_sharing_enabled()) {
+            queue_family_indices.push_back(allocator->get_graphics_family());
+            if (allocator->get_compute_family() != allocator->get_graphics_family())
+                queue_family_indices.push_back(allocator->get_compute_family());
+            if (allocator->get_copy_family() != allocator->get_graphics_family() &&
+                allocator->get_copy_family() != allocator->get_compute_family())
+                queue_family_indices.push_back(allocator->get_copy_family());
+        }
+
+        if (queue_family_indices.size() > 1) {
+            image_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+            image_info.queueFamilyIndexCount = static_cast<uint32_t>(queue_family_indices.size());
+            image_info.pQueueFamilyIndices = queue_family_indices.data();
+        } else {
+            image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
 
         VmaAllocationCreateInfo alloc_info = {};
         alloc_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;

@@ -72,6 +72,10 @@ namespace bud::graphics {
 	RGHandle VisibilityPass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer, RGHandle depth_buffer,
 		const SceneView& view, const RenderConfig& config,
 		RGHandle rg_visible_pages, RGHandle rg_hiz_pyramid, const GPUScene& gpu_scene,
+		const SceneDrawRanges& ranges,
+		BufferHandle mega_vertex_buffer,
+		BufferHandle mega_index_buffer,
+		RGHandle rg_draw,
 		RGHandle* out_depth) {
 		if (!visibility_pipeline.is_valid() || !rg_visible_pages.is_valid())
 			return {};
@@ -98,6 +102,8 @@ namespace bud::graphics {
 				builder.read(rg_visible_pages, ResourceState::ShaderResource);
 				if (rg_hiz_pyramid.is_valid())
 					builder.read(rg_hiz_pyramid, ResourceState::ShaderResource);
+				if (rg_draw.is_valid() && ranges.range_b_count > 0)
+					builder.read(rg_draw, ResourceState::IndirectArgument);
 				builder.write(*vis_h, ResourceState::RenderTarget);
 				builder.write(*depth_h, ResourceState::DepthWrite);
 				return *vis_h;
@@ -147,9 +153,31 @@ namespace bud::graphics {
 				vis_push.is_phase2 = 0;
 				vis_push.enable_hiz = (rg_hiz_pyramid.is_valid() && config.enable_hiz_culling) ? 1 : 0;
 				rhi->cmd_push_constants(cmd, active_pipeline, sizeof(VisPush), &vis_push);
+
+				// 1. Draw Range A (VG Clusters) via Mesh Shaders
 				uint32_t vpc = frame_res.visible_page_capacity;
-				if (vpc > 0)
+				if (vpc > 0 && ranges.range_a_count > 0)
 					rhi->cmd_draw_mesh_tasks(cmd, vpc, 1, 1);
+
+				// 2. Draw Range B (Traditional Dynamic / Opaque Meshes)
+				if (ranges.range_b_count > 0 && mega_vertex_buffer.is_valid() && visibility_indirect_pipeline.is_valid()) {
+					PipelineHandle active_indirect = (config.enable_wireframe && visibility_indirect_pipeline_wireframe.is_valid())
+						? visibility_indirect_pipeline_wireframe
+						: visibility_indirect_pipeline;
+					rhi->cmd_bind_pipeline(cmd, active_indirect);
+					rhi->cmd_bind_descriptor_set(cmd, active_indirect, 0);
+					rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+					rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+
+					BufferHandle ind_buf = rg_draw.is_valid() ? render_graph.get_buffer(rg_draw) : BufferHandle{};
+					if (ind_buf.is_valid()) {
+						rhi->cmd_draw_indexed_indirect(cmd, ind_buf,
+							static_cast<uint32_t>(ranges.range_a_count * sizeof(bud::graphics::IndirectCommand)),
+							static_cast<uint32_t>(ranges.range_b_count),
+							sizeof(bud::graphics::IndirectCommand));
+					}
+				}
+
 				rhi->cmd_end_render_pass(cmd);
 			}
 		);
@@ -239,13 +267,12 @@ namespace bud::graphics {
 		const RenderScene& render_scene,
 		const std::vector<RenderMesh>& meshes,
 		const std::vector<SortItem>& sort_list,
-		size_t draw_count,
+		const SceneDrawRanges& ranges,
 		RGHandle rg_draw,
 		RGHandle rg_instance_data,
 		const GPUScene& gpu_scene,
 		BufferHandle mega_vertex_buffer,
 		BufferHandle mega_index_buffer,
-		size_t split_index,
 		RGHandle* out_depth) {
 		if (!visibility_indirect_pipeline.is_valid())
 			return {};
@@ -306,27 +333,33 @@ namespace bud::graphics {
 
 				if (indirect_buffer_handle.is_valid()) {
 					auto page_pool_buf = gpu_scene.get_page_pool_buffer();
-					uint32_t gpu_draw_count = static_cast<uint32_t>(draw_count);
+					uint32_t gpu_draw_count = static_cast<uint32_t>(ranges.range_a_count + ranges.range_b_count);
 					if (config.enable_virtual_geometry) {
 						uint32_t frame_idx = rhi->get_current_frame_index();
 						gpu_draw_count = std::max(gpu_draw_count,
 							gpu_scene.get_frame_resources(frame_idx).indirect_capacity);
 					}
 
-					if (split_index > 0) {
-						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
-						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-						rhi->cmd_draw_indexed_indirect(cmd, indirect_buffer_handle, 0, static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
-					}
-
-					if (split_index < gpu_draw_count && page_pool_buf.is_valid()) {
+					// 1. Draw Range A (VG Clusters)
+					if (ranges.range_a_count > 0 && page_pool_buf.is_valid()) {
 						rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
 						rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
-						rhi->cmd_draw_indexed_indirect(cmd, indirect_buffer_handle, split_index * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(gpu_draw_count - split_index), sizeof(bud::graphics::IndirectCommand));
+						rhi->cmd_draw_indexed_indirect(cmd, indirect_buffer_handle, 0, static_cast<uint32_t>(ranges.range_a_count), sizeof(bud::graphics::IndirectCommand));
+					}
+
+					// 2. Draw Range B (Traditional Dynamic / Opaque Meshes)
+					if (ranges.range_b_count > 0 && mega_vertex_buffer.is_valid()) {
+						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
+						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
+						rhi->cmd_draw_indexed_indirect(cmd, indirect_buffer_handle,
+							static_cast<uint32_t>(ranges.range_a_count * sizeof(bud::graphics::IndirectCommand)),
+							static_cast<uint32_t>(ranges.range_b_count),
+							sizeof(bud::graphics::IndirectCommand));
 					}
 				}
 				else {
-					for (size_t i = 0; i < draw_count; ++i) {
+					const size_t opaque_end = ranges.range_a_count + ranges.range_b_count;
+					for (size_t i = 0; i < opaque_end && i < sort_list.size(); ++i) {
 						const auto& item = sort_list[i];
 						uint32_t idx = item.entity_index;
 						if (idx >= render_scene.mesh_indices.size()) continue;

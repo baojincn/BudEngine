@@ -329,27 +329,60 @@ void apply_companion_mask_if_present(RawTexture& tex, const std::string& path) {
     std::filesystem::path dir = p_path.parent_path();
     std::string stem = p_path.stem().string();
 
-    std::vector<std::string> mask_candidates = {
-        stem + "_mask.png", stem + "_mask.dds", stem + "_mask.tga", stem + "_mask.jpg",
-        stem + "_a.png", stem + "_a.dds", stem + "_alpha.png", stem + "_alpha.dds"
-    };
+    std::vector<std::string> stem_candidates;
+    stem_candidates.push_back(stem + "_mask");
+    stem_candidates.push_back(stem + "_a");
+    stem_candidates.push_back(stem + "_alpha");
+    stem_candidates.push_back(stem + "_opacity");
 
-    for (const auto& mc : mask_candidates) {
-        std::filesystem::path mask_file = dir / mc;
-        if (std::filesystem::exists(mask_file)) {
-            int mw = 0, mh = 0, mc_channels = 0;
-            stbi_uc* mdata = stbi_load(mask_file.string().c_str(), &mw, &mh, &mc_channels, 1);
-            if (mdata && static_cast<uint32_t>(mw) == tex.width && static_cast<uint32_t>(mh) == tex.height) {
-                std::cout << "[BudAssetPipeline] Merged companion alpha mask: " << mask_file.string() << " -> " << path << std::endl;
-                uint8_t* dst = tex.pixels.data();
-                for (size_t k = 0; k < total_px; ++k) {
-                    dst[k * 4 + 3] = mdata[k];
+    // Replace _D or _d with _A, _a, _Opacity, _Mask
+    auto try_replace_token = [&](const std::string& target_tok, const std::string& rep_tok) {
+        size_t pos = stem.rfind(target_tok);
+        if (pos != std::string::npos) {
+            std::string s = stem;
+            s.replace(pos, target_tok.length(), rep_tok);
+            stem_candidates.push_back(s);
+        }
+    };
+    try_replace_token("_D", "_A");
+    try_replace_token("_d", "_a");
+    try_replace_token("_D", "_Alpha");
+    try_replace_token("_d", "_alpha");
+    try_replace_token("_D", "_Opacity");
+    try_replace_token("_d", "_opacity");
+    try_replace_token("_D", "_Mask");
+    try_replace_token("_d", "_mask");
+    try_replace_token("_Diffuse", "_Alpha");
+    try_replace_token("_diffuse", "_alpha");
+    try_replace_token("_BaseColor", "_Alpha");
+    try_replace_token("_basecolor", "_alpha");
+
+    const std::string exts[] = { ".tga", ".TGA", ".png", ".PNG", ".dds", ".DDS", ".jpg", ".jpeg", ".bmp" };
+
+    for (const auto& sc : stem_candidates) {
+        for (const auto& ext : exts) {
+            std::filesystem::path mask_file = dir / (sc + ext);
+            if (std::filesystem::exists(mask_file)) {
+                int mw = 0, mh = 0, mc_channels = 0;
+                stbi_uc* mdata = stbi_load(mask_file.string().c_str(), &mw, &mh, &mc_channels, 1);
+                if (mdata && mw > 0 && mh > 0) {
+                    std::cout << "[BudAssetPipeline] Merged companion alpha mask: " << mask_file.string() << " -> " << path << std::endl;
+                    uint8_t* dst = tex.pixels.data();
+                    for (uint32_t y = 0; y < tex.height; ++y) {
+                        uint32_t my = (static_cast<uint64_t>(y) * mh) / tex.height;
+                        for (uint32_t x = 0; x < tex.width; ++x) {
+                            uint32_t mx = (static_cast<uint64_t>(x) * mw) / tex.width;
+                            size_t dst_idx = (static_cast<size_t>(y) * tex.width + x) * 4 + 3;
+                            size_t src_idx = static_cast<size_t>(my) * mw + mx;
+                            dst[dst_idx] = mdata[src_idx];
+                        }
+                    }
+                    stbi_image_free(mdata);
+                    return;
                 }
-                stbi_image_free(mdata);
-                break;
+                if (mdata)
+                    stbi_image_free(mdata);
             }
-            if (mdata)
-                stbi_image_free(mdata);
         }
     }
 }

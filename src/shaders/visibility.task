@@ -47,7 +47,7 @@ shared uint visible_cluster_count;
 shared uint visible_cluster_indices[256];
 
 void compute_frustum_planes(out vec4 planes[6]) {
-    mat4 vp = (push.cascade_index == 0u) ? (ubo.proj * ubo.view) : ubo.cascade_view_proj[push.cascade_index - 1u];
+    mat4 vp = (push.is_shadow_pass != 0u) ? ubo.cascade_view_proj[clamp(push.cascade_index, 0u, 3u)] : (ubo.proj * ubo.view);
     mat4 m = transpose(vp);
     planes[0] = m[3] + m[0];
     planes[1] = m[3] - m[0];
@@ -55,9 +55,9 @@ void compute_frustum_planes(out vec4 planes[6]) {
     planes[3] = m[3] - m[1];
     if (ubo.reversed_z == 1u) {
         planes[4] = m[3] - m[2];
-        planes[5] = m[3];
+        planes[5] = m[2];
     } else {
-        planes[4] = m[3];
+        planes[4] = m[2];
         planes[5] = m[3] - m[2];
     }
 }
@@ -174,7 +174,7 @@ void main() {
 
     uint cluster_count = page_pool.data[base_word + 2u];
     uint tid = gl_WorkGroupSize.x;
-    mat4 vp = (push.cascade_index == 0u) ? (ubo.proj * ubo.view) : ubo.cascade_view_proj[push.cascade_index - 1u];
+    mat4 vp = (push.is_shadow_pass != 0u) ? ubo.cascade_view_proj[clamp(push.cascade_index, 0u, 3u)] : (ubo.proj * ubo.view);
 
     float scale = max(length(model_matrix[0].xyz), max(length(model_matrix[1].xyz), length(model_matrix[2].xyz)));
 

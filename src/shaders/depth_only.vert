@@ -13,6 +13,7 @@ layout(location = 2) flat out float frag_blend_factor;
 layout(binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 proj;
+    mat4 prev_view_proj;
     mat4 cascade_view_proj[4];
     vec4 cascade_split_depths;
 
@@ -24,7 +25,9 @@ layout(binding = 0) uniform UniformBufferObject {
     uint cascade_count;
     uint debug_cascades;
     uint reversed_z;
-    uint padding[3];
+    float shadow_bias_constant;
+    float shadow_bias_slope;
+    uint debug_cluster;
 } ubo;
 
 struct InstanceData {
@@ -80,9 +83,7 @@ void main() {
 	if (page_slot != 0xFFFFFFFFu) {
 		uint pool_bytes = page_slot * PAGE_SIZE_BYTES;
 		uint base_word = pool_bytes / 4u;
-		uint magic = page_pool.data[base_word + 0u];
-
-		if (magic == 0x50475642u) { // "BVGP" Virtual Geometry Page Data Magic
+		if (base_word + 16u < page_pool.data.length() && page_pool.data[base_word + 0u] == 0x50475642u) { // "BVGP" Virtual Geometry Page Data Magic
 			uint vertex_count = page_pool.data[base_word + 3u];
 			uint v_stream_off = page_pool.data[base_word + 5u];
 			uint bits = page_pool.data[base_word + 9u];

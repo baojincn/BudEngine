@@ -14,9 +14,10 @@ namespace bud::graphics {
 		constexpr uint32_t ao_map_bindless_slot = 998;
 		constexpr uint32_t ssr_map_bindless_slot = 997;
 		constexpr uint32_t ssgi_map_bindless_slot = 996;
+		constexpr uint32_t opaque_scene_color_bindless_slot = 995;
 	}
 
-	void ForwardMainPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
+	void ForwardTranslucentPass::init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) {
 		if (!rhi || !asset_manager) return;
 
 		load_shaders_async(asset_manager, { "src/shaders/forward_main.vert.spv", "src/shaders/forward_main.frag.spv" }, [this, rhi, config](const auto& shaders) {
@@ -24,9 +25,12 @@ namespace bud::graphics {
 			desc.vs.code = shaders[0];
 			desc.fs.code = shaders[1];
 			desc.depth_test = true;
-			desc.depth_write = true;
+			desc.depth_write = false;
+			desc.blending_enable = true;
+			desc.blend_mode = BlendMode::PremultipliedAlpha;
 			desc.cull_mode = CullMode::None;
 			desc.color_attachment_format = bud::graphics::TextureFormat::BGRA8_SRGB;
+			desc.depth_attachment_format = bud::graphics::TextureFormat::D32_FLOAT;
 			desc.depth_compare_op = config.reversed_z ? CompareOp::GreaterEqual : CompareOp::LessEqual;
 			desc.enable_depth_bias = false;
 			desc.vertex_layout = VertexLayoutType::Default;
@@ -37,25 +41,25 @@ namespace bud::graphics {
 			pipeline_wireframe = rhi->create_graphics_pipeline(desc);
 
 			if (pipeline.is_valid() && pipeline_wireframe.is_valid()) {
-				bud::print("[ForwardMainPass] Shaders loaded and pipelines created.");
+				bud::print("[ForwardTranslucentPass] Shaders loaded and pipelines created.");
 			}
 		});
 	}
 
-	void ForwardMainPass::shutdown(RHI* rhi) {
+	void ForwardTranslucentPass::shutdown(RHI* rhi) {
 		if (pipeline.is_valid()) rhi->destroy_pipeline(pipeline);
 		if (pipeline_wireframe.is_valid()) rhi->destroy_pipeline(pipeline_wireframe);
 		pipeline.reset();
 		pipeline_wireframe.reset();
 	}
 
-	void ForwardMainPass::add_to_graph(RenderGraph& render_graph, RGHandle shadow_map, RGHandle backbuffer, RGHandle depth_buffer,
+	void ForwardTranslucentPass::add_to_graph(RenderGraph& render_graph, RGHandle shadow_map, RGHandle backbuffer, RGHandle depth_buffer,
 		const RenderScene& render_scene,
 		const SceneView& view,
 		const RenderConfig& config,
 		const std::vector<RenderMesh>& meshes,
 		const std::vector<SortItem>& sort_list,
-		size_t instance_count,
+		const SceneDrawRanges& ranges,
 		RGHandle indirect_draw_buffer,
 		RGHandle instance_data,
 		const GPUScene& gpu_scene,
@@ -64,17 +68,9 @@ namespace bud::graphics {
 		RGHandle ao_map,
 		RGHandle ssr_map,
 		RGHandle ssgi_map,
-		size_t split_index)
+		RGHandle opaque_scene_color)
 	{
-		const size_t max_scene_count = std::min({
-			render_scene.world_matrices.size(),
-			render_scene.world_aabbs.size(),
-			render_scene.mesh_indices.size(),
-			render_scene.material_indices.size(),
-			render_scene.flags.size()
-		});
-
-		if (max_scene_count == 0 || sort_list.empty()) {
+		if (ranges.range_c_count == 0 || sort_list.empty()) {
 			return;
 		}
 
@@ -83,19 +79,16 @@ namespace bud::graphics {
 			return;
 		}
 
-		const size_t draw_count = std::min(instance_count, sort_list.size());
-		if (draw_count == 0) return;
-
 		uint32_t target_width = backbuffer_desc.width;
 		uint32_t target_height = backbuffer_desc.height;
 
-		render_graph.add_pass("Forward Main Lighting Pass",
+		render_graph.add_pass("Forward Translucent Pass",
 			[=](RGBuilder& builder) {
 				builder.write(backbuffer, ResourceState::RenderTarget);
 				if (shadow_map.is_valid()) {
 					builder.read(shadow_map, ResourceState::DepthRead);
 				}
-				builder.write(depth_buffer, ResourceState::DepthWrite);
+				builder.read(depth_buffer, ResourceState::DepthRead);
 				if (ao_map.is_valid()) {
 					builder.read(ao_map, ResourceState::ShaderResource);
 				}
@@ -104,6 +97,9 @@ namespace bud::graphics {
 				}
 				if (ssgi_map.is_valid()) {
 					builder.read(ssgi_map, ResourceState::ShaderResource);
+				}
+				if (opaque_scene_color.is_valid()) {
+					builder.read(opaque_scene_color, ResourceState::ShaderResource);
 				}
 				if (indirect_draw_buffer.is_valid()) {
 					builder.read(indirect_draw_buffer, ResourceState::IndirectArgument);
@@ -145,11 +141,20 @@ namespace bud::graphics {
 					rhi->update_bindless_texture_current_frame(ssgi_map_bindless_slot, rhi->get_fallback_texture());
 				}
 
+				if (opaque_scene_color.is_valid()) {
+					TextureHandle col_tex = render_graph.get_texture(opaque_scene_color);
+					if (col_tex.is_valid()) rhi->update_bindless_texture_current_frame(opaque_scene_color_bindless_slot, col_tex);
+				}
+				else {
+					rhi->update_bindless_texture_current_frame(opaque_scene_color_bindless_slot, rhi->get_fallback_texture());
+				}
+
 				RenderPassBeginInfo info;
 				info.color_attachments.push_back(render_graph.get_texture(backbuffer));
 				info.depth_attachment = render_graph.get_texture(depth_buffer);
 				info.clear_color = false; // Render forward pass on top of resolved background
 				info.clear_depth = false; // Test against existing depth buffer
+				info.depth_read_only = true; // Read-only depth attachment for depth test without depth write
 
 				rhi->cmd_begin_render_pass(cmd, info);
 				rhi->cmd_bind_pipeline(cmd, active_pipeline);
@@ -167,30 +172,38 @@ namespace bud::graphics {
 				rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 
-				if (indirect_draw_buffer.is_valid() && split_index > 0) {
-					rhi->cmd_draw_indexed_indirect(cmd, render_graph.get_buffer(indirect_draw_buffer), 0, static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
-				}
-				else {
-					for (size_t i = 0; i < draw_count; ++i) {
-						const auto& item = sort_list[i];
-						uint32_t idx = item.entity_index;
-						if (idx >= render_scene.mesh_indices.size()) continue;
+				const size_t end_idx = std::min(ranges.range_c_start + ranges.range_c_count, sort_list.size());
+				for (size_t i = ranges.range_c_start; i < end_idx; ++i) {
+					const auto& item = sort_list[i];
+					uint32_t idx = item.entity_index;
+					if (idx >= render_scene.mesh_indices.size()) continue;
 
-						uint32_t mesh_id = render_scene.mesh_indices[idx];
-						if (mesh_id >= meshes.size()) continue;
+					uint32_t mesh_id = render_scene.mesh_indices[idx];
+					if (mesh_id >= meshes.size()) continue;
 
-						const auto& mesh = meshes[mesh_id];
-						if (!mesh.is_valid() || mesh.is_page_based) continue; // Non-VG traditional meshes only
+					const auto& mesh = meshes[mesh_id];
+					if (!mesh.is_valid() || mesh.is_page_based) continue; // Non-VG traditional meshes only
 
-						const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
+					const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
 
-						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
-							const auto& sub = mesh.submeshes[item.submesh_index];
-							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, (uint32_t)i);
-						}
-						else {
-							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, (uint32_t)i);
-						}
+					struct PushConstants {
+						bud::math::mat4 model;
+						uint32_t material_id;
+						uint32_t is_indirect;
+					} pc{};
+					pc.model = (idx < render_scene.world_matrices.size()) ? render_scene.world_matrices[idx] : bud::math::mat4(1.0f);
+					pc.material_id = (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size())
+						? mesh.submeshes[item.submesh_index].material_id
+						: (!mesh.submeshes.empty() ? mesh.submeshes[0].material_id : 0);
+					pc.is_indirect = 0;
+					rhi->cmd_push_constants(cmd, active_pipeline, sizeof(PushConstants), &pc);
+
+					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+						const auto& sub = mesh.submeshes[item.submesh_index];
+						rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
+					}
+					else {
+						rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, 0);
 					}
 				}
 

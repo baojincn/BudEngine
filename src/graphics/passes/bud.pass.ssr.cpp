@@ -86,6 +86,7 @@ namespace bud::graphics {
 				struct SSRPushConsts {
 					bud::math::mat4 proj;
 					bud::math::mat4 inv_proj;
+					bud::math::mat4 reproj_view_to_prev_clip;
 					bud::math::vec2 screen_size;
 					float max_distance;
 					float thickness;
@@ -99,6 +100,7 @@ namespace bud::graphics {
 
 				pc.proj = view.proj_matrix;
 				pc.inv_proj = bud::math::inverse(view.proj_matrix);
+				pc.reproj_view_to_prev_clip = view.prev_view_proj_matrix * bud::math::inverse(view.view_matrix);
 				pc.screen_size = bud::math::vec2(static_cast<float>(ssr_desc.width), static_cast<float>(ssr_desc.height));
 				pc.max_distance = config.ssr_max_distance;
 				pc.thickness = config.ssr_thickness;

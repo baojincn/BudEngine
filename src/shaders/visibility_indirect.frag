@@ -40,6 +40,8 @@ void main() {
             }
             if (alpha < mat.alpha_cutoff)
                 discard;
+        } else if (mat.alpha_mode == 2u) {
+            discard;
         }
     }
 

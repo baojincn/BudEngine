@@ -309,6 +309,7 @@ namespace bud::graphics {
 		bud::math::mat4 view_matrix;
 		bud::math::mat4 proj_matrix;
 		bud::math::mat4 view_proj_matrix;
+		bud::math::mat4 prev_view_proj_matrix = bud::math::mat4(1.0f);
 
 		bud::math::vec3 camera_position;
 		float fov;
@@ -370,6 +371,13 @@ namespace bud::graphics {
 		uint32_t binding_flags = 0; // VkDescriptorBindingFlags cast to uint32_t
 	};
 
+	enum class BlendMode {
+		Disabled,
+		Alpha,              // SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+		PremultipliedAlpha, // ONE, ONE_MINUS_SRC_ALPHA
+		Additive            // ONE, ONE
+	};
+
 	struct GraphicsPipelineDesc {
 		ShaderStage vs;
 		ShaderStage fs;
@@ -383,6 +391,7 @@ namespace bud::graphics {
 		TextureFormat depth_attachment_format = TextureFormat::D32_FLOAT;
 		bool enable_depth_bias = false;
 		bool blending_enable = false;
+		BlendMode blend_mode = BlendMode::Disabled;
 		VertexLayoutType vertex_layout = VertexLayoutType::Default;
 		bool wireframe = false;
 		// Backend-specific descriptor set layouts to use instead of the global set.
@@ -524,6 +533,7 @@ namespace bud::graphics {
 		uint32_t page_index = ~0u;
 		bool double_sided = false;
 		bool is_alpha_tested = false;
+		bool is_translucent = false;
 
 		bud::math::AABB aabb;
 		bud::math::BoundingSphere sphere;

@@ -63,31 +63,28 @@ vec2 poissonDisk[16] = vec2[](
    vec2( 0.14383161, -0.14100790 )
 );
 
-float SampleCascade(int layer, vec3 world_pos, vec3 N, vec3 L) {
+float SampleCascadeRaw(int layer, vec3 world_pos, vec3 N, vec3 L) {
     vec4 frag_pos_light_space = ubo.cascade_view_proj[layer] * vec4(world_pos, 1.0);
     vec3 proj_coords = frag_pos_light_space.xyz / frag_pos_light_space.w;
 
     // NDC -> [0, 1]
     proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
 
-    // 超出视锥体范围，视作无阴影
-    if(proj_coords.z > 1.0 || proj_coords.z < 0.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 || proj_coords.y < 0.0 || proj_coords.y > 1.0)
-        return 0.0;
+    // Check if within bounds of this cascade
+    if (proj_coords.z > 1.0 || proj_coords.z < 0.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 || proj_coords.y < 0.0 || proj_coords.y > 1.0) {
+        return -1.0;
+    }
 
     // Dynamic Bias based on slope and constant
-    // shadow_bias_constant is usually ~0.005, shadow_bias_slope is ~1.25
     float bias = max(ubo.shadow_bias_slope * 0.001 * (1.0 - dot(N, L)), ubo.shadow_bias_constant);
-
-    // Scale bias by cascade level (far cascades have less precision)
-    bias *= (1.0 + float(layer));
+    bias *= (1.0 + float(layer) * 0.5);
 
     // PCF
     float shadow_sum = 0.0;
     vec2 texel_size = 1.0 / textureSize(shadow_map, 0).xy;
 
-    // Spread: 控制软阴影程度
-    // 远处的级联 (layer 越大) 纹素覆盖的世界面积越大，
-    float spread = 2.5;
+    // Spread: normalize world-space filter size across cascade layers
+    float spread = max(1.0, 2.5 / (1.0 + float(layer) * 0.4));
 
     bool is_reversed = ubo.reversed_z != 0u;
     for(int i = 0; i < 16; ++i) {
@@ -99,45 +96,51 @@ float SampleCascade(int layer, vec3 world_pos, vec3 N, vec3 L) {
     return 1.0 - (shadow_sum / 16.0);
 }
 
+float SampleCascade(int layer, vec3 world_pos, vec3 N, vec3 L) {
+    for (int l = layer; l < 4; ++l) {
+        float s = SampleCascadeRaw(l, world_pos, N, L);
+        if (s >= 0.0) {
+            return s;
+        }
+    }
+    return 0.0;
+}
 
 float ShadowCalculation(vec3 world_pos, vec3 N, vec3 L) {
-	// 1. Cascade Selection
-	vec4 view_pos = ubo.view * vec4(world_pos, 1.0);
-	float depth = -view_pos.z;
+    // 1. Spherical radial depth (Rotation-Invariant!)
+    float depth = length(world_pos - ubo.cam_pos);
 
-	int layer = -1;
-	float blend_band = 1.5f;
-	float blend_factor = 0.0f;
-	int next_layer = -1;
+    int layer = -1;
+    float blend_factor = 0.0f;
+    int next_layer = -1;
 
-	for (int i = 0; i < 4; ++i) {
-		if (depth < ubo.cascade_split_depths[i]) {
-			layer = i;
+    for (int i = 0; i < 4; ++i) {
+        float split_dist = ubo.cascade_split_depths[i];
+        if (depth < split_dist) {
+            layer = i;
 
-			// Blend between cascades
-			float split_dist = ubo.cascade_split_depths[i];
-			float dist_to_edge = split_dist - depth;
+            // Adaptive blend band: 20% of cascade split distance
+            float blend_band = max(1.5f, split_dist * 0.2f);
+            float dist_to_edge = split_dist - depth;
 
-			if (dist_to_edge < blend_band && i < 3) {
-				next_layer = i + 1;
-				blend_factor = 1.0 - (dist_to_edge / blend_band);
-			}
+            if (dist_to_edge < blend_band && i < 3) {
+                next_layer = i + 1;
+                blend_factor = 1.0 - (dist_to_edge / blend_band);
+            }
 
-			break;
-		}
-	}
+            break;
+        }
+    }
 
-	if (layer == -1)
-		layer = 3;
+    if (layer == -1)
+        layer = 3;
 
-	// 2. 采样当前层级
+    // 2. Sample current cascade with fallback
     float shadow = SampleCascade(layer, world_pos, N, L);
 
-    // 3. 如果处于混合带，采样下一层级并插值
-    if (blend_factor > 0.001) {
-        float next_shadow = SampleCascade(layer + 1, world_pos, N, L);
-
-        // 线性插值：blend_factor 越大，越倾向于 next_shadow
+    // 3. Smooth interpolation between cascades
+    if (blend_factor > 0.001 && next_layer != -1) {
+        float next_shadow = SampleCascade(next_layer, world_pos, N, L);
         shadow = mix(shadow, next_shadow, blend_factor);
     }
 
@@ -240,4 +243,11 @@ vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
 vec3 apply_tonemap_and_gamma(vec3 linear_color) {
     vec3 mapped = ACESFilm(linear_color);
     return pow(mapped, vec3(1.0 / 2.2));
+}
+
+// Public common function: Screen-Space Reflections evaluation
+vec3 eval_ssr_reflection(vec4 ssr_sample, vec3 F, float roughness, vec3 albedo, float metallic) {
+    float roughness_fade = smoothstep(0.25, 0.05, roughness);
+    vec3 specular_tint = mix(vec3(1.0), albedo, metallic);
+    return ssr_sample.rgb * F * roughness_fade * specular_tint * ssr_sample.a;
 }

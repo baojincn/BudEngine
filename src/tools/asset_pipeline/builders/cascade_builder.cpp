@@ -63,13 +63,15 @@ bool CascadeBuilder::build_package_from_raw(
     tex_opts.use_cache = options.use_cache;
     tex_opts.cache_root = options.cache_root;
 
+    std::unordered_map<std::string, std::string> texture_cooked_paths;
+
     for (const auto& tex_path : all_textures) {
         if (tex_path.empty())
             continue;
 
         std::filesystem::path tp(tex_path);
         std::string tex_name = tp.stem().string();
-        std::string out_tex_path = (tex_dir / (tex_name + ".budasset")).string();
+        std::string out_tex_path = (tex_dir / (tex_name + ".budasset")).generic_string();
 
         uint64_t tex_id = hasher(tex_path);
         texture_id_map[tex_path] = tex_id;
@@ -95,15 +97,36 @@ bool CascadeBuilder::build_package_from_raw(
                 entry.asset_id = tex_id;
                 entry.asset_type = static_cast<uint32_t>(bud::asset::AssetType::Texture);
                 AssetRegistry::register_asset(entry);
+
+                texture_cooked_paths[tex_path] = out_tex_path;
+                texture_cooked_paths[resolved_path] = out_tex_path;
             }
         }
     }
 
+    // Remap RawMesh textures and material texture paths to cooked .budasset paths
+    RawMesh cooked_mesh = raw_mesh;
+    for (auto& tex : cooked_mesh.textures) {
+        if (texture_cooked_paths.contains(tex)) {
+            tex = texture_cooked_paths[tex];
+        }
+    }
+    for (auto& mat : cooked_mesh.materials) {
+        if (texture_cooked_paths.contains(mat.base_color_texture_path))
+            mat.base_color_texture_path = texture_cooked_paths[mat.base_color_texture_path];
+        if (texture_cooked_paths.contains(mat.normal_texture_path))
+            mat.normal_texture_path = texture_cooked_paths[mat.normal_texture_path];
+        if (texture_cooked_paths.contains(mat.metallic_roughness_texture_path))
+            mat.metallic_roughness_texture_path = texture_cooked_paths[mat.metallic_roughness_texture_path];
+        if (texture_cooked_paths.contains(mat.emissive_texture_path))
+            mat.emissive_texture_path = texture_cooked_paths[mat.emissive_texture_path];
+    }
+
     // 2. Materials
     std::unordered_map<std::string, uint64_t> material_id_map;
-    for (const auto& mat : raw_mesh.materials) {
+    for (const auto& mat : cooked_mesh.materials) {
         std::string mat_name = mat.name.empty() ? "DefaultMaterial" : mat.name;
-        std::string out_mat_path = (mat_dir / (mat_name + ".budasset")).string();
+        std::string out_mat_path = (mat_dir / (mat_name + ".budasset")).generic_string();
 
         uint64_t mat_id = hasher(mat_name);
         material_id_map[mat_name] = mat_id;
@@ -116,27 +139,25 @@ bool CascadeBuilder::build_package_from_raw(
             entry.asset_id = mat_id;
             entry.asset_type = static_cast<uint32_t>(bud::asset::AssetType::Material);
             if (!mat.base_color_texture_path.empty()) {
-                std::filesystem::path tp(mat.base_color_texture_path);
-                entry.dependencies.push_back((tex_dir / (tp.stem().string() + ".budasset")).string());
+                entry.dependencies.push_back(mat.base_color_texture_path);
             }
             AssetRegistry::register_asset(entry);
         }
     }
 
     // 3. Mesh
-    std::string out_mesh_path = (mesh_dir / (stem + ".budasset")).string();
+    std::string out_mesh_path = (mesh_dir / (stem + ".budasset")).generic_string();
     std::string temp_raw = (options.cache_root + "/" + stem + "_temp.rawmesh");
     if (options.scale != 1.0f && options.scale > 0.0f) {
-        RawMesh scaled_raw = raw_mesh;
-        for (auto& v : scaled_raw.vertices) {
+        for (auto& v : cooked_mesh.vertices) {
             v.position[0] *= options.scale;
             v.position[1] *= options.scale;
             v.position[2] *= options.scale;
         }
-        scaled_raw.compute_bounds();
-        scaled_raw.save_binary(temp_raw);
+        cooked_mesh.compute_bounds();
+        cooked_mesh.save_binary(temp_raw);
     } else {
-        raw_mesh.save_binary(temp_raw);
+        cooked_mesh.save_binary(temp_raw);
     }
 
     MeshBuildOptions mesh_opts{};
