@@ -27,6 +27,7 @@ int main(int argc, char* argv[]) {
     std::string cache_dir = "Cache";
     bool dump_text = false;
     bool use_cache = true;
+    float scale = 0.0f; // 0.0f = auto-detect unit scale based on metadata/bounds, converts to meters
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -36,6 +37,8 @@ int main(int argc, char* argv[]) {
             output_path = argv[++i];
         } else if (arg == "--output-dir" && i + 1 < argc) {
             output_dir = argv[++i];
+        } else if (arg == "--scale" && i + 1 < argc) {
+            scale = std::stof(argv[++i]);
         } else if (arg == "--cascade") {
             // Maintained as transparent alias for package import
         } else if (arg == "--no-cache") {
@@ -65,7 +68,7 @@ int main(int argc, char* argv[]) {
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
     // 1. Texture Image Import (Single texture asset)
-    if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp") {
+    if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp" || ext == ".dds" || ext == ".webp") {
         if (output_path.empty()) {
             if (!output_dir.empty()) {
                 output_path = (std::filesystem::path(output_dir) / (stem + ".budasset")).string();
@@ -94,29 +97,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // 2. 3D Model Import (Enforce Full Package Cascade Import)
-    std::optional<bud::asset_pipeline::RawMesh> raw_mesh_opt;
-    if (ext == ".obj") {
-        raw_mesh_opt = bud::asset_pipeline::ObjImporter::import_from_file(input_path);
-    } else if (ext == ".gltf" || ext == ".glb") {
-        raw_mesh_opt = bud::asset_pipeline::GltfImporter::import_from_file(input_path);
-    } else if (ext == ".fbx") {
-        raw_mesh_opt = bud::asset_pipeline::FbxImporter::import_from_file(input_path);
-    } else {
-        std::cerr << "[BudAssetImporter] Unsupported input format: " << ext << std::endl;
-        return 1;
-    }
-
-    if (!raw_mesh_opt) {
-        std::cerr << "[BudAssetImporter] Failed to parse mesh: " << input_path << std::endl;
-        return 1;
-    }
-
     if (output_dir.empty()) {
         if (!output_path.empty()) {
             std::filesystem::path out_p(output_path);
             if (out_p.has_extension()) {
-                // e.g. Content/Cryteksponza/Meshes/sponza.budasset -> Content/Cryteksponza
                 std::string parent_name = out_p.parent_path().filename().string();
                 if (parent_name == "Meshes" || parent_name == "meshes") {
                     output_dir = out_p.parent_path().parent_path().string();
@@ -132,12 +116,56 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    std::cout << "[BudAssetImporter] Importing complete package for " << stem << " -> " << output_dir << std::endl;
-
     bud::asset_pipeline::CascadeBuildOptions cascade_opts{};
     cascade_opts.cache_root = cache_dir;
     cascade_opts.use_cache = use_cache;
     cascade_opts.dump_text = dump_text;
+    cascade_opts.scale = scale;
+
+    // 2. Scene Import with 1:1 Directory Mirroring (glTF / glb)
+    if (ext == ".gltf" || ext == ".glb") {
+        auto raw_scene_opt = bud::asset_pipeline::GltfImporter::import_scene_from_file(input_path);
+        if (raw_scene_opt && raw_scene_opt->instances.size() > 1) {
+            std::cout << "[BudAssetImporter] Importing scene package for " << stem << " -> " << output_dir << std::endl;
+            if (bud::asset_pipeline::CascadeBuilder::build_scene_package(*raw_scene_opt, output_dir, cascade_opts)) {
+                std::cout << "[BudAssetImporter] Successfully imported full scene package to: " << output_dir << std::endl;
+                return 0;
+            } else {
+                std::cerr << "[BudAssetImporter] Failed to import scene package." << std::endl;
+                return 1;
+            }
+        }
+    }
+
+    // 3. Fallback / Single Mesh Package Import
+    std::optional<bud::asset_pipeline::RawMesh> raw_mesh_opt;
+    if (ext == ".obj") {
+        raw_mesh_opt = bud::asset_pipeline::ObjImporter::import_from_file(input_path, scale);
+    } else if (ext == ".gltf" || ext == ".glb") {
+        raw_mesh_opt = bud::asset_pipeline::GltfImporter::import_from_file(input_path);
+    } else if (ext == ".fbx") {
+        raw_mesh_opt = bud::asset_pipeline::FbxImporter::import_from_file(input_path, scale);
+    } else if (ext == ".rawmesh") {
+        raw_mesh_opt = bud::asset_pipeline::RawMesh::load_from_file(input_path);
+    } else if (ext == ".budasset") {
+        if (bud::asset_pipeline::CascadeBuilder::build_package(input_path, output_dir, cascade_opts)) {
+            std::cout << "[BudAssetImporter] Successfully imported full asset package to: " << output_dir << std::endl;
+            return 0;
+        } else {
+            std::cerr << "[BudAssetImporter] Failed to import full asset package from: " << input_path << std::endl;
+            return 1;
+        }
+    } else {
+        std::cerr << "[BudAssetImporter] Unsupported input format: " << ext << std::endl;
+        return 1;
+    }
+
+    if (!raw_mesh_opt) {
+        std::cerr << "[BudAssetImporter] Failed to parse mesh: " << input_path << std::endl;
+        return 1;
+    }
+
+    std::cout << "[BudAssetImporter] Importing complete package for " << stem << " -> " << output_dir << std::endl;
 
     if (bud::asset_pipeline::CascadeBuilder::build_package_from_raw(*raw_mesh_opt, output_dir, cascade_opts)) {
         std::cout << "[BudAssetImporter] Successfully imported full asset package to: " << output_dir << std::endl;

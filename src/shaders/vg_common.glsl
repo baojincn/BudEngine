@@ -4,6 +4,7 @@
 layout(set = 1, binding = 0) uniform UniformBufferObject {
 	mat4 view;
 	mat4 proj;
+	mat4 prev_view_proj;
 	mat4 cascade_view_proj[4];
 	vec4 cascade_split_depths;
 

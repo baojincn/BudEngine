@@ -16,6 +16,7 @@ namespace bud::graphics {
 		TextureHandle depth_attachment;
 		bool clear_color = false;
 		bool clear_depth = false;
+		bool depth_read_only = false;
 		bud::math::vec4 clear_color_value = { 0, 0, 0, 1 };
 		float clear_depth_value = 1.0f;
 		uint32_t base_array_layer = 0;
@@ -41,6 +42,7 @@ namespace bud::graphics {
 
 		virtual CommandHandle begin_frame() = 0;
 		virtual void end_frame(CommandHandle cmd) = 0;
+		virtual CommandHandle get_current_graphics_command_buffer() = 0;
 		virtual void wait_idle() = 0;
 		virtual void cleanup() = 0;
 		virtual uint32_t get_inflight_frame_count() const = 0;
@@ -62,6 +64,13 @@ namespace bud::graphics {
 		// 现有接口
 		virtual void resource_barrier(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state) = 0;
 		virtual void resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) = 0;
+		virtual void resource_barrier_release(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) = 0;
+		virtual void resource_barrier_release(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) = 0;
+		virtual void resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) = 0;
+		virtual void resource_barrier_acquire(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) = 0;
+		virtual uint32_t get_graphics_queue_family() const = 0;
+		virtual uint32_t get_compute_queue_family() const = 0;
+		virtual uint32_t get_transfer_queue_family() const = 0;
 		virtual void cmd_bind_pipeline(CommandHandle cmd, PipelineHandle pipeline) = 0;
 		virtual void cmd_bind_descriptor_set(CommandHandle cmd, PipelineHandle pipeline, uint32_t set_index) = 0;
 		virtual void cmd_bind_descriptor_set(CommandHandle cmd, PipelineHandle pipeline, uint32_t set_index, uint64_t descriptor_set) = 0;
@@ -88,7 +97,10 @@ namespace bud::graphics {
 		virtual uint64_t get_compute_timeline_value() const = 0;
 		virtual uint64_t get_graphics_timeline_value() const = 0;
 		virtual uint64_t get_graphics_timeline_completed_value() const = 0;
+		virtual uint64_t get_transfer_timeline_value() const { return 0; }
+		virtual void wait_transfer_timeline(uint64_t value) {}
 		virtual bool has_dedicated_compute_queue() const = 0;
+		virtual bool has_dedicated_transfer_queue() const { return false; }
 		virtual TextureHandle get_current_swapchain_texture() = 0;
 		virtual uint32_t get_current_image_index() = 0;
 		virtual uint32_t get_current_frame_index() const = 0;
@@ -149,8 +161,9 @@ namespace bud::graphics {
 		virtual RenderStats& get_render_stats() = 0;
 		virtual void add_culling_stats(uint32_t total, uint32_t visible, uint32_t casters) = 0;
 
-		virtual void cmd_copy_buffer(CommandHandle cmd, BufferHandle src, BufferHandle dst, uint64_t size) = 0;
+		virtual void cmd_copy_buffer(CommandHandle cmd, bud::graphics::BufferHandle src, bud::graphics::BufferHandle dst, uint64_t size) = 0;
 		virtual void cmd_copy_to_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, const void* data) = 0;
-		virtual void cmd_copy_image_to_buffer(CommandHandle cmd, TextureHandle src, BufferHandle dst) = 0;
-		};
+		virtual void cmd_fill_buffer(CommandHandle cmd, bud::graphics::BufferHandle dst, uint64_t offset, uint64_t size, uint32_t data) = 0;
+		virtual void cmd_copy_image_to_buffer(CommandHandle cmd, TextureHandle src, bud::graphics::BufferHandle dst) = 0;
+	};
 }

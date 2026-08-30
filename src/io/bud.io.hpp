@@ -34,9 +34,16 @@ namespace bud::io {
 
 		struct Material {
 			uint32_t base_color_texture = 0; // index into texture_paths
+			uint32_t normal_texture = 0xFFFFFFFF;
+			uint32_t metallic_roughness_texture = 0xFFFFFFFF;
+			uint32_t emissive_texture = 0xFFFFFFFF;
+			glm::vec4 base_color_factor = glm::vec4(1.0f);
+			float metallic_factor = 0.0f;
+			float roughness_factor = 0.5f;
 			uint8_t alpha_mode = 0; // 0=OPAQUE,1=MASK,2=BLEND
 			uint8_t double_sided = 0;
 			float alpha_cutoff = 0.5f;
+			std::string name;
 		};
 
 		struct Vertex {
@@ -49,6 +56,7 @@ namespace bud::io {
 			bool operator==(const Vertex& other) const;
 		};
 
+		std::string source_path;
 		std::vector<Vertex> vertices;
 		std::vector<uint32_t> indices;
 		std::vector<std::string> texture_paths;
@@ -130,13 +138,10 @@ private:
 
 	class ModelLoader {
 	public:
-    ModelLoader(VirtualFileSystem* virtual_file_system);
-    std::optional<MeshData> load_obj(const std::filesystem::path& path);
-    std::optional<MeshData> load_gltf(const std::filesystem::path& path);
-    std::optional<MeshData> load_bud_mesh(const std::filesystem::path& path);
-	private:
-		MeshData convert_to_mesh_data(const tinygltf::Model& model);
+		ModelLoader(VirtualFileSystem* virtual_file_system);
+		std::optional<MeshData> load_bud_asset(const std::filesystem::path& path);
 
+	private:
 		VirtualFileSystem* virtual_file_system;
 	};
 

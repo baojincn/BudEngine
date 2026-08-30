@@ -61,10 +61,12 @@ namespace bud::graphics {
 		hierarchy_traversal_pass = std::make_unique<HierarchyTraversalPass>();
 		page_emit_pass = std::make_unique<PageEmitPass>();
 		cluster_cull_pass = std::make_unique<ClusterCullPass>();
-		main_pass = std::make_unique<MainPass>();
+		forward_translucent_pass = std::make_unique<ForwardTranslucentPass>();
 		cluster_visualization_pass = std::make_unique<ClusterVisualizationPass>();
 		ui_pass = std::make_unique<UIPass>();
 		visibility_pass = std::make_unique<VisibilityPass>();
+		ssr_pass = std::make_unique<ScreenSpaceReflectionPass>();
+		ssgi_pass = std::make_unique<ScreenSpaceGlobalIlluminationPass>();
 		resolve_pass = std::make_unique<ResolvePass>();
 
 		csm_pass->init(rhi, render_config, asset_manager);
@@ -78,11 +80,25 @@ namespace bud::graphics {
 		hierarchy_traversal_pass->init(rhi, render_config, asset_manager);
 		page_emit_pass->init(rhi, render_config, asset_manager);
 		cluster_cull_pass->init(rhi, render_config, asset_manager);
-		main_pass->init(rhi, render_config, asset_manager);
+		forward_translucent_pass->init(rhi, render_config, asset_manager);
 		cluster_visualization_pass->init(rhi, render_config, asset_manager);
 		ui_pass->init(rhi, render_config, asset_manager);
 		visibility_pass->init(rhi, render_config, asset_manager);
+		ssr_pass->init(rhi, render_config, asset_manager);
+		ssgi_pass->init(rhi, render_config, asset_manager);
 		resolve_pass->init(rhi, render_config, asset_manager);
+
+		auto& geometry_pool = gpu_scene.get_geometry_pool();
+		if (!geometry_pool.initialized) {
+			geometry_pool.vertex_buffer = rhi->create_gpu_buffer(GPUScene::GeometryPool::vertex_pool_size, ResourceState::VertexBuffer);
+			geometry_pool.index_buffer = rhi->create_gpu_buffer(GPUScene::GeometryPool::index_pool_size, ResourceState::IndexBuffer);
+			rhi->set_debug_name(geometry_pool.vertex_buffer, ObjectType::Buffer, "GeometryPool_Vertices");
+			rhi->set_debug_name(geometry_pool.index_buffer, ObjectType::Buffer, "GeometryPool_Indices");
+			geometry_pool.initialized = true;
+			bud::print("[GeometryPool] Initialized: vertex={}MB index={}MB",
+				GPUScene::GeometryPool::vertex_pool_size / (1024 * 1024),
+				GPUScene::GeometryPool::index_pool_size / (1024 * 1024));
+		}
 
 		has_mesh_shader = true; // GPU supports mesh shaders (NV / EXT)
 		gpu_scene.init(rhi, rhi->get_inflight_frame_count());
@@ -117,9 +133,11 @@ namespace bud::graphics {
 		if (hierarchy_traversal_pass) hierarchy_traversal_pass->shutdown(rhi);
 		if (page_emit_pass) page_emit_pass->shutdown(rhi);
 		if (cluster_cull_pass) cluster_cull_pass->shutdown(rhi);
-		if (main_pass) main_pass->shutdown(rhi);
+		if (forward_translucent_pass) forward_translucent_pass->shutdown(rhi);
 		if (cluster_visualization_pass) cluster_visualization_pass->shutdown(rhi);
 		if (visibility_pass) visibility_pass->shutdown(rhi);
+		if (ssr_pass) ssr_pass->shutdown(rhi);
+		if (ssgi_pass) ssgi_pass->shutdown(rhi);
 		if (resolve_pass) resolve_pass->shutdown(rhi);
 		if (csm_cull_pipeline.is_valid()) {
 			rhi->destroy_pipeline(csm_cull_pipeline);
@@ -269,7 +287,17 @@ namespace bud::graphics {
 	}
 
 	uint32_t Renderer::bind_texture_async(const std::string& path) {
-		uint32_t current_slot = next_bindless_slot.fetch_add(1, std::memory_order_relaxed);
+		if (path.empty()) return 0;
+		uint32_t current_slot = 0;
+		{
+			std::lock_guard lock(texture_slot_mutex);
+			auto it = bound_texture_slots.find(path);
+			if (it != bound_texture_slots.end()) {
+				return it->second;
+			}
+			current_slot = next_bindless_slot.fetch_add(1, std::memory_order_relaxed);
+			bound_texture_slots[path] = current_slot;
+		}
 
 		auto queue = upload_queue;
 		auto queue_weak = std::weak_ptr<UploadQueue>(upload_queue);
@@ -342,53 +370,14 @@ namespace bud::graphics {
 		auto rhi_ptr = rhi;
 
 		if (!mesh_data.texture_paths.empty()) {
-
 			for (size_t i = 0; i < mesh_data.texture_paths.size(); ++i) {
-				uint32_t current_slot = next_bindless_slot.fetch_add(1, std::memory_order_relaxed);
+				const auto& tex_path = mesh_data.texture_paths[i];
+				uint32_t current_slot = bind_texture_async(tex_path);
 				texture_slot_map.push_back(current_slot);
 
 				if (i == 0) {
 					base_material_id = current_slot;
 				}
-
-				{
-					std::lock_guard lock(queue->mutex);
-					queue->commands.push_back([rhi_ptr, current_slot]() {
-						rhi_ptr->queue_bindless_fallback(current_slot, rhi_ptr->get_fallback_texture());
-					});
-				}
-
-				auto tex_path = mesh_data.texture_paths[i];
-
-				asset_manager->load_image_async(tex_path,
-					[queue_weak, rhi_ptr, current_slot, tex_path](bud::io::Image img) {
-						auto img_ptr = std::make_shared<bud::io::Image>(std::move(img));
-
-						auto queue_locked = queue_weak.lock();
-						if (!queue_locked) {
-							std::string err = "Renderer::upload_mesh upload queue was destroyed before callback";
-							bud::eprint("{}", err);
-#if defined(_DEBUG)
-							throw std::runtime_error(err);
-#else
-							return;
-#endif
-						}
-
-						std::lock_guard lock(queue_locked->mutex);
-						queue_locked->commands.push_back([rhi_ptr, current_slot, tex_path, img_ptr]() {
-							bud::graphics::TextureDesc desc{};
-							desc.width = (uint32_t)img_ptr->width;
-							desc.height = (uint32_t)img_ptr->height;
-							desc.format = bud::graphics::TextureFormat::RGBA8_SRGB;
-							desc.mips = static_cast<uint32_t>(std::floor(std::log2(std::max(desc.width, desc.height)))) + 1;
-
-							auto tex = rhi_ptr->create_texture_async(desc, (const void*)img_ptr->pixels,
-								(uint64_t)img_ptr->width * img_ptr->height * 4, current_slot);
-							rhi_ptr->set_debug_name(tex, ObjectType::Texture, tex_path);
-						});
-					}
-				);
 			}
 		}
 
@@ -454,16 +443,84 @@ namespace bud::graphics {
 				rhi->copy_buffer_immediate_offset(i_stage.buffer, geometry_pool.index_buffer, i_size, i_stage.offset, index_pool_byte_offset);
 
 				if (!mesh_data_copy->subsets.empty()) {
-					std::vector<uint32_t> material_to_slot;
-					material_to_slot.resize(mesh_data_copy->materials.size(), 0);
+					std::vector<uint32_t> material_to_id;
+					material_to_id.resize(mesh_data_copy->materials.size(), 0);
 					for (size_t mi = 0; mi < mesh_data_copy->materials.size(); ++mi) {
-						uint32_t tex_idx = mesh_data_copy->materials[mi].base_color_texture;
-						if (tex_idx < texture_slot_map.size()) {
-							material_to_slot[mi] = texture_slot_map[tex_idx];
+						const auto& mat_data = mesh_data_copy->materials[mi];
+						bud::graphics::GPUMaterialData gpu_mat{};
+						gpu_mat.alpha_mode = static_cast<uint32_t>(mat_data.alpha_mode);
+						gpu_mat.alpha_cutoff = (mat_data.alpha_cutoff > 0.0f) ? mat_data.alpha_cutoff : 0.5f;
+						gpu_mat.base_color_factor = mat_data.base_color_factor;
+						gpu_mat.metallic_factor = mat_data.metallic_factor;
+						gpu_mat.roughness_factor = (mat_data.roughness_factor > 0.0f) ? mat_data.roughness_factor : 0.5f;
+
+						uint32_t tex_idx = mat_data.base_color_texture;
+						if (tex_idx < texture_slot_map.size() && texture_slot_map[tex_idx] > 0) {
+							gpu_mat.albedo_texture_id = texture_slot_map[tex_idx];
+							gpu_mat.base_color_factor = glm::vec4(1.0f);
 						}
 						else {
-							material_to_slot[mi] = texture_slot_map.empty() ? 0 : texture_slot_map[0];
+							gpu_mat.albedo_texture_id = 0u;
 						}
+
+						// Physical Translucent Material Tuning:
+						// Support distinct glass, wine bottles, liquor bottles, drinking glasses, and jars
+						if (gpu_mat.alpha_mode == 2) {
+							std::string path_lower = mesh_data_copy->source_path;
+							for (char& c : path_lower) c = static_cast<char>(std::tolower(c));
+
+							if (gpu_mat.albedo_texture_id > 0) {
+								// Textured translucent surface (e.g. bottle labels, stickers, curtains)
+								gpu_mat.base_color_factor = glm::vec4(1.0f);
+								gpu_mat.roughness_factor = 0.05f;
+							}
+							else if (path_lower.find("liquorbottle") != std::string::npos || path_lower.find("winebottle") != std::string::npos || path_lower.find("bottle") != std::string::npos) {
+								// Bottle Glass: distribute rich authentic bottle colors (green, amber, deep bordeaux, clear)
+								size_t hash_val = std::hash<std::string>{}(mesh_data_copy->source_path);
+								uint32_t variant = static_cast<uint32_t>((hash_val ^ (mi * 1337u)) % 4u);
+								if (variant == 0) {
+									// Green Wine Bottle (emerald olive green)
+									gpu_mat.base_color_factor = glm::vec4(0.12f, 0.42f, 0.18f, 0.45f);
+									gpu_mat.roughness_factor = 0.05f;
+								}
+								else if (variant == 1) {
+									// Amber Whiskey / Bourbon Bottle (warm golden amber)
+									gpu_mat.base_color_factor = glm::vec4(0.55f, 0.28f, 0.08f, 0.50f);
+									gpu_mat.roughness_factor = 0.06f;
+								}
+								else if (variant == 2) {
+									// Deep Bordeaux Bottle (rich dark green-brown)
+									gpu_mat.base_color_factor = glm::vec4(0.14f, 0.22f, 0.08f, 0.55f);
+									gpu_mat.roughness_factor = 0.06f;
+								}
+								else {
+									// Clear Liquor / Vodka Bottle (clear with subtle refraction tint)
+									gpu_mat.base_color_factor = glm::vec4(0.88f, 0.94f, 0.98f, 0.08f);
+									gpu_mat.roughness_factor = 0.03f;
+								}
+							}
+							else if (path_lower.find("wineglass") != std::string::npos || path_lower.find("glass") != std::string::npos || path_lower.find("cup") != std::string::npos || path_lower.find("tumbler") != std::string::npos) {
+								// Crystal Wine Glass / Water Tumbler (high clarity, low roughness)
+								gpu_mat.base_color_factor = glm::vec4(0.96f, 0.98f, 1.0f, 0.04f);
+								gpu_mat.roughness_factor = 0.02f;
+							}
+							else if (path_lower.find("jar") != std::string::npos || path_lower.find("condiment") != std::string::npos || path_lower.find("canister") != std::string::npos) {
+								// Molded Glass Jar (faint jade tint, slightly thicker)
+								gpu_mat.base_color_factor = glm::vec4(0.82f, 0.94f, 0.88f, 0.20f);
+								gpu_mat.roughness_factor = 0.08f;
+							}
+							else if (path_lower.find("window") != std::string::npos) {
+								// Architectural Window Pane
+								gpu_mat.base_color_factor = glm::vec4(0.90f, 0.96f, 0.98f, 0.06f);
+								gpu_mat.roughness_factor = 0.03f;
+							}
+							else {
+								// Generic glass
+								gpu_mat.base_color_factor = glm::vec4(0.92f, 0.96f, 1.0f, 0.08f);
+								gpu_mat.roughness_factor = 0.04f;
+							}
+						}
+						material_to_id[mi] = gpu_scene.register_material(gpu_mat);
 					}
 
 					for (size_t i = 0; i < mesh_data_copy->subsets.size(); ++i) {
@@ -472,14 +529,13 @@ namespace bud::graphics {
 						sub.index_start = subset.index_start;
 						sub.index_count = subset.index_count;
 
-						if (subset.material_index < material_to_slot.size()) {
-							sub.material_id = material_to_slot[subset.material_index];
+						if (subset.material_index < material_to_id.size()) {
+							sub.material_id = material_to_id[subset.material_index];
 							sub.is_alpha_tested = mesh_data_copy->materials[subset.material_index].alpha_mode == 1; // 1 = AlphaMode::Mask
+							sub.is_translucent = mesh_data_copy->materials[subset.material_index].alpha_mode == 2; // 2 = AlphaMode::Blend
 						}
 						else {
-							bud::eprint("  Subset[{}]: INVALID mat_idx={} (max: {}) -> using fallback!",
-								i, subset.material_index, material_to_slot.size());
-							sub.material_id = texture_slot_map.empty() ? 0 : texture_slot_map[0];
+							sub.material_id = 0;
 						}
 
 						sub.aabb = subset.aabb;
@@ -499,7 +555,12 @@ namespace bud::graphics {
 					new_mesh.submeshes.push_back(sub);
 				}
 
-				meshes.push_back(std::move(new_mesh));
+				{
+					std::lock_guard mesh_lock(mesh_mutex);
+					if (assigned_mesh_id >= meshes.size())
+						meshes.resize(assigned_mesh_id + 1);
+					meshes[assigned_mesh_id] = std::move(new_mesh);
+				}
 			});
 		}
 
@@ -531,7 +592,8 @@ namespace bud::graphics {
 		}
 
 		for (const auto& rhi_cmd : commands_to_run) {
-			rhi_cmd();
+			if (rhi_cmd)
+				rhi_cmd();
 		}
 	}
 
@@ -551,10 +613,14 @@ namespace bud::graphics {
 
 
 	void Renderer::render(const bud::graphics::RenderScene& render_scene, SceneView& scene_view) {
-		// 先处理所有挂起的上传任务
+		auto cmd = rhi->begin_frame();
+		if (!cmd) {
+			render_graph.reset();
+			return;
+		}
+
+		// 处理当前帧挂起的上传任务（此时当前帧 in_flight_fence 已等待完成，命令池与 staging ring 已重置）
 		flush_upload_queue();
-		// 重置当前帧统计数据
-		rhi->get_render_stats() = {};
 
 		size_t instance_count = render_scene.instance_count.load(std::memory_order_relaxed);
 		const uint32_t cascade_count = std::min(render_config.cascade_count, (uint32_t)MAX_CASCADES);
@@ -563,8 +629,17 @@ namespace bud::graphics {
 		size_t visible_count = 0;
 		size_t visible_instance_count = 0;
 		size_t total_draw_count = 0;
-		size_t split_index = 0;
+		SceneDrawRanges ranges{};
 		std::vector<std::vector<uint32_t>> culled_results(1 + cascade_count);
+
+		// Advance 24H time cycle if enabled
+		if (render_config.sky_config.enable_sky && render_config.sky_config.time_mode == SkyTimeMode::Cycle24H) {
+			render_config.sky_config.time_of_day += scene_view.delta_time * render_config.sky_config.time_speed;
+			if (render_config.sky_config.time_of_day >= 24.0f)
+				render_config.sky_config.time_of_day = std::fmod(render_config.sky_config.time_of_day, 24.0f);
+			else if (render_config.sky_config.time_of_day < 0.0f)
+				render_config.sky_config.time_of_day += 24.0f;
+		}
 
 		if (instance_count > 0) {
 			update_cascades(scene_view, render_config, render_scene.scene_bounds);
@@ -687,7 +762,7 @@ namespace bud::graphics {
 							auto& item = sort_list[draw_start];
 							item.entity_index = (uint32_t)i;
 							item.submesh_index = bud::asset::INVALID_INDEX;
-							uint8_t layer = 1; // page-based layer
+							uint8_t layer = DRAW_LAYER_VIRTUAL_GEOMETRY;
 							item.key = DrawKey::generate_opaque(layer, 0, 0, mesh_id, depth_key);
 						}
 						else if (sub_idx_original != bud::asset::INVALID_INDEX) {
@@ -702,12 +777,17 @@ namespace bud::graphics {
 									item.key = UINT64_MAX;
 									continue;
 								}
-								uint8_t layer = sub.is_alpha_tested ? 2 : 0;
-								item.key = DrawKey::generate_opaque(layer, 0, sub.material_id, mesh_id, depth_key);
+								if (sub.is_translucent) {
+									item.key = DrawKey::generate_translucent(DRAW_LAYER_TRANSLUCENT, std::sqrt(distance));
+								}
+								else {
+									uint8_t layer = DRAW_LAYER_TRADITIONAL_OPAQUE;
+									item.key = DrawKey::generate_opaque(layer, 0, sub.material_id, mesh_id, depth_key);
+								}
 							}
 							else {
 								uint32_t material_id = render_scene.material_indices[i];
-								uint8_t layer = 0;
+								uint8_t layer = DRAW_LAYER_TRADITIONAL_OPAQUE;
 								item.key = DrawKey::generate_opaque(layer, 0, material_id, mesh_id, depth_key);
 							}
 						}
@@ -726,8 +806,13 @@ namespace bud::graphics {
 
 								item.entity_index = (uint32_t)i;
 								item.submesh_index = s;
-								uint8_t layer = sub.is_alpha_tested ? 2 : 0;
-								item.key = DrawKey::generate_opaque(layer, 0, sub.material_id, mesh_id, depth_key);
+								if (sub.is_translucent) {
+									item.key = DrawKey::generate_translucent(DRAW_LAYER_TRANSLUCENT, std::sqrt(distance));
+								}
+								else {
+									uint8_t layer = DRAW_LAYER_TRADITIONAL_OPAQUE;
+									item.key = DrawKey::generate_opaque(layer, 0, sub.material_id, mesh_id, depth_key);
+								}
 							}
 						}
 					}
@@ -749,17 +834,22 @@ namespace bud::graphics {
 			if (diag_frames < 5)
 				bud::print("[R dbg] frame {} total_draw={} visible={} inst={}", diag_frames++, total_draw_count, visible_count, instance_count);
 
-			for (; split_index < visible_count; ++split_index) {
-				if ((sort_list[split_index].key >> 60) == 1) {
-					break;
+			for (size_t i = 0; i < visible_count; ++i) {
+				uint8_t layer = static_cast<uint8_t>((sort_list[i].key >> 60) & 0xF);
+				if (layer == DRAW_LAYER_VIRTUAL_GEOMETRY) {
+					++ranges.range_a_count;
+				} else if (layer == DRAW_LAYER_TRADITIONAL_OPAQUE) {
+					++ranges.range_b_count;
+				} else if (layer == DRAW_LAYER_TRANSLUCENT) {
+					if (ranges.range_c_count == 0) {
+						ranges.range_c_start = i;
+					}
+					++ranges.range_c_count;
 				}
 			}
-		}
-
-		auto cmd = rhi->begin_frame();
-		if (!cmd) {
-			render_graph.reset(); // Release any transient textures acquired during this frame's setup
-			return;
+			if (ranges.range_c_count == 0) {
+				ranges.range_c_start = visible_count;
+			}
 		}
 
 		rhi->set_render_config(render_config);
@@ -799,7 +889,7 @@ namespace bud::graphics {
 			return;
 		}
 
-		auto back_buffer = render_graph.import_texture("Backbuffer", swapchain_tex, ResourceState::RenderTarget);
+		auto back_buffer = render_graph.import_texture("Backbuffer", swapchain_tex, ResourceState::Undefined);
 
 		// Use the render-frame slot (NOT the swapchain image index) to index
 		// per-frame GPU buffers: sync objects (in_flight_fence, upload timeline)
@@ -1257,7 +1347,7 @@ namespace bud::graphics {
 
 				const RGHandle csm_inst_input = csm_instance_h.is_valid() ? csm_instance_h : rg_inst;
 				const size_t csm_inst_count = csm_instance_h.is_valid() ? total_csm_items : visible_count;
-				const size_t csm_split = csm_instance_h.is_valid() ? scene_split : split_index;
+				const size_t csm_split = csm_instance_h.is_valid() ? scene_split : ranges.range_a_count;
 
 				RGHandle rg_csm_indirect;
 				// GPU-driven CSM culling for traditional dynamic meshes (only when dynamic instances exist)
@@ -1292,9 +1382,9 @@ namespace bud::graphics {
 				std::array<RGHandle, MAX_CASCADES> rg_csm_visible_pages{};
 				if (render_config.enable_virtual_geometry && hierarchy_traversal_pass) {
 					for (uint32_t c_idx = 0; c_idx < cascade_count; ++c_idx) {
-						float lod_error_scale = 2.5f;
-						if (c_idx == 1) lod_error_scale = 5.0f;
-						else if (c_idx == 2) lod_error_scale = 7.5f;
+						float lod_error_scale = 1.0f;
+						if (c_idx == 1) lod_error_scale = 2.5f;
+						else if (c_idx == 2) lod_error_scale = 5.0f;
 						else if (c_idx >= 3) lod_error_scale = 10.0f;
 
 						float ortho_extent = render_config.shadow_ortho_size * std::pow(2.0f, static_cast<float>(c_idx));
@@ -1326,6 +1416,7 @@ namespace bud::graphics {
 						rg_visible_pages = hierarchy_traversal_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, visible_count, gpu_scene, current_idx);
 
 					gpu_scene.ensure_hiz_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
+					gpu_scene.ensure_color_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
 
 					RGHandle rg_history_hiz{};
 					if (gpu_scene.has_history_hiz() && render_config.enable_hiz_culling) {
@@ -1334,11 +1425,19 @@ namespace bud::graphics {
 							rg_history_hiz = render_graph.import_texture("HistoryHiZ", hist_tex, ResourceState::ShaderResource);
 					}
 
+					RGHandle rg_history_color{};
+					if (gpu_scene.has_history_color() && (render_config.enable_ssr || render_config.enable_ssgi)) {
+						auto hist_col_tex = gpu_scene.get_history_color(current_idx);
+						if (hist_col_tex.is_valid())
+							rg_history_color = render_graph.import_texture("HistorySceneColor", hist_col_tex, ResourceState::ShaderResource);
+					}
+
 					if (rg_visible_pages.is_valid() && visibility_pass) {
 						RGHandle rg_depth{};
 						// Phase 1: Visibility Pass using History Hi-Z
 						auto rg_visibility = visibility_pass->add_to_graph(render_graph, back_buffer, rg_depth,
-							scene_view, render_config, rg_visible_pages, rg_history_hiz, gpu_scene, &rg_depth);
+							scene_view, render_config, rg_visible_pages, rg_history_hiz, gpu_scene, ranges,
+							gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), rg_draw, &rg_depth);
 
 						// Build Current Frame Hi-Z Pyramid from Phase 1 Depth Buffer
 						RGHandle rg_current_hiz{};
@@ -1371,15 +1470,39 @@ namespace bud::graphics {
 								rg_ao = raw_ao;
 						}
 
+						RGHandle rg_ssr{};
+						if (rg_depth.is_valid() && ssr_pass && render_config.enable_ssr) {
+							rg_ssr = ssr_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
+						}
+
+						RGHandle rg_ssgi{};
+						if (rg_depth.is_valid() && ssgi_pass && render_config.enable_ssgi) {
+							rg_ssgi = ssgi_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
+						}
+
 						if (rg_visibility.is_valid() && resolve_pass) {
 							resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
-								scene_view, render_config, gpu_scene, shadow_map, rg_ao);
+								scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 							has_main_pass = true;
+
+							if (render_config.enable_cluster_visualization && cluster_visualization_pass) {
+								cluster_visualization_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+									render_scene, scene_view, render_config, meshes, sort_list,
+									visible_count, rg_draw, rg_inst, gpu_scene,
+									gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), ranges.range_a_count);
+							}
+							else if (forward_translucent_pass && ranges.range_c_count > 0) {
+								forward_translucent_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
+									render_scene, scene_view, render_config, meshes, sort_list,
+									ranges, rg_draw, rg_inst, gpu_scene,
+									gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(),
+									rg_ao, rg_ssr, rg_ssgi, rg_history_color);
+							}
 						}
 					}
 				}
 				else {
-					auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), {}, split_index);
+					auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), {}, ranges.range_a_count);
 
 					if (depth_prepass.is_valid()) {
 						auto rg_hiz = pyramid_mip_pass->add_to_graph(render_graph, depth_prepass, render_config);
@@ -1397,9 +1520,9 @@ namespace bud::graphics {
 							}
 						}
 
-						// Path B: Dynamic Traditional Mesh GPU Culling (only for traditional meshes before split_index)
-						if (split_index > 0 && instance_culling_pass && rg_inst.is_valid() && rg_draw.is_valid()) {
-							rg_draw = instance_culling_pass->add_to_graph(render_graph, rg_inst, rg_draw, rg_stats, rg_hiz, scene_view, (uint32_t)split_index);
+						// Path B: Dynamic Traditional Mesh GPU Culling (for traditional meshes in Range B)
+						if (ranges.range_b_count > 0 && instance_culling_pass && rg_inst.is_valid() && rg_draw.is_valid()) {
+							rg_draw = instance_culling_pass->add_to_graph(render_graph, rg_inst, rg_draw, rg_stats, rg_hiz, scene_view, ranges.range_a_count + ranges.range_b_count);
 						}
 
 						if (render_config.debug_hiz && pyramid_mip_debug_pass) {
@@ -1410,9 +1533,10 @@ namespace bud::graphics {
 						if (visibility_pass && resolve_pass) {
 							RGHandle rg_depth{};
 							auto rg_visibility = visibility_pass->add_indirect_to_graph(render_graph, back_buffer, rg_depth,
-								scene_view, render_config, render_scene, meshes, sort_list, visible_count,
+								scene_view, render_config, render_scene, meshes, sort_list,
+								ranges,
 								rg_draw, rg_instance_data, gpu_scene,
-								gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), split_index, &rg_depth);
+								gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), &rg_depth);
 
 							RGHandle rg_ao{};
 							if (rg_depth.is_valid() && ao_pass && render_config.ao_mode != AOMode::Disabled) {
@@ -1428,12 +1552,62 @@ namespace bud::graphics {
 								}
 							}
 
+							RGHandle rg_history_color{};
+							if (gpu_scene.has_history_color() && (render_config.enable_ssr || render_config.enable_ssgi)) {
+								auto hist_col_tex = gpu_scene.get_history_color(current_idx);
+								if (hist_col_tex.is_valid())
+									rg_history_color = render_graph.import_texture("HistorySceneColor", hist_col_tex, ResourceState::ShaderResource);
+							}
+
+							RGHandle rg_ssr{};
+							if (rg_depth.is_valid() && ssr_pass && render_config.enable_ssr) {
+								rg_ssr = ssr_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
+							}
+
+							RGHandle rg_ssgi{};
+							if (rg_depth.is_valid() && ssgi_pass && render_config.enable_ssgi) {
+								rg_ssgi = ssgi_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
+							}
+
 							if (rg_visibility.is_valid()) {
 								resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
-									scene_view, render_config, gpu_scene, shadow_map, rg_ao);
+									scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 								has_main_pass = true;
+
+								if (render_config.enable_cluster_visualization && cluster_visualization_pass) {
+									cluster_visualization_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+										render_scene, scene_view, render_config, meshes, sort_list,
+										visible_count, rg_draw, rg_instance_data, gpu_scene,
+										gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), ranges.range_a_count);
+								}
+								else if (forward_translucent_pass && ranges.range_c_count > 0) {
+									forward_translucent_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
+										render_scene, scene_view, render_config, meshes, sort_list,
+										ranges, rg_draw, rg_instance_data, gpu_scene,
+										gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(),
+										rg_ao, rg_ssr, rg_ssgi, rg_history_color);
+								}
 							}
 						}
+					}
+				}
+
+				if (has_main_pass && (render_config.enable_ssr || render_config.enable_ssgi)) {
+					gpu_scene.mark_history_color_valid();
+					auto curr_col_tex = gpu_scene.get_current_color(current_idx);
+					if (curr_col_tex.is_valid()) {
+						auto rg_curr_color = render_graph.import_texture("CurrentSceneColor", curr_col_tex, ResourceState::Undefined);
+						render_graph.add_pass("Capture Scene Color",
+							[=](RGBuilder& builder) {
+								builder.read(back_buffer, ResourceState::TransferSrc);
+								builder.write(rg_curr_color, ResourceState::TransferDst);
+								return rg_curr_color;
+							},
+							[=](RHI* rhi, CommandHandle cmd) {
+								rhi->cmd_copy_image(cmd, render_graph.get_texture(back_buffer), render_graph.get_texture(rg_curr_color));
+								rhi->resource_barrier(cmd, render_graph.get_texture(rg_curr_color), ResourceState::TransferDst, ResourceState::ShaderResource);
+							}
+						);
 					}
 				}
 			}
@@ -1469,12 +1643,12 @@ namespace bud::graphics {
 		ui_pass->add_to_graph(render_graph, back_buffer);
 		render_graph.compile();
 
-		rhi->resource_barrier(cmd, swapchain_tex, ResourceState::Undefined, ResourceState::RenderTarget);
 		render_graph.execute(cmd);
 
+		CommandHandle active_cmd = rhi->get_current_graphics_command_buffer();
 		if (rhi->is_headless()) {
 			// Transition to TransferSrc
-			rhi->resource_barrier(cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::TransferSrc);
+			rhi->resource_barrier(active_cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::TransferSrc);
 
 			uint32_t current_idx = rhi->get_current_image_index();
 			if (readback_buffers.size() <= current_idx) {
@@ -1493,18 +1667,18 @@ namespace bud::graphics {
 			}
 
 			// Perform copy
-			rhi->cmd_copy_image_to_buffer(cmd, swapchain_tex, readback_buffers[current_idx]);
+			rhi->cmd_copy_image_to_buffer(active_cmd, swapchain_tex, readback_buffers[current_idx]);
 			// Barrier back to Present/Undefined doesn't strictly matter for offscreen, but we leave it as TransferSrc so it's clean next frame
 		}
 		else {
-			rhi->resource_barrier(cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::Present);
+			rhi->resource_barrier(active_cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::Present);
 		}
 
 		auto& frames = gpu_scene.get_frame_resources();
 		frames[current_idx].submit_timeline_value = rhi->get_graphics_timeline_value() + 1;
 		frames[current_idx].requests_processed = false;
 
-		rhi->end_frame(cmd);
+		rhi->end_frame(active_cmd);
 		render_graph.reset();
 	}
 

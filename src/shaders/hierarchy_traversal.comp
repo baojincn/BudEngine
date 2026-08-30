@@ -64,6 +64,7 @@ layout(std140, set = 0, binding = 0) uniform CameraBuffer {
     // Matches C++ UniformBufferObject exactly.
     mat4 view;
     mat4 proj;
+    mat4 prev_view_proj;
     mat4 cascade_view_proj[4];
     vec4 cascade_split_depths;
     vec3 cam_pos;
@@ -184,7 +185,7 @@ float calculate_lod_error(vec3 center, float radius, float max_error) {
         return (max_error * focal_pixels) / d;
     } else {
         // Shadow cascade view: orthographic projection error (constant across depth in each cascade)
-        float extent = (push_constants.ortho_extent > 0.0) ? push_constants.ortho_extent : 3500.0;
+        float extent = (push_constants.ortho_extent > 0.0) ? push_constants.ortho_extent : 35.0;
         float shadow_res = push_constants.screen_height;
         float error_multiplier = max(push_constants.lod_error_scale, 0.1);
         return (max_error * shadow_res) / (extent * error_multiplier);
@@ -196,6 +197,8 @@ float calculate_lod_error(vec3 center, float radius, float max_error) {
 // ---------------------------------------------------------------------------
 
 void emit_page(uint instance_id, uint virtual_page_index, float blend_factor) {
+    if (virtual_page_index >= page_table.length())
+        return;
     PageTableEntry entry = page_table[virtual_page_index];
     if (entry.valid != 0) {
         uint page_slot = entry.pool_offset;
@@ -204,10 +207,11 @@ void emit_page(uint instance_id, uint virtual_page_index, float blend_factor) {
         uint blend_bits = uint(clamp(blend_factor, 0.0, 1.0) * 7.0);
         uint pack = (instance_id << 16) | ((blend_bits & 0x7u) << 13) | (page_slot & 0x1FFFu);
         uint idx = atomicAdd(visible_page_count, 1);
-        visible_pages[idx] = pack;
+        if (idx < VG_MAX_VISIBLE_PAGES)
+            visible_pages[idx] = pack;
     } else {
         uint idx = atomicAdd(request_count, 1);
-        const uint kMaxRequests = (push_constants.max_requests > 0) ? push_constants.max_requests : 4096u;
+        const uint kMaxRequests = (push_constants.max_requests > 0) ? push_constants.max_requests : VG_MAX_PAGE_REQUESTS;
         if (idx < kMaxRequests)
             requests[idx] = virtual_page_index;
         else
@@ -233,7 +237,7 @@ void traverse_hierarchy(uint instance_id) {
         return;
 
     uint root_group = inst.root_group_index;
-    if (root_group == 0xFFFFFFFF)
+    if (root_group == VG_INVALID_INDEX || root_group >= groups.length())
         return;
 
     // Pre-compute the rotation-scale matrix for anisotropic radius scaling.
@@ -247,6 +251,10 @@ void traverse_hierarchy(uint instance_id) {
     uint iterations = 0;
     while (stack_ptr > 0 && iterations < 65536) {
         uint group_idx = stack[--stack_ptr];
+        if (group_idx >= groups.length()) {
+            iterations++;
+            continue;
+        }
         VGClusterGroup group = groups[group_idx];
 
         // Cluster group bounds are in local space; transform to world space.
@@ -277,11 +285,44 @@ void traverse_hierarchy(uint instance_id) {
             for (uint i = 0; i < group.page_index_num; ++i)
                 emit_page(instance_id, group.page_index_start + i, blend);
         } else {
+            // Check if all child pages are resident in GPU page table.
+            // If any child page is not loaded, request it and fallback to rendering
+            // the current resident coarse LOD group!
+            bool all_children_resident = true;
             for (uint i = 0; i < group.children_num; ++i) {
-                if (stack_ptr < 256)
-                    stack[stack_ptr++] = group.children_start + i;
-                else
-                    atomicOr(error_flags, 1u);
+                uint child_idx = group.children_start + i;
+                if (child_idx >= groups.length()) {
+                    all_children_resident = false;
+                    continue;
+                }
+                VGClusterGroup child_grp = groups[child_idx];
+                for (uint p = 0; p < child_grp.page_index_num; ++p) {
+                    uint vpage = child_grp.page_index_start + p;
+                    if (vpage >= page_table.length() || page_table[vpage].valid == 0) {
+                        all_children_resident = false;
+                        if (vpage < page_table.length()) {
+                            uint idx = atomicAdd(request_count, 1);
+                            const uint kMaxRequests = (push_constants.max_requests > 0) ? push_constants.max_requests : 4096u;
+                            if (idx < kMaxRequests)
+                                requests[idx] = vpage;
+                            else
+                                atomicAdd(overflow_count, 1);
+                        }
+                    }
+                }
+            }
+
+            if (all_children_resident) {
+                for (uint i = 0; i < group.children_num; ++i) {
+                    if (stack_ptr < 256)
+                        stack[stack_ptr++] = group.children_start + i;
+                    else
+                        atomicOr(error_flags, 1u);
+                }
+            } else {
+                // Streaming in progress: fallback to render current coarse LOD group!
+                for (uint i = 0; i < group.page_index_num; ++i)
+                    emit_page(instance_id, group.page_index_start + i, 1.0);
             }
         }
 

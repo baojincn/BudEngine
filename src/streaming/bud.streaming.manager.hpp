@@ -62,7 +62,7 @@ struct VirtualGeometryAsset {
 
 class StreamingManager {
 public:
-	using AssetRegisteredCallback = std::function<void(uint32_t mesh_id, const bud::math::AABB& aabb, uint32_t root_group_index, uint32_t base_virtual_page)>;
+	using AssetRegisteredCallback = std::function<void(const std::string& path, uint32_t mesh_id, const bud::math::AABB& aabb, uint32_t root_group_index, uint32_t base_virtual_page)>;
 
 	StreamingManager(bud::io::AssetManager* asset_manager,
 		bud::graphics::GPUScene* gpu_scene,
@@ -101,6 +101,14 @@ private:
 	// Resident Virtual Geometry tables, kept alive for the lifetime of the asset.
 	std::unordered_map<std::string, std::shared_ptr<VirtualGeometryAsset>> virtual_geometry_assets;
 	std::unordered_map<std::string, StreamingPage> all_pages;
+
+	struct RegisteredVGAssetInfo {
+		uint32_t mesh_id = 0;
+		bud::math::AABB global_aabb;
+		uint32_t root_group_index = 0;
+		uint32_t base_virtual_page = 0;
+	};
+	std::unordered_map<std::string, RegisteredVGAssetInfo> registered_info_map;
 
 	mutable std::mutex mutex_sm;
 	std::unordered_map<std::string, bool> residency_sm;

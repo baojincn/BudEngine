@@ -13,14 +13,28 @@ MaterialBuildResult MaterialBuilder::build(const std::vector<RawMaterial>& mater
         tex_map[textures[i]] = static_cast<uint32_t>(i);
     }
 
+    auto get_or_add_texture = [&](const std::string& path) -> uint32_t {
+        if (path.empty()) return 0xFFFFFFFF;
+        auto it = tex_map.find(path);
+        if (it != tex_map.end()) {
+            return it->second;
+        }
+        uint32_t new_idx = static_cast<uint32_t>(result.texture_paths.size());
+        result.texture_paths.push_back(path);
+        tex_map[path] = new_idx;
+        return new_idx;
+    };
+
     for (const auto& rm : materials) {
         bud::asset::MaterialDescriptor md{};
-        auto it = tex_map.find(rm.base_color_texture_path);
-        if (it != tex_map.end()) {
-            md.base_color_texture = it->second;
-        } else {
-            md.base_color_texture = 0;
-        }
+        md.base_color_texture = get_or_add_texture(rm.base_color_texture_path);
+        if (md.base_color_texture == 0xFFFFFFFF) md.base_color_texture = 0;
+
+        md.normal_texture = get_or_add_texture(rm.normal_texture_path);
+        md.metallic_roughness_texture = get_or_add_texture(rm.metallic_roughness_texture_path);
+        md.emissive_texture = get_or_add_texture(rm.emissive_texture_path);
+        md.metallic_factor = rm.metallic_factor;
+        md.roughness_factor = rm.roughness_factor;
 
         md.alpha_mode = static_cast<uint8_t>(rm.alpha_mode);
         md.double_sided = rm.double_sided ? 1 : 0;

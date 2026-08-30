@@ -47,6 +47,7 @@ layout(binding = 3) uniform sampler2D hizPyramid;
 layout(binding = 4) uniform UniformBufferObject {
     mat4 view;
     mat4 proj;
+    mat4 prev_view_proj;
     mat4 cascade_view_proj[4];
     vec4 cascade_split_depths;
     vec3 cam_pos;
@@ -57,6 +58,9 @@ layout(binding = 4) uniform UniformBufferObject {
     uint cascade_count;
     uint debug_cascades;
     uint reversed_z;
+    float shadow_bias_constant;
+    float shadow_bias_slope;
+    uint debug_cluster;
 } ubo;
 
 

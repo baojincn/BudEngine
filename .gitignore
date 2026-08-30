@@ -71,3 +71,15 @@ include/generated/shader_layouts.h
 
 # Runtime-generated config
 imgui.ini
+
+# Binary assets and cooked packages (only keep scene configs and default textures in Content/)
+*.budasset
+*.budbulk
+Content/**
+!Content/
+!Content/Scenes/
+!Content/Scenes/**
+!Content/Textures/
+!Content/Textures/default.png
+!Content/**/default.png
+!Content/**/.gitkeep

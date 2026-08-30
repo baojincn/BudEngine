@@ -24,7 +24,15 @@ namespace bud::ui {
         std::function<void(bool)> set_occluder_enable,
 		bool current_occluder_enable,
 		std::function<void(bud::graphics::AOMode)> set_ao_mode,
-		bud::graphics::AOMode current_ao_mode) {
+		bud::graphics::AOMode current_ao_mode,
+		std::function<void(bool)> set_ssr_enable,
+		bool current_ssr_enable,
+		std::function<void(bool)> set_ssgi_enable,
+		bool current_ssgi_enable,
+		std::function<void(float)> set_ssgi_intensity,
+		float current_ssgi_intensity,
+		std::function<void(float)> set_ssgi_blend,
+		float current_ssgi_blend) {
 
 		if (show_stats) {
 			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
@@ -200,6 +208,58 @@ namespace bud::ui {
 					}
 					ImGui::PopItemWidth();
 					ImGui::PopID();
+				}
+
+				if (set_ssr_enable) {
+					ImGui::SameLine();
+					ImGui::TextColored(color_neutral, " | SSR");
+					ImGui::SameLine();
+					ImGui::PushID("ssr_enable_checkbox");
+					bool tmp_ssr = current_ssr_enable;
+					if (ImGui::Checkbox("##ssr_enable", &tmp_ssr)) {
+						set_ssr_enable(tmp_ssr);
+					}
+					ImGui::PopID();
+				}
+
+				if (set_ssgi_enable) {
+					ImGui::SameLine();
+					ImGui::TextColored(color_neutral, " | SSGI");
+					ImGui::SameLine();
+					ImGui::PushID("ssgi_enable_checkbox");
+					bool tmp_ssgi = current_ssgi_enable;
+					if (ImGui::Checkbox("##ssgi_enable", &tmp_ssgi)) {
+						set_ssgi_enable(tmp_ssgi);
+					}
+					ImGui::PopID();
+				}
+
+				if (current_ssgi_enable && (set_ssgi_intensity || set_ssgi_blend)) {
+					if (set_ssgi_intensity) {
+						ImGui::TextColored(color_neutral, "SSGI Int: %.1f", current_ssgi_intensity);
+						ImGui::SameLine();
+						ImGui::PushID("ssgi_intensity_slider");
+						ImGui::PushItemWidth(60.0f);
+						float tmp = current_ssgi_intensity;
+						if (ImGui::SliderFloat("##ssgi_intensity", &tmp, 0.0f, 4.0f, "%.1f")) {
+							set_ssgi_intensity(tmp);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+					}
+					if (set_ssgi_blend) {
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Blend: %.2f", current_ssgi_blend);
+						ImGui::SameLine();
+						ImGui::PushID("ssgi_blend_slider");
+						ImGui::PushItemWidth(60.0f);
+						float tmp = current_ssgi_blend;
+						if (ImGui::SliderFloat("##ssgi_blend", &tmp, 0.01f, 0.20f, "%.2f")) {
+							set_ssgi_blend(tmp);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+					}
 				}
 
 				const auto draw_heuristic_occluder_controls = [&]() {

@@ -1,4 +1,5 @@
 #include "obj_importer.hpp"
+#include "texture_importer.hpp"
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
@@ -8,7 +9,7 @@
 
 namespace bud::asset_pipeline {
 
-static std::optional<RawMesh> import_assimp_common(const std::string& filepath, unsigned int postprocess_flags) {
+static std::optional<RawMesh> import_assimp_common(const std::string& filepath, unsigned int postprocess_flags, float scale = 1.0f) {
     Assimp::Importer importer;
     const aiScene* scene = importer.ReadFile(filepath, postprocess_flags);
 
@@ -52,9 +53,72 @@ static std::optional<RawMesh> import_assimp_common(const std::string& filepath, 
             rm.base_color_texture_path = raw_mesh.textures[0];
         }
 
+        // 1. PBR Textures from Assimp
+        aiString norm_path;
+        if (mat->GetTexture(aiTextureType_NORMALS, 0, &norm_path) == AI_SUCCESS ||
+            mat->GetTexture(aiTextureType_HEIGHT, 0, &norm_path) == AI_SUCCESS) {
+            std::string p = norm_path.C_Str();
+            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+            rm.normal_texture_path = p;
+        }
+
+        aiString rough_path;
+        if (mat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &rough_path) == AI_SUCCESS ||
+            mat->GetTexture(aiTextureType_SHININESS, 0, &rough_path) == AI_SUCCESS) {
+            std::string p = rough_path.C_Str();
+            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+            rm.metallic_roughness_texture_path = p;
+        }
+
+        aiString metal_path;
+        if (mat->GetTexture(aiTextureType_METALNESS, 0, &metal_path) == AI_SUCCESS) {
+            std::string p = metal_path.C_Str();
+            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+            if (rm.metallic_roughness_texture_path.empty()) rm.metallic_roughness_texture_path = p;
+        }
+
+        aiString emissive_path;
+        if (mat->GetTexture(aiTextureType_EMISSIVE, 0, &emissive_path) == AI_SUCCESS) {
+            std::string p = emissive_path.C_Str();
+            if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+            rm.emissive_texture_path = p;
+        }
+
+        // 2. Auto-scan companion PBR textures (_N, _R, _M, _E)
+        if (!rm.base_color_texture_path.empty() && rm.base_color_texture_path != raw_mesh.textures[0]) {
+            auto companions = TextureImporter::find_companion_pbr_textures(rm.base_color_texture_path);
+            if (rm.normal_texture_path.empty()) rm.normal_texture_path = companions.normal_path;
+            if (rm.metallic_roughness_texture_path.empty()) {
+                if (!companions.roughness_path.empty()) rm.metallic_roughness_texture_path = companions.roughness_path;
+                else if (!companions.metallic_path.empty()) rm.metallic_roughness_texture_path = companions.metallic_path;
+            }
+            if (rm.emissive_texture_path.empty()) rm.emissive_texture_path = companions.emissive_path;
+        }
+
+        float metallic_factor = 0.0f;
+        if (mat->Get(AI_MATKEY_METALLIC_FACTOR, metallic_factor) == AI_SUCCESS) {
+            rm.metallic_factor = metallic_factor;
+        }
+        float roughness_factor = 0.85f;
+        if (mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness_factor) == AI_SUCCESS) {
+            rm.roughness_factor = roughness_factor;
+        }
+
         rm.alpha_mode = bud::asset::AlphaMode::Opaque;
         rm.double_sided = false;
         rm.alpha_cutoff = 0.5f;
+
+        if (!rm.base_color_texture_path.empty() && rm.base_color_texture_path != raw_mesh.textures[0]) {
+            auto alpha_info = TextureImporter::analyze_alpha(rm.base_color_texture_path);
+            if (alpha_info.has_alpha) {
+                rm.alpha_mode = alpha_info.alpha_mode;
+                rm.alpha_cutoff = alpha_info.alpha_cutoff;
+                if (rm.alpha_mode == bud::asset::AlphaMode::Mask) {
+                    rm.double_sided = true;
+                }
+            }
+        }
+
         raw_mesh.materials.push_back(std::move(rm));
     }
 
@@ -80,6 +144,23 @@ static std::optional<RawMesh> import_assimp_common(const std::string& filepath, 
     };
     collect_instances(scene->mRootNode, aiMatrix4x4());
 
+    float effective_scale = scale;
+    if (effective_scale <= 0.0f) {
+        float max_dim = 0.0f;
+        for (unsigned int m = 0; m < scene->mNumMeshes; ++m) {
+            for (unsigned int v = 0; v < scene->mMeshes[m]->mNumVertices; ++v) {
+                const auto& pos = scene->mMeshes[m]->mVertices[v];
+                max_dim = std::max({ max_dim, std::abs(pos.x), std::abs(pos.y), std::abs(pos.z) });
+            }
+        }
+        if (max_dim > 100.0f) {
+            effective_scale = 0.01f; // Presumed centimeters
+            std::cout << "[BudAssetPipeline] Auto-detected centimeter scale in OBJ (max_dim = " << max_dim << "), applying scale = 0.01 to convert to meters." << std::endl;
+        } else {
+            effective_scale = 1.0f;
+        }
+    }
+
     for (const auto& inst : instances) {
         const aiMesh* mesh = scene->mMeshes[inst.mesh_index];
         uint32_t vertex_base = static_cast<uint32_t>(raw_mesh.vertices.size());
@@ -91,9 +172,9 @@ static std::optional<RawMesh> import_assimp_common(const std::string& filepath, 
         for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
             RawVertex rv{};
             aiVector3D pos = inst.transform * mesh->mVertices[v];
-            rv.position[0] = pos.x;
-            rv.position[1] = pos.y;
-            rv.position[2] = pos.z;
+            rv.position[0] = pos.x * effective_scale;
+            rv.position[1] = pos.y * effective_scale;
+            rv.position[2] = pos.z * effective_scale;
 
             if (mesh->HasNormals()) {
                 aiVector3D n = normal_matrix * mesh->mNormals[v];
@@ -155,13 +236,13 @@ static std::optional<RawMesh> import_assimp_common(const std::string& filepath, 
     return raw_mesh;
 }
 
-std::optional<RawMesh> ObjImporter::import_from_file(const std::string& filepath) {
+std::optional<RawMesh> ObjImporter::import_from_file(const std::string& filepath, float scale) {
     unsigned int flags = aiProcess_Triangulate |
                          aiProcess_GenSmoothNormals |
                          aiProcess_CalcTangentSpace |
                          aiProcess_FlipUVs |
                          aiProcess_JoinIdenticalVertices;
-    return import_assimp_common(filepath, flags);
+    return import_assimp_common(filepath, flags, scale);
 }
 
 } // namespace bud::asset_pipeline

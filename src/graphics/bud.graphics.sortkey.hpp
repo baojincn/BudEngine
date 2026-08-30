@@ -4,6 +4,21 @@
 
 namespace bud::graphics {
 
+	// Layer Definitions for Scene Rendering:
+	// Range A: Layer 0 = Virtual Geometry (VG page-backed static meshes, including masked/alpha-tested)
+	// Range B: Layer 1 = Traditional Dynamic / Opaque & Masked meshes
+	// Range C: Layer 2 = Translucent (Alpha-blended meshes, sorted back-to-front)
+	constexpr uint8_t DRAW_LAYER_VIRTUAL_GEOMETRY = 0;
+	constexpr uint8_t DRAW_LAYER_TRADITIONAL_OPAQUE = 1;
+	constexpr uint8_t DRAW_LAYER_TRANSLUCENT = 2;
+
+	struct SceneDrawRanges {
+		size_t range_a_count = 0; // Range A: VG [0, range_a_count)
+		size_t range_b_count = 0; // Range B: Dynamic Opaque [range_a_count, range_a_count + range_b_count)
+		size_t range_c_start = 0; // Range C: Translucent start
+		size_t range_c_count = 0; // Range C: Translucent [range_c_start, range_c_start + range_c_count)
+	};
+
 	// 布局: [ Layer(4) | Pipeline(10) | Material(18) | Mesh(14) | Depth(18) ]
 	// 总计 64 bits
 	struct DrawKey {
@@ -21,7 +36,7 @@ namespace bud::graphics {
 		static inline uint64_t generate_opaque(uint8_t layer, uint16_t pipeline_id, uint32_t material_id, uint32_t mesh_id, uint32_t depth_18bit) {
 			uint64_t key = 0;
 
-			// 1. Layer (4 bits) [60-63] (0 = Opaque, 1 = PageBacked Opaque, 2 = AlphaTested)
+			// 1. Layer (4 bits) [60-63] (0 = VG, 1 = Traditional Opaque & Masked)
 			key |= (uint64_t)(layer & 0xF) << 60;
 
 			// 2. Pipeline (10 bits) [50-59] - 支持 1024 种 Shader

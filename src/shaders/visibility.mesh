@@ -132,7 +132,7 @@ void main() {
 
         vec3 local_norm = vec3(vg_snorm8(n_raw), vg_snorm8(n_raw >> 8u), vg_snorm8(n_raw >> 16u));
 
-        mat4 vp = (push.cascade_index == 0u) ? (ubo.proj * ubo.view) : ubo.cascade_view_proj[push.cascade_index - 1u];
+        mat4 vp = (push.is_shadow_pass != 0u) ? ubo.cascade_view_proj[clamp(push.cascade_index, 0u, 3u)] : (ubo.proj * ubo.view);
         gl_MeshVerticesEXT[v_idx].gl_Position = vp * world_pos;
         frag_material_id[v_idx] = material_id;
         frag_blend_factor[v_idx] = blend_factor;

@@ -43,6 +43,7 @@ namespace bud::graphics {
 
 		return render_graph.add_pass("Hi-Z Culling Pass",
 			[=](RGBuilder& builder) {
+				builder.set_queue(QueueType::AsyncCompute);
 				builder.set_side_effect();
 				builder.read(instance_buffer, ResourceState::ShaderResource);
 				builder.read(hiz_pyramid, ResourceState::UnorderedAccess); // Keep in GENERAL so we can sample it in GENERAL layout
@@ -85,11 +86,10 @@ namespace bud::graphics {
 				}
 
 				// Clear stats buffer (all counters = 0)
-				bud::graphics::GPUStats zero_stats{};
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::UnorderedAccess, ResourceState::TransferDst);
-				rhi->cmd_copy_to_buffer(cmd, stat_buf, 0, 24, &zero_stats);
+				rhi->cmd_fill_buffer(cmd, stat_buf, 0, sizeof(bud::graphics::GPUStats), 0);
 
-				// Barrier: ensure the UpdateBuffer write is visible to the compute shader
+				// Barrier: ensure the fill write is visible to the compute shader
 				rhi->resource_barrier(cmd, stat_buf, ResourceState::TransferDst, ResourceState::UnorderedAccess);
 
 				rhi->cmd_bind_pipeline(cmd, pipeline);

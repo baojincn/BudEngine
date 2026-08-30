@@ -1,0 +1,125 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_nonuniform_qualifier : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D in_current_ssgi;
+layout(set = 0, binding = 1) uniform sampler2D in_history_ssgi;
+layout(set = 0, binding = 2) uniform sampler2D in_depth_sampler;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D out_accumulated_ssgi;
+
+layout(push_constant) uniform SSGITemporalPushConsts {
+    mat4 inv_proj;
+    mat4 curr_view_to_prev_clip;
+    vec2 screen_size;
+    vec2 inv_screen_size;
+    float temporal_blend;
+    uint has_history;
+    uint reversed_z;
+    float padding;
+} pc;
+
+vec3 rgb_to_ycocg(vec3 rgb) {
+    float y  =  0.25 * rgb.r + 0.5 * rgb.g + 0.25 * rgb.b;
+    float co =  0.5  * rgb.r                - 0.5  * rgb.b;
+    float cg = -0.25 * rgb.r + 0.5 * rgb.g - 0.25 * rgb.b;
+    return vec3(y, co, cg);
+}
+
+vec3 ycocg_to_rgb(vec3 ycocg) {
+    float y  = ycocg.x;
+    float co = ycocg.y;
+    float cg = ycocg.z;
+    float r = y + co - cg;
+    float g = y + cg;
+    float b = y - co - cg;
+    return max(vec3(0.0), vec3(r, g, b));
+}
+
+vec3 reconstruct_view_pos(vec2 uv, float raw_depth) {
+    vec4 clip = vec4(uv * 2.0 - 1.0, raw_depth, 1.0);
+    vec4 view = pc.inv_proj * clip;
+    if (abs(view.w) > 1e-6)
+        view /= view.w;
+    return view.xyz;
+}
+
+void main() {
+    ivec2 pixel_coord = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel_coord.x >= int(pc.screen_size.x) || pixel_coord.y >= int(pc.screen_size.y))
+        return;
+
+    vec2 uv = (vec2(pixel_coord) + 0.5) * pc.inv_screen_size;
+    float raw_depth = texture(in_depth_sampler, uv).r;
+
+    bool is_sky = (pc.reversed_z != 0u) ? (raw_depth <= 1e-6) : (raw_depth >= 1.0 - 1e-6);
+    if (is_sky) {
+        imageStore(out_accumulated_ssgi, pixel_coord, vec4(0.0));
+        return;
+    }
+
+    vec3 current_rgb = texture(in_current_ssgi, uv).rgb;
+    vec3 current_ycocg = rgb_to_ycocg(current_rgb);
+
+    if (pc.has_history == 0u) {
+        imageStore(out_accumulated_ssgi, pixel_coord, vec4(current_rgb, 1.0));
+        return;
+    }
+
+    // 3x3 Neighborhood in YCoCg color space for perceptual variance bounding box
+    vec3 m1 = vec3(0.0);
+    vec3 m2 = vec3(0.0);
+    vec3 min_ycocg = vec3(100.0);
+    vec3 max_ycocg = vec3(-100.0);
+
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            vec2 offset_uv = uv + vec2(float(x), float(y)) * pc.inv_screen_size;
+            vec3 neighbor_rgb = texture(in_current_ssgi, offset_uv).rgb;
+            vec3 neighbor_ycocg = rgb_to_ycocg(neighbor_rgb);
+            m1 += neighbor_ycocg;
+            m2 += neighbor_ycocg * neighbor_ycocg;
+            min_ycocg = min(min_ycocg, neighbor_ycocg);
+            max_ycocg = max(max_ycocg, neighbor_ycocg);
+        }
+    }
+
+    vec3 mean = m1 / 9.0;
+    vec3 variance = max(vec3(0.0), (m2 / 9.0) - (mean * mean));
+    vec3 std_dev = sqrt(variance);
+
+    // Bounding box in YCoCg with 1.5 sigma breathing room
+    vec3 clamp_min = max(min_ycocg, mean - std_dev * 1.5);
+    vec3 clamp_max = min(max_ycocg, mean + std_dev * 1.5);
+
+    // Reproject to previous frame using curr_view_to_prev_clip
+    vec3 view_pos = reconstruct_view_pos(uv, raw_depth);
+    vec4 prev_clip = pc.curr_view_to_prev_clip * vec4(view_pos, 1.0);
+
+    if (prev_clip.w <= 0.001) {
+        imageStore(out_accumulated_ssgi, pixel_coord, vec4(current_rgb, 1.0));
+        return;
+    }
+
+    vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
+
+    // Check if reprojected UV is within screen boundaries
+    if (prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0) {
+        imageStore(out_accumulated_ssgi, pixel_coord, vec4(current_rgb, 1.0));
+        return;
+    }
+
+    vec3 history_rgb = texture(in_history_ssgi, prev_uv).rgb;
+    vec3 history_ycocg = rgb_to_ycocg(history_rgb);
+
+    // Apply YCoCg variance clamping
+    history_ycocg = clamp(history_ycocg, clamp_min, clamp_max);
+
+    // Temporal blend with smooth exponential moving average
+    float blend_factor = clamp(pc.temporal_blend, 0.02, 0.3);
+    vec3 accumulated_ycocg = mix(history_ycocg, current_ycocg, blend_factor);
+    vec3 accumulated_rgb = ycocg_to_rgb(accumulated_ycocg);
+
+    imageStore(out_accumulated_ssgi, pixel_coord, vec4(accumulated_rgb, 1.0));
+}

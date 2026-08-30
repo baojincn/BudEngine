@@ -37,7 +37,7 @@ void main() {
 
     // Read count from buffer
     uint page_count = in_visibility.visible_page_count;
-    if (idx >= page_count) return;
+    if (idx >= page_count || idx >= VG_MAX_VISIBLE_PAGES) return;
 
     uint page_val = in_visibility.visible_pages[idx];
     uint instance_id = page_val >> 16;
@@ -46,9 +46,14 @@ void main() {
     uint page_slot = page_val & 0x1FFFu;
     float blend_factor = float(blend_bits) / 7.0;
 
-    uint pool_offset = page_slot * PAGE_SIZE_BYTES;
+    uint pool_offset = page_slot * VG_PAGE_SIZE_BYTES;
+    uint base_dword = pool_offset / 4u;
+    if (base_dword + VG_PAGE_HEADER_DWORDS >= page_pool.data.length()) return;
+    if (page_pool.data[base_dword + 0u] != VG_PAGE_MAGIC) return;
+
     // cluster_count is the 3rd uint in VGPageDataHeader (offset 8 bytes)
-    uint cluster_count = page_pool.data[pool_offset / 4u + 2u];
+    uint cluster_count = page_pool.data[base_dword + 2u];
+    if (cluster_count > VG_MAX_CLUSTERS_PER_PAGE) return;
 
     for (uint c = 0; c < cluster_count; ++c) {
         uint out_idx = atomicAdd(out_clusters.visible_cluster_count, 1);

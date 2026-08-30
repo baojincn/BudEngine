@@ -18,13 +18,15 @@ namespace bud::graphics {
 		rhi_ptr = rhi;
 		frame_resources.resize(inflight_frame_count);
 
-		if (!rhi || geometry_pool.initialized) {
+		if (!rhi) {
 			return;
 		}
 
-		geometry_pool.vertex_buffer = rhi->create_gpu_buffer(GeometryPool::vertex_pool_size, ResourceState::VertexBuffer);
-		geometry_pool.index_buffer = rhi->create_gpu_buffer(GeometryPool::index_pool_size, ResourceState::IndexBuffer);
-		geometry_pool.initialized = geometry_pool.vertex_buffer.is_valid() && geometry_pool.index_buffer.is_valid();
+		if (!geometry_pool.initialized) {
+			geometry_pool.vertex_buffer = rhi->create_gpu_buffer(GeometryPool::vertex_pool_size, ResourceState::VertexBuffer);
+			geometry_pool.index_buffer = rhi->create_gpu_buffer(GeometryPool::index_pool_size, ResourceState::IndexBuffer);
+			geometry_pool.initialized = geometry_pool.vertex_buffer.is_valid() && geometry_pool.index_buffer.is_valid();
+		}
 
 		if (!page_pool.initialized) {
 			page_pool.page_pool_buffer = rhi->create_gpu_buffer(PagePool::page_pool_size, ResourceState::UnorderedAccess);
@@ -38,7 +40,7 @@ namespace bud::graphics {
 		}
 
 		if (!page_table_buffer.is_valid()) {
-			page_table_buffer = rhi->create_upload_buffer(static_cast<uint64_t>(max_page_table_entries) * 12);
+			page_table_buffer = rhi->create_upload_buffer(static_cast<uint64_t>(max_page_table_entries) * sizeof(PageTableEntry));
 		}
 		
 		if (!vg_pool.group_buffer.is_valid()) {
@@ -137,8 +139,14 @@ namespace bud::graphics {
 					rhi->destroy_texture(persistent_hiz_textures[i]);
 					persistent_hiz_textures[i].reset();
 				}
+				if (persistent_color_textures[i].is_valid()) {
+					rhi->destroy_texture(persistent_color_textures[i]);
+					persistent_color_textures[i].reset();
+				}
 			}
 			persistent_hiz_size = 0;
+			persistent_color_width = 0;
+			persistent_color_height = 0;
 		}
 
 		mesh_geometries.clear();
@@ -402,6 +410,34 @@ namespace bud::graphics {
 		}
 		persistent_hiz_size = size;
 		has_history_hiz_valid = false;
+	}
+
+	void GPUScene::ensure_color_textures(RHI* rhi, uint32_t width, uint32_t height) {
+		if (width == 0 || height == 0 || !rhi)
+			return;
+		if (persistent_color_width == width && persistent_color_height == height &&
+			persistent_color_textures[0].is_valid() && persistent_color_textures[1].is_valid())
+			return;
+
+		TextureDesc desc;
+		desc.width = width;
+		desc.height = height;
+		desc.mips = 1;
+		desc.format = TextureFormat::RGBA8_SRGB;
+		desc.is_storage = false;
+		desc.is_transfer_src = true;
+		desc.initial_state = ResourceState::ShaderResource;
+
+		for (int i = 0; i < 2; ++i) {
+			if (persistent_color_textures[i].is_valid()) {
+				rhi->destroy_texture(persistent_color_textures[i]);
+				persistent_color_textures[i].reset();
+			}
+			persistent_color_textures[i] = rhi->create_texture(desc, nullptr, 0);
+		}
+		persistent_color_width = width;
+		persistent_color_height = height;
+		has_history_color_valid = false;
 	}
 }
 

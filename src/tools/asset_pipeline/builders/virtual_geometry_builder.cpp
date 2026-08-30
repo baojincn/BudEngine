@@ -279,10 +279,13 @@ std::vector<InternalCluster> simplify_cluster_set(
         attrs[i * 5 + 3] = deduped_v[i].normal[1];
         attrs[i * 5 + 4] = deduped_v[i].normal[2];
     }
-    const float weights[5] = { 0.02f, 0.02f, 0.05f, 0.05f, 0.05f };
+    // Attribute weights for QEM in SI meter units:
+    // UVs (indices 0, 1): 0.002f (~2mm displacement equivalent for UV seam stretch)
+    // Normals (indices 2, 3, 4): 0.005f (~5mm displacement equivalent for normal deviation, protecting sharp edges & curvature)
+    const float weights[5] = { 0.002f, 0.002f, 0.005f, 0.005f, 0.005f };
     const float level_scale = 1.0f + 0.8f * static_cast<float>(level);
 
-    // Standard Unit: 1.0f == 1.0 cm.
+    // Standard Unit: 1.0f == 1.0 m.
     // Target 50% triangle reduction per level
     size_t target_indices = std::max<size_t>(bud::asset::VG_MAX_CLUSTER_TRIANGLES * 3 / 2, deduped_i.size() / 2);
     const float base_error = std::max(2.0_mm, group_radius * (0.003f + 0.005f * static_cast<float>(level)));
@@ -1090,12 +1093,12 @@ VGBuildResult VirtualGeometryBuilder::build(const InternalMesh& mesh) {
         }
 
         // Calculate adaptive quantization precision based on page extent.
-        // Target: 0.1cm (1mm) precision. Unit = cm so 0.1 = 1mm.
+        // Target: 1mm precision (0.001f m).
         // Clamp to 8..16 bits. 16 bits max ensures the page fits in the 128KB slot.
         float max_extent = std::max({ pext[0], pext[1], pext[2] });
         uint32_t bits = 12u; // default
         if (max_extent > 0.0f) {
-            bits = std::clamp(static_cast<uint32_t>(std::ceil(std::log2(max_extent / 0.1f))), 8u, 16u);
+            bits = std::clamp(static_cast<uint32_t>(std::ceil(std::log2(max_extent / 0.001f))), 8u, 16u);
         }
         std::vector<uint8_t> pos_stream;
         write_page_quantized_positions(page_vertices, poff, pext, bits, pos_stream);

@@ -24,6 +24,18 @@ StreamingManager::~StreamingManager() {
 }
 
 void StreamingManager::register_virtual_geometry_async(const std::string& path) {
+	{
+		std::scoped_lock lock(mutex_sm);
+		auto it = registered_info_map.find(path);
+		if (it != registered_info_map.end()) {
+			if (asset_registered_callback) {
+				const auto& info = it->second;
+				asset_registered_callback(path, info.mesh_id, info.global_aabb, info.root_group_index, info.base_virtual_page);
+			}
+			return;
+		}
+	}
+
 	auto alive = alive_flag;
 	asset_manager->load_file_async(path, [this, alive, path](std::vector<char> data) {
 		if (!alive->load(std::memory_order_acquire))
@@ -35,6 +47,7 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 
 		const char* base = data.data();
 		uint64_t page_data_base_offset = 0;
+		bool has_vg_chunk = false;
 
 		if (data.size() >= sizeof(bud::asset::BudAssetHeader)) {
 			const auto* asset_header = reinterpret_cast<const bud::asset::BudAssetHeader*>(data.data());
@@ -45,11 +58,17 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 						if (chunks[c].chunk_type == static_cast<uint32_t>(bud::asset::AssetChunkType::VirtualGeometry)) {
 							base = data.data() + chunks[c].offset;
 							page_data_base_offset = chunks[c].offset;
+							has_vg_chunk = true;
 							break;
 						}
 					}
 				}
 			}
+		}
+
+		if (!has_vg_chunk) {
+			// Standard / translucent mesh asset without Virtual Geometry DAG
+			return;
 		}
 
 		if (reinterpret_cast<const uintptr_t>(base) + sizeof(bud::asset::VGHeader) > reinterpret_cast<const uintptr_t>(data.data() + data.size())) {
@@ -90,117 +109,30 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 			}
 		}
 
-		// Fallback: If no embedded materials in VG chunk, discover from package Materials folder
-		if (asset.materials.empty()) {
-			std::filesystem::path asset_p(path);
-			std::filesystem::path mat_dir = asset_p.parent_path().parent_path() / "Materials";
-			if (std::filesystem::exists(mat_dir) && std::filesystem::is_directory(mat_dir)) {
-				for (const auto& entry : std::filesystem::directory_iterator(mat_dir)) {
-					if (entry.path().extension() == ".budasset" && asset_manager && asset_manager->get_vfs()) {
-						auto mat_data = asset_manager->get_vfs()->read_binary(entry.path().generic_string());
-						if (mat_data && mat_data->size() >= sizeof(bud::asset::BudAssetHeader)) {
-							const auto* ah = reinterpret_cast<const bud::asset::BudAssetHeader*>(mat_data->data());
-							if (ah->magic == bud::asset::BUD_ASSET_MAGIC) {
-								const auto* chunks = reinterpret_cast<const bud::asset::AssetChunkEntry*>(mat_data->data() + ah->chunk_table_offset);
-								for (uint32_t c = 0; c < ah->chunk_count; ++c) {
-									if (chunks[c].chunk_type == static_cast<uint32_t>(bud::asset::AssetChunkType::Material)) {
-										const auto* rmh = reinterpret_cast<const bud::asset::RuntimeMaterialHeader*>(mat_data->data() + chunks[c].offset);
-										bud::asset::MaterialDescriptor md{};
-										md.alpha_mode = rmh->alpha_mode;
-										md.alpha_cutoff = rmh->alpha_cutoff;
-										md.double_sided = rmh->double_sided;
-
-										std::string mat_stem = entry.path().stem().string();
-										std::string tex_name;
-										if (mat_stem == "bricks") tex_name = "spnza_bricks_a_diff.budasset";
-										else if (mat_stem == "arch") tex_name = "sponza_arch_diff.budasset";
-										else if (mat_stem == "ceiling") tex_name = "sponza_ceiling_a_diff.budasset";
-										else if (mat_stem == "column_a") tex_name = "sponza_column_a_diff.budasset";
-										else if (mat_stem == "column_b") tex_name = "sponza_column_b_diff.budasset";
-										else if (mat_stem == "column_c") tex_name = "sponza_column_c_diff.budasset";
-										else if (mat_stem == "floor") tex_name = "sponza_floor_a_diff.budasset";
-										else if (mat_stem == "roof") tex_name = "sponza_roof_diff.budasset";
-										else if (mat_stem == "details") tex_name = "sponza_details_diff.budasset";
-										else if (mat_stem == "flagpole") tex_name = "sponza_flagpole_diff.budasset";
-										else if (mat_stem == "chain") tex_name = "chain_texture.budasset";
-										else if (mat_stem == "vase") tex_name = "vase_dif.budasset";
-										else if (mat_stem == "vase_hanging") tex_name = "vase_hanging.budasset";
-										else if (mat_stem == "vase_round") tex_name = "vase_round.budasset";
-										else if (mat_stem == "leaf") tex_name = "vase_plant.budasset";
-										else if (mat_stem == "fabric_a") tex_name = "sponza_fabric_diff.budasset";
-										else if (mat_stem == "fabric_c") tex_name = "sponza_curtain_diff.budasset";
-										else if (mat_stem == "fabric_d") tex_name = "sponza_curtain_blue_diff.budasset";
-										else if (mat_stem == "fabric_e") tex_name = "sponza_curtain_green_diff.budasset";
-										else if (mat_stem == "fabric_f") tex_name = "sponza_fabric_blue_diff.budasset";
-										else if (mat_stem == "fabric_g") tex_name = "sponza_fabric_green_diff.budasset";
-										else if (mat_stem == "Material__25") tex_name = "lion.budasset";
-										else if (mat_stem == "Material__298") tex_name = "background.budasset";
-										else if (mat_stem == "Material__47") tex_name = "sponza_thorn_diff.budasset";
-										else tex_name = "default.budasset";
-
-										std::string full_tex_path = (asset_p.parent_path().parent_path() / "Textures" / tex_name).generic_string();
-										uint32_t tidx = static_cast<uint32_t>(asset.textures.size());
-										asset.textures.push_back(full_tex_path);
-										md.base_color_texture = tidx;
-										asset.materials.push_back(md);
-										break;
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Register materials into GPUScene
+		// Register materials into GPUScene using asset-driven material descriptors
 		for (size_t mi = 0; mi < asset.materials.size(); ++mi) {
 			const auto& mat_desc = asset.materials[mi];
 			bud::graphics::GPUMaterialData gpu_mat;
 			gpu_mat.alpha_mode = static_cast<uint32_t>(mat_desc.alpha_mode);
 			gpu_mat.alpha_cutoff = (mat_desc.alpha_cutoff > 0.0f) ? mat_desc.alpha_cutoff : 0.5f;
 			gpu_mat.base_color_factor = glm::vec4(1.0f);
-			gpu_mat.metallic_factor = 0.0f;
-			gpu_mat.roughness_factor = 0.5f;
+			gpu_mat.metallic_factor = mat_desc.metallic_factor;
+			gpu_mat.roughness_factor = mat_desc.roughness_factor;
 
-			if (mat_desc.base_color_texture < asset.textures.size() && renderer) {
-				const std::string& raw_tex_path = asset.textures[mat_desc.base_color_texture];
-				if (!raw_tex_path.empty()) {
-					std::string tex_path = raw_tex_path;
-					std::filesystem::path tp(raw_tex_path);
-					std::string stem = tp.stem().string();
-					std::filesystem::path asset_p(path);
-					std::filesystem::path candidate1 = asset_p.parent_path().parent_path() / "Textures" / (stem + ".budasset");
-					std::filesystem::path candidate2 = asset_p.parent_path() / "Textures" / (stem + ".budasset");
-					std::filesystem::path candidate3 = asset_p.parent_path() / (stem + ".budasset");
+			auto resolve_and_bind_texture = [&](uint32_t tex_idx) -> uint32_t {
+				if (tex_idx >= asset.textures.size() || !renderer) return 0;
+				const std::string& tex_path = asset.textures[tex_idx];
+				if (tex_path.empty()) return 0;
+				return renderer->bind_texture_async(tex_path);
+			};
 
-					if (std::filesystem::exists(candidate1)) {
-						tex_path = candidate1.generic_string();
-					} else if (std::filesystem::exists(candidate2)) {
-						tex_path = candidate2.generic_string();
-					} else if (std::filesystem::exists(candidate3)) {
-						tex_path = candidate3.generic_string();
-					}
-
-					std::string lower_stem = stem;
-					std::transform(lower_stem.begin(), lower_stem.end(), lower_stem.begin(), ::tolower);
-					if (lower_stem.find("leaf") != std::string::npos ||
-					    lower_stem.find("plant") != std::string::npos ||
-					    lower_stem.find("chain") != std::string::npos ||
-					    lower_stem.find("thorn") != std::string::npos ||
-					    lower_stem.find("flagpole") != std::string::npos) {
-						gpu_mat.alpha_mode = 1; // Mask
-					}
-
-					gpu_mat.albedo_texture_id = renderer->bind_texture_async(tex_path);
-					bud::print("[Streaming] Binding material {} texture: {} -> {} (slot {}) alpha_mode={} cutoff={}",
-					           mi, raw_tex_path, tex_path, gpu_mat.albedo_texture_id, gpu_mat.alpha_mode, gpu_mat.alpha_cutoff);
-				}
-			}
+			gpu_mat.albedo_texture_id = resolve_and_bind_texture(mat_desc.base_color_texture);
+			gpu_mat.normal_texture_id = resolve_and_bind_texture(mat_desc.normal_texture);
+			gpu_mat.metallic_roughness_id = resolve_and_bind_texture(mat_desc.metallic_roughness_texture);
+			gpu_mat.emissive_texture_id = resolve_and_bind_texture(mat_desc.emissive_texture);
 
 			if (gpu_scene) {
 				uint32_t id = gpu_scene->register_material(gpu_mat);
-				bud::print("[Streaming] Registered material {} -> GPU slot {}", mi, id);
 			}
 		}
 
@@ -306,11 +238,21 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 				temp_pages.push_back(std::move(sp));
 			}
 
+			if (asset_ptr->root_group_index < asset_ptr->groups.size()) {
+				const auto& root_grp = asset_ptr->groups[asset_ptr->root_group_index];
+				for (uint32_t p = 0; p < root_grp.page_index_num; ++p) {
+					uint32_t page_local_idx = root_grp.page_index_start + p;
+					if (page_local_idx < temp_pages.size()) {
+						temp_pages[page_local_idx].is_root = true;
+					}
+				}
+			}
+
 			initial_page_indices.clear();
 			for (const auto& sp : temp_pages) {
 				all_pages.emplace(sp.get_unique_id(), sp);
-				// Automatically preload pages for root level
-				if (sp.is_root) {
+				// Automatically preload all pages if asset fits within pool capacity, ensuring complete shadow casters
+				if (temp_pages.size() <= 4000 || sp.is_root) {
 					initial_page_indices.push_back(sp.virtual_page_index);
 				}
 			}
@@ -351,7 +293,15 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 					page_submeshes,
 					{},
 					dummy_errs);
-				asset_registered_callback(mesh_id, global_aabb, root_group_index + asset_ptr->root_group_index, base_virtual_page);
+
+				RegisteredVGAssetInfo rinfo;
+				rinfo.mesh_id = mesh_id;
+				rinfo.global_aabb = global_aabb;
+				rinfo.root_group_index = root_group_index + asset_ptr->root_group_index;
+				rinfo.base_virtual_page = base_virtual_page;
+				registered_info_map[path] = rinfo;
+
+				asset_registered_callback(path, mesh_id, global_aabb, rinfo.root_group_index, base_virtual_page);
 			}
 		}
 
@@ -542,8 +492,6 @@ void StreamingManager::process_gpu_page_requests(const uint32_t* virtual_page_in
 						pending_loads.erase(p);
 						page_gpu_slots[p] = slot;
 					}
-
-					bud::print("[Streaming] Loaded Virtual Geometry page: {} (virtual_page={}) -> slot {}", p, sp.virtual_page_index, slot);
 				});
 			});
 	}
@@ -563,6 +511,7 @@ void StreamingManager::evict_furthest_pages(uint32_t count, const bud::math::vec
 			auto it = all_pages.find(page_key);
 			if (it == all_pages.end()) continue;
 			const auto& sp = it->second;
+			if (sp.is_root) continue; // Coarse LOD root pages are pinned permanently in memory
 			bud::math::vec3 bmin = sp.has_aabb ? sp.aabb.min : sp.global_aabb.min;
 			bud::math::vec3 bmax = sp.has_aabb ? sp.aabb.max : sp.global_aabb.max;
 			bud::math::vec3 closest(
@@ -705,8 +654,6 @@ void StreamingManager::process_gpu_page_requests_from_keys(const std::vector<std
 						pending_loads.erase(p);
 						page_gpu_slots[p] = slot;
 					}
-
-					bud::print("[Streaming] Loaded Virtual Geometry page: {} (virtual_page={}) -> slot {}", p, sp.virtual_page_index, slot);
 				});
 			});
 	}

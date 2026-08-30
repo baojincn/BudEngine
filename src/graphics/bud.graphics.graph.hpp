@@ -61,18 +61,21 @@ namespace bud::graphics {
 		// Culling info
 		uint32_t ref_count = 0;
 		bool has_side_effects = false;
-		// Async compute pass: recorded to the dedicated compute command buffer
-		// and submitted on the compute queue (when available) so it can overlap
-		// graphics rendering. Consumers must wait on the compute timeline.
+		QueueType queue_type = QueueType::Graphics;
 		bool async_compute = false;
 
 		// Barrier info calculated during compile()
 		struct BarrierInfo { 
 			RGHandle handle; 
 			ResourceState old_state; 
-			ResourceState new_state; 
+			ResourceState new_state;
+			uint32_t src_queue_family = 0xFFFFFFFF;
+			uint32_t dst_queue_family = 0xFFFFFFFF;
+			bool is_release = false;
+			bool is_acquire = false;
 		};
 		std::vector<BarrierInfo> before_barriers;
+		std::vector<BarrierInfo> after_barriers;
 	};
 
 
@@ -95,9 +98,18 @@ namespace bud::graphics {
 		// Mark pass as having side effects (cannot be culled)
 		void set_side_effect(bool value = true);
 
+		// Mark the pass queue affinity (Graphics, AsyncCompute, Transfer)
+		void set_queue(QueueType queue) {
+			pass_node.queue_type = queue;
+			pass_node.async_compute = (queue == QueueType::AsyncCompute);
+		}
+
 		// Mark the pass as an async compute pass (recorded on the dedicated
 		// compute command buffer when a dedicated compute queue is available).
-		void set_async_compute(bool value = true) { pass_node.async_compute = value; }
+		void set_async_compute(bool value = true) {
+			pass_node.async_compute = value;
+			pass_node.queue_type = value ? QueueType::AsyncCompute : QueueType::Graphics;
+		}
 
 	private:
 		class RenderGraph& render_graph;

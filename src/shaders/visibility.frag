@@ -40,6 +40,9 @@ void main() {
             }
             if (alpha < mat.alpha_cutoff)
                 discard;
+        } else if (mat.alpha_mode == 2u) {
+            // Translucent surfaces (glass, transparent bottles, windows) do not write to opaque visibility buffer
+            discard;
         }
     }
 

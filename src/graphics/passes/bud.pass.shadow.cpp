@@ -195,7 +195,7 @@ namespace bud::graphics {
 							uint32_t is_phase2;
 							uint32_t enable_hiz;
 						} vis_push;
-						vis_push.cascade_index = i + 1; // 1 = cascade 0, 2 = cascade 1, etc.
+						vis_push.cascade_index = i; // 0 = cascade 0, 1 = cascade 1, etc.
 						vis_push.is_shadow_pass = 1;
 						vis_push.is_phase2 = 0;
 						vis_push.enable_hiz = 0;

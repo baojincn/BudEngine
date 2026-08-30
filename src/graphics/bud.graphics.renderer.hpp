@@ -103,10 +103,12 @@ namespace bud::graphics {
 		std::unique_ptr<HierarchyTraversalPass> hierarchy_traversal_pass;
 		std::unique_ptr<PageEmitPass> page_emit_pass;
 		std::unique_ptr<ClusterCullPass> cluster_cull_pass;
+		std::unique_ptr<ForwardTranslucentPass> forward_translucent_pass;
 		std::unique_ptr<ClusterVisualizationPass> cluster_visualization_pass;
-		std::unique_ptr<MainPass> main_pass;
 		std::unique_ptr<UIPass> ui_pass;
 		std::unique_ptr<VisibilityPass> visibility_pass;
+		std::unique_ptr<ScreenSpaceReflectionPass> ssr_pass;
+		std::unique_ptr<ScreenSpaceGlobalIlluminationPass> ssgi_pass;
 		std::unique_ptr<ResolvePass> resolve_pass;
 		bool has_mesh_shader = false;
 
@@ -127,6 +129,8 @@ namespace bud::graphics {
 
 		std::atomic<uint32_t> next_bindless_slot{ 1 };
 		std::atomic<uint32_t> next_mesh_id{ 0 };
+		std::unordered_map<std::string, uint32_t> bound_texture_slots;
+		mutable std::mutex texture_slot_mutex;
 
 	public:
 		struct HierarchyInstance {

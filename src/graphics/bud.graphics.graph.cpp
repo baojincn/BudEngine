@@ -196,53 +196,61 @@ namespace bud::graphics {
 		}
 
 		// 3.5. Calculate Barriers (Phase 3)
-		// Track current state of each resource as we traverse
+		// Track current state and queue of each resource as we traverse
 		struct ResourceStateTracker {
 			ResourceState current_state = ResourceState::Undefined;
+			QueueType last_queue = QueueType::Graphics;
+			int last_pass_idx = -1;
 		};
 		std::vector<ResourceStateTracker> resource_states(resources.size());
+
+		uint32_t gfx_family = rhi->get_graphics_queue_family();
+		uint32_t compute_family = rhi->get_compute_queue_family();
+		uint32_t transfer_family = rhi->get_transfer_queue_family();
+
+		auto get_family = [&](QueueType q) -> uint32_t {
+			if (q == QueueType::AsyncCompute) return compute_family;
+			if (q == QueueType::Transfer) return transfer_family;
+			return gfx_family;
+		};
 		
 		// Initialize external resources state (e.g. swapchain is Present/Undefined)
 		for (size_t i = 1; i < resources.size(); ++i) {
 			if (resources[i].is_external) {
-				// Assume external starts as Undefined or Present. For backbuffer usually starts effectively undefined for us until we acquire it
 				resource_states[i].current_state = resources[i].initial_state;
 			}
 		}
 
 		for (int pass_idx : sorted_passes) {
 			auto& pass = passes[pass_idx];
+			uint32_t current_family = get_family(pass.queue_type);
 
-			// Process Reads (Transition to ReadState)
-			for (auto& access : pass.reads) {
+			auto handle_access = [&](const RGPassNode::Access& access, bool is_write) {
 				if (!access.handle.is_valid())
-					continue;
+					return;
 				uint32_t rid = access.handle.id;
 				ResourceState old_state = resource_states[rid].current_state;
 				ResourceState new_state = access.state;
+				QueueType old_queue = resource_states[rid].last_queue;
+				uint32_t old_family = get_family(old_queue);
 
-				// Always transition if old_state is Undefined to ensure initial layout is set correctly
-				if (old_state != new_state || old_state == ResourceState::Undefined) {
-					// Add barrier
-					pass.before_barriers.push_back({ access.handle, old_state, new_state });
-					resource_states[rid].current_state = new_state;
-				}
-			}
-
-			// Process Writes
-			for (auto& access : pass.writes) {
-				if (!access.handle.is_valid())
-					continue;
-				uint32_t rid = access.handle.id;
-				ResourceState old_state = resource_states[rid].current_state;
-				ResourceState new_state = access.state;
-
-				bool needs_barrier = (old_state != new_state) || (old_state == ResourceState::RenderTarget) || (old_state == ResourceState::Undefined); 
+				bool needs_barrier = (old_state != new_state) || (old_state == ResourceState::RenderTarget) || (old_state == ResourceState::Undefined);
 
 				if (needs_barrier) {
-					pass.before_barriers.push_back({ access.handle, old_state, new_state });
+					pass.before_barriers.push_back({
+						access.handle, old_state, new_state, 0xFFFFFFFF, 0xFFFFFFFF, false, false
+					});
 					resource_states[rid].current_state = new_state;
+					resource_states[rid].last_queue = pass.queue_type;
+					resource_states[rid].last_pass_idx = pass_idx;
 				}
+			};
+
+			for (auto& access : pass.reads) {
+				handle_access(access, false);
+			}
+			for (auto& access : pass.writes) {
+				handle_access(access, true);
 			}
 		}
 
@@ -293,9 +301,10 @@ namespace bud::graphics {
 		bool async_active = false;
 		bool async_used = false;
 
-		for (int pass_idx : sorted_passes) {
+		for (size_t p = 0; p < sorted_passes.size(); ++p) {
+			int pass_idx = sorted_passes[p];
 			auto& pass = passes[pass_idx];
-			const bool is_async = use_async && pass.async_compute;
+			const bool is_async = use_async && (pass.queue_type == QueueType::AsyncCompute || pass.async_compute);
 			if (is_async) async_used = true;
 
 			if (is_async) {
@@ -304,25 +313,32 @@ namespace bud::graphics {
 					async_active = (async_cmd != nullptr);
 				}
 				if (!async_active) {
-					// Fallback: no dedicated compute queue; run on the main cb.
-					async_cmd = cmd;
+					// Fallback: no dedicated compute queue; run on the graphics segment.
+					async_cmd = rhi->get_current_graphics_command_buffer();
 				}
 			}
-			CommandHandle target = is_async ? async_cmd : cmd;
+			CommandHandle target = is_async ? async_cmd : rhi->get_current_graphics_command_buffer();
 
 			rhi->cmd_begin_debug_label(target, pass.name, 1.0f, 0.7f, 0.0f);
 
-			// Inject Barriers (Phase 3)
+			// Inject Before Barriers (State transitions & Acquire operations)
 			for (auto& barrier : pass.before_barriers) {
 				if (!barrier.handle.is_valid())
 					continue;
 				auto tex = get_texture(barrier.handle);
 				auto buf = get_buffer(barrier.handle);
-				auto& debug_name = resources[barrier.handle.id].name;
-				if (tex.is_valid()) {
-					rhi->resource_barrier(target, tex, barrier.old_state, barrier.new_state);
-				} else if (buf.is_valid()) {
-					rhi->resource_barrier(target, buf, barrier.old_state, barrier.new_state);
+				if (barrier.is_acquire) {
+					if (tex.is_valid()) {
+						rhi->resource_barrier_acquire(target, tex, barrier.old_state, barrier.new_state, barrier.src_queue_family, barrier.dst_queue_family);
+					} else if (buf.is_valid()) {
+						rhi->resource_barrier_acquire(target, buf, barrier.old_state, barrier.new_state, barrier.src_queue_family, barrier.dst_queue_family);
+					}
+				} else {
+					if (tex.is_valid()) {
+						rhi->resource_barrier(target, tex, barrier.old_state, barrier.new_state);
+					} else if (buf.is_valid()) {
+						rhi->resource_barrier(target, buf, barrier.old_state, barrier.new_state);
+					}
 				}
 			}
 
@@ -330,15 +346,30 @@ namespace bud::graphics {
 				pass.execute(rhi, target);
 			}
 
+			// Inject After Barriers (Release operations)
+			for (auto& barrier : pass.after_barriers) {
+				if (!barrier.handle.is_valid())
+					continue;
+				auto tex = get_texture(barrier.handle);
+				auto buf = get_buffer(barrier.handle);
+				if (barrier.is_release) {
+					if (tex.is_valid()) {
+						rhi->resource_barrier_release(target, tex, barrier.old_state, barrier.new_state, barrier.src_queue_family, barrier.dst_queue_family);
+					} else if (buf.is_valid()) {
+						rhi->resource_barrier_release(target, buf, barrier.old_state, barrier.new_state, barrier.src_queue_family, barrier.dst_queue_family);
+					}
+				}
+			}
+
 			rhi->cmd_end_debug_label(target);
 
-			// After an async compute pass completes recording, submit it on the
-			// compute queue (signals the compute timeline). The MAIN command
-			// buffer waits on this timeline at submission (end_frame), so every
-			// graphics pass is ordered after the async output. This guarantees
-			// correctness (serialized); moving the wait closer to the true
-			// consumer is the overlap optimization.
-			if (is_async && use_async && async_active) {
+			// If the next pass is not async compute (or this is the last pass), end compute command recording and submit
+			bool next_is_async = false;
+			if (p + 1 < sorted_passes.size()) {
+				int next_pass_idx = sorted_passes[p + 1];
+				next_is_async = use_async && (passes[next_pass_idx].queue_type == QueueType::AsyncCompute || passes[next_pass_idx].async_compute);
+			}
+			if (is_async && use_async && async_active && !next_is_async) {
 				rhi->end_async_compute();
 				async_active = false;
 			}

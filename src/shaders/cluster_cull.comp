@@ -52,6 +52,7 @@ struct GPUStats {
 layout(set = 0, binding = 8) uniform uniform_buffer_object_block {
     mat4 view;
     mat4 proj;
+    mat4 prev_view_proj;
     mat4 cascade_view_proj[4];
     vec4 cascade_split_depths;
     vec3 cam_pos;
@@ -188,28 +189,33 @@ void main() {
 
     VisibleCluster cluster = in_clusters.visible_clusters[idx];
     uint instance_id = cluster.instance_and_page >> 16;
-    uint page_slot = cluster.instance_and_page & 0x1FFFu; // 13 bits (8192 max)
-    // Validate page slot: skip if invalid (0x1FFF = reserved, 0xFFFFFFFF = uninitialized)
-    if (page_slot == 0xFFFFFFFFu || page_slot >= 8192u)
+    uint page_slot = cluster.instance_and_page & 0x1FFFu;
+    // Validate page slot: skip if invalid
+    if (page_slot == VG_INVALID_INDEX || page_slot >= VG_MAX_PAGE_SLOTS)
         return;
     uint cluster_idx = cluster.cluster_idx;
     float blend_factor = cluster.blend_factor;
     
     HierarchyInstance inst = instances.data[instance_id];
     mat4 model_matrix = inst.model_matrix;
-    uint pool_dword = (page_slot * PAGE_SIZE_BYTES) / 4u;
+    uint pool_dword = (page_slot * VG_PAGE_SIZE_BYTES) / 4u;
+    
+    // Read cluster desc and cull data (VG_CLUSTER_DWORDS per cluster)
+    uint cluster_base = pool_dword + VG_PAGE_HEADER_DWORDS + cluster_idx * VG_CLUSTER_DWORDS;
+    if (cluster_base + VG_CLUSTER_DWORDS >= page_pool.data.length() || page_pool.data[pool_dword + 0u] != VG_PAGE_MAGIC) {
+        out_draws.commands[idx].indexCount = 0u;
+        out_draws.commands[idx].instanceCount = 0u;
+        return;
+    }
     
     uint page_cluster_count = page_pool.data[pool_dword + 2u];
-    
-    // Read cluster desc and cull data (12 dwords per cluster)
-    uint cluster_base = pool_dword + PAGE_HEADER_DWORDS + cluster_idx * 12u;
     uint vertex_offset  = page_pool.data[cluster_base + 0u];
     uint vertex_count   = page_pool.data[cluster_base + 1u];
     uint triangle_offset= page_pool.data[cluster_base + 2u];
     uint triangle_count = page_pool.data[cluster_base + 3u];
     uint cluster_mat_id = page_pool.data[cluster_base + 4u];
     uint base_mat = (inst.material_id == 0u) ? 1u : inst.material_id;
-    uint material_id = (cluster_mat_id != 0xFFFFFFFFu) ? (base_mat + cluster_mat_id) : base_mat;
+    uint material_id = (cluster_mat_id != VG_INVALID_INDEX) ? (base_mat + cluster_mat_id) : base_mat;
     
     // Read cull data
     vec3 sphere_center = vec3(

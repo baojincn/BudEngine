@@ -88,11 +88,16 @@ namespace bud::asset {
 	};
 
 	struct MaterialDescriptor {
-		uint32_t base_color_texture;
-		uint8_t alpha_mode;
-		uint8_t double_sided;
-		uint8_t padding[2];
-		float alpha_cutoff;
+		uint32_t base_color_texture = 0;
+		uint32_t normal_texture = 0xFFFFFFFF;
+		uint32_t metallic_roughness_texture = 0xFFFFFFFF;
+		uint32_t emissive_texture = 0xFFFFFFFF;
+		float metallic_factor = 0.0f;
+		float roughness_factor = 0.5f;
+		float alpha_cutoff = 0.5f;
+		uint8_t alpha_mode = 0;
+		uint8_t double_sided = 0;
+		uint8_t padding[2] = { 0, 0 };
 		uint64_t material_asset_id = 0; // Reference to external Material .budasset
 	};
 

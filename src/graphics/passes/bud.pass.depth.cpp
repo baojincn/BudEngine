@@ -267,6 +267,7 @@ namespace bud::graphics {
 		for (uint32_t i = 0; i < mip_count; ++i) {
 			rg.add_pass(std::format("Hi-Z Mip {}", i),
 				[=](RGBuilder& builder) {
+					builder.set_queue(QueueType::AsyncCompute);
 					if (i == 0 && !pyramid_h_ptr->is_valid()) {
 						*pyramid_h_ptr = builder.create("HiZPyramid", desc);
 					}
