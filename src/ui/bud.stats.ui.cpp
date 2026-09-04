@@ -32,7 +32,17 @@ namespace bud::ui {
 		std::function<void(float)> set_ssgi_intensity,
 		float current_ssgi_intensity,
 		std::function<void(float)> set_ssgi_blend,
-		float current_ssgi_blend) {
+		float current_ssgi_blend,
+		std::function<void(float)> set_light_elevation,
+		float current_light_elevation,
+		std::function<void(float)> set_light_azimuth,
+		float current_light_azimuth,
+		std::function<void(bud::math::vec3)> set_light_color,
+		bud::math::vec3 current_light_color,
+		std::function<void(float)> set_light_intensity,
+		float current_light_intensity,
+		std::function<void(float)> set_ambient_strength,
+		float current_ambient_strength) {
 
 		if (show_stats) {
 			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
@@ -289,6 +299,95 @@ namespace bud::ui {
 						ImGui::PopID();
 					}
 				};
+
+				// --- Directional light editing -----------------------------------------------
+				// Direction is edited as elevation / azimuth (degrees). Angle-driven editing can
+				// never produce a zero vector, so the per-frame normalize() in the engine and the
+				// CSM light-space matrices stay safe no matter what the user drags.
+				if (set_light_elevation || set_light_azimuth || set_light_color ||
+					set_light_intensity || set_ambient_strength) {
+					ImGui::Separator();
+					ImGui::TextColored(color_neutral, "Directional Light");
+				}
+
+				// Elev / Azim 放在同一行,两个滑块平分扣除标签后的整行宽度。
+				if (set_light_elevation || set_light_azimuth) {
+					const float row_w = ImGui::GetContentRegionAvail().x;
+					const float spacing = ImGui::GetStyle().ItemSpacing.x;
+					const std::string elev_label = std::format("Elev: {:.0f}\xC2\xB0", current_light_elevation);
+					const std::string azim_label = std::format(" | Azim: {:.0f}\xC2\xB0", current_light_azimuth);
+					const float elev_label_w = ImGui::CalcTextSize(elev_label.c_str()).x;
+					const float azim_label_w = ImGui::CalcTextSize(azim_label.c_str()).x;
+					// [elev_label][slider_elev][azim_label][slider_azim], 3 个 ItemSpacing
+					float slider_total = row_w - elev_label_w - azim_label_w - spacing * 3.0f;
+					if (slider_total < 20.0f) slider_total = 20.0f;
+					const float elev_w = slider_total * 0.5f;
+					const float azim_w = slider_total - elev_w;
+
+					if (set_light_elevation) {
+						ImGui::TextColored(color_neutral, "%s", elev_label.c_str());
+						ImGui::SameLine();
+						ImGui::PushID("light_elev_slider");
+						ImGui::PushItemWidth(elev_w);
+						float tmp_elev = current_light_elevation;
+						if (ImGui::SliderFloat("##light_elev", &tmp_elev, -90.0f, 90.0f, "%.0f")) {
+							set_light_elevation(tmp_elev);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+					}
+					if (set_light_azimuth) {
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, "%s", azim_label.c_str());
+						ImGui::SameLine();
+						ImGui::PushID("light_azim_slider");
+						ImGui::PushItemWidth(azim_w);
+						float tmp_azim = current_light_azimuth;
+						if (ImGui::SliderFloat("##light_azim", &tmp_azim, 0.0f, 359.0f, "%.0f")) {
+							set_light_azimuth(tmp_azim);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+					}
+				}
+
+				if (set_light_color) {
+					ImGui::TextColored(color_neutral, "Color:");
+					ImGui::SameLine();
+					ImGui::PushID("light_color_picker");
+					float light_color_tmp[3] = { current_light_color.r, current_light_color.g, current_light_color.b };
+					if (ImGui::ColorEdit3("##light_color", light_color_tmp, ImGuiColorEditFlags_NoInputs)) {
+						set_light_color(bud::math::vec3(light_color_tmp[0], light_color_tmp[1], light_color_tmp[2]));
+					}
+					ImGui::PopID();
+				}
+
+				if (set_light_intensity) {
+					ImGui::SameLine();
+					ImGui::TextColored(color_neutral, " | Int: %.1f", current_light_intensity);
+					ImGui::SameLine();
+					ImGui::PushID("light_intensity_slider");
+					ImGui::PushItemWidth(60.0f);
+					float tmp_int = current_light_intensity;
+					if (ImGui::SliderFloat("##light_int", &tmp_int, 0.0f, 20.0f, "%.1f")) {
+						set_light_intensity(tmp_int);
+					}
+					ImGui::PopItemWidth();
+					ImGui::PopID();
+				}
+				if (set_ambient_strength) {
+					ImGui::SameLine();
+					ImGui::TextColored(color_neutral, " | Ambient: %.2f", current_ambient_strength);
+					ImGui::SameLine();
+					ImGui::PushID("light_ambient_slider");
+					ImGui::PushItemWidth(60.0f);
+					float tmp_amb = current_ambient_strength;
+					if (ImGui::SliderFloat("##light_ambient", &tmp_amb, 0.0f, 1.0f, "%.2f")) {
+						set_ambient_strength(tmp_amb);
+					}
+					ImGui::PopItemWidth();
+					ImGui::PopID();
+				}
 
 				ImGui::Separator();
 				ImGui::TextColored(color_neutral, "Shadow Casters: %u", display_shadow_casters);

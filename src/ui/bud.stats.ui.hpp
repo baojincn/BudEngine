@@ -29,7 +29,17 @@ namespace bud::ui {
                            std::function<void(float)> set_ssgi_intensity = nullptr,
                            float current_ssgi_intensity = 1.5f,
                            std::function<void(float)> set_ssgi_blend = nullptr,
-                           float current_ssgi_blend = 0.05f);
+                           float current_ssgi_blend = 0.05f,
+                           std::function<void(float)> set_light_elevation = nullptr,
+                           float current_light_elevation = 55.0f,
+                           std::function<void(float)> set_light_azimuth = nullptr,
+                           float current_light_azimuth = 25.0f,
+                           std::function<void(bud::math::vec3)> set_light_color = nullptr,
+                           bud::math::vec3 current_light_color = { 1.0f, 1.0f, 1.0f },
+                           std::function<void(float)> set_light_intensity = nullptr,
+                           float current_light_intensity = 5.0f,
+                           std::function<void(float)> set_ambient_strength = nullptr,
+                           float current_ambient_strength = 0.25f);
     };
 
 }

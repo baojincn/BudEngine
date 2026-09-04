@@ -64,20 +64,36 @@ vec2 poissonDisk[16] = vec2[](
 );
 
 float SampleCascadeRaw(int layer, vec3 world_pos, vec3 N, vec3 L) {
-    vec4 frag_pos_light_space = ubo.cascade_view_proj[layer] * vec4(world_pos, 1.0);
+    // cascade_texel_size == 0 marks an unconfigured cascade (cascade_count < 4):
+    // bail out instead of sampling a layer that does not exist in the map array.
+    float texel = ubo.cascade_texel_size[layer];
+    if (texel <= 0.0) {
+        return -1.0;
+    }
+
+    float ndl = clamp(dot(N, L), 0.0, 1.0);
+
+    // (1) Shadow Normal Offset, in WORLD metres. Sized from this cascade's own texel
+    //     footprint, so it is the same physical bias on cascade 0 and cascade 3.
+    vec3 biased_pos = world_pos + N * (texel * ubo.shadow_normal_offset_texels *
+                                       (0.5 + 1.5 * (1.0 - ndl)));
+
+    vec4 frag_pos_light_space = ubo.cascade_view_proj[layer] * vec4(biased_pos, 1.0);
     vec3 proj_coords = frag_pos_light_space.xyz / frag_pos_light_space.w;
 
     // NDC -> [0, 1]
     proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
 
     // Check if within bounds of this cascade
-    if (proj_coords.z > 1.0 || proj_coords.z < 0.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 || proj_coords.y < 0.0 || proj_coords.y > 1.0) {
+    if (proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
+        proj_coords.y < 0.0 || proj_coords.y > 1.0 ||
+        proj_coords.z < 0.0 || proj_coords.z > 1.0) {
         return -1.0;
     }
 
-    // Dynamic Bias based on slope and constant
-    float bias = max(ubo.shadow_bias_slope * 0.001 * (1.0 - dot(N, L)), ubo.shadow_bias_constant);
-    bias *= (1.0 + float(layer) * 0.5);
+    // (2) Residual depth bias, expressed as a number of shadow texels of light-space
+    //     thickness and converted with THIS cascade's own depth slab.
+    float bias = ubo.shadow_receiver_bias_texels * texel / max(ubo.cascade_depth_range[layer], 1e-4);
 
     // PCF
     float shadow_sum = 0.0;
@@ -97,54 +113,34 @@ float SampleCascadeRaw(int layer, vec3 world_pos, vec3 N, vec3 L) {
 }
 
 float SampleCascade(int layer, vec3 world_pos, vec3 N, vec3 L) {
-    for (int l = layer; l < 4; ++l) {
-        float s = SampleCascadeRaw(l, world_pos, N, L);
-        if (s >= 0.0) {
-            return s;
-        }
-    }
-    return 0.0;
+    return SampleCascadeRaw(layer, world_pos, N, L);
 }
 
 float ShadowCalculation(vec3 world_pos, vec3 N, vec3 L) {
-    // 1. Spherical radial depth (Rotation-Invariant!)
-    float depth = length(world_pos - ubo.cam_pos);
+    // 1. View-space depth for cascade selection (must match the view-space
+    //    split depths computed by update_cascades in renderer.cpp).
+    vec4 view_pos = ubo.view * vec4(world_pos, 1.0);
+    float depth = -view_pos.z;
 
-    int layer = -1;
-    float blend_factor = 0.0f;
-    int next_layer = -1;
-
+    int layer = 3;
     for (int i = 0; i < 4; ++i) {
-        float split_dist = ubo.cascade_split_depths[i];
-        if (depth < split_dist) {
+        if (depth < ubo.cascade_split_depths[i]) {
             layer = i;
-
-            // Adaptive blend band: 20% of cascade split distance
-            float blend_band = max(1.5f, split_dist * 0.2f);
-            float dist_to_edge = split_dist - depth;
-
-            if (dist_to_edge < blend_band && i < 3) {
-                next_layer = i + 1;
-                blend_factor = 1.0 - (dist_to_edge / blend_band);
-            }
-
             break;
         }
     }
 
-    if (layer == -1)
-        layer = 3;
-
-    // 2. Sample current cascade with fallback
-    float shadow = SampleCascade(layer, world_pos, N, L);
-
-    // 3. Smooth interpolation between cascades
-    if (blend_factor > 0.001 && next_layer != -1) {
-        float next_shadow = SampleCascade(next_layer, world_pos, N, L);
-        shadow = mix(shadow, next_shadow, blend_factor);
+    // Try sampling the selected cascade. If the fragment lies slightly outside this cascade's
+    // light ortho bounds (e.g. at the far boundary or due to normal bias), fallback to the next
+    // coarser cascade layer so we never leak unshadowed light on seams.
+    for (int l = layer; l < 4; ++l) {
+        float shadow = SampleCascade(l, world_pos, N, L);
+        if (shadow >= 0.0) {
+            return shadow;
+        }
     }
 
-    return shadow;
+    return 0.0;
 }
 
 // Main lighting entry point — called from resolve.frag and main.frag.
@@ -160,7 +156,7 @@ float ShadowCalculation(vec3 world_pos, vec3 N, vec3 L) {
 // Returns: final linear color (before tone-mapping & gamma)
 vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
                         GPUMaterialData mat, vec3 albedo, float ao,
-                        float metallic, float roughness) {
+                        float metallic, float roughness, float receive_shadow) {
     vec3 N = normalize(normal);
     vec3 V = normalize(ubo.cam_pos - world_pos);
     vec3 L = normalize(ubo.light_dir);
@@ -190,7 +186,11 @@ vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
 
     vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
 
-    float shadow = ShadowCalculation(world_pos, N, L);
+    // receive_shadow == 0 means this surface opted out (per-instance flag): skip the
+    // shadow term entirely - which also skips every PCF sample, so opting out is free.
+    float shadow = (receive_shadow > 0.0) ? ShadowCalculation(world_pos, N, L) : 0.0;
+
+
 
     // Apply Shadow
     Lo *= (1.0 - shadow);
@@ -238,6 +238,15 @@ vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
     }
 
     return color;
+}
+
+// Convenience overload for receivers that have no per-instance flag available (the
+// forward translucent pass): shadows are always received.
+vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
+                        GPUMaterialData mat, vec3 albedo, float ao,
+                        float metallic, float roughness) {
+    return calculate_lighting(world_pos, normal, tex_coord, mat, albedo, ao,
+                              metallic, roughness, 1.0);
 }
 
 vec3 apply_tonemap_and_gamma(vec3 linear_color) {

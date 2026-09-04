@@ -104,6 +104,9 @@ void main()
     draw_data draw = instance_data.data[draw_index];
 
     bool is_static = (draw.flags & 2u) != 0u;
+    // DrawData bit 2 = "no cast shadow" (instance opted out). Such objects may still be
+    // rendered normally in the view, they must never be rasterized into a shadow map.
+    bool no_cast_shadow = (draw.flags & 4u) != 0u;
     bool keep = true;
     if (pc.static_only == 1u)
         keep = is_static;              // static cache pass: only static casters
@@ -111,7 +114,7 @@ void main()
         keep = !is_static;             // dynamic pass: statics come from the cache
 
     for (uint i = 0; i < ubo.cascade_count; ++i) {
-        bool visible = keep && aabb_visible(draw.min, draw.max, ubo.cascade_view_proj[i]);
+        bool visible = keep && !no_cast_shadow && aabb_visible(draw.min, draw.max, ubo.cascade_view_proj[i]);
 
         indirect_command command;
         command.index_count = draw.index_count;

@@ -95,10 +95,10 @@ namespace bud::graphics {
 		bud::graphics::BufferHandle mega_vertex_buffer,
 		bud::graphics::BufferHandle mega_index_buffer,
 		bud::graphics::RGHandle rg_instance_data,
-		size_t instance_count,
-		size_t split_index,
+		const ShadowCasterLists& casters,
 		bud::graphics::RGHandle rg_indirect_draw,
-		std::array<bud::graphics::RGHandle, MAX_CASCADES> rg_csm_visible_pages)
+		std::array<bud::graphics::RGHandle, MAX_CASCADES> rg_csm_visible_pages,
+		bud::graphics::BufferHandle vg_shadow_instances)
 	{
 		if (config.shadow_map_size == 0 || config.cascade_count == 0) {
 			bud::eprint("[CSMShadowPass] ERROR: Invalid shadow config (size={}, cascades={}).",
@@ -174,14 +174,25 @@ namespace bud::graphics {
 					rhi->cmd_begin_render_pass(cmd, info);
 					rhi->cmd_set_viewport(cmd, (float)config.shadow_map_size, (float)config.shadow_map_size);
 					rhi->cmd_set_scissor(cmd, config.shadow_map_size, config.shadow_map_size);
-					rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, 0.0f, config.shadow_bias_slope);
+					// Raster-stage bias ONLY (Vulkan depth-bias units). The receiver-side
+					// bias lives in lighting.glsl and is expressed in shadow texels -
+					// the two must never share a value, they have different units.
+					rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, config.shadow_bias_clamp, config.shadow_bias_slope);
 
 					// 1. Virtual Geometry Shadow Pass (Mesh Shader path)
 					if (is_vg && shadow_mesh_pipeline.is_valid() && rg_csm_visible_pages[i].is_valid()) {
 						uint64_t ds = rhi->create_descriptor_set(shadow_visibility_set_layout);
 						rhi->update_descriptor_set_buffer(ds, 1, render_graph.get_buffer(rg_csm_visible_pages[i]));
 						rhi->update_descriptor_set_buffer(ds, 2, gpu_scene.get_page_pool_buffer());
-						rhi->update_descriptor_set_buffer(ds, 3, frame.instance_data);
+						// instance_id in the per-cascade visible-page list indexes whatever
+						// list the CSM traversal walked, so bind exactly that buffer.
+						// (Empty handle = main-view visible instances.)
+						{
+							BufferHandle shadow_instance_buffer = vg_shadow_instances.is_valid()
+								? vg_shadow_instances
+								: frame.instance_data;
+							rhi->update_descriptor_set_buffer(ds, 3, shadow_instance_buffer);
+						}
 						rhi->update_descriptor_set_image(ds, 4, gpu_scene.get_history_hiz(rhi->get_current_frame_index()));
 						rhi->update_descriptor_set_buffer(ds, 5, frame.page_cluster_mask);
 
@@ -207,8 +218,15 @@ namespace bud::graphics {
 						}
 					}
 
-					// 2. Non-VG Dynamic Mesh Shadow Pass (Traditional Vertex/Indirect path)
-					if (split_index > 0 && pipeline.is_valid()) {
+						// 2. Traditional (non page-based) casters. GPU-driven indirect when the
+					//    cull buffer is live, otherwise the CPU fallback. The block layout and
+					//    the issued sub-range come from the renderer (casters.traditional) -
+					//    they used to be re-derived here from unrelated counts, which read the
+					//    wrong cascade blocks (corrupting every cascade >= 1) and, in non-VG
+					//    mode, drew the VG layer's commands while skipping the traditional
+					//    casters entirely.
+					const bool use_indirect = frame.csm_indirect_draw.is_valid() && casters.traditional.Valid();
+					if (pipeline.is_valid() && (use_indirect || !csm_vis[i].empty())) {
 						rhi->cmd_bind_pipeline(cmd, pipeline);
 						rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
 
@@ -234,6 +252,9 @@ namespace bud::graphics {
 							if (mesh_id >= meshes.size()) return;
 							const auto& mesh = meshes[mesh_id];
 							if (!mesh.is_valid() || mesh.is_page_based) return;
+							// CPU fallback must honour the same per-instance flag the GPU
+							// paths use (RenderScene::INSTANCE_FLAG_NO_CAST_SHADOW == 2).
+							if (idx < render_scene.flags.size() && (render_scene.flags[idx] & 2)) return;
 
 							// Culling
 							const auto& model_matrix = render_scene.world_matrices[idx];
@@ -262,26 +283,23 @@ namespace bud::graphics {
 							}
 						};
 
-						if (frame.csm_indirect_draw.is_valid()) {
+						if (use_indirect) {
+							// The cascade block stride MUST equal what the cull shader was
+							// given as total_instances: it writes cascade_count * stride
+							// commands. Using any other count silently shifts every
+							// cascade >= 1 onto another cascade's data.
+							const ShadowCasterRange& tr = casters.traditional;
+							const uint32_t block_offset = static_cast<uint32_t>(
+								(static_cast<uint64_t>(i) * tr.stride_commands + tr.first_command) * sizeof(bud::graphics::IndirectCommand));
 							rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConsts), &push_consts);
-							rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, i * static_cast<uint32_t>(instance_count) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(split_index), sizeof(bud::graphics::IndirectCommand));
+							rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, block_offset,
+								tr.command_count, sizeof(bud::graphics::IndirectCommand));
 						} else {
 							// Fallback: CPU-driven draw for each visible non-VG instance.
 							const auto& visible_instances = csm_vis[i];
 							for (size_t k = 0; k < visible_instances.size(); ++k) {
 								draw_occluder(visible_instances[k]);
 							}
-						}
-					}
-					else if (!is_vg && pipeline.is_valid()) {
-						// Legacy non-VG fallback when virtual geometry is disabled
-						const auto page_pool_buf = gpu_scene.get_page_pool_buffer();
-						if (frame.csm_indirect_draw.is_valid() && page_pool_buf.is_valid()) {
-							rhi->cmd_bind_pipeline(cmd, pipeline);
-							rhi->cmd_bind_descriptor_set(cmd, pipeline, 0);
-							rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
-							rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
-							rhi->cmd_draw_indexed_indirect(cmd, frame.csm_indirect_draw, (i * static_cast<uint32_t>(instance_count) + split_index) * sizeof(bud::graphics::IndirectCommand), static_cast<uint32_t>(instance_count - split_index), sizeof(bud::graphics::IndirectCommand));
 						}
 					}
 

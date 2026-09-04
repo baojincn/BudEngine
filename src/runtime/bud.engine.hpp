@@ -18,6 +18,7 @@
 #include "src/graphics/bud.graphics.hpp"
 #include "src/graphics/bud.graphics.scene.hpp"
 #include "src/graphics/bud.graphics.renderer.hpp"
+#include "src/streaming/bud.streaming.manager.hpp"
 #include "src/runtime/bud.camera_sequencer.hpp"
 #include "src/input/bud.input.manager.hpp"
 
@@ -43,7 +44,12 @@ namespace bud::engine {
 
 		bud::io::AssetManager* get_asset_manager() { return asset_manager.get(); }
 		bud::graphics::Renderer* get_renderer() { return renderer.get(); }
+		bud::streaming::StreamingManager* get_streaming_manager() { return streaming_manager.get(); }
 		bud::scene::Scene& get_scene() { return scene; }
+
+		// Data-Driven Scene & Asset Loader
+		bool load_scene_async(const std::string& scene_path, std::function<void()> on_finished = nullptr);
+		void load_scene_resources_async(std::function<void()> on_finished = nullptr);
 
 		const void* get_readback_pixels() const { return renderer->get_readback_pixels(); }
 
@@ -88,6 +94,7 @@ namespace bud::engine {
 		std::unique_ptr<bud::graphics::RHI> rhi;
 		std::unique_ptr<bud::io::AssetManager> asset_manager;
 		std::unique_ptr<bud::graphics::Renderer> renderer;
+		std::unique_ptr<bud::streaming::StreamingManager> streaming_manager;
         std::unique_ptr<bud::io::VirtualFileSystem> virtual_file_system;
 
 		// 场景数据

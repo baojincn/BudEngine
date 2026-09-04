@@ -5,90 +5,91 @@
 
 // GLM Serialization Helpers
 namespace glm {
-    inline void to_json(nlohmann::json& j, const vec2& v) {
-        j = nlohmann::json{ v.x, v.y };
+    template <typename BasicJsonType>
+    inline void to_json(BasicJsonType& j, const vec2& v) {
+        j = BasicJsonType{ v.x, v.y };
     }
-    inline void from_json(const nlohmann::json& j, vec2& v) {
-        v.x = j.at(0).get<float>();
-        v.y = j.at(1).get<float>();
-    }
-
-    inline void to_json(nlohmann::json& j, const vec3& v) {
-        j = nlohmann::json{ v.x, v.y, v.z };
-    }
-    inline void from_json(const nlohmann::json& j, vec3& v) {
-        v.x = j.at(0).get<float>();
-        v.y = j.at(1).get<float>();
-        v.z = j.at(2).get<float>();
+    template <typename BasicJsonType>
+    inline void from_json(const BasicJsonType& j, vec2& v) {
+        v.x = j.at(0).template get<float>();
+        v.y = j.at(1).template get<float>();
     }
 
-    inline void to_json(nlohmann::json& j, const mat4& m) {
-        j = nlohmann::json::array();
+    template <typename BasicJsonType>
+    inline void to_json(BasicJsonType& j, const vec3& v) {
+        j = BasicJsonType{ v.x, v.y, v.z };
+    }
+    template <typename BasicJsonType>
+    inline void from_json(const BasicJsonType& j, vec3& v) {
+        v.x = j.at(0).template get<float>();
+        v.y = j.at(1).template get<float>();
+        v.z = j.at(2).template get<float>();
+    }
+
+    template <typename BasicJsonType>
+    inline void to_json(BasicJsonType& j, const mat4& m) {
+        j = BasicJsonType::array();
         for (int i = 0; i < 4; ++i)
             for (int j_ = 0; j_ < 4; ++j_)
                 j.push_back(m[i][j_]);
     }
-    inline void from_json(const nlohmann::json& j, mat4& m) {
+    template <typename BasicJsonType>
+    inline void from_json(const BasicJsonType& j, mat4& m) {
         for (int i = 0; i < 4; ++i)
             for (int j_ = 0; j_ < 4; ++j_)
-                m[i][j_] = j.at(i * 4 + j_).get<float>();
+                m[i][j_] = j.at(i * 4 + j_).template get<float>();
     }
 }
 
 namespace bud::scene {
-    // NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE requires the type to be in the same namespace or accessible
     // Entity
-    inline void to_json(nlohmann::json& j, const Entity& e) {
-        std::string rt = "VirtualGeometry";
-        if (e.render_type == RenderType::Translucent) rt = "Translucent";
-        else if (e.render_type == RenderType::Dynamic) rt = "Dynamic";
-        else if (e.render_type == RenderType::Custom) rt = "Custom";
-
-        j = nlohmann::json{
-            {"name", e.name},
+    template <typename BasicJsonType>
+    inline void to_json(BasicJsonType& j, const Entity& e) {
+        j = BasicJsonType{
             {"asset_path", e.asset_path},
-            {"mesh_index", e.mesh_index},
-            {"material_index", e.material_index},
-            {"render_type", rt},
-            {"transform", e.transform},
+            {"is_active", e.is_active},
             {"is_static", e.is_static},
-            {"is_active", e.is_active}
+            {"is_cast_shadow", e.is_cast_shadow},
+            {"is_receive_shadow", e.is_receive_shadow},
+            {"material_index", e.material_index},
+            {"mesh_index", e.mesh_index},
+            {"name", e.name},
+            {"transform", e.transform}
         };
     }
-    inline void from_json(const nlohmann::json& j, Entity& e) {
+    template <typename BasicJsonType>
+    inline void from_json(const BasicJsonType& j, Entity& e) {
         if (j.contains("name")) j.at("name").get_to(e.name);
-        j.at("asset_path").get_to(e.asset_path);
-        j.at("mesh_index").get_to(e.mesh_index);
-        j.at("material_index").get_to(e.material_index);
-        j.at("transform").get_to(e.transform);
-        j.at("is_static").get_to(e.is_static);
-        j.at("is_active").get_to(e.is_active);
-        if (j.contains("render_type")) {
-            std::string rt = j.at("render_type").get<std::string>();
-            if (rt == "Translucent") e.render_type = RenderType::Translucent;
-            else if (rt == "Dynamic") e.render_type = RenderType::Dynamic;
-            else if (rt == "Custom") e.render_type = RenderType::Custom;
-            else e.render_type = RenderType::VirtualGeometry;
-        }
+        if (j.contains("asset_path")) j.at("asset_path").get_to(e.asset_path);
+        if (j.contains("mesh_index")) j.at("mesh_index").get_to(e.mesh_index);
+        if (j.contains("material_index")) j.at("material_index").get_to(e.material_index);
+        if (j.contains("transform")) j.at("transform").get_to(e.transform);
+        if (j.contains("is_static")) j.at("is_static").get_to(e.is_static);
+        if (j.contains("is_active")) j.at("is_active").get_to(e.is_active);
+        // Absent keys keep the defaults (both true), so older scene files are unaffected.
+        if (j.contains("is_cast_shadow")) j.at("is_cast_shadow").get_to(e.is_cast_shadow);
+        if (j.contains("is_receive_shadow")) j.at("is_receive_shadow").get_to(e.is_receive_shadow);
         if (j.contains("lod_bias")) j.at("lod_bias").get_to(e.lod_bias);
     }
 
     // Camera
-    inline void to_json(nlohmann::json& j, const Camera& c) {
-        j = nlohmann::json{
-            {"position", c.position},
-            {"yaw", c.yaw},
+    template <typename BasicJsonType>
+    inline void to_json(BasicJsonType& j, const Camera& c) {
+        j = BasicJsonType{
             {"pitch", c.pitch},
-            {"zoom", c.zoom},
+            {"position", c.position},
+            {"sensitivity", c.mouse_sensitivity},
             {"speed", c.movement_speed},
-            {"sensitivity", c.mouse_sensitivity}
+            {"yaw", c.yaw},
+            {"zoom", c.zoom}
         };
     }
-    inline void from_json(const nlohmann::json& j, Camera& c) {
-        j.at("position").get_to(c.position);
-        j.at("yaw").get_to(c.yaw);
-        j.at("pitch").get_to(c.pitch);
-        j.at("zoom").get_to(c.zoom);
+    template <typename BasicJsonType>
+    inline void from_json(const BasicJsonType& j, Camera& c) {
+        if (j.contains("position")) j.at("position").get_to(c.position);
+        if (j.contains("yaw")) j.at("yaw").get_to(c.yaw);
+        if (j.contains("pitch")) j.at("pitch").get_to(c.pitch);
+        if (j.contains("zoom")) j.at("zoom").get_to(c.zoom);
         if (j.contains("speed")) j.at("speed").get_to(c.movement_speed);
         if (j.contains("sensitivity")) j.at("sensitivity").get_to(c.mouse_sensitivity);
 
@@ -96,35 +97,40 @@ namespace bud::scene {
     }
 
     // DirectionalLight
-    inline void to_json(nlohmann::json& j, const DirectionalLight& l) {
-        j = nlohmann::json{
-            {"direction", l.direction},
+    template <typename BasicJsonType>
+    inline void to_json(BasicJsonType& j, const DirectionalLight& l) {
+        j = BasicJsonType{
             {"color", l.color},
+            {"direction", l.direction},
             {"intensity", l.intensity}
         };
     }
-    inline void from_json(const nlohmann::json& j, DirectionalLight& l) {
-        j.at("direction").get_to(l.direction);
-        j.at("color").get_to(l.color);
-        j.at("intensity").get_to(l.intensity);
+    template <typename BasicJsonType>
+    inline void from_json(const BasicJsonType& j, DirectionalLight& l) {
+        if (j.contains("direction")) j.at("direction").get_to(l.direction);
+        if (j.contains("color")) j.at("color").get_to(l.color);
+        if (j.contains("intensity")) j.at("intensity").get_to(l.intensity);
     }
 
     // Scene
-    inline void to_json(nlohmann::json& j, const Scene& s) {
-        j = nlohmann::json{
-            {"main_camera", s.main_camera},
-            {"directional_light", s.directional_light},
+    template <typename BasicJsonType>
+    inline void to_json(BasicJsonType& j, const Scene& s) {
+        j = BasicJsonType{
             {"ambient_strength", s.ambient_strength},
+            {"directional_light", s.directional_light},
             {"lod_error_threshold_px", s.lod_error_threshold_px},
+            {"main_camera", s.main_camera},
             {"streaming_unload_radius", s.streaming_unload_radius},
             {"entities", s.entities}
         };
     }
-    inline void from_json(const nlohmann::json& j, Scene& s) {
-        if (j.contains("main_camera")) j.at("main_camera").get_to(s.main_camera);
-        if (j.contains("directional_light")) j.at("directional_light").get_to(s.directional_light);
+
+    template <typename BasicJsonType>
+    inline void from_json(const BasicJsonType& j, Scene& s) {
         if (j.contains("ambient_strength")) j.at("ambient_strength").get_to(s.ambient_strength);
+        if (j.contains("directional_light")) j.at("directional_light").get_to(s.directional_light);
         if (j.contains("lod_error_threshold_px")) j.at("lod_error_threshold_px").get_to(s.lod_error_threshold_px);
+        if (j.contains("main_camera")) j.at("main_camera").get_to(s.main_camera);
         if (j.contains("streaming_unload_radius")) j.at("streaming_unload_radius").get_to(s.streaming_unload_radius);
         if (j.contains("entities")) j.at("entities").get_to(s.entities);
     }

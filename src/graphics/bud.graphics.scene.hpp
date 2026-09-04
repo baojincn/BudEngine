@@ -25,7 +25,16 @@ namespace bud::graphics {
 		std::vector<uint32_t> root_group_indices;
 		std::vector<uint32_t> base_virtual_pages;
 
-		// 标志位 (Bit 0 = IsStatic, Bit 1 = CastShadow ...)
+		// Per-instance flags. NOTE: the shadow bits are stored NEGATIVELY ("no ...") so
+		// that a zero-initialised / legacy entry keeps both features enabled.
+		enum InstanceFlags : uint8_t {
+			INSTANCE_FLAG_NONE = 0,
+			INSTANCE_FLAG_STATIC = 1 << 0,			// set = static (existing convention)
+			INSTANCE_FLAG_NO_CAST_SHADOW = 1 << 1,		// set = never rasterized into the shadow maps
+			INSTANCE_FLAG_NO_RECEIVE_SHADOW = 1 << 2,		// set = ignores the directional shadow term
+		};
+
+		// 标志位 (Bit 0 = IsStatic, Bit 1 = NoCastShadow, Bit 2 = NoReceiveShadow)
 		std::vector<uint8_t> flags;
 
 		struct LBVHNode {
@@ -80,7 +89,7 @@ namespace bud::graphics {
 		void cull_frustum(const bud::math::Frustum& frustum, std::vector<uint32_t>& out_indices) const;
 		bool intersect_scene(const bud::math::AABB& aabb) const;
 
-		inline void add_instance(const bud::math::mat4& transform, const bud::math::AABB& aabb, uint32_t mesh_index, uint32_t submesh_index, uint32_t material_index, bool is_static, uint32_t root_group_index = 0xFFFFFFFF, uint32_t base_virtual_page = 0xFFFFFFFF) {
+		inline void add_instance(const bud::math::mat4& transform, const bud::math::AABB& aabb, uint32_t mesh_index, uint32_t submesh_index, uint32_t material_index, bool is_static, uint32_t root_group_index = 0xFFFFFFFF, uint32_t base_virtual_page = 0xFFFFFFFF, bool cast_shadow = true, bool receive_shadow = true) {
 			size_t idx = instance_count.fetch_add(1, std::memory_order_relaxed);
 
 			if (idx >= world_matrices.size()) [[unlikely]] {
@@ -96,7 +105,10 @@ namespace bud::graphics {
 			root_group_indices[idx] = root_group_index;
 			base_virtual_pages[idx] = base_virtual_page;
 
-			flags[idx] = is_static ? 1 : 0;
+			flags[idx] = static_cast<uint8_t>(
+				(is_static ? INSTANCE_FLAG_STATIC : 0) |
+				(cast_shadow ? 0 : INSTANCE_FLAG_NO_CAST_SHADOW) |
+				(receive_shadow ? 0 : INSTANCE_FLAG_NO_RECEIVE_SHADOW));
 		}
 
 		inline size_t size() const {

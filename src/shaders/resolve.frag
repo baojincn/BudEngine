@@ -50,7 +50,10 @@ void main() {
 
     float depth = uintBitsToFloat(vis.g);
     vec2 uv = unpackHalf2x16(vis.b);
-    vec3 N = unpackSnorm4x8(vis.a).xyz;
+    vec4 normal_raw = unpackSnorm4x8(vis.a);
+    vec3 N = normal_raw.xyz;
+    // vis.a.w carries the per-instance receive-shadow flag (written by visibility.frag).
+    float receive_shadow = (normal_raw.w < 0.0) ? 0.0 : 1.0;
 
     if (ubo.debug_cluster > 0u) {
         vec3 cluster_color = get_random_cluster_color(cluster_seed);
@@ -99,6 +102,29 @@ void main() {
         N = (length(cross_n) > 1e-5) ? normalize(cross_n) : vec3(0.0, 1.0, 0.0);
     } else {
         N = normalize(N);
+    }
+
+    if (ubo.debug_cascades > 0u) {
+        vec4 debug_view_pos = ubo.view * vec4(world_pos, 1.0);
+        float debug_depth = -debug_view_pos.z;
+        int debug_layer = 3;
+        for (int i = 0; i < 4; ++i) {
+            if (debug_depth < ubo.cascade_split_depths[i]) {
+                debug_layer = i;
+                break;
+            }
+        }
+        vec3 cascade_colors[4] = vec3[](
+            vec3(1.0, 0.2, 0.2), // Cascade 0: Red
+            vec3(0.2, 1.0, 0.2), // Cascade 1: Green
+            vec3(0.2, 0.4, 1.0), // Cascade 2: Blue
+            vec3(1.0, 1.0, 0.2)  // Cascade 3: Yellow
+        );
+        vec3 L = normalize(ubo.light_dir);
+        float ndotl = max(dot(N, L), 0.25);
+        vec3 debug_color = mix(albedo_sample.rgb * ndotl, cascade_colors[debug_layer] * ndotl, 0.7);
+        out_color = vec4(debug_color, 1.0);
+        return;
     }
 
     if (mat.normal_texture_id > 0u && mat.normal_texture_id < 1000u) {
@@ -150,7 +176,7 @@ void main() {
     vec3 ssr_reflection = eval_ssr_reflection(ssr_sample, F_ssr, roughness, albedo_sample.rgb, metallic);
 
     vec3 albedo = albedo_sample.rgb;
-    vec3 color = calculate_lighting(world_pos, N, uv, mat, albedo, ao, metallic, roughness);
+    vec3 color = calculate_lighting(world_pos, N, uv, mat, albedo, ao, metallic, roughness, receive_shadow);
     color += ssr_reflection + ssgi_diffuse;
     color = apply_tonemap_and_gamma(color);
     out_color = vec4(color, albedo_sample.a);

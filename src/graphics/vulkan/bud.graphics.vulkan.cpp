@@ -4263,6 +4263,23 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	ubo.reversed_z = render_config.reversed_z ? 1 : 0;
 	ubo.shadow_bias_constant = render_config.shadow_bias_constant;
 	ubo.shadow_bias_slope = render_config.shadow_bias_slope;
+
+	// CSM receiver metrics: the bias applied while *sampling* the shadow map is
+	// expressed in shadow texels and converted to normalized depth per cascade,
+	// so it stays physically identical for every cascade / map resolution.
+	ubo.cascade_texel_size = bud::math::vec4(
+		scene_view.cascade_texel_size[0],
+		scene_view.cascade_texel_size[1],
+		scene_view.cascade_texel_size[2],
+		scene_view.cascade_texel_size[3]);
+	ubo.cascade_depth_range = bud::math::vec4(
+		scene_view.cascade_depth_range[0],
+		scene_view.cascade_depth_range[1],
+		scene_view.cascade_depth_range[2],
+		scene_view.cascade_depth_range[3]);
+	ubo.shadow_receiver_bias_texels = render_config.shadow_receiver_bias_texels;
+	ubo.shadow_normal_offset_texels = render_config.shadow_normal_offset_texels;
+
 	ubo.debug_cluster = render_config.enable_cluster_visualization ? 1 : 0;
 
 	if (frames[current_frame].uniform_mapped) {

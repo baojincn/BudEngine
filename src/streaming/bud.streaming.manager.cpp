@@ -42,6 +42,11 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 			return;
 		if (data.empty()) {
 			bud::eprint("[Streaming] Empty asset data for: {}", path);
+			// Fall through to the non-VG path so the caller can attempt a
+			// traditional mesh load (or simply complete its pending count).
+			if (non_vg_asset_callback) {
+				non_vg_asset_callback(path);
+			}
 			return;
 		}
 
@@ -67,7 +72,11 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 		}
 
 		if (!has_vg_chunk) {
-			// Standard / translucent mesh asset without Virtual Geometry DAG
+			// Standard / translucent mesh asset without Virtual Geometry DAG.
+			// Report it so the caller can load it via the traditional mesh path.
+			if (non_vg_asset_callback) {
+				non_vg_asset_callback(path);
+			}
 			return;
 		}
 
@@ -109,7 +118,9 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 			}
 		}
 
-		// Register materials into GPUScene using asset-driven material descriptors
+		// Register materials into GPUScene using asset-driven material descriptors.
+		// The first material slot is stored as base_material_id so PageSubMesh entries
+		// can reference the correct bindless texture slot at render time.
 		for (size_t mi = 0; mi < asset.materials.size(); ++mi) {
 			const auto& mat_desc = asset.materials[mi];
 			bud::graphics::GPUMaterialData gpu_mat;
@@ -132,7 +143,10 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 			gpu_mat.emissive_texture_id = resolve_and_bind_texture(mat_desc.emissive_texture);
 
 			if (gpu_scene) {
-				uint32_t id = gpu_scene->register_material(gpu_mat);
+				uint32_t slot_id = gpu_scene->register_material(gpu_mat);
+				// Record the first material's GPU slot as the base for this asset.
+				if (mi == 0)
+					asset.base_material_id = slot_id;
 			}
 		}
 
@@ -259,11 +273,11 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 
 			virtual_geometry_assets[path] = asset_ptr;
 
-			bud::print("[Streaming] Registered Virtual Geometry asset: {} ({} pages, {} clusters, {} groups, bulk={})",
-				path, asset_ptr->pages.size(),
-				asset_ptr->clusters.size(),
-				asset_ptr->groups.size(),
-				bulk_bin_path);
+			//bud::print("[Streaming] Registered Virtual Geometry asset: {} ({} pages, {} clusters, {} groups, bulk={})",
+			//	path, asset_ptr->pages.size(),
+			//	asset_ptr->clusters.size(),
+			//	asset_ptr->groups.size(),
+			//	bulk_bin_path);
 
 			if (asset_registered_callback) {
 				std::vector<bud::graphics::PageSubMesh> page_submeshes;
@@ -276,7 +290,7 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 					psub.page_index = base_virtual_page + pi;
 					psub.aabb = asset_ptr->page_aabbs[pi];
 					psub.lod_level = asset_ptr->pages[pi].flags;
-					psub.material_id = 0;
+					psub.material_id = asset_ptr->base_material_id;
 					page_submeshes.push_back(psub);
 					total_indices += psub.index_count;
 				}
@@ -692,7 +706,7 @@ void StreamingManager::unregister_virtual_geometry(const std::string& path) {
 	// Remove the asset from the virtual_geometry_assets map
 	virtual_geometry_assets.erase(path);
 
-	bud::print("[Streaming] Unregistered Virtual Geometry asset: {}", path);
+	//bud::print("[Streaming] Unregistered Virtual Geometry asset: {}", path);
 }
 
 } // namespace bud::streaming

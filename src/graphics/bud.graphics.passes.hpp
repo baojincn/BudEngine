@@ -100,7 +100,11 @@ namespace bud::graphics {
 			float lod_error_scale = 1.0f,
 			float ortho_extent = 0.0f,
 			BufferHandle target_visible_pages = {},
-			const std::string& pass_name = "Hierarchy Traversal"
+			const std::string& pass_name = "Hierarchy Traversal",
+			// Optional instance source. CSM cascade traversals pass a FULL-SCENE
+			// HierarchyInstance buffer here; the default (invalid) keeps the main-view
+			// visible-instance buffer (frame.instance_data).
+			BufferHandle source_instances = {}
 		);
 	};
 
@@ -140,6 +144,29 @@ namespace bud::graphics {
 			bud::math::vec4 light_dir;
 		};
 
+		// Shadow caster work lists. The renderer owns the layout knowledge, the pass
+		// just obeys it - the previous code guessed the indirect-block stride from an
+		// unrelated count and picked the wrong item range, which corrupted every
+		// cascade >= 1 (and skipped traditional casters entirely when VG items existed).
+		struct ShadowCasterRange {
+			uint32_t stride_commands = 0;	// csm_cull's total_instances == entries per cascade block
+			uint32_t first_command = 0;		// start of the range to issue inside each block
+			uint32_t command_count = 0;		// commands to issue per cascade
+			bool Valid() const { return stride_commands > 0 && command_count > 0; }
+		};
+
+		struct ShadowCasterLists {
+			// GPU-driven traditional (non page-based) casters, fed to csm_cull.comp.
+			// VG mode   : the full-scene list [0, scene_split)   (stride = scene_split)
+			// non-VG mode: the opaque sorted range [range_a, range_a+range_b) (stride = visible)
+			ShadowCasterRange traditional;
+			// Translucent meshes are not rasterized into the shadow map: they render in
+			// the forward translucent pass, and casting from them would need a shadow FS
+			// with opacity-aware depth (not implemented). Entries carry DrawData bit 2 and
+			// the cull shader drops them, so this list also excludes them explicitly.
+			bool skip_translucent_casters = true;
+		};
+
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		RGHandle add_to_graph(
 			RenderGraph& rg,
@@ -152,10 +179,13 @@ namespace bud::graphics {
 			bud::graphics::BufferHandle mega_vertex_buffer,
 			bud::graphics::BufferHandle mega_index_buffer,
 			bud::graphics::RGHandle rg_instance_data,
-			size_t instance_count,
-			size_t split_index = 0,
+			const ShadowCasterLists& casters = {},
 			bud::graphics::RGHandle rg_indirect_draw = {},
-			std::array<bud::graphics::RGHandle, MAX_CASCADES> rg_csm_visible_pages = {}
+			std::array<bud::graphics::RGHandle, MAX_CASCADES> rg_csm_visible_pages = {},
+			// VG instance list that matches rg_csm_visible_pages' instance_id space
+			// (full-scene when shadow_full_scene_casters is on, otherwise empty =
+			// fall back to the main-view visible instances).
+			bud::graphics::BufferHandle vg_shadow_instances = {}
 		);
 	};
 
@@ -182,24 +212,6 @@ namespace bud::graphics {
 			bud::graphics::RGHandle ssr_map = {},
 			bud::graphics::RGHandle ssgi_map = {},
 			bud::graphics::RGHandle opaque_scene_color = {});
-	};
-
-	class ClusterVisualizationPass : public RenderPass {
-	public:
-		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
-		void add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle depth_buffer,
-			const RenderScene& render_scene,
-			const SceneView& view,
-			const RenderConfig& config,
-			const std::vector<RenderMesh>& meshes,
-			const std::vector<SortItem>& sort_list,
-			size_t instance_count,
-			bud::graphics::RGHandle indirect_draw_buffer,
-			bud::graphics::RGHandle instance_data,
-			const GPUScene& gpu_scene,
-			bud::graphics::BufferHandle mega_vertex_buffer,
-			bud::graphics::BufferHandle mega_index_buffer,
-			size_t split_index = 0);
 	};
 
 	struct UIDrawCmdSnapshot {

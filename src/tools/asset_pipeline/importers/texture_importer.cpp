@@ -471,33 +471,46 @@ TextureAlphaInfo TextureImporter::analyze_alpha(const RawTexture& tex) {
     if (total_px == 0)
         return info;
 
-    size_t transparent_px = 0;
-    size_t semi_transparent_px = 0;
+    size_t cutout_transparent_px = 0; // alpha < 25 (binary transparent)
+    size_t translucent_px = 0;        // 25 <= alpha <= 230 (continuous semi-transparent)
+    size_t opaque_px = 0;             // alpha > 230 (binary solid)
 
     const uint8_t* p = tex.pixels.data();
     for (size_t k = 0; k < total_px; ++k) {
         uint8_t a = p[k * 4 + 3];
-        if (a < 250) {
-            if (a < 25) {
-                transparent_px++;
-            } else {
-                semi_transparent_px++;
-            }
+        if (a < 25) {
+            cutout_transparent_px++;
+        } else if (a <= 230) {
+            translucent_px++;
+        } else {
+            opaque_px++;
         }
     }
 
-    // If at least 0.05% of the texture has transparency:
-    if (transparent_px + semi_transparent_px > (total_px / 2000)) {
+    size_t non_opaque_px = cutout_transparent_px + translucent_px;
+
+    // If at least 0.05% of the texture has non-opaque pixels:
+    if (non_opaque_px > (total_px / 2000)) {
         info.has_alpha = true;
-        if (transparent_px > (total_px / 1000)) {
-            info.alpha_mode = bud::asset::AlphaMode::Mask;
-            info.alpha_cutoff = 0.5f;
-        } else if (semi_transparent_px > (total_px / 20)) {
+
+        // Smooth Translucent (Blend):
+        // 1. Significant continuous semi-transparent pixels (> 2%) that dominate over cutout background (cutout_transparent_px * 2 < translucent_px).
+        // 2. OR almost zero cutout background (cutout_transparent_px <= 0.1%) but broad semi-transparent surface (> 1%).
+        if ((translucent_px > (total_px / 50) && translucent_px > cutout_transparent_px * 2) ||
+            (cutout_transparent_px <= (total_px / 1000) && translucent_px > (total_px / 100))) {
             info.alpha_mode = bud::asset::AlphaMode::Blend;
+            info.alpha_cutoff = 0.0f;
         } else {
+            // Cutout / Mask (AlphaTest):
+            // Foliage leaves, branches, flowers, grass, fences, grates, paper cards.
+            // Dominated by binary transparent cutout background with thin anti-aliased edge filter.
             info.alpha_mode = bud::asset::AlphaMode::Mask;
             info.alpha_cutoff = 0.5f;
         }
+    } else {
+        info.has_alpha = false;
+        info.alpha_mode = bud::asset::AlphaMode::Opaque;
+        info.alpha_cutoff = 0.0f;
     }
 
     return info;

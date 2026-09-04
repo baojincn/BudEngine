@@ -42,13 +42,6 @@ namespace bud::scene {
 		void update_camera_vectors();
 	};
 
-	enum class RenderType : uint32_t {
-		VirtualGeometry = 0,
-		Translucent = 1,
-		Dynamic = 2,
-		Custom = 3
-	};
-
 	struct Entity {
 		std::string name = "";
 		std::string asset_path = "";
@@ -57,7 +50,12 @@ namespace bud::scene {
 		bud::math::mat4 transform = bud::math::mat4(1.0f);
 		bool is_static = true;
 		bool is_active = true;
-		RenderType render_type = RenderType::VirtualGeometry;
+		// Shadow participation, per instance. Both default to true (classic behaviour).
+		// is_cast_shadow=false keeps the object out of every shadow-caster list (background
+		// shells, sky/backdrop lids, fake ceilings); is_receive_shadow=false makes the
+		// surface ignore the directional shadow term while still being lit.
+		bool is_cast_shadow = true;
+		bool is_receive_shadow = true;
 		
 		// GPU-driven virtual geometry hierarchy parameters
 		uint32_t root_group_index = 0xFFFFFFFF;

@@ -238,17 +238,62 @@ namespace bud::graphics {
 		static constexpr bool reversed_z = false;
 
 		uint32_t shadow_map_size = 2048;
-		float shadow_bias_constant = 1.25f;
-		float shadow_bias_slope = 1.75f;
+
+		// -----------------------------------------------------------------
+		// Shadow bias: TWO independent stages with TWO different units.
+		// Never share values between them - that was the source of the
+		// "light leaking / shadows detached by metres" artefact.
+		//
+		// (1) Raster stage bias, applied while rendering INTO the shadow map.
+		//     Units = vkCmdSetDepthBias factors (device depth units, NOT
+		//     normalized [0,1] fractions). Only used by CSMShadowPass.
+		// -----------------------------------------------------------------
+		float shadow_bias_constant = 2.0f;  // constantFactor (integer part is what counts)
+		float shadow_bias_slope = 1.75f;    // slopeFactor
+		float shadow_bias_clamp = 0.0f;     // 0 == no clamping (Vulkan convention)
+
+		// (2) Receiver stage bias, applied when sampling the shadow map in
+		//     lighting.glsl. Expressed in SHADOW TEXELS, so it is invariant to
+		//     cascade size / map resolution / camera pitch:
+		//         world_offset = cascade_texel_size * <these factors>
+		float shadow_normal_offset_texels = 1.0f; // world-space offset along N
+		float shadow_receiver_bias_texels = 1.5f; // residual light-depth offset
+
 		float shadow_ortho_size = 35.0f * bud::core::units::m;
-		float shadow_near_plane = 0.1f * bud::core::units::m;
-		float shadow_far_plane = 60.0f * bud::core::units::m;
+		// ^ Legacy: only a fallback for the shadow caster LOD metric when a cascade has
+		//   no derived extent yet. update_cascades() now sizes every cascade from its own
+		//   frustum slice, so this no longer controls the shadow-map coverage.
+		float shadow_near_plane = 0.1f * bud::core::units::m; // Unused: cascades get a per-cascade slab from update_cascades().
+		float shadow_far_plane = 500.0f * bud::core::units::m;
+		// Cascade boxes never need to be bigger than the scene they enclose.
+		// update_cascades() clamps shadow_far_plane to
+		// scene_bounds_radius * this factor (prevents every cascade covering
+		// the whole world => identical shadow maps + unusable resolution).
+		float shadow_far_scene_factor = 2.5f;
 
 		uint32_t cascade_count = 4;
 		float cascade_split_lambda = 0.75f; // Practical Split Scheme
 
 		bool enable_soft_shadows = true;
 		bool debug_cascades = false;
+		// Feed the CSM cascade traversals the FULL scene instance list instead of only
+		// the main-camera visible ones. This is the correct CSM model: an object that is
+		// outside the primary frustum but inside a cascade's light box still has to be
+		// rasterized into that cascade, otherwise rotating the camera changes which
+		// objects exist in the shadow map and the shadows visibly break when you look up
+		// or down (the caster count tracked the visible set: 20..102 of 393).
+		// The reason this used to be off is that it also drags in authored backdrop
+		// geometry - the Sponza asset carries a full-footprint lid (sponza_380: a 37x23m
+		// slab at y=13.30..14.22, 100% of the scene footprint, 0.92m thick) which then
+		// blocks the sun from the entire courtyard. That is now handled per entity with
+		// "is_cast_shadow": false in the scene file, and Renderer reports the candidates
+		// by asset path (see BudEngine::extract_scene) so any scene can be cleaned up.
+		bool shadow_full_scene_casters = true;
+		// Opt-in: let alpha-blended translucent meshes write shadow depth too. Off by
+		// default because the shadow passes have no opacity-aware depth stage - a glass
+		// pane would then drop a fully solid shadow. Translucent objects are drawn by the
+		// forward translucent pass and are excluded from every shadow-caster list here.
+		bool shadow_translucent_casters = false;
 
 		bool enable_virtual_geometry = true;
 		bool enable_mesh_shader = true;
@@ -324,6 +369,14 @@ namespace bud::graphics {
 
 		bud::math::mat4 cascade_view_proj_matrices[MAX_CASCADES];
 		float cascade_split_depths[MAX_CASCADES];
+		// Per-cascade shadow-map metrics filled by Renderer::update_cascades().
+		// cascade_texel_size  = world metres covered by one shadow-map texel.
+		// cascade_depth_range = light-space depth slab thickness (metres) of the
+		//                       ortho projection used for that cascade.
+		// The receiver shader converts its "in texels" bias into normalized depth
+		// with texel_size / depth_range, so bias stays correct for every cascade.
+		float cascade_texel_size[MAX_CASCADES] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		float cascade_depth_range[MAX_CASCADES] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
 		bud::math::vec3 light_dir = { 0.5f, 1.0f, 0.3f };
 		bud::math::vec3 light_color = { 1.0f, 1.0f, 1.0f };

@@ -30,9 +30,9 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-:: 3. Build BudAssetCompiler and BudAssetImporter
-echo [Build Tools Script] Building BudAssetCompiler and BudAssetImporter (Debug x64)...
-"%CMAKE_EXE%" --build --preset "Debug x64" --target BudAssetCompiler BudAssetImporter
+:: 3. Build BudAssetCompiler, BudAssetImporter and SceneTool
+echo [Build Tools Script] Building BudAssetCompiler, BudAssetImporter and SceneTool (Debug x64)...
+"%CMAKE_EXE%" --build --preset "Debug x64" --target BudAssetCompiler BudAssetImporter SceneTool
 if %errorlevel% neq 0 (
     echo [Error] Build failed
     exit /b 1

@@ -43,7 +43,8 @@ namespace bud::graphics {
 		float lod_error_scale,
 		float ortho_extent,
 		BufferHandle target_visible_pages,
-		const std::string& pass_name)
+		const std::string& pass_name,
+		BufferHandle source_instances)
 	{
 		if (!hierarchy_traversal_pipeline.is_valid())
 			return {};
@@ -102,7 +103,12 @@ namespace bud::graphics {
 				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
 				rhi->cmd_bind_compute_ubo(cmd, hierarchy_traversal_pipeline, 0);
 				rhi->cmd_bind_storage_buffer(cmd, hierarchy_traversal_pipeline, 1, gpu_scene.get_page_table_buffer());
-				rhi->cmd_bind_storage_buffer(cmd, hierarchy_traversal_pipeline, 2, frame.instance_data);
+				// CSM cascade traversals get a FULL-SCENE instance list (source_instances)
+				// so that casters outside the primary camera frustum are still rasterized
+				// into the shadow map; the main-view traversal keeps the visible subset.
+				BufferHandle traversal_instances =
+					source_instances.is_valid() ? source_instances : frame.instance_data;
+				rhi->cmd_bind_storage_buffer(cmd, hierarchy_traversal_pipeline, 2, traversal_instances);
 				rhi->cmd_bind_storage_buffer(cmd, hierarchy_traversal_pipeline, 3, gpu_scene.get_vg_pool().group_buffer); 
 
 				// binding 4 = PageRequestBuffer, binding 5 = VisiblePageBuffer

@@ -28,6 +28,7 @@ namespace bud::platform {
 		case SDLK_F3:     return bud::input::Key::F3;
 		case SDLK_F4:     return bud::input::Key::F4;
 		case SDLK_F5:     return bud::input::Key::F5;
+		case SDLK_F6:     return bud::input::Key::F6;
 		case SDLK_F8:     return bud::input::Key::F8;
 		case SDLK_F9:     return bud::input::Key::F9;
 		case SDLK_LCTRL:  return bud::input::Key::LCtrl;

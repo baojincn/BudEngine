@@ -39,6 +39,10 @@ layout(location = 2) flat out uint frag_instance_id[];
 layout(location = 3) out vec2 frag_tex_coord[];
 layout(location = 4) out vec3 frag_normal[];
 layout(location = 5) flat out uint frag_cluster_id[];
+// Per-instance flags ride along so the fragment stage never has to touch the instance
+// buffer itself (it already lives in this stage, and re-reading it from the FS would add
+// a second, stride-sensitive dependency on the global instance descriptor).
+layout(location = 6) flat out uint frag_instance_flags[];
 
 uint vg_read_bits(uint base_word_idx, uint bit_offset, uint num_bits) {
     uint word_idx = base_word_idx + (bit_offset >> 5);
@@ -87,8 +91,8 @@ void main() {
     uint triangle_offset = page_pool.data[cluster_base + 2u];
     uint triangle_count = page_pool.data[cluster_base + 3u];
     uint cluster_mat_id = page_pool.data[cluster_base + 4u];
-    uint base_mat = (instance.material_id == 0u) ? 1u : instance.material_id;
-    uint material_id = (cluster_mat_id != 0xFFFFFFFFu) ? (base_mat + cluster_mat_id) : base_mat;
+    uint base_mat = instance.material_id;
+    uint material_id = (cluster_mat_id != 0xFFFFFFFFu && cluster_mat_id != 0u) ? (base_mat + cluster_mat_id) : base_mat;
 
     uint page_vertex_count = page_pool.data[base_word + 3u];
     uint v_stream_off = page_pool.data[base_word + 5u];
@@ -140,6 +144,7 @@ void main() {
         frag_tex_coord[v_idx] = unpackHalf2x16(uv_raw);
         frag_normal[v_idx] = normalize(mat3(model_matrix) * local_norm);
         frag_cluster_id[v_idx] = cluster_global_id;
+        frag_instance_flags[v_idx] = instance.flags;
     }
 
     for (uint t_idx = local_idx; t_idx < tris; t_idx += 32u) {

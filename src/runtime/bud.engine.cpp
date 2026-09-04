@@ -19,6 +19,7 @@
 #include "src/platform/crash_handler.hpp"
 
 #include "src/runtime/bud.engine.hpp"
+#include "src/runtime/bud.scene.builder.hpp"
 #include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
 
 #include <imgui.h>
@@ -38,15 +39,11 @@ namespace bud::engine {
 		bud::platform::set_crash_dump_root(virtual_file_system.get()->get_root_path().string().c_str());
 		bud::platform::install_crash_handler();
 
-		auto flags = engine_config.is_headless ? bud::platform::WindowFlags::Hidden : bud::platform::WindowFlags::Default;
-		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height, flags);
-
 		task_scheduler = std::make_unique<bud::threading::TaskScheduler>();
-
-		// Input manager for keyboard/mouse action mapping
 		input_manager = std::make_unique<bud::input::InputManager>();
 
-
+		auto flags = engine_config.is_headless ? bud::platform::WindowFlags::Hidden : bud::platform::WindowFlags::Default;
+		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height, flags);
 
 		int initial_width = 0;
 		int initial_height = 0;
@@ -82,6 +79,14 @@ namespace bud::engine {
 
 		renderer = std::make_unique<bud::graphics::Renderer>(rhi.get(), asset_manager.get(), task_scheduler.get());
 
+		streaming_manager = std::make_unique<bud::streaming::StreamingManager>(
+			asset_manager.get(),
+			&renderer->get_gpu_scene(),
+			renderer.get(),
+			rhi.get()
+		);
+		renderer->set_streaming_manager(streaming_manager.get());
+
 		render_scenes.resize(engine_config.inflight_frame_count);
 
 		camera_sequencer = bud::scene::CameraSequencer(asset_manager.get(), virtual_file_system.get());
@@ -95,6 +100,7 @@ namespace bud::engine {
 		input_manager->bind_key("ToggleDebug", bud::input::Key::F3);
 		input_manager->bind_key("ToggleClusterVis", bud::input::Key::F4);
 		input_manager->bind_key("ToggleWireframe", bud::input::Key::F5);
+		input_manager->bind_key("ToggleDebugCascades", bud::input::Key::F6);
 		input_manager->bind_key("TogglePause", bud::input::Key::Space);
 		input_manager->bind_key("ToggleRecord", bud::input::Key::F8);
 		input_manager->bind_key("TogglePlayback", bud::input::Key::F9);
@@ -143,6 +149,15 @@ namespace bud::engine {
 			}
 		});
 
+		input_manager->register_action_callback("ToggleDebugCascades", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				auto config = renderer->get_config();
+				config.debug_cascades = !config.debug_cascades;
+				renderer->set_config(config);
+				bud::print("[CSM] Debug cascades: {}", config.debug_cascades ? "ON" : "OFF");
+			}
+		});
+
 		input_manager->register_action_callback("TogglePause", [this]() {
 			camera_sequencer.toggle_pause();
 		});
@@ -176,6 +191,7 @@ namespace bud::engine {
 			task_scheduler->pump_main_thread_tasks();
 		}
 
+		streaming_manager.reset();
 		asset_manager.reset();
 		renderer.reset();
 
@@ -351,7 +367,9 @@ namespace bud::engine {
 						entity.material_index,
 						entity.is_static,
 						entity.root_group_index,
-						entity.base_virtual_page
+						entity.base_virtual_page,
+						entity.is_cast_shadow,
+						entity.is_receive_shadow
 					);
 				}
 			},
@@ -359,6 +377,78 @@ namespace bud::engine {
 		);
 
 		task_scheduler->wait_for_counter(extract_scene_counter);
+
+		// --- Backdrop discovery for full-scene shadow casters ---------------------
+		// Feeding the cascades the whole scene (RenderConfig::shadow_full_scene_casters)
+		// is the correct CSM model: an object outside the primary camera frustum must
+		// still be rasterized into the cascade it falls in, otherwise shadows break the
+		// moment the player looks up or down. What that surfaces is authored backdrop
+		// geometry - a thin lid lying over the whole model - which then blocks the sun
+		// from everything. Those objects need "is_cast_shadow": false in the scene file.
+		// The runtime instance index is NOT a usable key for that: add_instance() above
+		// is driven by a ParallelFor through an atomic counter, so instance order is not
+		// stable. Report by asset_path instead, which is exactly what the scene file
+		// stores. Re-printing is suppressed by a signature of the current candidate set.
+		{
+			std::vector<bud::math::AABB> boxes;
+			std::vector<size_t> box_entity;                   // boxes[k] <- logic_entities[box_entity[k]]
+			std::vector<std::pair<float, size_t>> by_footprint;   // (x*z footprint, box slot k)
+			boxes.reserve(logic_entities.size());
+			box_entity.reserve(logic_entities.size());
+			by_footprint.reserve(logic_entities.size());
+			bud::math::vec3 bmin(1e30f, 1e30f, 1e30f), bmax(-1e30f, -1e30f, -1e30f);
+
+			for (size_t i = 0; i < logic_entities.size(); ++i) {
+				const auto& entity = logic_entities[i];
+				if (!entity.is_active || entity.mesh_index == bud::asset::INVALID_INDEX)
+					continue;
+				if (entity.mesh_index >= mesh_bounds.size())
+					continue;
+				const auto wb = mesh_bounds[entity.mesh_index].transform(entity.transform);
+				bmin.x = std::min(bmin.x, wb.min.x); bmin.y = std::min(bmin.y, wb.min.y); bmin.z = std::min(bmin.z, wb.min.z);
+				bmax.x = std::max(bmax.x, wb.max.x); bmax.y = std::max(bmax.y, wb.max.y); bmax.z = std::max(bmax.z, wb.max.z);
+				const float fp = (wb.max.x - wb.min.x) * (wb.max.z - wb.min.z);
+				by_footprint.emplace_back(fp, boxes.size());
+				boxes.push_back(wb);
+				box_entity.push_back(i);
+			}
+
+			static std::string s_last_report;
+			if (!boxes.empty() && bmax.x > bmin.x) {
+				const float scene_fp = std::max((bmax.x - bmin.x) * (bmax.z - bmin.z), 1e-3f);
+				const float mid_y = (bmin.y + bmax.y) * 0.5f;
+
+				std::sort(by_footprint.begin(), by_footprint.end(),
+					[](const auto& a, const auto& b) { return a.first > b.first; });
+
+				std::vector<size_t> cands;
+				std::string signature;
+				for (const auto& [fp, slot] : by_footprint) {
+					if (fp < 0.25f * scene_fp) break;          // sorted descending: rest are smaller
+					const auto& wb = boxes[slot];
+					// Only something whose *lowest* point is already above mid-height can
+					// lid the scene; a floor or a plinth cannot.
+					if (wb.min.y < mid_y) continue;
+					cands.push_back(slot);
+					signature += logic_entities[box_entity[slot]].asset_path;
+					signature += logic_entities[box_entity[slot]].is_cast_shadow ? "1;" : "0;";
+				}
+
+				if (!cands.empty() && signature != s_last_report) {
+					s_last_report = signature;
+					bud::print("[CSM] backdrop candidates (footprint >= 25% of scene {:.1f}m2, entirely above y={:.2f}) - add \"is_cast_shadow\": false to these in the scene file:",
+						scene_fp, mid_y);
+					for (const size_t slot : cands) {
+						const auto& entity = logic_entities[box_entity[slot]];
+						const auto& wb = boxes[slot];
+						const float fp = (wb.max.x - wb.min.x) * (wb.max.z - wb.min.z);
+						bud::print("[CSM]   name={} asset={} footprint={:.1f}m2 ({:.0f}%) thickness={:.2f}m y=[{:.2f},{:.2f}] x=[{:.1f},{:.1f}] z=[{:.1f},{:.1f}] is_cast_shadow={}",
+							entity.name, entity.asset_path, fp, 100.0f * fp / scene_fp, wb.max.y - wb.min.y,
+							wb.min.y, wb.max.y, wb.min.x, wb.max.x, wb.min.z, wb.max.z, entity.is_cast_shadow);
+					}
+				}
+			}
+		}
 
 		FrameMark;
 	}
@@ -407,6 +497,7 @@ namespace bud::engine {
 			view_snapshot.proj_matrix = bud::math::perspective_vk(scene.main_camera.zoom, aspect, near_plane, far_plane);
 		}
 		view_snapshot.camera_position = scene.main_camera.position;
+		view_snapshot.fov = scene.main_camera.zoom;	// was never assigned: SceneView::fov read as garbage
 		view_snapshot.near_plane = near_plane;
 		view_snapshot.far_plane = far_plane;
 
@@ -484,7 +575,41 @@ namespace bud::engine {
 			};
 			float current_ssgi_blend = renderer->get_config().ssgi_temporal_blend;
 
-			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_ao_mode, current_ao_mode, set_ssr_enable, current_ssr_enable, set_ssgi_enable, current_ssgi_enable, set_ssgi_intensity, current_ssgi_intensity, set_ssgi_blend, current_ssgi_blend);
+			// Directional-light editing (mutates the runtime scene on the main thread; the
+			// light values are copied into view_snapshot at the top of this frame, so HUD
+			// changes take effect from the next frame on). Direction is exposed as elevation /
+			// azimuth in degrees; angle-driven editing can never produce a zero vector, which
+			// keeps the per-frame normalize() and the CSM light-space matrices safe.
+			const auto light_dir_len = bud::math::length(scene.directional_light.direction);
+			const float current_light_elevation = (light_dir_len > 1e-6f)
+				? bud::math::degrees(std::asin(scene.directional_light.direction.y / light_dir_len))
+				: 0.0f;
+			const float current_light_azimuth = (light_dir_len > 1e-6f)
+				? std::min(std::fmod(bud::math::degrees(std::atan2(scene.directional_light.direction.x, scene.directional_light.direction.z)) + 360.0f, 360.0f), 359.0f)
+				: 0.0f;
+
+			auto set_light_elevation = [this](float elevation_deg) {
+				auto& dir = scene.directional_light.direction;
+				const float azimuth_rad = std::atan2(dir.x, dir.z); // keep current azimuth
+				const float elevation_rad = bud::math::radians(elevation_deg);
+				dir = bud::math::vec3(std::cos(elevation_rad) * std::sin(azimuth_rad),
+					std::sin(elevation_rad),
+					std::cos(elevation_rad) * std::cos(azimuth_rad));
+			};
+			auto set_light_azimuth = [this](float azimuth_deg) {
+				auto& dir = scene.directional_light.direction;
+				const float len = bud::math::length(dir);
+				const float elevation_rad = (len > 1e-6f) ? std::asin(dir.y / len) : 0.0f; // keep current elevation
+				const float azimuth_rad = bud::math::radians(azimuth_deg);
+				dir = bud::math::vec3(std::cos(elevation_rad) * std::sin(azimuth_rad),
+					std::sin(elevation_rad),
+					std::cos(elevation_rad) * std::cos(azimuth_rad));
+			};
+			auto set_light_color = [this](bud::math::vec3 color) { scene.directional_light.color = color; };
+			auto set_light_intensity = [this](float v) { scene.directional_light.intensity = v; };
+			auto set_ambient_strength = [this](float v) { scene.ambient_strength = v; };
+
+			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_ao_mode, current_ao_mode, set_ssr_enable, current_ssr_enable, set_ssgi_enable, current_ssgi_enable, set_ssgi_intensity, current_ssgi_intensity, set_ssgi_blend, current_ssgi_blend, set_light_elevation, current_light_elevation, set_light_azimuth, current_light_azimuth, set_light_color, scene.directional_light.color, set_light_intensity, scene.directional_light.intensity, set_ambient_strength, scene.ambient_strength);
 
             ImGui::Render();
 
@@ -496,5 +621,97 @@ namespace bud::engine {
 			renderer->render(render_scenes[render_scene_index], view_snapshot);
 			render_inflight_index.store(BudEngine::invalid_render_index, std::memory_order_release);
 		}, &render_task_counter);
+	}
+
+	bool BudEngine::load_scene_async(const std::string& scene_path, std::function<void()> on_finished) {
+		if (!bud::scene::SceneBuilder::load_scene_from_file(scene_path, scene)) {
+			bud::eprint("[BudEngine] Failed to load scene file: {}", scene_path);
+			if (on_finished)
+				on_finished();
+			return false;
+		}
+
+		load_scene_resources_async(on_finished);
+		return true;
+	}
+
+	void BudEngine::load_scene_resources_async(std::function<void()> on_finished) {
+		std::unordered_set<std::string> unique_asset_paths;
+		for (auto& e : scene.entities) {
+			if (!e.asset_path.empty()) {
+				unique_asset_paths.insert(e.asset_path);
+				e.mesh_index = bud::asset::INVALID_INDEX;
+			}
+		}
+
+		if (unique_asset_paths.empty()) {
+			if (on_finished)
+				on_finished();
+			return;
+		}
+
+		auto pending_count = std::make_shared<std::atomic<int>>(static_cast<int>(unique_asset_paths.size()));
+		auto finish = std::make_shared<std::function<void()>>(std::move(on_finished));
+
+		if (streaming_manager) {
+			// VG assets: streaming manager's callback sets mesh_index and decrements pending_count.
+			streaming_manager->set_asset_registered_callback([this, pending_count, finish](const std::string& path, uint32_t mesh_id, const bud::math::AABB& aabb, uint32_t root_group_index, uint32_t base_virtual_page) {
+				renderer->register_mesh_bounds(mesh_id, aabb);
+				for (auto& ent : scene.entities) {
+					if (ent.asset_path == path) {
+						ent.mesh_index = mesh_id;
+						ent.root_group_index = root_group_index;
+						ent.base_virtual_page = base_virtual_page;
+					}
+				}
+				if (pending_count->fetch_sub(1) == 1) {
+					bud::print("[BudEngine] Scene resources fully loaded and dispatched ({} entities)", scene.entities.size());
+					if (*finish) (*finish)();
+				}
+			});
+
+			// Non-VG assets: load via traditional mesh path (no Virtual Geometry chunk).
+			streaming_manager->set_non_vg_asset_callback([this, pending_count, finish, asset_manager = this->asset_manager.get()](const std::string& path) {
+				asset_manager->load_mesh_async(path, [this, pending_count, finish, path](bud::io::MeshData mesh) mutable {
+					auto mesh_handle = renderer->upload_mesh(mesh);
+					if (mesh_handle.is_valid()) {
+						for (auto& ent : scene.entities) {
+							if (ent.asset_path == path) {
+								ent.mesh_index = mesh_handle.mesh_id;
+								ent.material_index = mesh_handle.material_id;
+							}
+						}
+					}
+					if (pending_count->fetch_sub(1) == 1) {
+						bud::print("[BudEngine] Scene resources fully loaded and dispatched ({} entities)", scene.entities.size());
+						if (*finish) (*finish)();
+					}
+				});
+			});
+
+			for (const auto& path : unique_asset_paths) {
+				streaming_manager->register_virtual_geometry_async(path);
+			}
+		}
+		else {
+			// No streaming manager: fallback to traditional mesh loading for all assets.
+			for (const auto& asset_path : unique_asset_paths) {
+				asset_manager->load_mesh_async(asset_path, [this, pending_count, finish, asset_path](bud::io::MeshData mesh) mutable {
+					auto mesh_handle = renderer->upload_mesh(mesh);
+					if (mesh_handle.is_valid()) {
+						for (auto& ent : scene.entities) {
+							if (ent.asset_path == asset_path) {
+								ent.mesh_index = mesh_handle.mesh_id;
+								ent.material_index = mesh_handle.material_id;
+							}
+						}
+					}
+					if (pending_count->fetch_sub(1) == 1) {
+						bud::print("[BudEngine] Scene resources fully loaded and dispatched ({} entities) [fallback]", scene.entities.size());
+						if (*finish) (*finish)();
+					}
+				});
+			}
+		}
 	}
 } // namespace bud::engine

@@ -23,6 +23,7 @@ namespace bud::input {
 		F3, // Enable debug overlay
 		F4, // Enable cluster visualization
 		F5, // Enable wireframe
+		F6, // Toggle CSM cascade visualization
 		F8, // Toggle camera recording
 		F9, // Toggle camera playback (one-shot)
 		LCtrl, // Modifier for Ctrl+F9 loop playback

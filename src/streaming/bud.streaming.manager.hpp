@@ -58,6 +58,9 @@ struct VirtualGeometryAsset {
 	// Per-page cluster range in the cluster table.
 	std::vector<uint32_t> page_cluster_start;
 	std::vector<uint32_t> page_cluster_count;
+	// GPU material slot for the first (primary) material of this asset.
+	// Populated during registration and assigned to every PageSubMesh.material_id.
+	uint32_t base_material_id = 0;
 };
 
 class StreamingManager {
@@ -71,6 +74,10 @@ public:
 	~StreamingManager();
 
 	void set_asset_registered_callback(AssetRegisteredCallback cb) { asset_registered_callback = std::move(cb); }
+	// Callback for assets that do NOT contain a Virtual Geometry chunk.
+	// These are standard/traditional meshes that should be loaded via load_mesh_async.
+	using NonVgAssetCallback = std::function<void(const std::string& path)>;
+	void set_non_vg_asset_callback(NonVgAssetCallback cb) { non_vg_asset_callback = std::move(cb); }
 
 	// Processes page faults emitted by the GPU hierarchy traversal pass
 	// (virtual page indices read back from the PageRequestBuffer) and starts
@@ -124,6 +131,7 @@ private:
 	std::mutex fvps_mutex;
 
 	AssetRegisteredCallback asset_registered_callback;
+	NonVgAssetCallback non_vg_asset_callback;
 
 	// Eviction threshold in world units (1 unit = 1 cm). Set to 10m for testing dynamic streaming.
 	float unload_radius_ = 20.0f * bud::core::units::m;
