@@ -1328,9 +1328,9 @@ namespace bud::graphics {
 						if (render_scene.flags[i] & RenderScene::INSTANCE_FLAG_NO_CAST_SHADOW)
 							++no_cast;
 					}
-					bud::print("[CSM] shadow casters: {} (scene instances={}, main-view visible={}, opted out of casting={})",
-						render_config.shadow_full_scene_casters ? "FULL SCENE" : "main-view only",
-						flag_n, visible_count, no_cast);
+					// bud::print("[CSM] shadow casters: {} (scene instances={}, main-view visible={}, opted out of casting={})",
+					// 	render_config.shadow_full_scene_casters ? "FULL SCENE" : "main-view only",
+					// 	flag_n, visible_count, no_cast);
 
 					// Backdrop discovery deliberately lives in BudEngine::extract_scene,
 					// where the entity's asset_path is available: the instance index here
