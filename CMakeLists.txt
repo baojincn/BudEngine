@@ -88,6 +88,7 @@ find_package(onnxruntime CONFIG REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
+find_package(Jolt CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
 find_package(unofficial-spirv-reflect CONFIG REQUIRED)
 # End, find dependencies
@@ -282,6 +283,7 @@ target_sources(bud_engine_core
 		"src/runtime/bud.scene.cpp"
 		"src/runtime/bud.scene.builder.cpp"
 		"src/runtime/bud.camera_sequencer.cpp"
+		"src/physics/bud.physics.scene.cpp"
 
     PUBLIC
 		"src/core/bud.core.hpp"
@@ -296,6 +298,10 @@ target_sources(bud_engine_core
 		"src/runtime/bud.scene.builder.hpp"
 		"src/graphics/bud.graphics.gpu_scene.hpp"
 		"src/runtime/bud.camera_sequencer.hpp"
+
+		"src/physics/bud.physics.hpp"
+		"src/physics/bud.physics.types.hpp"
+		"src/physics/bud.physics.scene.hpp"
 
 		"src/ui/bud.stats.ui.hpp"
 
@@ -333,6 +339,7 @@ target_link_libraries(bud_engine_core
 		onnxruntime::onnxruntime
 		nlohmann_json::nlohmann_json
 		meshoptimizer::meshoptimizer
+		Jolt::Jolt
 )
 
 if (WIN32)
