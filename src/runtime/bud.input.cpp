@@ -27,4 +27,22 @@ namespace bud::input {
         return scroll_y;
     }
 
+    bool Input::is_gamepad_connected() const {
+        return gamepad_connected;
+    }
+
+    bool Input::is_gamepad_button_down(GamepadButton btn) const {
+        auto it = gamepad_buttons.find(btn);
+        return it != gamepad_buttons.end() && it->second;
+    }
+
+    float Input::get_gamepad_axis(GamepadAxis axis) const {
+        return gamepad_axis_values[static_cast<int>(axis)];
+    }
+
+    float Input::get_gamepad_axis_delta(GamepadAxis axis) const {
+        int i = static_cast<int>(axis);
+        return gamepad_axis_values[i] - gamepad_axis_prev[i];
+    }
+
 }

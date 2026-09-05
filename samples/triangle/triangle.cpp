@@ -83,6 +83,20 @@ void TriangleApp::on_update(float delta_time) {
 	if (input.is_key_down(bud::input::Key::A)) cam.process_keyboard(2, delta_time);
 	if (input.is_key_down(bud::input::Key::D)) cam.process_keyboard(3, delta_time);
 
+	if (input.is_gamepad_connected()) {
+		float lx = input.get_gamepad_axis(bud::input::GamepadAxis::LeftX);
+		float ly = input.get_gamepad_axis(bud::input::GamepadAxis::LeftY);
+		float speed = cam.movement_speed * delta_time;
+		cam.position += cam.right * lx * speed;
+		cam.position += cam.front * (-ly) * speed;
+
+		float rx = input.get_gamepad_axis(bud::input::GamepadAxis::RightX);
+		float ry = input.get_gamepad_axis(bud::input::GamepadAxis::RightY);
+		float look_speed = 3.0f * delta_time;
+		if (rx != 0.0f || ry != 0.0f)
+			cam.process_mouse_movement(rx * 100.0f * delta_time, ry * 100.0f * delta_time, true);
+	}
+
 	float dx, dy;
 	input.get_mouse_delta(dx, dy);
 

@@ -5,44 +5,51 @@
 namespace bud::input {
 
 void InputManager::update() {
-    // snapshot previous
     prev_keys_ = curr_keys_;
     prev_mouse_buttons_ = curr_mouse_buttons_;
+    prev_gamepad_buttons_ = curr_gamepad_buttons_;
 
-    // reset deltas
     mouse_dx_ = 0.0f;
     mouse_dy_ = 0.0f;
     scroll_y_ = 0.0f;
 
     auto& low = Input::get();
 
-    // Sample keys that are either in bindings or part of the known base set.
-    // Compute highest key value to iterate a contiguous range (enum is contiguous starting at 0).
-    int max_key = static_cast<int>(Key::LCtrl);
+    // Sample keys
+    int max_key = static_cast<int>(Key::Num9);
     for (const auto& entry : bindings_) {
-        for (auto k : entry.second.keys) {
+        for (auto k : entry.second.keys)
             max_key = std::max(max_key, static_cast<int>(k));
-        }
     }
     for (int i = 0; i <= max_key; ++i) {
         Key k = static_cast<Key>(i);
-        bool down = low.is_key_down(k);
-        curr_keys_[k] = down;
+        curr_keys_[k] = low.is_key_down(k);
     }
 
-    // Sample mouse buttons (Left..Middle)
-    const int max_btn = static_cast<int>(MouseButton::Middle);
-    for (int i = 0; i <= max_btn; ++i) {
+    // Sample mouse buttons
+    for (int i = 0; i <= static_cast<int>(MouseButton::Middle); ++i) {
         MouseButton b = static_cast<MouseButton>(i);
-        bool down = low.is_mouse_button_down(b);
-        curr_mouse_buttons_[b] = down;
+        curr_mouse_buttons_[b] = low.is_mouse_button_down(b);
+    }
+
+    // Sample gamepad buttons
+    for (int i = 0; i <= static_cast<int>(GamepadButton::DPadRight); ++i) {
+        GamepadButton b = static_cast<GamepadButton>(i);
+        curr_gamepad_buttons_[b] = low.is_gamepad_button_down(b);
     }
 
     // mouse delta/scroll
     low.get_mouse_delta(mouse_dx_, mouse_dy_);
     scroll_y_ = low.get_mouse_scroll();
 
-    // Collect triggered actions (rising edge) and invoke callbacks after sampling
+    // gamepad axis
+    gamepad_connected_ = low.is_gamepad_connected();
+    for (int i = 0; i < GAMEPAD_AXIS_COUNT; ++i) {
+        gamepad_axis_prev_[i] = gamepad_axis_vals_[i];
+        gamepad_axis_vals_[i] = low.get_gamepad_axis(static_cast<GamepadAxis>(i));
+    }
+
+    // Collect triggered actions (rising edge) and invoke callbacks
     std::vector<std::string> triggered;
     triggered.reserve(bindings_.size());
 
@@ -74,14 +81,25 @@ void InputManager::update() {
             }
         }
 
+        if (!was_pressed) {
+            for (auto btn : bind.gamepad_buttons) {
+                bool prev = false;
+                auto itp = prev_gamepad_buttons_.find(btn);
+                if (itp != prev_gamepad_buttons_.end()) prev = itp->second;
+                bool curr = false;
+                auto itc = curr_gamepad_buttons_.find(btn);
+                if (itc != curr_gamepad_buttons_.end()) curr = itc->second;
+                if (!prev && curr) { was_pressed = true; break; }
+            }
+        }
+
         if (was_pressed) triggered.push_back(action);
     }
 
     for (const auto& a : triggered) {
         auto it = callbacks_.find(a);
-        if (it != callbacks_.end() && it->second) {
+        if (it != callbacks_.end() && it->second)
             it->second();
-        }
     }
 }
 
@@ -124,12 +142,44 @@ float InputManager::get_mouse_scroll() const {
     return scroll_y_;
 }
 
+bool InputManager::is_gamepad_connected() const {
+    return gamepad_connected_;
+}
+
+bool InputManager::is_gamepad_button_down(GamepadButton btn) const {
+    auto it = curr_gamepad_buttons_.find(btn);
+    return it != curr_gamepad_buttons_.end() ? it->second : false;
+}
+
+bool InputManager::was_gamepad_button_pressed(GamepadButton btn) const {
+    bool prev = false;
+    auto itp = prev_gamepad_buttons_.find(btn);
+    if (itp != prev_gamepad_buttons_.end()) prev = itp->second;
+    bool curr = false;
+    auto itc = curr_gamepad_buttons_.find(btn);
+    if (itc != curr_gamepad_buttons_.end()) curr = itc->second;
+    return !prev && curr;
+}
+
+float InputManager::get_gamepad_axis(GamepadAxis axis) const {
+    return gamepad_axis_vals_[static_cast<int>(axis)];
+}
+
+float InputManager::get_gamepad_axis_delta(GamepadAxis axis) const {
+    int i = static_cast<int>(axis);
+    return gamepad_axis_vals_[i] - gamepad_axis_prev_[i];
+}
+
 void InputManager::bind_key(const std::string& action, Key key) {
     bindings_[action].keys.push_back(key);
 }
 
 void InputManager::bind_mouse_button(const std::string& action, MouseButton btn) {
     bindings_[action].mouse_buttons.push_back(btn);
+}
+
+void InputManager::bind_gamepad_button(const std::string& action, GamepadButton btn) {
+    bindings_[action].gamepad_buttons.push_back(btn);
 }
 
 void InputManager::unbind_action(const std::string& action) {
@@ -143,6 +193,7 @@ bool InputManager::is_action_down(const std::string& action) const {
     const auto& bind = it->second;
     for (auto k : bind.keys) if (is_key_down(k)) return true;
     for (auto b : bind.mouse_buttons) if (is_mouse_down(b)) return true;
+    for (auto b : bind.gamepad_buttons) if (is_gamepad_button_down(b)) return true;
     return false;
 }
 
@@ -152,6 +203,7 @@ bool InputManager::was_action_pressed(const std::string& action) const {
     const auto& bind = it->second;
     for (auto k : bind.keys) if (was_key_pressed(k)) return true;
     for (auto b : bind.mouse_buttons) if (was_mouse_pressed(b)) return true;
+    for (auto b : bind.gamepad_buttons) if (was_gamepad_button_pressed(b)) return true;
     return false;
 }
 
