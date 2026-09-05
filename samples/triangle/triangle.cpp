@@ -69,14 +69,23 @@ void TriangleApp::on_update(float delta_time) {
 
 	if (engine->is_replay_active()) return;
 
-	if (auto* sm = engine->get_streaming_manager()) {
-		auto& cam = engine->get_scene().main_camera;
-		sm->update(bud::math::vec3(cam.position.x, cam.position.y, cam.position.z));
-	}
-
 	auto& input = bud::input::Input::get();
 	auto& scene = engine->get_scene();
 	auto& cam = scene.main_camera;
+
+	static bool prev_v = false;
+	bool curr_v = input.is_key_down(bud::input::Key::V);
+	if (curr_v && !prev_v) {
+		if (cam.get_mode() == bud::scene::CameraMode::FreeFly)
+			cam.set_mode(bud::scene::CameraMode::ThirdPerson);
+		else
+			cam.set_mode(bud::scene::CameraMode::FreeFly);
+	}
+	prev_v = curr_v;
+
+	if (auto* sm = engine->get_streaming_manager()) {
+		sm->update(bud::math::vec3(cam.position.x, cam.position.y, cam.position.z));
+	}
 
 	if (input.is_key_down(bud::input::Key::W)) cam.process_keyboard(0, delta_time);
 	if (input.is_key_down(bud::input::Key::S)) cam.process_keyboard(1, delta_time);
@@ -87,12 +96,16 @@ void TriangleApp::on_update(float delta_time) {
 		float lx = input.get_gamepad_axis(bud::input::GamepadAxis::LeftX);
 		float ly = input.get_gamepad_axis(bud::input::GamepadAxis::LeftY);
 		float speed = cam.movement_speed * delta_time;
-		cam.position += cam.right * lx * speed;
-		cam.position += cam.front * (-ly) * speed;
+		if (cam.get_mode() == bud::scene::CameraMode::ThirdPerson) {
+			cam.target_position += cam.right * lx * speed;
+			cam.target_position += cam.front * (-ly) * speed;
+		} else {
+			cam.position += cam.right * lx * speed;
+			cam.position += cam.front * (-ly) * speed;
+		}
 
 		float rx = input.get_gamepad_axis(bud::input::GamepadAxis::RightX);
 		float ry = input.get_gamepad_axis(bud::input::GamepadAxis::RightY);
-		float look_speed = 3.0f * delta_time;
 		if (rx != 0.0f || ry != 0.0f)
 			cam.process_mouse_movement(rx * 100.0f * delta_time, ry * 100.0f * delta_time, true);
 	}
@@ -100,18 +113,11 @@ void TriangleApp::on_update(float delta_time) {
 	float dx, dy;
 	input.get_mouse_delta(dx, dy);
 
-	// Let Dear ImGui own the mouse while the cursor is over any HUD widget
-	// (sliders, color pickers, checkboxes, ...). Otherwise dragging a HUD
-	// control with the left button simultaneously pitches the camera.
 	const bool imgui_wants_mouse = ImGui::GetIO().WantCaptureMouse;
 
-	if (!imgui_wants_mouse && input.is_mouse_button_down(bud::input::MouseButton::Left)) {
+	if (!imgui_wants_mouse && input.is_mouse_button_down(bud::input::MouseButton::Right)) {
 		if (dx != 0.0f || dy != 0.0f)
 			cam.process_mouse_movement(dx, dy);
-	}
-	else if (!imgui_wants_mouse && input.is_mouse_button_down(bud::input::MouseButton::Right)) {
-		if (dy != 0.0f)
-			cam.process_mouse_drag_zoom(dy);
 	}
 }
 

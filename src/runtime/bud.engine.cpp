@@ -233,6 +233,7 @@ namespace bud::engine {
 					task_scheduler->spawn("GameLogic", [&]() {
 						perform_game_logic((float)fixed_dt);
 						camera_sequencer.update((float)fixed_dt, scene.main_camera);
+						scene.main_camera.update((float)fixed_dt);
 					}, &logic_counter);
 					task_scheduler->wait_for_counter(logic_counter);
 				}
@@ -274,6 +275,7 @@ namespace bud::engine {
 			task_scheduler->spawn("GameLogic_Step", [&]() {
 				perform_game_logic((float)fixed_dt);
 				camera_sequencer.update((float)fixed_dt, scene.main_camera);
+				scene.main_camera.update((float)fixed_dt);
 			}, &logic_counter);
 			task_scheduler->wait_for_counter(logic_counter);
 		}
