@@ -2,6 +2,7 @@
 #include <memory>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <print>
 
@@ -97,10 +98,12 @@ namespace bud::engine {
 		task_scheduler->init_main_thread_worker();
 
 		// Register default action bindings
-		input_manager->bind_key("ToggleDebug", bud::input::Key::F3);
+		input_manager->bind_key("ToggleDebug", bud::input::Key::F1);
 		input_manager->bind_key("ToggleClusterVis", bud::input::Key::F4);
 		input_manager->bind_key("ToggleWireframe", bud::input::Key::F5);
 		input_manager->bind_key("ToggleDebugCascades", bud::input::Key::F6);
+		input_manager->bind_key("ToggleDebugPhysics", bud::input::Key::F3);
+		// F2 is deliberately left unbound (reserved for a future hotkey).
 		input_manager->bind_key("TogglePause", bud::input::Key::Space);
 		input_manager->bind_key("ToggleRecord", bud::input::Key::F8);
 		input_manager->bind_key("TogglePlayback", bud::input::Key::F9);
@@ -155,6 +158,15 @@ namespace bud::engine {
 				config.debug_cascades = !config.debug_cascades;
 				renderer->set_config(config);
 				bud::print("[CSM] Debug cascades: {}", config.debug_cascades ? "ON" : "OFF");
+			}
+		});
+
+		input_manager->register_action_callback("ToggleDebugPhysics", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				auto config = renderer->get_config();
+				config.debug_physics = !config.debug_physics;
+				renderer->set_config(config);
+				bud::print("[Physics] Debug physics: {}", config.debug_physics ? "ON" : "OFF");
 			}
 		});
 
@@ -231,6 +243,10 @@ namespace bud::engine {
 				if (perform_game_logic) {
 					bud::threading::Counter logic_counter;
 					task_scheduler->spawn("GameLogic", [&]() {
+						if (physics_scene) {
+							physics_scene->step((float)fixed_dt);
+							update_physics_debug_overlay();
+						}
 						perform_game_logic((float)fixed_dt);
 						camera_sequencer.update((float)fixed_dt, scene.main_camera);
 						scene.main_camera.update((float)fixed_dt);
@@ -265,6 +281,47 @@ namespace bud::engine {
 		rhi->wait_idle();
 	}
 
+	// Wireframe box outline for every body in the physics SoA, handed to the
+	// PhysicsDebugPass. Runs on the logic thread right after the physics step;
+	// the cross-thread handoff itself is guarded inside the pass.
+	void BudEngine::update_physics_debug_overlay() {
+		if (!physics_scene || !renderer) return;
+		if (!renderer->get_config().debug_physics) return;
+
+		const size_t n = physics_scene->size();
+		auto& pos = physics_scene->body_positions;
+		auto& he = physics_scene->body_half_extents;
+
+		// 12 box edges as a 24 vertex line list.
+		static const int box_edges[24] = {
+				0,1, 1,2, 2,3, 3,0, 4,5, 5,6, 6,7, 7,4,
+				0,4, 1,5, 2,6, 3,7
+		};
+
+		std::vector<bud::graphics::PhysicsDebugVertex> dbg_verts;
+		dbg_verts.reserve(n * 24);
+		for (size_t i = 0; i < n && i < pos.size() && i < he.size(); ++i) {
+			auto c = pos[i];
+			auto h = he[i];
+			bud::math::vec3 corners[8] = {
+				c + bud::math::vec3(-h.x,-h.y,-h.z),
+				c + bud::math::vec3( h.x,-h.y,-h.z),
+				c + bud::math::vec3( h.x, h.y,-h.z),
+				c + bud::math::vec3(-h.x, h.y,-h.z),
+				c + bud::math::vec3(-h.x,-h.y, h.z),
+				c + bud::math::vec3( h.x,-h.y, h.z),
+				c + bud::math::vec3( h.x, h.y, h.z),
+				c + bud::math::vec3(-h.x, h.y, h.z),
+			};
+			for (int e = 0; e < 24; ++e) {
+				auto& p = corners[box_edges[e]];
+				dbg_verts.push_back({{p.x, p.y, p.z}, {0.0f, 1.0f, 0.0f}});
+			}
+		}
+		renderer->update_physics_debug_vertices(dbg_verts);
+	}
+
+
 	void BudEngine::step(float fixed_dt, GameLogic perform_game_logic) {
 		task_scheduler->pump_main_thread_tasks();
 		handle_events();
@@ -273,6 +330,10 @@ namespace bud::engine {
 		if (perform_game_logic) {
 			bud::threading::Counter logic_counter;
 			task_scheduler->spawn("GameLogic_Step", [&]() {
+				if (physics_scene) {
+					physics_scene->step((float)fixed_dt);
+					update_physics_debug_overlay();
+				}
 				perform_game_logic((float)fixed_dt);
 				camera_sequencer.update((float)fixed_dt, scene.main_camera);
 				scene.main_camera.update((float)fixed_dt);
@@ -613,7 +674,7 @@ namespace bud::engine {
 
 			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_ao_mode, current_ao_mode, set_ssr_enable, current_ssr_enable, set_ssgi_enable, current_ssgi_enable, set_ssgi_intensity, current_ssgi_intensity, set_ssgi_blend, current_ssgi_blend, set_light_elevation, current_light_elevation, set_light_azimuth, current_light_azimuth, set_light_color, scene.directional_light.color, set_light_intensity, scene.directional_light.intensity, set_ambient_strength, scene.ambient_strength);
 
-            ImGui::Render();
+			ImGui::Render();
 
             renderer->update_ui_draw_data(ImGui::GetDrawData());
         }
@@ -633,7 +694,141 @@ namespace bud::engine {
 			return false;
 		}
 
-		load_scene_resources_async(on_finished);
+		// Initialize physics scene.
+		// Tear the previous scene down FIRST: ~PhysicsScene unregisters the Jolt
+		// types and deletes the process-wide JPH::Factory, so an old scene that is
+		// destroyed after a new one has been initialised would leave the new scene
+		// running without a factory (scene reload = broken/empty physics).
+		character_controller.reset();
+		physics_scene.reset();
+		physics_scene = std::make_unique<bud::physics::PhysicsScene>();
+		physics_scene->init();
+
+		bud::print("[BudEngine] Physics scene initialized, ready for bodies.");
+
+		// Create character controller
+		character_controller = std::make_unique<bud::scene::CharacterController>();
+		character_controller->init(physics_scene.get(), scene.main_camera.position);
+
+		// Wrap on_finished to create physics bodies after mesh bounds are loaded
+		auto wrapped_finish = [this, cb = std::move(on_finished)]() {
+			auto bounds = renderer->get_mesh_bounds_snapshot();
+			int skipped = 0, added = 0, dropped = 0, giant = 0, shell_faces = 0;
+
+			// First pass: collect world-space AABB candidates and the bounds they span.
+			struct StaticAABB {
+				const std::string* name;
+				bud::math::vec3 center;
+				bud::math::vec3 half;
+			};
+			std::vector<StaticAABB> candidates;
+			candidates.reserve(scene.entities.size());
+			bud::math::vec3 scene_min(1e30f), scene_max(-1e30f);
+			for (auto& entity : scene.entities) {
+				if (!entity.is_active || !entity.enable_physics || !entity.is_static) { skipped++; continue; }
+				if (entity.mesh_index == 0xFFFFFFFF || entity.mesh_index >= bounds.size()) { skipped++; continue; }
+				auto world_aabb = bounds[entity.mesh_index].transform(entity.transform);
+				auto s = world_aabb.size();
+				if (s.x < 0.001f && s.y < 0.001f && s.z < 0.001f) { skipped++; continue; }
+				auto c = world_aabb.center();
+				auto half = s * 0.5f;
+				candidates.push_back({ &entity.name, c, half });
+				scene_min = bud::math::vec3(std::min(scene_min.x, c.x - half.x),
+				                            std::min(scene_min.y, c.y - half.y),
+				                            std::min(scene_min.z, c.z - half.z));
+				scene_max = bud::math::vec3(std::max(scene_max.x, c.x + half.x),
+				                            std::max(scene_max.y, c.y + half.y),
+				                            std::max(scene_max.z, c.z + half.z));
+			}
+
+			const bud::math::vec3 scene_span = scene_max - scene_min;
+			const float scene_volume = std::max(scene_span.x * scene_span.y * scene_span.z, 1e-6f);
+
+			// Biggest first, so the level proxies can be read straight off the log.
+			std::sort(candidates.begin(), candidates.end(),
+			          [](const StaticAABB& a, const StaticAABB& b) {
+			             return a.half.x * a.half.y * a.half.z > b.half.x * b.half.y * b.half.z;
+			          });
+
+			// ---- how an entity world-AABB becomes a collider --------------------------
+			// A solid box is only a faithful proxy when the mesh is box-like, so classify
+			// each candidate by SHAPE instead of by size alone:
+			//  * thin along its smallest axis  -> it is a slab: floor, ceiling, wall, ramp.
+			//    Keep one solid box; this is exactly what must block the character.
+			//  * small in volume               -> a chunky prop (column, statue, stairs).
+			//    Keep one solid box.
+			//  * big AND thick                 -> a building / facade / courtyard shell. As a
+			//    solid box it fills the interior and welds the character (Jolt cannot push a
+			//    capsule out of a 15 m block), so emit it as a HOLLOW shell of 6 thin slabs:
+			//    the floor, the ceiling and the surrounding walls stay colliders while the
+			//    interior remains walkable.
+			constexpr float kMaxSlabThickness   = 2.5f;  // min extent at/under this = slab
+			constexpr float kMaxPropVolume      = 30.0f; // volume at/under this = prop
+			constexpr float kShellSlabThickness = 0.5f;  // thickness of the 6 shell faces
+			constexpr bool  kShellBigThickBoxes = true;  // false = keep them solid (investigation)
+
+			auto add_static_box = [&](const bud::math::vec3& center, const bud::math::vec3& half) -> bool {
+				bud::physics::RigidBodyDesc desc;
+				desc.motion_type = bud::physics::MotionType::Static;
+				desc.shape.type = bud::physics::ShapeType::Box;
+				desc.shape.half_extent = half;
+				desc.position = center;
+				// add_rigid_body() returns an invalid handle when the SoA storage is full;
+				// propagate that so the log can never report phantom bodies again.
+				return physics_scene->add_rigid_body(desc).is_valid();
+			};
+
+			for (const auto& cand : candidates) {
+				const float volume = 8.0f * cand.half.x * cand.half.y * cand.half.z;
+				const bud::math::vec3 size = cand.half * 2.0f;
+				const float min_extent = std::min({ size.x, size.y, size.z });
+				const float pct_of_scene = 100.0f * volume / scene_volume;
+				const bool is_slab  = min_extent <= kMaxSlabThickness;
+				const bool is_prop  = volume <= kMaxPropVolume;
+
+				if (!is_slab && !is_prop) {
+					giant++;
+					const char* name = cand.name ? cand.name->c_str() : "?";
+					if (!kShellBigThickBoxes) {
+						bud::print("[Physics] big+thick AABB '{}' size=({:.1f} x {:.1f} x {:.1f}) m center=({:.1f}, {:.1f}, {:.1f}) kept SOLID {:.1f}% of scene",
+						           name, size.x, size.y, size.z, cand.center.x, cand.center.y, cand.center.z, pct_of_scene);
+					} else {
+						// Hollow shell: 6 faces, each kShellSlabThickness deep, flush with the
+						// outside of the AABB so the walkable volume is never made smaller.
+						const float t  = std::min(kShellSlabThickness, min_extent * 0.25f);
+						const float ht = t * 0.5f;
+						const bud::math::vec3& c = cand.center;
+						const bud::math::vec3& h = cand.half;
+						add_static_box({ c.x + (h.x - ht), c.y, c.z },           { ht,  h.y,  h.z  });
+						add_static_box({ c.x - (h.x - ht), c.y, c.z },           { ht,  h.y,  h.z  });
+						add_static_box({ c.x, c.y + (h.y - ht), c.z },           { h.x, ht,    h.z });
+						add_static_box({ c.x, c.y - (h.y - ht), c.z },           { h.x, ht,    h.z });
+						add_static_box({ c.x, c.y, c.z + (h.z - ht) },           { h.x, h.y,   ht  });
+						add_static_box({ c.x, c.y, c.z - (h.z - ht) },           { h.x, h.y,   ht  });
+						shell_faces += 6;
+						bud::print("[Physics] big+thick AABB '{}' size=({:.1f} x {:.1f} x {:.1f}) m center=({:.1f}, {:.1f}, {:.1f}) -> hollow shell of 6 faces (t={:.2f} m, {:.1f}% of scene)",
+						           name, size.x, size.y, size.z, c.x, c.y, c.z, t, pct_of_scene);
+						continue;
+					}
+				}
+
+				if (add_static_box(cand.center, cand.half)) added++; else dropped++;
+			}
+
+			bud::print("> physics: static_aabb solid_boxes={}, big+thick={} -> {} shell faces, dropped={}, skipped={}, scene_bodies={} <",
+			           added, giant, shell_faces, dropped, skipped, physics_scene->size());
+
+			// Never start the run welded inside geometry.
+			if (character_controller && physics_scene->size() > 0) {
+				const int stuck = character_controller->unstick_from(physics_scene->body_positions,
+				                                                     physics_scene->body_half_extents);
+				if (stuck != 0)
+					bud::print("[Physics] character spawn overlapped {} static AABB(s) -> re-seeded {}",
+					           stuck < 0 ? -stuck : stuck, stuck < 0 ? "FAILED (still overlapped)" : "to a free spot above");
+			}
+		};
+
+		load_scene_resources_async(wrapped_finish);
 		return true;
 	}
 

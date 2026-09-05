@@ -21,6 +21,8 @@ namespace JPH {
     class JobSystem;
     class Body;
     class Shape;
+    class ContactListener;
+    class BodyActivationListener;
 }
 
 namespace bud::physics {
@@ -57,6 +59,7 @@ namespace bud::physics {
         std::vector<bud::math::quaternion> body_rotations;
         std::vector<bud::math::vec3>       body_linear_velocities;
         std::vector<bud::math::vec3>       body_angular_velocities;
+        std::vector<bud::math::vec3>       body_half_extents;
         std::vector<float>                 body_masses;
         std::vector<void*>                 body_user_data;
 
@@ -84,6 +87,7 @@ namespace bud::physics {
             body_rotations.assign(capacity, bud::math::quaternion(1.0f, 0.0f, 0.0f, 0.0f));
             body_linear_velocities.assign(capacity, bud::math::vec3(0.0f));
             body_angular_velocities.assign(capacity, bud::math::vec3(0.0f));
+            body_half_extents.assign(capacity, bud::math::vec3(0.5f));
             body_masses.assign(capacity, 0.0f);
             body_user_data.assign(capacity, nullptr);
             body_flags.assign(capacity, 0);
@@ -99,6 +103,7 @@ namespace bud::physics {
         inline RigidBodyHandle add_rigid_body(const RigidBodyDesc& desc) {
             size_t idx = body_count.fetch_add(1, std::memory_order_relaxed);
             if (idx >= body_positions.size()) [[unlikely]] {
+                body_count.fetch_sub(1, std::memory_order_relaxed);
                 dropped_bodies.fetch_add(1, std::memory_order_relaxed);
                 return {};
             }
@@ -107,6 +112,7 @@ namespace bud::physics {
             body_rotations[idx] = desc.rotation;
             body_linear_velocities[idx] = bud::math::vec3(0.0f);
             body_angular_velocities[idx] = bud::math::vec3(0.0f);
+            body_half_extents[idx] = desc.shape.half_extent;
             body_masses[idx] = desc.mass;
             body_user_data[idx] = nullptr;
 
@@ -200,10 +206,19 @@ namespace bud::physics {
         uint32_t get_active_body_count() const;
         uint32_t get_total_body_count() const;
 
+        // Jolt internals (for CharacterController)
+        JPH::PhysicsSystem* get_jolt_system() const;
+        JPH::TempAllocator* get_temp_allocator() const;
+
     private:
         void create_jolt_bodies();
 
         std::unique_ptr<JPH::PhysicsSystem> physics_system;
+
+        // Listeners handed to Jolt as raw, non-owning pointers: PhysicsScene owns and
+        // deletes them (Jolt's PhysicsSystem destructor leaves them alone).
+        JPH::ContactListener*         contact_listener = nullptr;
+        JPH::BodyActivationListener*  activation_listener = nullptr;
 
         std::unique_ptr<JPH::BroadPhaseLayerInterface>  broad_phase_layer_interface;
         std::unique_ptr<JPH::ObjectVsBroadPhaseLayerFilter> object_vs_broadphase_filter;

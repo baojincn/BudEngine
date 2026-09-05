@@ -393,7 +393,7 @@ namespace bud::graphics {
 			const SceneView& view, const RenderConfig& config);
 	};
 
-	class ResolvePass : public RenderPass {
+class ResolvePass : public RenderPass {
 		PipelineHandle resolve_pipeline;
 		uint64_t resolve_set_layout = 0;
 		uint64_t resolve_descriptor_set = 0;
@@ -411,4 +411,33 @@ namespace bud::graphics {
 			RGHandle ssr_map = {},
 			RGHandle ssgi_map = {});
 	};
+
+	struct PhysicsDebugVertex {
+		float pos[3];
+		float color[3];
+	};
+
+	class PhysicsDebugPass : public RenderPass {
+		PipelineHandle pipeline;
+		uint64_t set_layout = 0;
+		uint64_t descriptor_set = 0;
+		BufferHandle vertex_buffer;
+		BufferHandle ubo_buffer;
+		uint64_t vertex_capacity = 0;
+		RGHandle ubo_handle;
+		std::vector<PhysicsDebugVertex> cpu_vertices;
+		// cpu_vertices is written by the logic thread (Renderer::update_physics_debug_vertices)
+		// and consumed by the render thread (add_to_graph), so the handoff must be locked.
+		std::mutex vertices_mutex;
+		bool has_ubo = false;
+
+	public:
+		~PhysicsDebugPass() = default;
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		void update_vertices(const std::vector<PhysicsDebugVertex>& verts);
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle depth_buffer,
+			const SceneView& view, const RenderConfig& config);
+	};
+
 }

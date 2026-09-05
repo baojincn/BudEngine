@@ -83,6 +83,10 @@ namespace bud::ui {
 				static uint32_t display_occluder_tris = 0;
 				static uint32_t display_shadow_caster_submeshes = 0;
 
+				static uint32_t display_physics_debug_calls = 0;
+				static uint32_t display_physics_debug_boxes = 0;
+				static uint32_t display_physics_debug_verts = 0;
+
 				float current_ms = delta_time * 1000.0f;
 				float ema_alpha = (delta_time > 0.0f)
 					? (1.0f - std::exp(-delta_time / fps_ema_tau_seconds))
@@ -111,6 +115,9 @@ namespace bud::ui {
 					display_draw_calls = stats.draw_calls;
 					display_drawn_tris = stats.gpu_visible_triangles;
 					display_pipeline_binds = stats.pipeline_binds;
+					display_physics_debug_calls = stats.physics_debug_draw_calls;
+					display_physics_debug_boxes = stats.physics_debug_boxes;
+					display_physics_debug_verts = stats.physics_debug_line_vertices;
 
 					cpu_display_total_tris = stats.cpu_total_triangles;
 					cpu_display_visible_tris = stats.cpu_visible_triangles;
@@ -189,6 +196,13 @@ namespace bud::ui {
 				ImGui::TextColored(dc_color, "Draw Calls: %u", display_draw_calls);
 				ImGui::TextColored(drawn_tri_color, "Rasterized Tris: %u", display_drawn_tris);
 				ImGui::TextColored(pipe_color, "Pipeline Binds: %u", display_pipeline_binds);
+				// Physics wireframe overlay: attributed separately because it is a single
+				// LINE_LIST draw call that otherwise vanishes inside draw_calls. Non-zero
+				// here == the overlay really is being submitted (F3 hotkey is working).
+				ImGui::TextColored(display_physics_debug_calls ? color_warn : color_neutral,
+				                   "Physics Debug: %u calls, %u boxes, %u line verts",
+				                   display_physics_debug_calls, display_physics_debug_boxes, display_physics_debug_verts);
+
 
 				// CPU CULLING
 				ImGui::Separator();

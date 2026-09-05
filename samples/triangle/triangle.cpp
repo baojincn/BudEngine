@@ -72,6 +72,8 @@ void TriangleApp::on_update(float delta_time) {
 	auto& input = bud::input::Input::get();
 	auto& scene = engine->get_scene();
 	auto& cam = scene.main_camera;
+	auto* controller = engine->get_character_controller();
+	auto* physics = engine->get_physics_scene();
 
 	static bool prev_v = false;
 	bool curr_v = input.is_key_down(bud::input::Key::V);
@@ -87,27 +89,41 @@ void TriangleApp::on_update(float delta_time) {
 		sm->update(bud::math::vec3(cam.position.x, cam.position.y, cam.position.z));
 	}
 
-	if (input.is_key_down(bud::input::Key::W)) cam.process_keyboard(0, delta_time);
-	if (input.is_key_down(bud::input::Key::S)) cam.process_keyboard(1, delta_time);
-	if (input.is_key_down(bud::input::Key::A)) cam.process_keyboard(2, delta_time);
-	if (input.is_key_down(bud::input::Key::D)) cam.process_keyboard(3, delta_time);
+	// Character movement via CharacterController
+	if (controller && physics) {
+		bud::math::vec3 move_dir(0.0f);
+		if (input.is_key_down(bud::input::Key::W)) move_dir += cam.front;
+		if (input.is_key_down(bud::input::Key::S)) move_dir -= cam.front;
+		if (input.is_key_down(bud::input::Key::A)) move_dir -= cam.right;
+		if (input.is_key_down(bud::input::Key::D)) move_dir += cam.right;
 
-	if (input.is_gamepad_connected()) {
-		float lx = input.get_gamepad_axis(bud::input::GamepadAxis::LeftX);
-		float ly = input.get_gamepad_axis(bud::input::GamepadAxis::LeftY);
-		float speed = cam.movement_speed * delta_time;
-		if (cam.get_mode() == bud::scene::CameraMode::ThirdPerson) {
-			cam.target_position += cam.right * lx * speed;
-			cam.target_position += cam.front * (-ly) * speed;
-		} else {
-			cam.position += cam.right * lx * speed;
-			cam.position += cam.front * (-ly) * speed;
+		if (input.is_gamepad_connected()) {
+			float lx = input.get_gamepad_axis(bud::input::GamepadAxis::LeftX);
+			float ly = input.get_gamepad_axis(bud::input::GamepadAxis::LeftY);
+			move_dir += cam.right * lx;
+			move_dir += cam.front * (-ly);
 		}
 
-		float rx = input.get_gamepad_axis(bud::input::GamepadAxis::RightX);
-		float ry = input.get_gamepad_axis(bud::input::GamepadAxis::RightY);
-		if (rx != 0.0f || ry != 0.0f)
-			cam.process_mouse_movement(rx * 100.0f * delta_time, ry * 100.0f * delta_time, true);
+		if (glm::length(move_dir) > 0.0f)
+			move_dir = glm::normalize(move_dir);
+
+		controller->set_velocity(move_dir * cam.movement_speed);
+		controller->update(delta_time);
+
+		// Sync camera from controller
+		if (cam.get_mode() == bud::scene::CameraMode::ThirdPerson) {
+			cam.target_position = controller->get_position();
+		} else {
+			cam.position = controller->get_eye_position();
+		}
+
+		// Gamepad right stick for camera rotation
+		if (input.is_gamepad_connected()) {
+			float rx = input.get_gamepad_axis(bud::input::GamepadAxis::RightX);
+			float ry = input.get_gamepad_axis(bud::input::GamepadAxis::RightY);
+			if (rx != 0.0f || ry != 0.0f)
+				cam.process_mouse_movement(rx * 300.0f * delta_time, ry * 300.0f * delta_time, true);
+		}
 	}
 
 	float dx, dy;

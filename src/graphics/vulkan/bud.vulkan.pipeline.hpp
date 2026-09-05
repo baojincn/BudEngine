@@ -24,6 +24,7 @@ namespace bud::graphics::vulkan {
 		VkBool32 blending_enable;
 		BlendMode blend_mode;
 		VertexLayoutType vertex_layout;
+		VkPrimitiveTopology topology;
 		VkCompareOp depth_compare_op;
 		VkCullModeFlags cull_mode;
 		VkFormat color_format;
@@ -42,6 +43,7 @@ namespace bud::graphics::vulkan {
 				blending_enable == other.blending_enable &&
 				blend_mode == other.blend_mode &&
 				vertex_layout == other.vertex_layout &&
+				topology == other.topology &&
 				depth_compare_op == other.depth_compare_op &&
 				cull_mode == other.cull_mode &&
 				color_format == other.color_format &&
@@ -63,9 +65,10 @@ namespace bud::graphics::vulkan {
 				(std::hash<uint32_t>()(k.blending_enable) << 8) ^
 				(std::hash<uint32_t>()((uint32_t)k.blend_mode) << 9) ^
 				(std::hash<uint32_t>()((uint32_t)k.vertex_layout) << 10) ^
-				(std::hash<uint32_t>()(k.depth_bias_enable) << 11) ^
-				(std::hash<uint32_t>()(k.depth_format) << 12) ^
-				(std::hash<uint32_t>()(k.wireframe) << 13);
+				(std::hash<uint32_t>()(k.topology) << 11) ^
+				(std::hash<uint32_t>()(k.depth_bias_enable) << 12) ^
+				(std::hash<uint32_t>()(k.depth_format) << 13) ^
+				(std::hash<uint32_t>()(k.wireframe) << 14);
 		}
 	};
 

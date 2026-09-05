@@ -89,6 +89,8 @@ namespace bud::graphics {
 		ssr_pass->init(rhi, render_config, asset_manager);
 		ssgi_pass->init(rhi, render_config, asset_manager);
 		resolve_pass->init(rhi, render_config, asset_manager);
+		physics_debug_pass = std::make_unique<PhysicsDebugPass>();
+		physics_debug_pass->init(rhi, render_config, asset_manager);
 
 		auto& geometry_pool = gpu_scene.get_geometry_pool();
 		if (!geometry_pool.initialized) {
@@ -140,6 +142,7 @@ namespace bud::graphics {
 		if (ssr_pass) ssr_pass->shutdown(rhi);
 		if (ssgi_pass) ssgi_pass->shutdown(rhi);
 		if (resolve_pass) resolve_pass->shutdown(rhi);
+		if (physics_debug_pass) physics_debug_pass->shutdown(rhi);
 		if (csm_cull_pipeline.is_valid()) {
 			rhi->destroy_pipeline(csm_cull_pipeline);
 			csm_cull_pipeline.reset();
@@ -837,10 +840,6 @@ namespace bud::graphics {
 			auto end_it = std::remove_if(sort_list.begin(), sort_list.begin() + total_draw_count, [](const SortItem& a) { return a.key == UINT64_MAX; });
 			sort_list.erase(end_it, sort_list.end()); // REMOVES INVALID ITEMS!
 			visible_count = sort_list.size();
-			// TEMP DIAGNOSTIC
-			static int diag_frames = 0;
-			if (diag_frames < 5)
-				bud::print("[R dbg] frame {} total_draw={} visible={} inst={}", diag_frames++, total_draw_count, visible_count, instance_count);
 
 			for (size_t i = 0; i < visible_count; ++i) {
 				uint8_t layer = static_cast<uint8_t>((sort_list[i].key >> 60) & 0xF);
@@ -1726,6 +1725,11 @@ namespace bud::graphics {
 								scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 							has_main_pass = true;
 
+							if (physics_debug_pass && render_config.debug_physics) {
+								physics_debug_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+									scene_view, render_config);
+							}
+
 							if (forward_translucent_pass && ranges.range_c_count > 0) {
 								forward_translucent_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
 									render_scene, scene_view, render_config, meshes, sort_list,
@@ -1808,6 +1812,11 @@ namespace bud::graphics {
 								resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
 									scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 								has_main_pass = true;
+
+								if (physics_debug_pass && render_config.debug_physics) {
+									physics_debug_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+										scene_view, render_config);
+								}
 
 								if (forward_translucent_pass && ranges.range_c_count > 0) {
 									forward_translucent_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
@@ -1915,6 +1924,11 @@ namespace bud::graphics {
 
 	void Renderer::set_config(const RenderConfig& config) {
 		render_config = config;
+	}
+
+	void Renderer::update_physics_debug_vertices(const std::vector<PhysicsDebugVertex>& verts) {
+		if (physics_debug_pass)
+			physics_debug_pass->update_vertices(verts);
 	}
 
 	const RenderConfig& Renderer::get_config() const {

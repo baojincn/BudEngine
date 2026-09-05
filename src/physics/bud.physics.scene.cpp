@@ -24,8 +24,40 @@
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseQuery.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
+#include <Jolt/Core/IssueReporting.h>
+
+#include <cstdarg>
 
 namespace {
+
+    // ------------------------------------------------------------------
+    // Jolt diagnostics -> engine logger.
+    //
+    // Jolt reports asserts/trace output through the JPH::Trace / JPH::AssertFailed
+    // function pointers, whose default implementation uses printf + OutputDebugString.
+    // A GUI process without a console shows nothing, so a failed assert looks like a
+    // silent exit with status 0x80000003. Routing them into bud::print makes the real
+    // expression, file and line visible in the log.
+    // ------------------------------------------------------------------
+    void jolt_trace(const char* in_format, ...) {
+        char buf[1024];
+        va_list args;
+        va_start(args, in_format);
+        vsnprintf(buf, sizeof(buf), in_format, args);
+        va_end(args);
+        bud::print("[Jolt] {}", buf);
+    }
+
+    bool jolt_assert_failed(const char* in_expression, const char* in_message,
+                            const char* in_file, JPH::uint in_line) {
+        bud::print("[Jolt] ASSERT FAILED: {} ({}:{})",
+                   in_expression ? in_expression : "?",
+                   in_file ? in_file : "?", in_line);
+        if (in_message && in_message[0] != '\0')
+            bud::print("[Jolt]   message: {}", in_message);
+        if (auto* g = bud::get_global_logger()) g->flush();
+        return true; // still break, but only after the log line has been written
+    }
 
     constexpr uint32_t LAYER_STATIC  = 0;
     constexpr uint32_t LAYER_DYNAMIC = 1;
@@ -228,6 +260,14 @@ namespace bud::physics {
         jolt_shapes.clear();
         jolt_body_ids.clear();
 
+        // Tear the system down before releasing the listeners it points at, then drop
+        // the process-wide Jolt registration.
+        physics_system.reset();
+        delete contact_listener;
+        contact_listener = nullptr;
+        delete activation_listener;
+        activation_listener = nullptr;
+
         JPH::UnregisterTypes();
         delete JPH::Factory::sInstance;
         JPH::Factory::sInstance = nullptr;
@@ -237,9 +277,18 @@ namespace bud::physics {
                             uint32_t max_contact_constraints) {
         if (initialized) return;
 
+        // Allocate the SoA columns BEFORE anything can call add_rigid_body().
+        // Without this every body is silently dropped: add_rigid_body() rejects
+        // indices >= body_positions.size(), and an un-reset scene has size 0.
+        reset(max_bodies);
+
         JPH::RegisterDefaultAllocator();
         JPH::Factory::sInstance = new JPH::Factory();
         JPH::RegisterTypes();
+
+        // Send Jolt's own diagnostics into the engine log (see above).
+        JPH::Trace = &jolt_trace;
+        JPH::AssertFailed = &jolt_assert_failed;
 
         temp_allocator = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
 
@@ -257,8 +306,12 @@ namespace bud::physics {
                                *object_vs_broadphase_filter,
                                *object_layer_pair_filter);
 
-        physics_system->SetContactListener(new ContactListenerImpl());
-        physics_system->SetBodyActivationListener(new ActivationListenerImpl());
+        // Jolt's PhysicsSystem does NOT own (nor delete) these listeners, so the
+        // PhysicsScene keeps the pointers and releases them in its destructor.
+        contact_listener = new ContactListenerImpl();
+        physics_system->SetContactListener(contact_listener);
+        activation_listener = new ActivationListenerImpl();
+        physics_system->SetBodyActivationListener(activation_listener);
         physics_system->SetGravity(JPH::Vec3(0.0f, -9.80665f, 0.0f));
 
         initialized = true;
@@ -275,10 +328,21 @@ namespace bud::physics {
         jolt_body_ids.resize(n, JPH::BodyID::cInvalidBodyID);
         jolt_shapes.resize(n, nullptr);
 
-        for (size_t i = 0; i < n; ++i) {
+        const size_t count = std::min({n, body_positions.size(), body_rotations.size(), body_flags.size(), body_half_extents.size()});
+        for (size_t i = 0; i < count; ++i) {
             JPH::BodyID id(jolt_body_ids[i]);
             if (id.IsInvalid()) {
-                auto* shape = new JPH::BoxShape(JPH::Vec3(0.5f, 0.5f, 0.5f));
+                auto he = body_half_extents[i];
+                // Meshes that are planar (floors, walls) produce a world AABB with a
+                // zero-width axis. Jolt can reject such a box and, worse, penetration
+                // recovery cannot resolve a zero-thickness surface, so clamp to a thin slab.
+                constexpr float cMinHalfExtent = 0.005f;
+                auto clamp_extent = [](float v) {
+                    return (v > cMinHalfExtent && v == v) ? v : cMinHalfExtent;
+                };
+                auto* shape = new JPH::BoxShape(JPH::Vec3(clamp_extent(he.x),
+                                                          clamp_extent(he.y),
+                                                          clamp_extent(he.z)));
                 auto motion = to_jolt_motion(body_flags[i]);
                 JPH::BodyCreationSettings bcs(shape, to_jolt(body_positions[i]),
                                               to_jolt(body_rotations[i]),
@@ -307,12 +371,17 @@ namespace bud::physics {
                     shape->Release();
                 }
             } else {
-                JPH::BodyLockWrite lock(physics_system->GetBodyLockInterface(), id);
-                if (lock.Succeeded()) {
-                    auto& body = lock.GetBody();
-                    bi.SetPositionAndRotation(id, to_jolt(body_positions[i]),
-                                              to_jolt(body_rotations[i]),
-                                              JPH::EActivation::DontActivate);
+                // BodyInterface locks the body internally. Never wrap these calls in a
+                // BodyLockWrite of our own: Jolt's per-body mutexes are not recursive, so
+                // locking the same body twice from the same thread trips its deadlock
+                // check (and would deadlock outright in a build without asserts).
+                bi.SetPositionAndRotation(id, to_jolt(body_positions[i]),
+                                          to_jolt(body_rotations[i]),
+                                          JPH::EActivation::DontActivate);
+
+                // Static bodies own no motion properties - setting their velocity is an
+                // assert inside Jolt. Only dynamic/kinematic bodies carry velocity.
+                if (!(body_flags[i] & BODY_FLAG_STATIC)) {
                     bi.SetLinearVelocity(id, JPH::Vec3(body_linear_velocities[i].x,
                                                         body_linear_velocities[i].y,
                                                         body_linear_velocities[i].z));
@@ -328,7 +397,7 @@ namespace bud::physics {
         if (!initialized || !physics_system) return;
 
         const size_t n = body_count.load(std::memory_order_relaxed);
-        const size_t limit = std::min(n, jolt_body_ids.size());
+        const size_t limit = std::min({n, jolt_body_ids.size(), body_positions.size()});
         for (size_t i = 0; i < limit; ++i) {
             JPH::BodyID id(jolt_body_ids[i]);
             if (id.IsInvalid()) continue;
@@ -501,6 +570,14 @@ namespace bud::physics {
 
     uint32_t PhysicsScene::get_total_body_count() const {
         return physics_system ? physics_system->GetNumBodies() : 0;
+    }
+
+    JPH::PhysicsSystem* PhysicsScene::get_jolt_system() const {
+        return physics_system.get();
+    }
+
+    JPH::TempAllocator* PhysicsScene::get_temp_allocator() const {
+        return temp_allocator.get();
     }
 
 } // namespace bud::physics

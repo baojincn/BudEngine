@@ -59,6 +59,8 @@ namespace bud::graphics {
 		std::vector<std::vector<bud::math::AABB>> get_submesh_bounds_snapshot() const;
 		void register_mesh_bounds(uint32_t mesh_id, const bud::math::AABB& aabb);
 
+		void update_physics_debug_vertices(const std::vector<PhysicsDebugVertex>& verts);
+
 		GPUScene& get_gpu_scene() { return gpu_scene; }
 		RHI* get_rhi() { return rhi; }
 		uint32_t register_page_based_mesh(uint32_t page_index, uint32_t meshlet_count,
@@ -121,6 +123,8 @@ namespace bud::graphics {
 		std::unique_ptr<ScreenSpaceReflectionPass> ssr_pass;
 		std::unique_ptr<ScreenSpaceGlobalIlluminationPass> ssgi_pass;
 		std::unique_ptr<ResolvePass> resolve_pass;
+		std::unique_ptr<PhysicsDebugPass> physics_debug_pass;
+
 		bool has_mesh_shader = false;
 
 		PipelineHandle csm_cull_pipeline;

@@ -1,9 +1,9 @@
 #pragma once
 
 #include <nlohmann/json.hpp>
+#include <sstream>
 #include "bud.scene.hpp"
 
-// GLM Serialization Helpers
 namespace glm {
     template <typename BasicJsonType>
     inline void to_json(BasicJsonType& j, const vec2& v) {
@@ -42,6 +42,76 @@ namespace glm {
 }
 
 namespace bud::scene {
+
+    // Custom JSON dump: objects indented, arrays compact (single line)
+    inline void dump_json(std::ostream& os, const nlohmann::ordered_json& j, int indent = 0, int step = 4) {
+        if (j.is_object()) {
+            os << "{";
+            if (!j.empty()) {
+                os << "\n";
+                bool first = true;
+                for (auto& [key, value] : j.items()) {
+                    if (!first) os << ",\n";
+                    first = false;
+                    os << std::string(indent + step, ' ') << "\"" << key << "\": ";
+                    dump_json(os, value, indent + step, step);
+                }
+                os << "\n" << std::string(indent, ' ');
+            }
+            os << "}";
+        } else if (j.is_array()) {
+            if (j.empty()) {
+                os << "[]";
+                return;
+            }
+            bool all_primitive = true;
+            for (auto& val : j) {
+                if (!val.is_number() && !val.is_boolean() && !val.is_null()) {
+                    all_primitive = false;
+                    break;
+                }
+            }
+            if (all_primitive) {
+                os << "[";
+                bool first = true;
+                for (auto& val : j) {
+                    if (!first) os << ", ";
+                    first = false;
+                    dump_json(os, val, indent, step);
+                }
+                os << "]";
+            } else {
+                os << "[\n";
+                bool first = true;
+                for (auto& val : j) {
+                    if (!first) os << ",\n";
+                    first = false;
+                    os << std::string(indent + step, ' ');
+                    dump_json(os, val, indent + step, step);
+                }
+                os << "\n" << std::string(indent, ' ') << "]";
+            }
+        } else if (j.is_string()) {
+            os << "\"" << j.get<std::string>() << "\"";
+        } else if (j.is_boolean()) {
+            os << (j.get<bool>() ? "true" : "false");
+        } else if (j.is_number_float()) {
+            os << j.get<double>();
+        } else if (j.is_number_integer()) {
+            os << j.get<int64_t>();
+        } else if (j.is_number_unsigned()) {
+            os << j.get<uint64_t>();
+        } else if (j.is_null()) {
+            os << "null";
+        }
+    }
+
+    inline std::string dump_scene(const nlohmann::ordered_json& j) {
+        std::ostringstream oss;
+        dump_json(oss, j);
+        return oss.str();
+    }
+
     // Entity
     template <typename BasicJsonType>
     inline void to_json(BasicJsonType& j, const Entity& e) {
@@ -51,6 +121,7 @@ namespace bud::scene {
             {"is_static", e.is_static},
             {"is_cast_shadow", e.is_cast_shadow},
             {"is_receive_shadow", e.is_receive_shadow},
+            {"enable_physics", e.enable_physics},
             {"material_index", e.material_index},
             {"mesh_index", e.mesh_index},
             {"name", e.name},
@@ -66,9 +137,9 @@ namespace bud::scene {
         if (j.contains("transform")) j.at("transform").get_to(e.transform);
         if (j.contains("is_static")) j.at("is_static").get_to(e.is_static);
         if (j.contains("is_active")) j.at("is_active").get_to(e.is_active);
-        // Absent keys keep the defaults (both true), so older scene files are unaffected.
         if (j.contains("is_cast_shadow")) j.at("is_cast_shadow").get_to(e.is_cast_shadow);
         if (j.contains("is_receive_shadow")) j.at("is_receive_shadow").get_to(e.is_receive_shadow);
+        if (j.contains("enable_physics")) j.at("enable_physics").get_to(e.enable_physics);
         if (j.contains("lod_bias")) j.at("lod_bias").get_to(e.lod_bias);
     }
 

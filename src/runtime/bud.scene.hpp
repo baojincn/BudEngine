@@ -81,6 +81,7 @@ namespace bud::scene {
 		bool is_active = true;
 		bool is_cast_shadow = true;
 		bool is_receive_shadow = true;
+		bool enable_physics = true;
 
 		uint32_t root_group_index = 0xFFFFFFFF;
 		uint32_t base_virtual_page = 0xFFFFFFFF;

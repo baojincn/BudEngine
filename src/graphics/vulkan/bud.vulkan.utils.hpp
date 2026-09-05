@@ -99,7 +99,11 @@ namespace bud::graphics::vulkan {
 		} else if (usage_state == bud::graphics::ResourceState::ShaderResource) {
 			usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 		} else if (usage_state == bud::graphics::ResourceState::Common || usage_state == bud::graphics::ResourceState::TransferDst) {
-			usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+			// Per-pass uniform buffers (e.g. PhysicsDebugPass' MVP) are created through
+			// create_upload_buffer(), which lands here. Without UNIFORM_BUFFER the
+			// descriptor write is rejected (VUID-VkWriteDescriptorSet-descriptorType-00330)
+			// and the pipeline would read an undefined UBO.
+			usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 		}
 		return usage;
 	}

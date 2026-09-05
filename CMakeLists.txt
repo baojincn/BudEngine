@@ -283,6 +283,8 @@ target_sources(bud_engine_core
 		"src/runtime/bud.scene.cpp"
 		"src/runtime/bud.scene.builder.cpp"
 		"src/runtime/bud.camera_sequencer.cpp"
+		"src/runtime/bud.character_controller.cpp"
+		"src/graphics/passes/bud.pass.physics_debug.cpp"
 		"src/physics/bud.physics.scene.cpp"
 
     PUBLIC
@@ -298,6 +300,8 @@ target_sources(bud_engine_core
 		"src/runtime/bud.scene.builder.hpp"
 		"src/graphics/bud.graphics.gpu_scene.hpp"
 		"src/runtime/bud.camera_sequencer.hpp"
+
+		"src/runtime/bud.character_controller.hpp"
 
 		"src/physics/bud.physics.hpp"
 		"src/physics/bud.physics.types.hpp"

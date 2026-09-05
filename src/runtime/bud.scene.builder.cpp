@@ -69,7 +69,7 @@ namespace bud::scene
             return false;
 
         nlohmann::ordered_json j = scene;
-        out << j.dump(4);
+        out << dump_scene(j);
         return true;
     }
 

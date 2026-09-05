@@ -21,6 +21,8 @@
 #include "src/streaming/bud.streaming.manager.hpp"
 #include "src/runtime/bud.camera_sequencer.hpp"
 #include "src/input/bud.input.manager.hpp"
+#include "src/physics/bud.physics.hpp"
+#include "src/runtime/bud.character_controller.hpp"
 
 
 namespace bud::engine {
@@ -46,6 +48,8 @@ namespace bud::engine {
 		bud::graphics::Renderer* get_renderer() { return renderer.get(); }
 		bud::streaming::StreamingManager* get_streaming_manager() { return streaming_manager.get(); }
 		bud::scene::Scene& get_scene() { return scene; }
+		bud::physics::PhysicsScene* get_physics_scene() { return physics_scene.get(); }
+		bud::scene::CharacterController* get_character_controller() { return character_controller.get(); }
 
 		// Data-Driven Scene & Asset Loader
 		bool load_scene_async(const std::string& scene_path, std::function<void()> on_finished = nullptr);
@@ -63,6 +67,10 @@ namespace bud::engine {
 
 	private:
 		void handle_events();
+
+		// Rebuilds the wireframe overlay handed to PhysicsDebugPass from the current
+		// physics SoA state (no-op unless RenderConfig::debug_physics is set).
+		void update_physics_debug_overlay();
 
 		void extract_render_scene_data(bud::graphics::RenderScene& render_scene);
 
@@ -96,6 +104,10 @@ namespace bud::engine {
 		std::unique_ptr<bud::graphics::Renderer> renderer;
 		std::unique_ptr<bud::streaming::StreamingManager> streaming_manager;
         std::unique_ptr<bud::io::VirtualFileSystem> virtual_file_system;
+
+		// 物理
+		std::unique_ptr<bud::physics::PhysicsScene> physics_scene;
+		std::unique_ptr<bud::scene::CharacterController> character_controller;
 
 		// 场景数据
 		bud::scene::Scene scene;

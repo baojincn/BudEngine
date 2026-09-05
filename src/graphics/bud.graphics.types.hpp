@@ -276,6 +276,7 @@ namespace bud::graphics {
 
 		bool enable_soft_shadows = true;
 		bool debug_cascades = false;
+		bool debug_physics = false;
 		// Feed the CSM cascade traversals the FULL scene instance list instead of only
 		// the main-camera visible ones. This is the correct CSM model: an object that is
 		// outside the primary frustum but inside a cascade's light box still has to be
@@ -413,7 +414,8 @@ namespace bud::graphics {
 		PositionUV,   // Pos(0) and UV(3)
 		PositionNormal, // Pos(0) and Normal(2)
 		NoVertexInput,// For self-generating vertices (Fullscreen)
-		ImGui         // Special ImGui layout (0,1,2)
+		ImGui,        // Special ImGui layout (0,1,2)
+		DebugLine     // Pos(0), Color(1) — for line debug rendering
 	};
 
 	struct DescriptorBinding {
@@ -431,6 +433,11 @@ namespace bud::graphics {
 		Additive            // ONE, ONE
 	};
 
+	enum class PrimitiveTopology {
+		TriangleList,
+		LineList,
+	};
+
 	struct GraphicsPipelineDesc {
 		ShaderStage vs;
 		ShaderStage fs;
@@ -446,6 +453,7 @@ namespace bud::graphics {
 		bool blending_enable = false;
 		BlendMode blend_mode = BlendMode::Disabled;
 		VertexLayoutType vertex_layout = VertexLayoutType::Default;
+		PrimitiveTopology topology = PrimitiveTopology::TriangleList;
 		bool wireframe = false;
 		// Backend-specific descriptor set layouts to use instead of the global set.
 		// These are VkDescriptorSetLayout handles cast to uint64_t for portability.
@@ -692,10 +700,21 @@ namespace bud::graphics {
 		uint32_t shadow_casters = 0;
 		uint32_t shadow_caster_submeshes = 0;
 
+		// Debug overlay attribution. The physics wireframe is drawn by its own pass with a
+		// single LINE_LIST draw call, which is invisible inside draw_calls; exposing it
+		// separately lets the HUD show what the overlay actually costs (and it proves the
+		// overlay is really being submitted when debug_physics is on).
+		uint32_t physics_debug_draw_calls = 0;
+		uint32_t physics_debug_line_vertices = 0;
+		uint32_t physics_debug_boxes = 0;
+
 		void reset() {
 			draw_calls = 0;
 			drawn_triangles = 0;
 			pipeline_binds = 0;
+			physics_debug_draw_calls = 0;
+			physics_debug_line_vertices = 0;
+			physics_debug_boxes = 0;
 			active_visibility_path = VisibilityPath::Instance;
 			gpu_total_objects = 0;
 			gpu_visible_objects = 0;

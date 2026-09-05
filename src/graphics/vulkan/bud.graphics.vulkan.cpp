@@ -1120,6 +1120,7 @@ PipelineHandle VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& d
     if (desc.blending_enable && desc.blend_mode == BlendMode::Disabled)
         key.blend_mode = BlendMode::Alpha;
     key.vertex_layout = desc.vertex_layout;
+    key.topology = (desc.topology == PrimitiveTopology::LineList) ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     
     switch (desc.depth_compare_op) {
     case CompareOp::Less: key.depth_compare_op = VK_COMPARE_OP_LESS; break;
@@ -2418,6 +2419,9 @@ void VulkanRHI::cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32
 void VulkanRHI::cmd_draw_mesh_tasks(CommandHandle cmd, uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z) {
     if (fpCmdDrawMeshTasksEXT) {
         fpCmdDrawMeshTasksEXT(static_cast<VkCommandBuffer>(cmd), group_count_x, group_count_y, group_count_z);
+        // One submission = one draw call, same rule as cmd_draw / cmd_draw_indexed /
+        // cmd_draw_indexed_indirect. The task draw used to be invisible in Draw Calls.
+        current_stats.draw_calls++;
     }
 }
 
