@@ -1634,6 +1634,9 @@ namespace bud::graphics {
 					? frame.csm_hierarchy_instances
 					: BufferHandle{};
 
+				gpu_scene.ensure_hiz_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
+				gpu_scene.ensure_color_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
+
 				if (render_config.enable_virtual_geometry && hierarchy_traversal_pass) {
 					for (uint32_t c_idx = 0; c_idx < cascade_count; ++c_idx) {
 						float lod_error_scale = 1.0f;

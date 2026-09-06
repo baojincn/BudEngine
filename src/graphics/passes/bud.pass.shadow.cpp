@@ -197,7 +197,10 @@ namespace bud::graphics {
 								: frame.instance_data;
 							rhi->update_descriptor_set_buffer(ds, 3, shadow_instance_buffer);
 						}
-						rhi->update_descriptor_set_image(ds, 4, gpu_scene.get_history_hiz(rhi->get_current_frame_index()));
+						TextureHandle hiz_tex = gpu_scene.has_history_hiz()
+							? gpu_scene.get_history_hiz(rhi->get_current_frame_index())
+							: rhi->get_fallback_texture();
+						rhi->update_descriptor_set_image(ds, 4, hiz_tex);
 						rhi->update_descriptor_set_buffer(ds, 5, frame.page_cluster_mask);
 
 						rhi->cmd_bind_pipeline(cmd, shadow_mesh_pipeline);

@@ -314,6 +314,18 @@ namespace bud::graphics {
 			);
 		}
 
+		// Transition all mips of the completed Hi-Z pyramid to ShaderResource (VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+		// so subsequent passes (CSM shadow next frame, cluster culling, visibility pass) can sample it safely.
+		rg.add_pass("Hi-Z Final Transition",
+			[=](RGBuilder& builder) {
+				builder.set_queue(QueueType::AsyncCompute);
+				builder.set_side_effect();
+				builder.read(*pyramid_h_ptr, ResourceState::ShaderResource);
+				return *pyramid_h_ptr;
+			},
+			[](RHI*, CommandHandle) {}
+		);
+
 		return *pyramid_h_ptr;
 	}
 

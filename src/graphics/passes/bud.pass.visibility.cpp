@@ -130,8 +130,10 @@ namespace bud::graphics {
 				rhi->update_descriptor_set_buffer(ds, 3, frame_res.instance_data);
 				if (rg_hiz_pyramid.is_valid())
 					rhi->update_descriptor_set_image(ds, 4, render_graph.get_texture(rg_hiz_pyramid));
-				else
+				else if (gpu_scene.has_history_hiz())
 					rhi->update_descriptor_set_image(ds, 4, gpu_scene.get_history_hiz(rhi->get_current_frame_index()));
+				else
+					rhi->update_descriptor_set_image(ds, 4, rhi->get_fallback_texture());
 				rhi->update_descriptor_set_buffer(ds, 5, frame_res.page_cluster_mask);
 				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
 
@@ -231,8 +233,10 @@ namespace bud::graphics {
 				rhi->update_descriptor_set_buffer(ds, 3, frame_res.instance_data);
 				if (rg_current_hiz.is_valid())
 					rhi->update_descriptor_set_image(ds, 4, render_graph.get_texture(rg_current_hiz));
-				else
+				else if (gpu_scene.has_history_hiz())
 					rhi->update_descriptor_set_image(ds, 4, gpu_scene.get_current_hiz(rhi->get_current_frame_index()));
+				else
+					rhi->update_descriptor_set_image(ds, 4, rhi->get_fallback_texture());
 				rhi->update_descriptor_set_buffer(ds, 5, frame_res.page_cluster_mask);
 				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
 
