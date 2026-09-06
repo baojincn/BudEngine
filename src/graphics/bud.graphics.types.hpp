@@ -235,7 +235,7 @@ namespace bud::graphics {
 	struct RenderConfig {
 		float fixed_logic_timestep = 1.0f / 60.0f;
 		float time_scale = 1.0f;
-		static constexpr bool reversed_z = false;
+		bool reversed_z = true;
 
 		uint32_t shadow_map_size = 2048;
 

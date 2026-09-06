@@ -39,7 +39,7 @@ void main() {
     ivec2 texel_coord = ivec2(gl_FragCoord.xy);
     uvec4 vis = texelFetch(visibility_tex, texel_coord, 0);
 
-    if (vis.r == 0u && vis.g == 0u)
+    if (vis.r == 0u && vis.a == 0u)
         discard;
 
     uint cluster_seed = vis.r & 0xFFFFu;

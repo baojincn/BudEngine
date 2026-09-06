@@ -162,7 +162,7 @@ namespace bud::graphics {
 				for (uint32_t i = 0; i < config.cascade_count; ++i) {
 					auto cascade_light_view_proj = view.cascade_view_proj_matrices[i];
 					bud::math::Frustum cascade_view_frustum_dbg;
-					cascade_view_frustum_dbg.update(cascade_light_view_proj);
+					cascade_view_frustum_dbg.update(cascade_light_view_proj, config.reversed_z);
 
 					RenderPassBeginInfo info;
 					info.depth_attachment = active_map;
@@ -177,7 +177,11 @@ namespace bud::graphics {
 					// Raster-stage bias ONLY (Vulkan depth-bias units). The receiver-side
 					// bias lives in lighting.glsl and is expressed in shadow texels -
 					// the two must never share a value, they have different units.
-					rhi->cmd_set_depth_bias(cmd, config.shadow_bias_constant, config.shadow_bias_clamp, config.shadow_bias_slope);
+					// Under reversed-z, depth 1.0 is near and 0.0 is far, so pushing the caster
+					// away from the light requires negative bias values.
+					float bias_constant = config.reversed_z ? -config.shadow_bias_constant : config.shadow_bias_constant;
+					float bias_slope = config.reversed_z ? -config.shadow_bias_slope : config.shadow_bias_slope;
+					rhi->cmd_set_depth_bias(cmd, bias_constant, config.shadow_bias_clamp, bias_slope);
 
 					// 1. Virtual Geometry Shadow Pass (Mesh Shader path)
 					if (is_vg && shadow_mesh_pipeline.is_valid() && rg_csm_visible_pages[i].is_valid()) {
