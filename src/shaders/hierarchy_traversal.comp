@@ -226,6 +226,13 @@ void emit_page(uint instance_id, uint virtual_page_index, float blend_factor) {
 void traverse_hierarchy(uint instance_id) {
     HierarchyInstance inst = instances[instance_id];
 
+    // Shadow cascades only: honour the per-instance "no cast shadow" bit
+    // (RenderScene::INSTANCE_FLAG_NO_CAST_SHADOW == 2). Such objects still render in
+    // the main view, they simply may never occlude the sun - this is the filter that
+    // lets background shells / backdrop lids stay out of the shadow map.
+    if (push_constants.cascade_index != 0u && (inst.flags & 2u) != 0u)
+        return;
+
     // global_sphere_center/radius are already in world space (computed from
     // world_aabbs on CPU). Do NOT transform by model_matrix again.
     vec3 global_center = vec3(inst.global_sphere_center_x,

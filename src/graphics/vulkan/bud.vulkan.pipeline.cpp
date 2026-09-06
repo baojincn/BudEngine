@@ -6,6 +6,7 @@
 #include "src/graphics/vulkan/bud.vulkan.pipeline.hpp"
 #include "src/core/bud.asset.types.hpp"
 #include "src/graphics/bud.graphics.types.hpp"
+#include "src/graphics/bud.graphics.passes.hpp"
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.logger.hpp"
 #include <imgui.h>
@@ -115,6 +116,13 @@ namespace bud::graphics::vulkan {
                 {2, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(ImDrawVert, col)}
             };
             break;
+        case VertexLayoutType::DebugLine:
+            bindingDescription.stride = sizeof(PhysicsDebugVertex);
+            attributeDescriptions = {
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(PhysicsDebugVertex, pos)},
+                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(PhysicsDebugVertex, color)}
+            };
+            break;
         }
 
 
@@ -127,7 +135,7 @@ namespace bud::graphics::vulkan {
 
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
         inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        inputAssembly.topology = key.topology;
         inputAssembly.primitiveRestartEnable = VK_FALSE;
 
         VkPipelineViewportStateCreateInfo viewportState{};

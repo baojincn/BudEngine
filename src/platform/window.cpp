@@ -8,6 +8,7 @@
 #include <print>
 #include <string>
 #include <memory>
+#include <cmath>
 
 #include <imgui_impl_sdl3.h>
 
@@ -25,19 +26,71 @@ namespace bud::platform {
 		case SDLK_S:      return bud::input::Key::S;
 		case SDLK_D:      return bud::input::Key::D;
 		case SDLK_R:      return bud::input::Key::R;
+		case SDLK_Q:      return bud::input::Key::Q;
+		case SDLK_E:      return bud::input::Key::E;
+		case SDLK_LSHIFT: return bud::input::Key::LShift;
+		case SDLK_V:      return bud::input::Key::V;
+		case SDLK_TAB:    return bud::input::Key::Tab;
+		case SDLK_F1:     return bud::input::Key::F1;
+		case SDLK_F2:     return bud::input::Key::F2;
 		case SDLK_F3:     return bud::input::Key::F3;
 		case SDLK_F4:     return bud::input::Key::F4;
 		case SDLK_F5:     return bud::input::Key::F5;
+		case SDLK_F6:     return bud::input::Key::F6;
+		case SDLK_F7:     return bud::input::Key::F7;
 		case SDLK_F8:     return bud::input::Key::F8;
 		case SDLK_F9:     return bud::input::Key::F9;
+		case SDLK_F10:    return bud::input::Key::F10;
+		case SDLK_F11:    return bud::input::Key::F11;
+		case SDLK_F12:    return bud::input::Key::F12;
 		case SDLK_LCTRL:  return bud::input::Key::LCtrl;
-        // Main "+" on many layouts is produced by Shift+'=' -> SDLK_EQUALS
-        case SDLK_EQUALS: return bud::input::Key::Plus;
-        case SDLK_KP_PLUS:return bud::input::Key::Plus;
-        case SDLK_MINUS:  return bud::input::Key::Minus;
-        case SDLK_KP_MINUS:return bud::input::Key::Minus;
-
+		case SDLK_EQUALS: return bud::input::Key::Plus;
+		case SDLK_KP_PLUS:return bud::input::Key::Plus;
+		case SDLK_MINUS:  return bud::input::Key::Minus;
+		case SDLK_KP_MINUS:return bud::input::Key::Minus;
+		case SDLK_0:      return bud::input::Key::Num0;
+		case SDLK_1:      return bud::input::Key::Num1;
+		case SDLK_2:      return bud::input::Key::Num2;
+		case SDLK_3:      return bud::input::Key::Num3;
+		case SDLK_4:      return bud::input::Key::Num4;
+		case SDLK_5:      return bud::input::Key::Num5;
+		case SDLK_6:      return bud::input::Key::Num6;
+		case SDLK_7:      return bud::input::Key::Num7;
+		case SDLK_8:      return bud::input::Key::Num8;
+		case SDLK_9:      return bud::input::Key::Num9;
 		default:          return bud::input::Key::Unknown;
+		}
+	}
+
+	bud::input::GamepadButton sdl_to_bud_gamepad_button(uint8_t button) {
+		switch (button) {
+		case SDL_GAMEPAD_BUTTON_SOUTH:          return bud::input::GamepadButton::A;
+		case SDL_GAMEPAD_BUTTON_EAST:           return bud::input::GamepadButton::B;
+		case SDL_GAMEPAD_BUTTON_WEST:           return bud::input::GamepadButton::X;
+		case SDL_GAMEPAD_BUTTON_NORTH:          return bud::input::GamepadButton::Y;
+		case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER:  return bud::input::GamepadButton::LB;
+		case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return bud::input::GamepadButton::RB;
+		case SDL_GAMEPAD_BUTTON_START:          return bud::input::GamepadButton::Start;
+		case SDL_GAMEPAD_BUTTON_BACK:           return bud::input::GamepadButton::Back;
+		case SDL_GAMEPAD_BUTTON_LEFT_STICK:     return bud::input::GamepadButton::LS;
+		case SDL_GAMEPAD_BUTTON_RIGHT_STICK:    return bud::input::GamepadButton::RS;
+		case SDL_GAMEPAD_BUTTON_DPAD_UP:        return bud::input::GamepadButton::DPadUp;
+		case SDL_GAMEPAD_BUTTON_DPAD_DOWN:      return bud::input::GamepadButton::DPadDown;
+		case SDL_GAMEPAD_BUTTON_DPAD_LEFT:      return bud::input::GamepadButton::DPadLeft;
+		case SDL_GAMEPAD_BUTTON_DPAD_RIGHT:     return bud::input::GamepadButton::DPadRight;
+		default: return bud::input::GamepadButton::A;
+		}
+	}
+
+	bud::input::GamepadAxis sdl_to_bud_gamepad_axis(uint8_t axis) {
+		switch (axis) {
+		case SDL_GAMEPAD_AXIS_LEFTX:        return bud::input::GamepadAxis::LeftX;
+		case SDL_GAMEPAD_AXIS_LEFTY:        return bud::input::GamepadAxis::LeftY;
+		case SDL_GAMEPAD_AXIS_RIGHTX:       return bud::input::GamepadAxis::RightX;
+		case SDL_GAMEPAD_AXIS_RIGHTY:       return bud::input::GamepadAxis::RightY;
+		case SDL_GAMEPAD_AXIS_LEFT_TRIGGER: return bud::input::GamepadAxis::LeftTrigger;
+		case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER:return bud::input::GamepadAxis::RightTrigger;
+		default: return bud::input::GamepadAxis::LeftX;
 		}
 	}
 
@@ -83,7 +136,7 @@ namespace bud::platform {
 		WindowWin(const std::string& title, int width, int height, WindowFlags flags)
 			: width(width), height(height)
 		{
-			if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+			if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD)) {
 				throw std::runtime_error("Failed to initialize SDL3");
 			}
 
@@ -108,7 +161,7 @@ namespace bud::platform {
 			}
 
 			update_window_size();
-			bud::print("Created window: {} ({}x{}){}", title, width, height, 
+			bud::print("Created window: {} ({}x{}){}", title, width, height,
 				(static_cast<uint32_t>(flags) & static_cast<uint32_t>(WindowFlags::Hidden)) ? " [HIDDEN]" : "");
 		}
 
@@ -161,6 +214,19 @@ namespace bud::platform {
 
 		bool should_close() const override {
 			return close_requested;
+		}
+
+		void set_mouse_relative_mode(bool enabled) override {
+			if (window)
+				SDL_SetWindowRelativeMouseMode(window, enabled);
+		}
+
+		void set_cursor_visible(bool visible) override {
+			SDL_ShowCursor();
+			if (visible)
+				SDL_ShowCursor();
+			else
+				SDL_HideCursor();
 		}
 
 		void poll_events() override {
@@ -221,6 +287,37 @@ namespace bud::platform {
 						btn = bud::input::MouseButton::Middle;
 
 					input.internal_set_mouse_btn(pass_key, btn, is_down);
+				}
+				break;
+
+				case SDL_EVENT_GAMEPAD_ADDED:
+					SDL_OpenGamepad(event.gdevice.which);
+					input.internal_set_gamepad_connected(pass_key, true);
+					bud::print("[Input] Gamepad connected (id={})", event.gdevice.which);
+					break;
+
+				case SDL_EVENT_GAMEPAD_REMOVED:
+					bud::print("[Input] Gamepad disconnected (id={})", event.gdevice.which);
+					input.internal_set_gamepad_connected(pass_key, false);
+					break;
+
+				case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+					input.internal_set_gamepad_button(pass_key,
+						sdl_to_bud_gamepad_button(event.gbutton.button), true);
+					break;
+
+				case SDL_EVENT_GAMEPAD_BUTTON_UP:
+					input.internal_set_gamepad_button(pass_key,
+						sdl_to_bud_gamepad_button(event.gbutton.button), false);
+					break;
+
+				case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+				{
+					float norm = static_cast<float>(event.gaxis.value) / 32767.0f;
+					norm = std::max(-1.0f, std::min(1.0f, norm));
+					if (std::abs(norm) < 0.1f) norm = 0.0f;
+					input.internal_set_gamepad_axis(pass_key,
+						sdl_to_bud_gamepad_axis(event.gaxis.axis), norm);
 				}
 				break;
 				}

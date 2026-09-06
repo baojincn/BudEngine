@@ -62,6 +62,7 @@ namespace bud::io {
 		std::vector<std::string> texture_paths;
 		std::vector<Material> materials;
 		std::vector<MeshSubset> subsets;
+		bool has_virtual_geometry = false;
 	};
 }
 

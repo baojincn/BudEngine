@@ -88,6 +88,7 @@ find_package(onnxruntime CONFIG REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
+find_package(Jolt CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
 find_package(unofficial-spirv-reflect CONFIG REQUIRED)
 # End, find dependencies
@@ -126,6 +127,13 @@ file(GLOB SHADER_FILES
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rgen"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rmiss"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.rchit"
+)
+# Also collect GLSL include files (*.glsl) so that changing a #included header
+# triggers recompilation of the shaders that pull it in.  Adding them to every
+# shader's DEPENDS is a small over-approximation but the correct fix for the
+# fact that glslc itself does not know about CMake's dependency tracking.
+file(GLOB SHADER_GLSL_INCLUDES
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/*.glsl"
 )
 
 # Ensure new prepass shaders are included
@@ -174,7 +182,7 @@ else()
 				# exact shader instruction that faulted. -O keeps the default
 				# optimization level (needed for readable disassembly).
 				COMMAND ${GLSLC_EXECUTABLE} -g ${TARGET_FLAGS} ${SHADER_SOURCE} -o ${SHADER_OUTPUT}
-				DEPENDS ${SHADER_SOURCE}
+				DEPENDS ${SHADER_SOURCE} ${SHADER_GLSL_INCLUDES}
 				COMMENT "Compiling ${SHADER_SOURCE} -> ${SHADER_OUTPUT}"
 				VERBATIM
 			)
@@ -273,7 +281,11 @@ target_sources(bud_engine_core
 		"src/runtime/bud.input.cpp"
 		"src/input/bud.input.manager.cpp"
 		"src/runtime/bud.scene.cpp"
+		"src/runtime/bud.scene.builder.cpp"
 		"src/runtime/bud.camera_sequencer.cpp"
+		"src/runtime/bud.character_controller.cpp"
+		"src/graphics/passes/bud.pass.physics_debug.cpp"
+		"src/physics/bud.physics.scene.cpp"
 
     PUBLIC
 		"src/core/bud.core.hpp"
@@ -285,8 +297,15 @@ target_sources(bud_engine_core
 		"src/threading/bud.threading.hpp"
 		"src/runtime/bud.input.hpp"
 		"src/runtime/bud.scene.hpp"
+		"src/runtime/bud.scene.builder.hpp"
 		"src/graphics/bud.graphics.gpu_scene.hpp"
 		"src/runtime/bud.camera_sequencer.hpp"
+
+		"src/runtime/bud.character_controller.hpp"
+
+		"src/physics/bud.physics.hpp"
+		"src/physics/bud.physics.types.hpp"
+		"src/physics/bud.physics.scene.hpp"
 
 		"src/ui/bud.stats.ui.hpp"
 
@@ -324,6 +343,7 @@ target_link_libraries(bud_engine_core
 		onnxruntime::onnxruntime
 		nlohmann_json::nlohmann_json
 		meshoptimizer::meshoptimizer
+		Jolt::Jolt
 )
 
 if (WIN32)
@@ -364,11 +384,34 @@ if(BUD_BUILD_SAMPLES)
 
     # Ensure runtime resources are available next to the executable so launching
     # the binary from the filesystem works the same as from Visual Studio.
+    # Use a directory junction (reparse point) instead of copying the entire
+    # Content/ tree — the junction is near-instant and Content/ is read-only at
+    # runtime.  Junction creation does NOT require admin (unlike symlinks), and
+    # if it fails for any reason we fall back to a regular copy.
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/cmake")
+    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/cmake/link_content_$<CONFIG>.cmake"
+        CONTENT "file(TO_NATIVE_PATH \"$<TARGET_FILE_DIR:triangle_sample>/Content\" _dst)
+file(TO_NATIVE_PATH \"${CMAKE_CURRENT_SOURCE_DIR}/Content\" _src)
+# A stale real directory (e.g. from the old copy_directory step) must be removed
+# BEFORE creating the junction, otherwise mklink fails and we'd fall back to
+# copying 5.9 GB every build. Removing a junction only removes the link.
+if(EXISTS \"\${_dst}\" AND NOT IS_SYMLINK \"\${_dst}\")
+    message(STATUS \"Replacing stale real Content dir with a junction...\")
+    file(REMOVE_RECURSE \"\${_dst}\")
+endif()
+if(NOT EXISTS \"\${_dst}\")
+    file(MAKE_DIRECTORY \"$<TARGET_FILE_DIR:triangle_sample>\")
+    execute_process(COMMAND cmd /c mklink /J \"\${_dst}\" \"\${_src}\"
+        ERROR_VARIABLE _err)
+    if(_err)
+        message(STATUS \"Junction creation failed, falling back to copy.\")
+        file(COPY \"${CMAKE_CURRENT_SOURCE_DIR}/Content\" DESTINATION \"$<TARGET_FILE_DIR:triangle_sample>\")
+    endif()
+endif()"
+    )
     add_custom_command(TARGET triangle_sample POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/Content"
-            "$<TARGET_FILE_DIR:triangle_sample>/Content"
-        COMMENT "Copying Content/ to output directory"
+        COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/cmake/link_content_$<CONFIG>.cmake"
+        COMMENT "Linking Content/ into output directory (junction)"
     )
 
     # Preserve original source tree layout for shaders so runtime loader
@@ -401,6 +444,7 @@ endif()
 add_subdirectory(src/tools/asset_pipeline)
 add_subdirectory(src/tools/applications/bud_asset_importer)
 add_subdirectory(src/tools/applications/bud_asset_compiler)
+add_subdirectory(src/tools/applications/scene_tool)
 add_subdirectory(src/tools/applications/shader_layout_codegen)
 
 # Generate shader layouts header at build time using the codegen tool.

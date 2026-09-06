@@ -10,12 +10,14 @@
 namespace bud::input {
 
 // Lightweight InputManager that sits on top of the low-level `bud::input::Input` singleton.
-// Responsibilities (keyboard & mouse only for now):
+// Responsibilities (keyboard, mouse, gamepad):
 //  - per-frame update() to compute edge events (was pressed)
-//  - query helpers: is_key_down/was_key_pressed, is_mouse_down/was_mouse_pressed
-//  - simple action mapping: bind a named action to one or more keys or mouse buttons
+//  - query helpers: is_key_down/was_key_pressed, is_mouse_down/was_mouse_pressed,
+//    is_gamepad_button_down/was_gamepad_button_pressed
+//  - simple action mapping: bind a named action to keys, mouse buttons, or gamepad buttons
 //  - query actions by name (is_action_down / was_action_pressed)
 //  - optional callback registration for actions
+//  - gamepad axis queries (raw + delta)
 //
 // Design notes:
 //  - Only a thin abstraction; all device polling remains in bud::input::Input.
@@ -31,7 +33,7 @@ public:
 
     // Raw queries (wraps bud::input::Input)
     bool is_key_down(Key key) const;
-    bool was_key_pressed(Key key) const; // rising edge this frame
+    bool was_key_pressed(Key key) const;
 
     bool is_mouse_down(MouseButton btn) const;
     bool was_mouse_pressed(MouseButton btn) const;
@@ -39,9 +41,16 @@ public:
     void get_mouse_delta(float& out_dx, float& out_dy) const;
     float get_mouse_scroll() const;
 
-    // Action mapping API (single-key/mouse binding per action supported; can extend later)
+    bool is_gamepad_connected() const;
+    bool is_gamepad_button_down(GamepadButton btn) const;
+    bool was_gamepad_button_pressed(GamepadButton btn) const;
+    float get_gamepad_axis(GamepadAxis axis) const;
+    float get_gamepad_axis_delta(GamepadAxis axis) const;
+
+    // Action mapping API
     void bind_key(const std::string& action, Key key);
     void bind_mouse_button(const std::string& action, MouseButton btn);
+    void bind_gamepad_button(const std::string& action, GamepadButton btn);
     void unbind_action(const std::string& action);
 
     bool is_action_down(const std::string& action) const;
@@ -59,14 +68,22 @@ private:
     std::unordered_map<MouseButton, bool> prev_mouse_buttons_;
     std::unordered_map<MouseButton, bool> curr_mouse_buttons_;
 
+    std::unordered_map<GamepadButton, bool> prev_gamepad_buttons_;
+    std::unordered_map<GamepadButton, bool> curr_gamepad_buttons_;
+
     float mouse_dx_ = 0.0f;
     float mouse_dy_ = 0.0f;
     float scroll_y_ = 0.0f;
+
+    bool gamepad_connected_ = false;
+    float gamepad_axis_vals_[GAMEPAD_AXIS_COUNT] = {};
+    float gamepad_axis_prev_[GAMEPAD_AXIS_COUNT] = {};
 
     // action bindings
     struct Binding {
         std::vector<Key> keys;
         std::vector<MouseButton> mouse_buttons;
+        std::vector<GamepadButton> gamepad_buttons;
     };
 
     std::unordered_map<std::string, Binding> bindings_;

@@ -18,8 +18,8 @@ struct DrawData {
     vec3 min;
     uint meshId;
     vec3 max;
-    uint meshletStart;
-    uint meshletCount;
+    uint clusterStart;
+    uint clusterCount;
     uint pageBacked;
     uint pageIndex;
     uint visibilityOffset;
@@ -38,8 +38,8 @@ layout(std430, set = 0, binding = 2) buffer StatsBuffer {
 	uint visibleInstances;
     uint totalTriangles;
     uint visibleTriangles;
-    uint totalMeshlets;
-    uint visibleMeshlets;
+    uint totalClusters;
+    uint visibleClusters;
 } stats;
 
 layout(binding = 3) uniform sampler2D hizPyramid;
@@ -135,7 +135,7 @@ void main() {
 
 	atomicAdd(stats.totalInstances, 1);
     atomicAdd(stats.totalTriangles, data[idx].indexCount / 3);
-    atomicAdd(stats.totalMeshlets, data[idx].meshletCount);
+    atomicAdd(stats.totalClusters, data[idx].clusterCount);
 
     bool visible = is_visible(data[idx].min, data[idx].max);
 
@@ -148,6 +148,6 @@ void main() {
     if (visible) {
 		atomicAdd(stats.visibleInstances, 1);
         atomicAdd(stats.visibleTriangles, data[idx].indexCount / 3);
-        atomicAdd(stats.visibleMeshlets, data[idx].meshletCount);
+        atomicAdd(stats.visibleClusters, data[idx].clusterCount);
     }
 }

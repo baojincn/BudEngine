@@ -10,6 +10,7 @@
 #include "src/io/bud.io.hpp"
 #include "src/runtime/bud.engine.hpp"
 #include "src/runtime/bud.scene.io.hpp"
+#include <imgui.h>
 
 using namespace bud::game;
 
@@ -22,143 +23,40 @@ void TriangleApp::on_init(const AppConfig& config) {
 	bud::print("[TriangleApp] Initialized. Loading scene: {}", config.scene_file);
 
 	auto engine = get_engine();
-	auto asset_manager = engine->get_asset_manager();
 	auto renderer = engine->get_renderer();
-
-	streaming_manager = std::make_unique<bud::streaming::StreamingManager>(
-		asset_manager, &renderer->get_gpu_scene(), renderer, renderer->get_rhi());
-
-	renderer->set_streaming_manager(streaming_manager.get());
-
-	streaming_manager->set_asset_registered_callback([engine](const std::string& path, uint32_t mesh_id, const bud::math::AABB&, uint32_t root_group_index, uint32_t base_virtual_page) {
-		auto& s = engine->get_scene();
-		bud::scene::Entity e;
-		e.asset_path = path;
-		e.mesh_index = mesh_id;
-		e.material_index = 0;
-		e.is_active = true;
-		e.is_static = true;
-		e.transform = glm::mat4(1.0f);
-		e.root_group_index = root_group_index;
-		e.base_virtual_page = base_virtual_page;
-		s.entities.push_back(std::move(e));
-	});
 
 	// 1. Initial Render Config
 	bud::graphics::RenderConfig render_config;
-	render_config.shadow_bias_constant = 0.005f;
-	render_config.shadow_bias_slope = 1.25f;
+	// Raster-stage bias: applied while rendering INTO the shadow map.
+	// Units are vkCmdSetDepthBias factors (device depth units), NOT [0,1] fractions.
+	render_config.shadow_bias_constant = 2.0f;
+	render_config.shadow_bias_slope = 1.75f;
+	render_config.shadow_bias_clamp = 0.0f; // 0 == no clamping (Vulkan convention)
+	// Receiver-stage bias: applied when sampling the shadow map (lighting.glsl).
+	// Expressed in shadow texels, so it is invariant to cascade size and map resolution.
+	render_config.shadow_normal_offset_texels = 1.0f;
+	render_config.shadow_receiver_bias_texels = 1.5f;
 	render_config.cascade_count = 4;
 	render_config.cascade_split_lambda = 0.5;
 	render_config.debug_cascades = false;
-	// CPU-driven path: page-backed streaming is validated via the CPU indirect
-	// path (GPU-driven meshlet rendering would need per-page meshlet GPU data
-	// that streaming does not upload yet).
 	render_config.enable_virtual_geometry = true;
-	render_config.enable_mesh_shader = true;
+	render_config.enable_mesh_shader = false;
 	renderer->set_config(render_config);
 
-	// 2. Load Scene Data-Driven
+	// 2. Load Scene via Engine Data-Driven Pipeline
 	if (!config.scene_file.empty()) {
-		asset_manager->load_json_async(config.scene_file, [this, engine, renderer, asset_manager](const nlohmann::json& j) {
-			try {
-				auto& scene = engine->get_scene();
-				scene = j.get<bud::scene::Scene>();
-
-				if (streaming_manager) {
-					streaming_manager->set_unload_radius(scene.streaming_unload_radius * bud::core::units::m);
-				}
-				auto cur_cfg = renderer->get_config();
-				cur_cfg.lod_error_threshold_px = scene.lod_error_threshold_px;
-				renderer->set_config(cur_cfg);
-
-				bud::print("[TriangleApp] Scene file parsed. Entities found: {}, lod_threshold={}px, unload_radius={}m",
-					scene.entities.size(), scene.lod_error_threshold_px, scene.streaming_unload_radius);
-
-				auto is_vg_asset = [](const std::string& p) {
-					return p.ends_with(".budasset") || p.ends_with(".budmesh");
-				};
-
-				if (streaming_manager) {
-					streaming_manager->set_asset_registered_callback([this, engine, renderer](const std::string& path, uint32_t mesh_id, const bud::math::AABB& aabb, uint32_t root_group_index, uint32_t base_virtual_page) {
-						renderer->register_mesh_bounds(mesh_id, aabb);
-						auto& s = engine->get_scene();
-						for (auto& ent : s.entities) {
-							if (ent.asset_path == path && ent.render_type == bud::scene::RenderType::VirtualGeometry) {
-								ent.mesh_index = mesh_id;
-								ent.root_group_index = root_group_index;
-								ent.base_virtual_page = base_virtual_page;
-							}
-						}
-						bud::print("[TriangleApp] Virtual Geometry mesh registered: {} (mesh_id={}, root_group={}, base_page={})", path, mesh_id, root_group_index, base_virtual_page);
-					});
-				}
-
-				// Route Virtual Geometry assets through GPU page streaming;
-				// everything else (Translucent, Dynamic, etc.) loads as traditional mesh below.
-				std::unordered_set<std::string> unique_vg_paths;
-				for (auto& e : scene.entities) {
-					if (!e.asset_path.empty() && e.render_type == bud::scene::RenderType::VirtualGeometry) {
-						unique_vg_paths.insert(e.asset_path);
-						e.mesh_index = bud::asset::INVALID_INDEX;
-					}
-				}
-
-				if (streaming_manager) {
-					for (const auto& path : unique_vg_paths) {
-						streaming_manager->register_virtual_geometry_async(path);
-					}
-				}
-
-				int count = 0;
-				for (auto& e : scene.entities)
-					if (!e.asset_path.empty() && e.render_type != bud::scene::RenderType::VirtualGeometry)
-						++count;
-
-				pending_mesh_loads->store(count);
-
-				if (count == 0) {
-					bud::print("[TriangleApp] init finished");
-					return;
-				}
-
-				for (size_t i = 0; i < scene.entities.size(); ++i) {
-					const auto asset_path = scene.entities[i].asset_path;
-					if (asset_path.empty() || scene.entities[i].render_type == bud::scene::RenderType::VirtualGeometry) continue;
-
-					asset_manager->load_mesh_async(asset_path, [this, engine, renderer, pending_mesh = pending_mesh_loads, asset_path, i](bud::io::MeshData mesh) mutable {
-						auto mesh_handle = renderer->upload_mesh(mesh);
-
-						if (mesh_handle.is_valid()) {
-							auto& s = engine->get_scene();
-
-							if (i < s.entities.size() && s.entities[i].asset_path == asset_path) {
-								s.entities[i].mesh_index = mesh_handle.mesh_id;
-								s.entities[i].material_index = mesh_handle.material_id;
-							}
-							else {
-								// Fallback: find by asset_path
-								for (auto& ent : s.entities) {
-									if (ent.asset_path == asset_path) {
-										ent.mesh_index = mesh_handle.mesh_id;
-										ent.material_index = mesh_handle.material_id;
-										break;
-									}
-								}
-							}
-							bud::print("[TriangleApp] Loaded mesh: {}", asset_path);
-						}
-
-						if (pending_mesh->fetch_sub(1) == 1) {
-							bud::print("[TriangleApp] init finished");
-						}
-						});
-				}
+		engine->load_scene_async(config.scene_file, [this, engine, renderer]() {
+			auto& scene = engine->get_scene();
+			if (auto* sm = engine->get_streaming_manager()) {
+				sm->set_unload_radius(scene.streaming_unload_radius);
 			}
-			catch (const std::exception& e) {
-				bud::eprint("[TriangleApp] CRITICAL EXCEPTION during JSON parsing: {}", e.what());
-			}
-			});
+			auto cur_cfg = renderer->get_config();
+			cur_cfg.lod_error_threshold_px = scene.lod_error_threshold_px;
+			renderer->set_config(cur_cfg);
+
+			pending_mesh_loads->store(0);
+			bud::print("[TriangleApp] init finished");
+		});
 	}
 	else {
 		pending_mesh_loads->store(0);
@@ -171,36 +69,76 @@ void TriangleApp::on_update(float delta_time) {
 
 	if (engine->is_replay_active()) return;
 
-	if (streaming_manager) {
-		auto& cam = engine->get_scene().main_camera;
-		streaming_manager->update(bud::math::vec3(cam.position.x, cam.position.y, cam.position.z));
-	}
-
 	auto& input = bud::input::Input::get();
 	auto& scene = engine->get_scene();
 	auto& cam = scene.main_camera;
+	auto* controller = engine->get_character_controller();
+	auto* physics = engine->get_physics_scene();
 
-	if (input.is_key_down(bud::input::Key::W)) cam.process_keyboard(0, delta_time);
-	if (input.is_key_down(bud::input::Key::S)) cam.process_keyboard(1, delta_time);
-	if (input.is_key_down(bud::input::Key::A)) cam.process_keyboard(2, delta_time);
-	if (input.is_key_down(bud::input::Key::D)) cam.process_keyboard(3, delta_time);
+	static bool prev_v = false;
+	bool curr_v = input.is_key_down(bud::input::Key::V);
+	if (curr_v && !prev_v) {
+		if (cam.get_mode() == bud::scene::CameraMode::FreeFly)
+			cam.set_mode(bud::scene::CameraMode::ThirdPerson);
+		else
+			cam.set_mode(bud::scene::CameraMode::FreeFly);
+	}
+	prev_v = curr_v;
+
+	if (auto* sm = engine->get_streaming_manager()) {
+		sm->update(bud::math::vec3(cam.position.x, cam.position.y, cam.position.z));
+	}
+
+	// Character movement via CharacterController
+	if (controller && physics) {
+		bud::math::vec3 move_dir(0.0f);
+		if (input.is_key_down(bud::input::Key::W)) move_dir += cam.front;
+		if (input.is_key_down(bud::input::Key::S)) move_dir -= cam.front;
+		if (input.is_key_down(bud::input::Key::A)) move_dir -= cam.right;
+		if (input.is_key_down(bud::input::Key::D)) move_dir += cam.right;
+
+		if (input.is_gamepad_connected()) {
+			float lx = input.get_gamepad_axis(bud::input::GamepadAxis::LeftX);
+			float ly = input.get_gamepad_axis(bud::input::GamepadAxis::LeftY);
+			move_dir += cam.right * lx;
+			move_dir += cam.front * (-ly);
+		}
+
+		if (glm::length(move_dir) > 0.0f)
+			move_dir = glm::normalize(move_dir);
+
+		controller->set_velocity(move_dir * cam.movement_speed);
+		controller->update(delta_time);
+
+		// Sync camera from controller
+		if (cam.get_mode() == bud::scene::CameraMode::ThirdPerson) {
+			cam.target_position = controller->get_position();
+		} else {
+			cam.position = controller->get_eye_position();
+		}
+
+		// Gamepad right stick for camera rotation
+		if (input.is_gamepad_connected()) {
+			float rx = input.get_gamepad_axis(bud::input::GamepadAxis::RightX);
+			float ry = input.get_gamepad_axis(bud::input::GamepadAxis::RightY);
+			if (rx != 0.0f || ry != 0.0f)
+				cam.process_mouse_movement(rx * 300.0f * delta_time, ry * 300.0f * delta_time, true);
+		}
+	}
 
 	float dx, dy;
 	input.get_mouse_delta(dx, dy);
 
-	if (input.is_mouse_button_down(bud::input::MouseButton::Left)) {
+	const bool imgui_wants_mouse = ImGui::GetIO().WantCaptureMouse;
+
+	if (!imgui_wants_mouse && input.is_mouse_button_down(bud::input::MouseButton::Right)) {
 		if (dx != 0.0f || dy != 0.0f)
 			cam.process_mouse_movement(dx, dy);
-	}
-	else if (input.is_mouse_button_down(bud::input::MouseButton::Right)) {
-		if (dy != 0.0f)
-			cam.process_mouse_drag_zoom(dy);
 	}
 }
 
 void TriangleApp::on_shutdown() {
 	bud::print("[TriangleApp] Shutting down.");
-	streaming_manager.reset();
 }
 
 pybind11::array_t<uint8_t> TriangleApp::step(float dt) {

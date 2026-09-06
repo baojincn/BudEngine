@@ -270,6 +270,37 @@ std::vector<InternalCluster> simplify_cluster_set(
         }
     }
 
+    if (deduped_v.size() < 3 || deduped_i.size() < 3) {
+        if (deduped_v.empty() || deduped_i.empty()) return {};
+        InternalCluster cluster;
+        cluster.material_index = material_index;
+        cluster.level = level;
+        cluster.vertices = std::move(deduped_v);
+        cluster.indices = std::move(deduped_i);
+        cluster.lod_error = max_child_lod_error;
+        compute_cluster_bounds(cluster);
+        return { std::move(cluster) };
+    }
+
+    // Sanitize vertex attributes to guard against NaN, Inf, and zero-length normals
+    for (auto& v : deduped_v) {
+        for (int k = 0; k < 3; ++k) {
+            if (std::isnan(v.position[k]) || std::isinf(v.position[k])) v.position[k] = 0.0f;
+            if (std::isnan(v.normal[k]) || std::isinf(v.normal[k])) v.normal[k] = (k == 1 ? 1.0f : 0.0f);
+        }
+        for (int k = 0; k < 2; ++k) {
+            if (std::isnan(v.uv[k]) || std::isinf(v.uv[k])) v.uv[k] = 0.0f;
+        }
+        float n_len = std::sqrt(v.normal[0] * v.normal[0] + v.normal[1] * v.normal[1] + v.normal[2] * v.normal[2]);
+        if (n_len > 1e-4f) {
+            v.normal[0] /= n_len;
+            v.normal[1] /= n_len;
+            v.normal[2] /= n_len;
+        } else {
+            v.normal[0] = 0.0f; v.normal[1] = 1.0f; v.normal[2] = 0.0f;
+        }
+    }
+
     std::vector<unsigned int> simplified(deduped_i.size());
     std::vector<float> attrs(deduped_v.size() * 5);
     for (size_t i = 0; i < deduped_v.size(); ++i) {
@@ -279,16 +310,15 @@ std::vector<InternalCluster> simplify_cluster_set(
         attrs[i * 5 + 3] = deduped_v[i].normal[1];
         attrs[i * 5 + 4] = deduped_v[i].normal[2];
     }
-    // Attribute weights for QEM in SI meter units:
-    // UVs (indices 0, 1): 0.002f (~2mm displacement equivalent for UV seam stretch)
-    // Normals (indices 2, 3, 4): 0.005f (~5mm displacement equivalent for normal deviation, protecting sharp edges & curvature)
+    // Attribute weights for QEM:
     const float weights[5] = { 0.002f, 0.002f, 0.005f, 0.005f, 0.005f };
-    const float level_scale = 1.0f + 0.8f * static_cast<float>(level);
 
-    // Standard Unit: 1.0f == 1.0 m.
-    // Target 50% triangle reduction per level
-    size_t target_indices = std::max<size_t>(bud::asset::VG_MAX_CLUSTER_TRIANGLES * 3 / 2, deduped_i.size() / 2);
-    const float base_error = std::max(2.0_mm, group_radius * (0.003f + 0.005f * static_cast<float>(level)));
+    // Target 50% triangle reduction per level, strictly a multiple of 3 and strictly < deduped_i.size()
+    size_t target_indices = (deduped_i.size() / 2 / 3) * 3;
+    if (target_indices < 3) target_indices = 3;
+    if (target_indices >= deduped_i.size()) target_indices = (deduped_i.size() > 3) ? deduped_i.size() - 3 : 3;
+
+    const float rel_target_error = std::clamp(0.01f * (1.0f + 0.5f * static_cast<float>(level)), 1e-4f, 0.5f);
     float result_error = 0.0f;
 
     size_t simplified_count = meshopt_simplifyWithAttributes(
@@ -296,32 +326,44 @@ std::vector<InternalCluster> simplify_cluster_set(
         &deduped_v[0].position[0], deduped_v.size(), sizeof(bud::asset::Vertex),
         attrs.data(), sizeof(float) * 5, weights, 5,
         vertex_lock.data(),
-        target_indices, base_error, 0, &result_error);
+        target_indices, rel_target_error, 0, &result_error);
 
     if (simplified_count == 0 || simplified_count >= deduped_i.size()) {
-        // Retry with relaxed lock for higher levels
+        // Retry without vertex lock
         simplified_count = meshopt_simplifyWithAttributes(
             simplified.data(), deduped_i.data(), deduped_i.size(),
             &deduped_v[0].position[0], deduped_v.size(), sizeof(bud::asset::Vertex),
             attrs.data(), sizeof(float) * 5, weights, 5,
             nullptr,
-            target_indices, base_error * 2.0f, 0, &result_error);
+            target_indices, rel_target_error * 2.0f, 0, &result_error);
+    }
+
+    if (simplified_count == 0 || simplified_count >= deduped_i.size()) {
+        // Fallback to standard meshopt_simplify (position only)
+        simplified_count = meshopt_simplify(
+            simplified.data(), deduped_i.data(), deduped_i.size(),
+            &deduped_v[0].position[0], deduped_v.size(), sizeof(bud::asset::Vertex),
+            target_indices, rel_target_error * 2.0f, 0, &result_error);
+    }
+
+    if (simplified_count == 0 || simplified_count >= deduped_i.size()) {
+        // Fallback to sloppy simplifier if topology constraints prevented reduction
+        simplified_count = meshopt_simplifySloppy(
+            simplified.data(), deduped_i.data(), deduped_i.size(),
+            &deduped_v[0].position[0], deduped_v.size(), sizeof(bud::asset::Vertex),
+            nullptr,
+            target_indices, rel_target_error * 4.0f, &result_error);
     }
 
     if (simplified_count == 0) {
         simplified_count = deduped_i.size();
         std::copy(deduped_i.begin(), deduped_i.end(), simplified.begin());
         result_error = 0.0f;
+    } else {
+        simplified.resize(simplified_count);
     }
 
     // Convert meshopt normalized error to object-space error (cm) and scale with level.
-    // Calibrate geometric error step by scale/profile:
-    // Small/medium hero props (R < 2.5m, e.g. Lion, Vases, Columns):
-    //   Level 1: ~1.4 - 1.5 cm (LOD0 -> LOD1 transition around 6.5 - 7.0 meters)
-    //   Level 2: ~3.5 - 3.8 cm (LOD1 -> LOD2 transition around 16 - 18 meters)
-    // Large architecture (R >= 2.5m, e.g. Arches, Ceiling, Roof):
-    //   Level 1: ~1.8 - 2.0 cm (LOD0 -> LOD1 transition around 8.5 - 9.5 meters)
-    //   Level 2: ~4.5 - 5.0 cm (LOD1 -> LOD2 transition around 21 - 24 meters)
     float level_error_step;
     float max_level_error;
     if (group_radius < 250.0_cm) {

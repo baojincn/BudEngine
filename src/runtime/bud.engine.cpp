@@ -2,6 +2,7 @@
 #include <memory>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <print>
 
@@ -19,6 +20,7 @@
 #include "src/platform/crash_handler.hpp"
 
 #include "src/runtime/bud.engine.hpp"
+#include "src/runtime/bud.scene.builder.hpp"
 #include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
 
 #include <imgui.h>
@@ -38,15 +40,11 @@ namespace bud::engine {
 		bud::platform::set_crash_dump_root(virtual_file_system.get()->get_root_path().string().c_str());
 		bud::platform::install_crash_handler();
 
-		auto flags = engine_config.is_headless ? bud::platform::WindowFlags::Hidden : bud::platform::WindowFlags::Default;
-		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height, flags);
-
 		task_scheduler = std::make_unique<bud::threading::TaskScheduler>();
-
-		// Input manager for keyboard/mouse action mapping
 		input_manager = std::make_unique<bud::input::InputManager>();
 
-
+		auto flags = engine_config.is_headless ? bud::platform::WindowFlags::Hidden : bud::platform::WindowFlags::Default;
+		window = bud::platform::create_window(engine_config.name, engine_config.width, engine_config.height, flags);
 
 		int initial_width = 0;
 		int initial_height = 0;
@@ -82,6 +80,14 @@ namespace bud::engine {
 
 		renderer = std::make_unique<bud::graphics::Renderer>(rhi.get(), asset_manager.get(), task_scheduler.get());
 
+		streaming_manager = std::make_unique<bud::streaming::StreamingManager>(
+			asset_manager.get(),
+			&renderer->get_gpu_scene(),
+			renderer.get(),
+			rhi.get()
+		);
+		renderer->set_streaming_manager(streaming_manager.get());
+
 		render_scenes.resize(engine_config.inflight_frame_count);
 
 		camera_sequencer = bud::scene::CameraSequencer(asset_manager.get(), virtual_file_system.get());
@@ -92,9 +98,12 @@ namespace bud::engine {
 		task_scheduler->init_main_thread_worker();
 
 		// Register default action bindings
-		input_manager->bind_key("ToggleDebug", bud::input::Key::F3);
+		input_manager->bind_key("ToggleDebug", bud::input::Key::F1);
 		input_manager->bind_key("ToggleClusterVis", bud::input::Key::F4);
 		input_manager->bind_key("ToggleWireframe", bud::input::Key::F5);
+		input_manager->bind_key("ToggleDebugCascades", bud::input::Key::F6);
+		input_manager->bind_key("ToggleDebugPhysics", bud::input::Key::F3);
+		// F2 is deliberately left unbound (reserved for a future hotkey).
 		input_manager->bind_key("TogglePause", bud::input::Key::Space);
 		input_manager->bind_key("ToggleRecord", bud::input::Key::F8);
 		input_manager->bind_key("TogglePlayback", bud::input::Key::F9);
@@ -143,6 +152,24 @@ namespace bud::engine {
 			}
 		});
 
+		input_manager->register_action_callback("ToggleDebugCascades", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				auto config = renderer->get_config();
+				config.debug_cascades = !config.debug_cascades;
+				renderer->set_config(config);
+				bud::print("[CSM] Debug cascades: {}", config.debug_cascades ? "ON" : "OFF");
+			}
+		});
+
+		input_manager->register_action_callback("ToggleDebugPhysics", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				auto config = renderer->get_config();
+				config.debug_physics = !config.debug_physics;
+				renderer->set_config(config);
+				bud::print("[Physics] Debug physics: {}", config.debug_physics ? "ON" : "OFF");
+			}
+		});
+
 		input_manager->register_action_callback("TogglePause", [this]() {
 			camera_sequencer.toggle_pause();
 		});
@@ -176,6 +203,7 @@ namespace bud::engine {
 			task_scheduler->pump_main_thread_tasks();
 		}
 
+		streaming_manager.reset();
 		asset_manager.reset();
 		renderer.reset();
 
@@ -215,8 +243,13 @@ namespace bud::engine {
 				if (perform_game_logic) {
 					bud::threading::Counter logic_counter;
 					task_scheduler->spawn("GameLogic", [&]() {
+						if (physics_scene) {
+							physics_scene->step((float)fixed_dt);
+							update_physics_debug_overlay();
+						}
 						perform_game_logic((float)fixed_dt);
 						camera_sequencer.update((float)fixed_dt, scene.main_camera);
+						scene.main_camera.update((float)fixed_dt);
 					}, &logic_counter);
 					task_scheduler->wait_for_counter(logic_counter);
 				}
@@ -248,6 +281,47 @@ namespace bud::engine {
 		rhi->wait_idle();
 	}
 
+	// Wireframe box outline for every body in the physics SoA, handed to the
+	// PhysicsDebugPass. Runs on the logic thread right after the physics step;
+	// the cross-thread handoff itself is guarded inside the pass.
+	void BudEngine::update_physics_debug_overlay() {
+		if (!physics_scene || !renderer) return;
+		if (!renderer->get_config().debug_physics) return;
+
+		const size_t n = physics_scene->size();
+		auto& pos = physics_scene->body_positions;
+		auto& he = physics_scene->body_half_extents;
+
+		// 12 box edges as a 24 vertex line list.
+		static const int box_edges[24] = {
+				0,1, 1,2, 2,3, 3,0, 4,5, 5,6, 6,7, 7,4,
+				0,4, 1,5, 2,6, 3,7
+		};
+
+		std::vector<bud::graphics::PhysicsDebugVertex> dbg_verts;
+		dbg_verts.reserve(n * 24);
+		for (size_t i = 0; i < n && i < pos.size() && i < he.size(); ++i) {
+			auto c = pos[i];
+			auto h = he[i];
+			bud::math::vec3 corners[8] = {
+				c + bud::math::vec3(-h.x,-h.y,-h.z),
+				c + bud::math::vec3( h.x,-h.y,-h.z),
+				c + bud::math::vec3( h.x, h.y,-h.z),
+				c + bud::math::vec3(-h.x, h.y,-h.z),
+				c + bud::math::vec3(-h.x,-h.y, h.z),
+				c + bud::math::vec3( h.x,-h.y, h.z),
+				c + bud::math::vec3( h.x, h.y, h.z),
+				c + bud::math::vec3(-h.x, h.y, h.z),
+			};
+			for (int e = 0; e < 24; ++e) {
+				auto& p = corners[box_edges[e]];
+				dbg_verts.push_back({{p.x, p.y, p.z}, {0.0f, 1.0f, 0.0f}});
+			}
+		}
+		renderer->update_physics_debug_vertices(dbg_verts);
+	}
+
+
 	void BudEngine::step(float fixed_dt, GameLogic perform_game_logic) {
 		task_scheduler->pump_main_thread_tasks();
 		handle_events();
@@ -256,8 +330,13 @@ namespace bud::engine {
 		if (perform_game_logic) {
 			bud::threading::Counter logic_counter;
 			task_scheduler->spawn("GameLogic_Step", [&]() {
+				if (physics_scene) {
+					physics_scene->step((float)fixed_dt);
+					update_physics_debug_overlay();
+				}
 				perform_game_logic((float)fixed_dt);
 				camera_sequencer.update((float)fixed_dt, scene.main_camera);
+				scene.main_camera.update((float)fixed_dt);
 			}, &logic_counter);
 			task_scheduler->wait_for_counter(logic_counter);
 		}
@@ -351,7 +430,9 @@ namespace bud::engine {
 						entity.material_index,
 						entity.is_static,
 						entity.root_group_index,
-						entity.base_virtual_page
+						entity.base_virtual_page,
+						entity.is_cast_shadow,
+						entity.is_receive_shadow
 					);
 				}
 			},
@@ -359,6 +440,78 @@ namespace bud::engine {
 		);
 
 		task_scheduler->wait_for_counter(extract_scene_counter);
+
+		// --- Backdrop discovery for full-scene shadow casters ---------------------
+		// Feeding the cascades the whole scene (RenderConfig::shadow_full_scene_casters)
+		// is the correct CSM model: an object outside the primary camera frustum must
+		// still be rasterized into the cascade it falls in, otherwise shadows break the
+		// moment the player looks up or down. What that surfaces is authored backdrop
+		// geometry - a thin lid lying over the whole model - which then blocks the sun
+		// from everything. Those objects need "is_cast_shadow": false in the scene file.
+		// The runtime instance index is NOT a usable key for that: add_instance() above
+		// is driven by a ParallelFor through an atomic counter, so instance order is not
+		// stable. Report by asset_path instead, which is exactly what the scene file
+		// stores. Re-printing is suppressed by a signature of the current candidate set.
+		{
+			std::vector<bud::math::AABB> boxes;
+			std::vector<size_t> box_entity;                   // boxes[k] <- logic_entities[box_entity[k]]
+			std::vector<std::pair<float, size_t>> by_footprint;   // (x*z footprint, box slot k)
+			boxes.reserve(logic_entities.size());
+			box_entity.reserve(logic_entities.size());
+			by_footprint.reserve(logic_entities.size());
+			bud::math::vec3 bmin(1e30f, 1e30f, 1e30f), bmax(-1e30f, -1e30f, -1e30f);
+
+			for (size_t i = 0; i < logic_entities.size(); ++i) {
+				const auto& entity = logic_entities[i];
+				if (!entity.is_active || entity.mesh_index == bud::asset::INVALID_INDEX)
+					continue;
+				if (entity.mesh_index >= mesh_bounds.size())
+					continue;
+				const auto wb = mesh_bounds[entity.mesh_index].transform(entity.transform);
+				bmin.x = std::min(bmin.x, wb.min.x); bmin.y = std::min(bmin.y, wb.min.y); bmin.z = std::min(bmin.z, wb.min.z);
+				bmax.x = std::max(bmax.x, wb.max.x); bmax.y = std::max(bmax.y, wb.max.y); bmax.z = std::max(bmax.z, wb.max.z);
+				const float fp = (wb.max.x - wb.min.x) * (wb.max.z - wb.min.z);
+				by_footprint.emplace_back(fp, boxes.size());
+				boxes.push_back(wb);
+				box_entity.push_back(i);
+			}
+
+			static std::string s_last_report;
+			if (!boxes.empty() && bmax.x > bmin.x) {
+				const float scene_fp = std::max((bmax.x - bmin.x) * (bmax.z - bmin.z), 1e-3f);
+				const float mid_y = (bmin.y + bmax.y) * 0.5f;
+
+				std::sort(by_footprint.begin(), by_footprint.end(),
+					[](const auto& a, const auto& b) { return a.first > b.first; });
+
+				std::vector<size_t> cands;
+				std::string signature;
+				for (const auto& [fp, slot] : by_footprint) {
+					if (fp < 0.25f * scene_fp) break;          // sorted descending: rest are smaller
+					const auto& wb = boxes[slot];
+					// Only something whose *lowest* point is already above mid-height can
+					// lid the scene; a floor or a plinth cannot.
+					if (wb.min.y < mid_y) continue;
+					cands.push_back(slot);
+					signature += logic_entities[box_entity[slot]].asset_path;
+					signature += logic_entities[box_entity[slot]].is_cast_shadow ? "1;" : "0;";
+				}
+
+				if (!cands.empty() && signature != s_last_report) {
+					s_last_report = signature;
+					bud::print("[CSM] backdrop candidates (footprint >= 25% of scene {:.1f}m2, entirely above y={:.2f}) - add \"is_cast_shadow\": false to these in the scene file:",
+						scene_fp, mid_y);
+					for (const size_t slot : cands) {
+						const auto& entity = logic_entities[box_entity[slot]];
+						const auto& wb = boxes[slot];
+						const float fp = (wb.max.x - wb.min.x) * (wb.max.z - wb.min.z);
+						bud::print("[CSM]   name={} asset={} footprint={:.1f}m2 ({:.0f}%) thickness={:.2f}m y=[{:.2f},{:.2f}] x=[{:.1f},{:.1f}] z=[{:.1f},{:.1f}] is_cast_shadow={}",
+							entity.name, entity.asset_path, fp, 100.0f * fp / scene_fp, wb.max.y - wb.min.y,
+							wb.min.y, wb.max.y, wb.min.x, wb.max.x, wb.min.z, wb.max.z, entity.is_cast_shadow);
+					}
+				}
+			}
+		}
 
 		FrameMark;
 	}
@@ -407,6 +560,7 @@ namespace bud::engine {
 			view_snapshot.proj_matrix = bud::math::perspective_vk(scene.main_camera.zoom, aspect, near_plane, far_plane);
 		}
 		view_snapshot.camera_position = scene.main_camera.position;
+		view_snapshot.fov = scene.main_camera.zoom;	// was never assigned: SceneView::fov read as garbage
 		view_snapshot.near_plane = near_plane;
 		view_snapshot.far_plane = far_plane;
 
@@ -484,9 +638,43 @@ namespace bud::engine {
 			};
 			float current_ssgi_blend = renderer->get_config().ssgi_temporal_blend;
 
-			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_ao_mode, current_ao_mode, set_ssr_enable, current_ssr_enable, set_ssgi_enable, current_ssgi_enable, set_ssgi_intensity, current_ssgi_intensity, set_ssgi_blend, current_ssgi_blend);
+			// Directional-light editing (mutates the runtime scene on the main thread; the
+			// light values are copied into view_snapshot at the top of this frame, so HUD
+			// changes take effect from the next frame on). Direction is exposed as elevation /
+			// azimuth in degrees; angle-driven editing can never produce a zero vector, which
+			// keeps the per-frame normalize() and the CSM light-space matrices safe.
+			const auto light_dir_len = bud::math::length(scene.directional_light.direction);
+			const float current_light_elevation = (light_dir_len > 1e-6f)
+				? bud::math::degrees(std::asin(scene.directional_light.direction.y / light_dir_len))
+				: 0.0f;
+			const float current_light_azimuth = (light_dir_len > 1e-6f)
+				? std::min(std::fmod(bud::math::degrees(std::atan2(scene.directional_light.direction.x, scene.directional_light.direction.z)) + 360.0f, 360.0f), 359.0f)
+				: 0.0f;
 
-            ImGui::Render();
+			auto set_light_elevation = [this](float elevation_deg) {
+				auto& dir = scene.directional_light.direction;
+				const float azimuth_rad = std::atan2(dir.x, dir.z); // keep current azimuth
+				const float elevation_rad = bud::math::radians(elevation_deg);
+				dir = bud::math::vec3(std::cos(elevation_rad) * std::sin(azimuth_rad),
+					std::sin(elevation_rad),
+					std::cos(elevation_rad) * std::cos(azimuth_rad));
+			};
+			auto set_light_azimuth = [this](float azimuth_deg) {
+				auto& dir = scene.directional_light.direction;
+				const float len = bud::math::length(dir);
+				const float elevation_rad = (len > 1e-6f) ? std::asin(dir.y / len) : 0.0f; // keep current elevation
+				const float azimuth_rad = bud::math::radians(azimuth_deg);
+				dir = bud::math::vec3(std::cos(elevation_rad) * std::sin(azimuth_rad),
+					std::sin(elevation_rad),
+					std::cos(elevation_rad) * std::cos(azimuth_rad));
+			};
+			auto set_light_color = [this](bud::math::vec3 color) { scene.directional_light.color = color; };
+			auto set_light_intensity = [this](float v) { scene.directional_light.intensity = v; };
+			auto set_ambient_strength = [this](float v) { scene.ambient_strength = v; };
+
+			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_ao_mode, current_ao_mode, set_ssr_enable, current_ssr_enable, set_ssgi_enable, current_ssgi_enable, set_ssgi_intensity, current_ssgi_intensity, set_ssgi_blend, current_ssgi_blend, set_light_elevation, current_light_elevation, set_light_azimuth, current_light_azimuth, set_light_color, scene.directional_light.color, set_light_intensity, scene.directional_light.intensity, set_ambient_strength, scene.ambient_strength);
+
+			ImGui::Render();
 
             renderer->update_ui_draw_data(ImGui::GetDrawData());
         }
@@ -496,5 +684,231 @@ namespace bud::engine {
 			renderer->render(render_scenes[render_scene_index], view_snapshot);
 			render_inflight_index.store(BudEngine::invalid_render_index, std::memory_order_release);
 		}, &render_task_counter);
+	}
+
+	bool BudEngine::load_scene_async(const std::string& scene_path, std::function<void()> on_finished) {
+		if (!bud::scene::SceneBuilder::load_scene_from_file(scene_path, scene)) {
+			bud::eprint("[BudEngine] Failed to load scene file: {}", scene_path);
+			if (on_finished)
+				on_finished();
+			return false;
+		}
+
+		// Initialize physics scene.
+		// Tear the previous scene down FIRST: ~PhysicsScene unregisters the Jolt
+		// types and deletes the process-wide JPH::Factory, so an old scene that is
+		// destroyed after a new one has been initialised would leave the new scene
+		// running without a factory (scene reload = broken/empty physics).
+		character_controller.reset();
+		physics_scene.reset();
+		physics_scene = std::make_unique<bud::physics::PhysicsScene>();
+		physics_scene->init();
+
+		bud::print("[BudEngine] Physics scene initialized, ready for bodies.");
+
+		// Create character controller
+		character_controller = std::make_unique<bud::scene::CharacterController>();
+		character_controller->init(physics_scene.get(), scene.main_camera.position);
+
+		// Wrap on_finished to create physics bodies after mesh bounds are loaded
+		auto wrapped_finish = [this, cb = std::move(on_finished)]() {
+			auto bounds = renderer->get_mesh_bounds_snapshot();
+			int skipped = 0, added = 0, dropped = 0, giant = 0, shell_faces = 0;
+
+			// First pass: collect world-space AABB candidates and the bounds they span.
+			struct StaticAABB {
+				const std::string* name;
+				bud::math::vec3 center;
+				bud::math::vec3 half;
+			};
+			std::vector<StaticAABB> candidates;
+			candidates.reserve(scene.entities.size());
+			bud::math::vec3 scene_min(1e30f), scene_max(-1e30f);
+			for (auto& entity : scene.entities) {
+				if (!entity.is_active || !entity.enable_physics || !entity.is_static) { skipped++; continue; }
+				if (entity.mesh_index == 0xFFFFFFFF || entity.mesh_index >= bounds.size()) { skipped++; continue; }
+				auto world_aabb = bounds[entity.mesh_index].transform(entity.transform);
+				auto s = world_aabb.size();
+				if (s.x < 0.001f && s.y < 0.001f && s.z < 0.001f) { skipped++; continue; }
+				auto c = world_aabb.center();
+				auto half = s * 0.5f;
+				candidates.push_back({ &entity.name, c, half });
+				scene_min = bud::math::vec3(std::min(scene_min.x, c.x - half.x),
+				                            std::min(scene_min.y, c.y - half.y),
+				                            std::min(scene_min.z, c.z - half.z));
+				scene_max = bud::math::vec3(std::max(scene_max.x, c.x + half.x),
+				                            std::max(scene_max.y, c.y + half.y),
+				                            std::max(scene_max.z, c.z + half.z));
+			}
+
+			const bud::math::vec3 scene_span = scene_max - scene_min;
+			const float scene_volume = std::max(scene_span.x * scene_span.y * scene_span.z, 1e-6f);
+
+			// Biggest first, so the level proxies can be read straight off the log.
+			std::sort(candidates.begin(), candidates.end(),
+			          [](const StaticAABB& a, const StaticAABB& b) {
+			             return a.half.x * a.half.y * a.half.z > b.half.x * b.half.y * b.half.z;
+			          });
+
+			// ---- how an entity world-AABB becomes a collider --------------------------
+			// A solid box is only a faithful proxy when the mesh is box-like, so classify
+			// each candidate by SHAPE instead of by size alone:
+			//  * thin along its smallest axis  -> it is a slab: floor, ceiling, wall, ramp.
+			//    Keep one solid box; this is exactly what must block the character.
+			//  * small in volume               -> a chunky prop (column, statue, stairs).
+			//    Keep one solid box.
+			//  * big AND thick                 -> a building / facade / courtyard shell. As a
+			//    solid box it fills the interior and welds the character (Jolt cannot push a
+			//    capsule out of a 15 m block), so emit it as a HOLLOW shell of 6 thin slabs:
+			//    the floor, the ceiling and the surrounding walls stay colliders while the
+			//    interior remains walkable.
+			constexpr float kMaxSlabThickness   = 2.5f;  // min extent at/under this = slab
+			constexpr float kMaxPropVolume      = 30.0f; // volume at/under this = prop
+			constexpr float kShellSlabThickness = 0.5f;  // thickness of the 6 shell faces
+			constexpr bool  kShellBigThickBoxes = true;  // false = keep them solid (investigation)
+
+			auto add_static_box = [&](const bud::math::vec3& center, const bud::math::vec3& half) -> bool {
+				bud::physics::RigidBodyDesc desc;
+				desc.motion_type = bud::physics::MotionType::Static;
+				desc.shape.type = bud::physics::ShapeType::Box;
+				desc.shape.half_extent = half;
+				desc.position = center;
+				// add_rigid_body() returns an invalid handle when the SoA storage is full;
+				// propagate that so the log can never report phantom bodies again.
+				return physics_scene->add_rigid_body(desc).is_valid();
+			};
+
+			for (const auto& cand : candidates) {
+				const float volume = 8.0f * cand.half.x * cand.half.y * cand.half.z;
+				const bud::math::vec3 size = cand.half * 2.0f;
+				const float min_extent = std::min({ size.x, size.y, size.z });
+				const float pct_of_scene = 100.0f * volume / scene_volume;
+				const bool is_slab  = min_extent <= kMaxSlabThickness;
+				const bool is_prop  = volume <= kMaxPropVolume;
+
+				if (!is_slab && !is_prop) {
+					giant++;
+					const char* name = cand.name ? cand.name->c_str() : "?";
+					if (!kShellBigThickBoxes) {
+						bud::print("[Physics] big+thick AABB '{}' size=({:.1f} x {:.1f} x {:.1f}) m center=({:.1f}, {:.1f}, {:.1f}) kept SOLID {:.1f}% of scene",
+						           name, size.x, size.y, size.z, cand.center.x, cand.center.y, cand.center.z, pct_of_scene);
+					} else {
+						// Hollow shell: 6 faces, each kShellSlabThickness deep, flush with the
+						// outside of the AABB so the walkable volume is never made smaller.
+						const float t  = std::min(kShellSlabThickness, min_extent * 0.25f);
+						const float ht = t * 0.5f;
+						const bud::math::vec3& c = cand.center;
+						const bud::math::vec3& h = cand.half;
+						add_static_box({ c.x + (h.x - ht), c.y, c.z },           { ht,  h.y,  h.z  });
+						add_static_box({ c.x - (h.x - ht), c.y, c.z },           { ht,  h.y,  h.z  });
+						add_static_box({ c.x, c.y + (h.y - ht), c.z },           { h.x, ht,    h.z });
+						add_static_box({ c.x, c.y - (h.y - ht), c.z },           { h.x, ht,    h.z });
+						add_static_box({ c.x, c.y, c.z + (h.z - ht) },           { h.x, h.y,   ht  });
+						add_static_box({ c.x, c.y, c.z - (h.z - ht) },           { h.x, h.y,   ht  });
+						shell_faces += 6;
+						bud::print("[Physics] big+thick AABB '{}' size=({:.1f} x {:.1f} x {:.1f}) m center=({:.1f}, {:.1f}, {:.1f}) -> hollow shell of 6 faces (t={:.2f} m, {:.1f}% of scene)",
+						           name, size.x, size.y, size.z, c.x, c.y, c.z, t, pct_of_scene);
+						continue;
+					}
+				}
+
+				if (add_static_box(cand.center, cand.half)) added++; else dropped++;
+			}
+
+			bud::print("> physics: static_aabb solid_boxes={}, big+thick={} -> {} shell faces, dropped={}, skipped={}, scene_bodies={} <",
+			           added, giant, shell_faces, dropped, skipped, physics_scene->size());
+
+			// Never start the run welded inside geometry.
+			if (character_controller && physics_scene->size() > 0) {
+				const int stuck = character_controller->unstick_from(physics_scene->body_positions,
+				                                                     physics_scene->body_half_extents);
+				if (stuck != 0)
+					bud::print("[Physics] character spawn overlapped {} static AABB(s) -> re-seeded {}",
+					           stuck < 0 ? -stuck : stuck, stuck < 0 ? "FAILED (still overlapped)" : "to a free spot above");
+			}
+		};
+
+		load_scene_resources_async(wrapped_finish);
+		return true;
+	}
+
+	void BudEngine::load_scene_resources_async(std::function<void()> on_finished) {
+		std::unordered_set<std::string> unique_asset_paths;
+		for (auto& e : scene.entities) {
+			if (!e.asset_path.empty()) {
+				unique_asset_paths.insert(e.asset_path);
+				e.mesh_index = bud::asset::INVALID_INDEX;
+			}
+		}
+
+		if (unique_asset_paths.empty()) {
+			if (on_finished)
+				on_finished();
+			return;
+		}
+
+		auto pending_count = std::make_shared<std::atomic<int>>(static_cast<int>(unique_asset_paths.size()));
+		auto finish = std::make_shared<std::function<void()>>(std::move(on_finished));
+
+		if (streaming_manager) {
+			// VG assets: streaming manager's callback sets mesh_index and decrements pending_count.
+			streaming_manager->set_asset_registered_callback([this, pending_count, finish](const std::string& path, uint32_t mesh_id, const bud::math::AABB& aabb, uint32_t root_group_index, uint32_t base_virtual_page) {
+				renderer->register_mesh_bounds(mesh_id, aabb);
+				for (auto& ent : scene.entities) {
+					if (ent.asset_path == path) {
+						ent.mesh_index = mesh_id;
+						ent.root_group_index = root_group_index;
+						ent.base_virtual_page = base_virtual_page;
+					}
+				}
+				if (pending_count->fetch_sub(1) == 1) {
+					bud::print("[BudEngine] Scene resources fully loaded and dispatched ({} entities)", scene.entities.size());
+					if (*finish) (*finish)();
+				}
+			});
+
+			// Non-VG assets: load via traditional mesh path (no Virtual Geometry chunk).
+			streaming_manager->set_non_vg_asset_callback([this, pending_count, finish, asset_manager = this->asset_manager.get()](const std::string& path) {
+				asset_manager->load_mesh_async(path, [this, pending_count, finish, path](bud::io::MeshData mesh) mutable {
+					auto mesh_handle = renderer->upload_mesh(mesh);
+					if (mesh_handle.is_valid()) {
+						for (auto& ent : scene.entities) {
+							if (ent.asset_path == path) {
+								ent.mesh_index = mesh_handle.mesh_id;
+								ent.material_index = mesh_handle.material_id;
+							}
+						}
+					}
+					if (pending_count->fetch_sub(1) == 1) {
+						bud::print("[BudEngine] Scene resources fully loaded and dispatched ({} entities)", scene.entities.size());
+						if (*finish) (*finish)();
+					}
+				});
+			});
+
+			for (const auto& path : unique_asset_paths) {
+				streaming_manager->register_virtual_geometry_async(path);
+			}
+		}
+		else {
+			// No streaming manager: fallback to traditional mesh loading for all assets.
+			for (const auto& asset_path : unique_asset_paths) {
+				asset_manager->load_mesh_async(asset_path, [this, pending_count, finish, asset_path](bud::io::MeshData mesh) mutable {
+					auto mesh_handle = renderer->upload_mesh(mesh);
+					if (mesh_handle.is_valid()) {
+						for (auto& ent : scene.entities) {
+							if (ent.asset_path == asset_path) {
+								ent.mesh_index = mesh_handle.mesh_id;
+								ent.material_index = mesh_handle.material_id;
+							}
+						}
+					}
+					if (pending_count->fetch_sub(1) == 1) {
+						bud::print("[BudEngine] Scene resources fully loaded and dispatched ({} entities) [fallback]", scene.entities.size());
+						if (*finish) (*finish)();
+					}
+				});
+			}
+		}
 	}
 } // namespace bud::engine

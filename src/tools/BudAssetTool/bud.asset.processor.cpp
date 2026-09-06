@@ -1,4 +1,4 @@
-#include "bud.asset.processor.hpp"
+﻿#include "bud.asset.processor.hpp"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -2005,7 +2005,8 @@ bool bud::tool::AssetProcessor::process_gltf_to_budnanite(const std::string& inp
     // 材质与纹理表（与 .budmesh 路径一致，按 aiMaterial 索引对齐）
     std::vector<asset::MaterialDescriptor> materials;
     std::vector<std::string> texture_paths;
-    texture_paths.push_back("data/textures/default.png");
+	const std::string default_texture_path = "Content/Textures/default.png";
+    texture_paths.push_back(default_texture_path);
     {
         std::string input_path_str = std::string(input_path);
         std::string base_dir = "";

@@ -5,6 +5,7 @@
 #include "../cache/asset_cache.hpp"
 #include "../cache/asset_registry.hpp"
 #include "../core/support.hpp"
+#include "src/runtime/bud.scene.builder.hpp"
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -15,13 +16,107 @@
 
 namespace bud::asset_pipeline {
 
+namespace {
+    std::string resolve_scene_input_path(const std::string& input_path) {
+        if (input_path.empty())
+            return input_path;
+        if (std::filesystem::exists(input_path))
+            return input_path;
+
+        std::filesystem::path p(input_path);
+        if (!p.has_extension()) {
+            if (std::filesystem::exists(input_path + ".json"))
+                return input_path + ".json";
+            if (std::filesystem::exists(input_path + ".budscene"))
+                return input_path + ".budscene";
+        }
+
+        if (!p.has_parent_path()) {
+            std::vector<std::string> candidates;
+            if (p.has_extension()) {
+                candidates.push_back((std::filesystem::path("Content") / input_path).generic_string());
+                candidates.push_back((std::filesystem::path("Content/Scenes") / input_path).generic_string());
+            } else {
+                candidates.push_back((std::filesystem::path("Content") / (input_path + ".json")).generic_string());
+                candidates.push_back((std::filesystem::path("Content/Scenes") / (input_path + ".budscene")).generic_string());
+                candidates.push_back((std::filesystem::path("Content/Scenes") / (input_path + ".json")).generic_string());
+                candidates.push_back((std::filesystem::path("Content/Scenes") / (input_path + ".budscene")).generic_string());
+                candidates.push_back((std::filesystem::path("Content") / input_path).generic_string());
+            }
+
+            for (const auto& cand : candidates) {
+                if (std::filesystem::exists(cand))
+                    return cand;
+            }
+
+            return (std::filesystem::path("Content") / (p.has_extension() ? input_path : (input_path + ".json"))).generic_string();
+        }
+
+        return input_path;
+    }
+
+    RawMesh extract_submesh(const RawMesh& source_mesh, size_t sub_idx) {
+        const auto& sub = source_mesh.submeshes[sub_idx];
+        RawMesh out;
+        out.source_path = source_mesh.source_path;
+        std::string sname = sub.name.empty() ? ("submesh_" + std::to_string(sub_idx)) : sub.name;
+
+        std::unordered_map<uint32_t, uint32_t> index_remap;
+        out.indices.reserve(sub.index_count);
+        out.vertices.reserve(sub.index_count);
+
+        for (uint32_t i = 0; i < sub.index_count; ++i) {
+            uint32_t old_idx = source_mesh.indices[sub.index_offset + i];
+            auto it = index_remap.find(old_idx);
+            if (it != index_remap.end()) {
+                out.indices.push_back(it->second);
+            } else {
+                uint32_t new_idx = static_cast<uint32_t>(out.vertices.size());
+                index_remap[old_idx] = new_idx;
+                out.vertices.push_back(source_mesh.vertices[old_idx]);
+                out.indices.push_back(new_idx);
+            }
+        }
+
+        RawSubmesh out_sub;
+        out_sub.name = sname;
+        out_sub.index_offset = 0;
+        out_sub.index_count = static_cast<uint32_t>(out.indices.size());
+        out_sub.material_index = 0;
+        out.submeshes.push_back(out_sub);
+
+        // Copy only the material for this submesh.
+        // Rebuild the texture list to contain only the paths referenced by this
+        // material so MeshBuilder assigns correct 0-based texture indices into
+        // the per-asset texture string table stored in the budasset.
+        if (sub.material_index < source_mesh.materials.size()) {
+            RawMaterial mat = source_mesh.materials[sub.material_index];
+
+            auto add_tex = [&](const std::string& path) {
+                if (path.empty()) return;
+                if (std::find(out.textures.begin(), out.textures.end(), path) == out.textures.end())
+                    out.textures.push_back(path);
+            };
+            add_tex(mat.base_color_texture_path);
+            add_tex(mat.normal_texture_path);
+            add_tex(mat.metallic_roughness_texture_path);
+            add_tex(mat.emissive_texture_path);
+
+            out.materials.push_back(std::move(mat));
+        }
+
+        out.compute_bounds();
+        return out;
+    }
+}
+
 bool CascadeBuilder::build_package_from_raw(
     const RawMesh& raw_mesh,
     const std::string& output_package_dir,
     const CascadeBuildOptions& options) {
 
     auto t_start = std::chrono::steady_clock::now();
-    std::filesystem::path src_p(raw_mesh.source_path.empty() ? "Mesh" : raw_mesh.source_path);
+    std::filesystem::path src_p(raw_mesh.source_path.empty() ? output_package_dir : raw_mesh.source_path);
     std::string stem = src_p.stem().string();
 
     support::log_info("[BudAssetPipeline] Starting Cascade Package Build for: " + stem + " -> " + output_package_dir);
@@ -145,50 +240,161 @@ bool CascadeBuilder::build_package_from_raw(
         }
     }
 
-    // 3. Mesh
-    std::string out_mesh_path = (mesh_dir / (stem + ".budasset")).generic_string();
-    std::string temp_raw = (options.cache_root + "/" + stem + "_temp.rawmesh");
-    if (options.scale != 1.0f && options.scale > 0.0f) {
-        for (auto& v : cooked_mesh.vertices) {
-            v.position[0] *= options.scale;
-            v.position[1] *= options.scale;
-            v.position[2] *= options.scale;
+    // 3. Meshes (Decomposed per submesh)
+    std::vector<bud::scene::Entity> entities;
+    if (cooked_mesh.submeshes.size() > 1) {
+        entities.reserve(cooked_mesh.submeshes.size());
+        for (size_t sub_idx = 0; sub_idx < cooked_mesh.submeshes.size(); ++sub_idx) {
+            const auto& sub = cooked_mesh.submeshes[sub_idx];
+            // Human-readable name for the entity (may have duplicates in FBX instanced meshes)
+            std::string sname_readable = sub.name.empty() ? (stem + "_submesh_" + std::to_string(sub_idx)) : sub.name;
+            // File name MUST be unique: always append sub_idx to avoid collisions when multiple
+            // FBX nodes reference the same aiMesh (same sub.name) with different baked transforms.
+            std::string sname = sname_readable + "_" + std::to_string(sub_idx);
+            std::string out_mesh_path = (mesh_dir / (sname + ".budasset")).generic_string();
+            std::string temp_raw = (options.cache_root + "/" + sname + "_temp.rawmesh");
+
+
+            RawMesh sub_raw = extract_submesh(cooked_mesh, sub_idx);
+
+            // Apply optional uniform scale (same logic as the single-submesh branch).
+            if (options.scale != 1.0f && options.scale > 0.0f) {
+                for (auto& v : sub_raw.vertices) {
+                    v.position[0] *= options.scale;
+                    v.position[1] *= options.scale;
+                    v.position[2] *= options.scale;
+                }
+                sub_raw.compute_bounds();
+            }
+
+            sub_raw.save_binary(temp_raw);
+
+            bool is_translucent = false;
+            if (sub.material_index < cooked_mesh.materials.size()) {
+                const auto alpha = cooked_mesh.materials[sub.material_index].alpha_mode;
+                // AlphaMode::Blend  → Translucent path (no VG, standard indexed draw).
+                // AlphaMode::Mask   → stays VG; alpha discard is done in the VG fragment shader.
+                // AlphaMode::Opaque → VG (default).
+                if (alpha == bud::asset::AlphaMode::Blend) {
+                    is_translucent = true;
+                }
+            }
+
+            MeshBuildOptions mesh_opts{};
+            mesh_opts.enable_virtual_geometry = !is_translucent;
+            mesh_opts.dump_text = options.dump_text;
+            mesh_opts.use_cache = options.use_cache;
+            mesh_opts.cache_root = options.cache_root;
+
+            if (MeshBuilder::build(temp_raw, out_mesh_path, mesh_opts)) {
+                uint64_t asset_id = hasher(out_mesh_path);
+                AssetRegistryEntry entry;
+                entry.asset_path = out_mesh_path;
+                entry.asset_id = asset_id;
+                entry.asset_type = static_cast<uint32_t>(bud::asset::AssetType::Mesh);
+                if (sub.material_index < cooked_mesh.materials.size()) {
+                    std::string mname = cooked_mesh.materials[sub.material_index].name.empty() ? "DefaultMaterial" : cooked_mesh.materials[sub.material_index].name;
+                    entry.dependencies.push_back((mat_dir / (mname + ".budasset")).generic_string());
+                }
+                AssetRegistry::register_asset(entry);
+
+                bud::scene::Entity ent;
+                ent.name = options.entity_prefix.empty() ? sname_readable : (options.entity_prefix + "_" + sname_readable);
+                ent.asset_path = out_mesh_path;
+                ent.is_active = true;
+                ent.is_static = true;
+                ent.mesh_index = 0;
+                ent.material_index = 0;
+                ent.transform = glm::mat4(1.0f);
+                entities.push_back(ent);
+            }
+            std::filesystem::remove(temp_raw, ec);
         }
-        cooked_mesh.compute_bounds();
-        cooked_mesh.save_binary(temp_raw);
     } else {
-        cooked_mesh.save_binary(temp_raw);
-    }
+        // Single submesh / mesh
+        std::string out_mesh_path = (mesh_dir / (stem + ".budasset")).generic_string();
+        std::string temp_raw = (options.cache_root + "/" + stem + "_temp.rawmesh");
+		if (options.scale != 1.0f && options.scale > 0.0f) {
+			for (auto& v : cooked_mesh.vertices) {
+				v.position[0] *= options.scale;
+				v.position[1] *= options.scale;
+				v.position[2] *= options.scale;
+			}
+			cooked_mesh.compute_bounds();
+			cooked_mesh.save_binary(temp_raw);
+		} else {
+			cooked_mesh.save_binary(temp_raw);
+		}
 
-    MeshBuildOptions mesh_opts{};
-    mesh_opts.enable_virtual_geometry = true;
-    mesh_opts.dump_text = options.dump_text;
-    mesh_opts.use_cache = options.use_cache;
-    mesh_opts.cache_root = options.cache_root;
+		bool is_translucent = false;
+		if (!cooked_mesh.materials.empty()) {
+			const auto alpha = cooked_mesh.materials[0].alpha_mode;
+			// AlphaMode::Blend  → Translucent path (no VG, standard indexed draw).
+			// AlphaMode::Mask   → stays VG; alpha discard is done in the VG fragment shader.
+			if (alpha == bud::asset::AlphaMode::Blend) {
+				is_translucent = true;
+			}
+		}
 
-    bool mesh_ok = MeshBuilder::build(temp_raw, out_mesh_path, mesh_opts);
-    std::filesystem::remove(temp_raw, ec);
+        MeshBuildOptions mesh_opts{};
+        mesh_opts.enable_virtual_geometry = !is_translucent;
+        mesh_opts.dump_text = options.dump_text;
+        mesh_opts.use_cache = options.use_cache;
+        mesh_opts.cache_root = options.cache_root;
 
-    if (mesh_ok) {
-        uint64_t asset_id = hasher(raw_mesh.source_path.empty() ? out_mesh_path : raw_mesh.source_path);
-        AssetRegistryEntry entry;
-        entry.asset_path = out_mesh_path;
-        entry.asset_id = asset_id;
-        entry.asset_type = static_cast<uint32_t>(bud::asset::AssetType::Mesh);
-        for (const auto& mat : raw_mesh.materials) {
-            std::string mname = mat.name.empty() ? "DefaultMaterial" : mat.name;
-            entry.dependencies.push_back((mat_dir / (mname + ".budasset")).string());
+        if (MeshBuilder::build(temp_raw, out_mesh_path, mesh_opts)) {
+			uint64_t asset_id = hasher(cooked_mesh.source_path.empty() ? out_mesh_path : cooked_mesh.source_path);
+
+			AssetRegistryEntry entry;
+            entry.asset_path = out_mesh_path;
+            entry.asset_id = asset_id;
+            entry.asset_type = static_cast<uint32_t>(bud::asset::AssetType::Mesh);
+            for (const auto& mat : cooked_mesh.materials) {
+                std::string mname = mat.name.empty() ? "DefaultMaterial" : mat.name;
+                entry.dependencies.push_back((mat_dir / (mname + ".budasset")).generic_string());
+            }
+            AssetRegistry::register_asset(entry);
+
+            bud::scene::Entity ent;
+            ent.name = options.entity_prefix.empty() ? stem : (options.entity_prefix + "_" + stem);
+            ent.asset_path = out_mesh_path;
+            ent.is_active = true;
+            ent.is_static = true;
+            ent.mesh_index = 0;
+            ent.material_index = 0;
+            ent.transform = glm::mat4(1.0f);
+            entities.push_back(ent);
         }
-        AssetRegistry::register_asset(entry);
-        AssetRegistry::save();
-
-        auto t_end = std::chrono::steady_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-        support::log_info("[BudAssetPipeline] Cascade package successfully built in " + std::to_string(ms) + " ms.");
-        return true;
+        std::filesystem::remove(temp_raw, ec);
     }
 
-    return false;
+    AssetRegistry::save();
+
+    // Append to existing scene file if target_scene_path is provided
+    if (options.scene_mode == SceneImportMode::Append || !options.target_scene_path.empty()) {
+        std::string scene_file_path = resolve_scene_input_path(options.target_scene_path);
+        bud::scene::Scene target_scene;
+        if (!bud::scene::SceneBuilder::load_scene_from_file(scene_file_path, target_scene)) {
+            support::log_error("[BudAssetImporter] Error: Target scene does not exist: " + scene_file_path +
+                              ". Please create the scene first using SceneTool.");
+            return false;
+        }
+
+        bud::scene::SceneBuilder::append_entities(target_scene, entities);
+
+        if (bud::scene::SceneBuilder::save_scene_to_file(target_scene, scene_file_path)) {
+            support::log_info("[BudAssetPipeline] Appended " + std::to_string(entities.size()) +
+                              " submesh entities to target scene: " + scene_file_path);
+        } else {
+            support::log_error("[BudAssetPipeline] Failed to save updated target scene: " + scene_file_path);
+            return false;
+        }
+    }
+
+    auto t_end = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    support::log_info("[BudAssetPipeline] Cascade package successfully built in " + std::to_string(ms) + " ms.");
+    return true;
 }
 
 bool CascadeBuilder::build_package(
@@ -414,55 +620,54 @@ bool CascadeBuilder::build_scene_package(
 
     AssetRegistry::save();
 
-    // 4. Generate Level Scene File (e.g. Content/Scenes/bistro_page_scene.json)
-    std::filesystem::path scene_dir(options.scene_output_dir);
-    std::filesystem::create_directories(scene_dir, ec);
-    std::string scene_file_path = (scene_dir / (scene.name + "_page_scene.json")).generic_string();
+    // 4. Handle Scene File based on SceneImportMode
+    if (options.scene_mode == SceneImportMode::None) {
+        support::log_info("[BudAssetPipeline] Scene mode is 'None'. Skipping scene file generation.");
+    } else {
+        std::vector<bud::scene::Entity> entities;
+        entities.reserve(scene.instances.size());
 
-    nlohmann::json scene_json;
-    scene_json["name"] = scene.name + " Virtual Geometry Scene";
-    scene_json["ambient_strength"] = 0.25f;
-    scene_json["lod_error_threshold_px"] = 2.0f;
-    scene_json["streaming_unload_radius"] = 500.0f;
-    scene_json["main_camera"] = {
-        { "position", { 0.0f, 1.5f, 3.0f } },
-        { "yaw", 0.0f },
-        { "pitch", 0.0f },
-        { "zoom", 45.0f },
-        { "speed", 5.0f },
-        { "sensitivity", 0.1f }
-    };
-    scene_json["directional_light"] = {
-        { "color", { 1.0f, 0.95f, 0.85f } },
-        { "direction", { 100.0f, 250.0f, 80.0f } },
-        { "intensity", 1.2f }
-    };
+        for (const auto& inst : scene.instances) {
+            if (inst.mesh_index >= mesh_cooked_paths.size() || mesh_cooked_paths[inst.mesh_index].empty())
+                continue;
 
-    nlohmann::json entities_json = nlohmann::json::array();
-    for (const auto& inst : scene.instances) {
-        if (inst.mesh_index >= mesh_cooked_paths.size() || mesh_cooked_paths[inst.mesh_index].empty()) continue;
+            bud::scene::Entity ent;
+            std::string ename = options.entity_prefix.empty() ? inst.name : (options.entity_prefix + "_" + inst.name);
+            ent.name = ename;
+            ent.asset_path = mesh_cooked_paths[inst.mesh_index];
+            ent.is_active = true;
+            ent.is_static = true;
+            ent.material_index = 0;
+            ent.mesh_index = 0;
 
-        nlohmann::json ent;
-        ent["name"] = inst.name;
-        ent["asset_path"] = mesh_cooked_paths[inst.mesh_index];
-        ent["is_active"] = true;
-        ent["is_static"] = true;
-        ent["material_index"] = 0;
-        ent["mesh_index"] = 0;
-        ent["render_type"] = inst.is_translucent ? "Translucent" : "VirtualGeometry";
+            for (int r = 0; r < 4; ++r) {
+                for (int c = 0; c < 4; ++c) {
+                    ent.transform[r][c] = inst.transform[r * 4 + c];
+                }
+            }
 
-        std::vector<float> tf(inst.transform, inst.transform + 16);
-        ent["transform"] = tf;
+            entities.push_back(ent);
+        }
 
-        entities_json.push_back(ent);
-    }
-    scene_json["entities"] = entities_json;
+        // Append to existing scene file if target_scene_path is provided
+        if (options.scene_mode == SceneImportMode::Append || !options.target_scene_path.empty()) {
+            std::string scene_file_path = resolve_scene_input_path(options.target_scene_path);
+            bud::scene::Scene target_scene;
+            if (!bud::scene::SceneBuilder::load_scene_from_file(scene_file_path, target_scene)) {
+                support::log_error("[BudAssetImporter] Error: Target scene does not exist: " + scene_file_path +
+                                  ". Please create the scene first using SceneTool.");
+                return false;
+            }
 
-    std::ofstream scene_out(scene_file_path);
-    if (scene_out.is_open()) {
-        scene_out << scene_json.dump(4);
-        support::log_info("[BudAssetPipeline] Generated Scene Level JSON: " + scene_file_path +
-                          " (" + std::to_string(entities_json.size()) + " entities)");
+            bud::scene::SceneBuilder::append_entities(target_scene, entities);
+            if (bud::scene::SceneBuilder::save_scene_to_file(target_scene, scene_file_path)) {
+                support::log_info("[BudAssetPipeline] Appended " + std::to_string(entities.size()) +
+                                  " entities to target scene: " + scene_file_path);
+            } else {
+                support::log_error("[BudAssetPipeline] Failed to save updated target scene: " + scene_file_path);
+                return false;
+            }
+        }
     }
 
     auto t_end = std::chrono::steady_clock::now();

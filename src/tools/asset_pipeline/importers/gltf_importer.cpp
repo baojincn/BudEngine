@@ -1,4 +1,4 @@
-#include "gltf_importer.hpp"
+﻿#include "gltf_importer.hpp"
 #include "texture_importer.hpp"
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
@@ -14,6 +14,9 @@ namespace bud::asset_pipeline {
 
 namespace {
 
+const std::string default_texture_path = "Content/Textures/default.png";
+
+
 void extract_materials_and_textures(
     const aiScene* scene,
     const std::string& filepath,
@@ -23,7 +26,7 @@ void extract_materials_and_textures(
     std::vector<RawMaterial>& out_materials,
     std::vector<std::string>& out_textures) {
 
-    out_textures.push_back("data/textures/default.png");
+    out_textures.push_back(default_texture_path);
 
     auto resolve_gltf_texture_path = [&](int tex_idx) -> std::string {
         if (tex_idx < 0 || !has_gltf_json || !gltf_json.contains("textures") ||
@@ -89,22 +92,28 @@ void extract_materials_and_textures(
         rm.alpha_cutoff = 0.5f;
         rm.double_sided = false;
 
+        // 1. Explicit glTF Alpha Mode
+        bool explicit_mode = false;
         aiString alpha_mode_str;
         if (mat->Get("$mat.gltf.alphaMode", 0, 0, alpha_mode_str) == AI_SUCCESS) {
             std::string mode_s = alpha_mode_str.C_Str();
             if (mode_s == "MASK") {
                 rm.alpha_mode = bud::asset::AlphaMode::Mask;
+                explicit_mode = true;
             } else if (mode_s == "BLEND") {
                 rm.alpha_mode = bud::asset::AlphaMode::Blend;
+                explicit_mode = true;
             }
         }
 
         int alpha_mode_int = 0;
-        if (mat->Get("$mat.gltf.alphaMode", 0, 0, alpha_mode_int) == AI_SUCCESS) {
+        if (!explicit_mode && mat->Get("$mat.gltf.alphaMode", 0, 0, alpha_mode_int) == AI_SUCCESS) {
             if (alpha_mode_int == 1) {
                 rm.alpha_mode = bud::asset::AlphaMode::Mask;
+                explicit_mode = true;
             } else if (alpha_mode_int == 2) {
                 rm.alpha_mode = bud::asset::AlphaMode::Blend;
+                explicit_mode = true;
             }
         }
 
@@ -113,16 +122,34 @@ void extract_materials_and_textures(
             rm.alpha_cutoff = cutoff;
         }
 
-        float opacity = 1.0f;
-        if (mat->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS) {
-            if (opacity < 0.99f && rm.alpha_mode == bud::asset::AlphaMode::Opaque) {
+        // 2. Texture Alpha Analysis if not explicitly set
+        if (!explicit_mode && !rm.base_color_texture_path.empty() && rm.base_color_texture_path != out_textures[0]) {
+            auto alpha_info = TextureImporter::analyze_alpha(rm.base_color_texture_path);
+            if (alpha_info.has_alpha) {
+                rm.alpha_mode = alpha_info.alpha_mode;
+                rm.alpha_cutoff = alpha_info.alpha_cutoff;
+                explicit_mode = true;
+            }
+        }
+
+        // 3. Numeric opacity / transmission
+        if (!explicit_mode) {
+            float opacity = 1.0f;
+            if (mat->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS && opacity < 0.99f && opacity > 0.001f) {
+                rm.alpha_mode = bud::asset::AlphaMode::Blend;
+                rm.base_color_factor[3] = opacity;
+            }
+            float transmission = 0.0f;
+            if (mat->Get("$mat.gltf.transmissionFactor", 0, 0, transmission) == AI_SUCCESS && transmission > 0.01f) {
                 rm.alpha_mode = bud::asset::AlphaMode::Blend;
             }
         }
 
         int two_sided = 0;
-        if (mat->Get(AI_MATKEY_TWOSIDED, two_sided) == AI_SUCCESS) {
-            rm.double_sided = (two_sided != 0);
+        if (mat->Get(AI_MATKEY_TWOSIDED, two_sided) == AI_SUCCESS && two_sided != 0) {
+            rm.double_sided = true;
+        } else if (rm.alpha_mode == bud::asset::AlphaMode::Mask) {
+            rm.double_sided = true;
         }
 
         aiString norm_path;

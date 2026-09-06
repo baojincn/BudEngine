@@ -14,10 +14,14 @@
 
 void print_usage() {
     std::cout << "Usage: BudAssetImporter --input <file.obj/gltf/fbx/png> [options]" << std::endl;
-    std::cout << "       --output-dir <dir>  (Package output directory, default: Content/<ModelName>)" << std::endl;
-    std::cout << "       --output <path>     (Custom output target)" << std::endl;
-    std::cout << "       --cache-dir <dir>   (Custom cache directory, default: Cache)" << std::endl;
-    std::cout << "       --dump-text         (Dump JSON debug metadata)" << std::endl;
+    std::cout << "       --output-dir <dir>            (Content package directory, default: Content/<ModelName>)" << std::endl;
+    std::cout << "       --output <path>               (Custom output target)" << std::endl;
+    std::cout << "       --scene <path>                (Optional: Append imported model to an existing scene file created via SceneTool)" << std::endl;
+    std::cout << "       --target-scene <path>         (Alias for --scene)" << std::endl;
+    std::cout << "       --entity-prefix <prefix>      (Prefix for appended scene entity names)" << std::endl;
+    std::cout << "       --scale <factor>              (Uniform scale factor)" << std::endl;
+    std::cout << "       --cache-dir <dir>             (Custom cache directory, default: Cache)" << std::endl;
+    std::cout << "       --dump-text                   (Dump JSON debug metadata)" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -25,6 +29,8 @@ int main(int argc, char* argv[]) {
     std::string output_path;
     std::string output_dir;
     std::string cache_dir = "Cache";
+    std::string target_scene_path;
+    std::string entity_prefix;
     bool dump_text = false;
     bool use_cache = true;
     float scale = 0.0f; // 0.0f = auto-detect unit scale based on metadata/bounds, converts to meters
@@ -37,10 +43,12 @@ int main(int argc, char* argv[]) {
             output_path = argv[++i];
         } else if (arg == "--output-dir" && i + 1 < argc) {
             output_dir = argv[++i];
+        } else if ((arg == "--scene" || arg == "--target-scene") && i + 1 < argc) {
+            target_scene_path = argv[++i];
+        } else if (arg == "--entity-prefix" && i + 1 < argc) {
+            entity_prefix = argv[++i];
         } else if (arg == "--scale" && i + 1 < argc) {
             scale = std::stof(argv[++i]);
-        } else if (arg == "--cascade") {
-            // Maintained as transparent alias for package import
         } else if (arg == "--no-cache") {
             use_cache = false;
         } else if (arg == "--dump-text" || arg == "--dump-json" || arg == "--text") {
@@ -121,6 +129,9 @@ int main(int argc, char* argv[]) {
     cascade_opts.use_cache = use_cache;
     cascade_opts.dump_text = dump_text;
     cascade_opts.scale = scale;
+    cascade_opts.target_scene_path = target_scene_path;
+    cascade_opts.entity_prefix = entity_prefix;
+    cascade_opts.scene_mode = target_scene_path.empty() ? bud::asset_pipeline::SceneImportMode::None : bud::asset_pipeline::SceneImportMode::Append;
 
     // 2. Scene Import with 1:1 Directory Mirroring (glTF / glb)
     if (ext == ".gltf" || ext == ".glb") {

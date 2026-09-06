@@ -535,7 +535,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	shadow_sampler_info.minFilter = VK_FILTER_LINEAR;
 	shadow_sampler_info.compareEnable = VK_TRUE;
 	shadow_sampler_info.compareOp = render_config.reversed_z ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_LESS_OR_EQUAL;
-	shadow_sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; // Depths outside [0,1]?
+	shadow_sampler_info.borderColor = render_config.reversed_z ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
 	shadow_sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 	shadow_sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 
@@ -1120,6 +1120,7 @@ PipelineHandle VulkanRHI::create_graphics_pipeline(const GraphicsPipelineDesc& d
     if (desc.blending_enable && desc.blend_mode == BlendMode::Disabled)
         key.blend_mode = BlendMode::Alpha;
     key.vertex_layout = desc.vertex_layout;
+    key.topology = (desc.topology == PrimitiveTopology::LineList) ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     
     switch (desc.depth_compare_op) {
     case CompareOp::Less: key.depth_compare_op = VK_COMPARE_OP_LESS; break;
@@ -2418,6 +2419,9 @@ void VulkanRHI::cmd_draw_indexed(CommandHandle cmd, uint32_t index_count, uint32
 void VulkanRHI::cmd_draw_mesh_tasks(CommandHandle cmd, uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z) {
     if (fpCmdDrawMeshTasksEXT) {
         fpCmdDrawMeshTasksEXT(static_cast<VkCommandBuffer>(cmd), group_count_x, group_count_y, group_count_z);
+        // One submission = one draw call, same rule as cmd_draw / cmd_draw_indexed /
+        // cmd_draw_indexed_indirect. The task draw used to be invisible in Draw Calls.
+        current_stats.draw_calls++;
     }
 }
 
@@ -4263,6 +4267,23 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	ubo.reversed_z = render_config.reversed_z ? 1 : 0;
 	ubo.shadow_bias_constant = render_config.shadow_bias_constant;
 	ubo.shadow_bias_slope = render_config.shadow_bias_slope;
+
+	// CSM receiver metrics: the bias applied while *sampling* the shadow map is
+	// expressed in shadow texels and converted to normalized depth per cascade,
+	// so it stays physically identical for every cascade / map resolution.
+	ubo.cascade_texel_size = bud::math::vec4(
+		scene_view.cascade_texel_size[0],
+		scene_view.cascade_texel_size[1],
+		scene_view.cascade_texel_size[2],
+		scene_view.cascade_texel_size[3]);
+	ubo.cascade_depth_range = bud::math::vec4(
+		scene_view.cascade_depth_range[0],
+		scene_view.cascade_depth_range[1],
+		scene_view.cascade_depth_range[2],
+		scene_view.cascade_depth_range[3]);
+	ubo.shadow_receiver_bias_texels = render_config.shadow_receiver_bias_texels;
+	ubo.shadow_normal_offset_texels = render_config.shadow_normal_offset_texels;
+
 	ubo.debug_cluster = render_config.enable_cluster_visualization ? 1 : 0;
 
 	if (frames[current_frame].uniform_mapped) {

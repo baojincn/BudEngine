@@ -15,11 +15,34 @@ namespace bud::scene {
         update_camera_vectors();
     }
 
+    void Camera::set_mode(CameraMode m) {
+        if (mode == m) return;
+
+        if (m == CameraMode::ThirdPerson) {
+            target_position = position + front * orbit_distance;
+            spring_position = position;
+            spring_velocity = bud::math::vec3(0.0f);
+        }
+
+        mode = m;
+    }
+
     bud::math::mat4 Camera::get_view_matrix() const {
         return bud::math::lookAt(position, position + front, up);
     }
 
     void Camera::process_keyboard(int direction, float delta_time) {
+        if (mode == CameraMode::ThirdPerson) {
+            float velocity = movement_speed * delta_time;
+            if (direction == 0) target_position += front * velocity;
+            if (direction == 1) target_position -= front * velocity;
+            if (direction == 2) target_position -= right * velocity;
+            if (direction == 3) target_position += right * velocity;
+            if (direction == 4) target_position += world_up * velocity;
+            if (direction == 5) target_position -= world_up * velocity;
+            return;
+        }
+
         float velocity = movement_speed * delta_time;
         if (direction == 0) position += front * velocity;
         if (direction == 1) position -= front * velocity;
@@ -30,6 +53,16 @@ namespace bud::scene {
     }
 
     void Camera::process_mouse_movement(float x_offset, float y_offset, bool constrain_pitch) {
+        if (mode == CameraMode::ThirdPerson) {
+            orbit_yaw += x_offset * mouse_sensitivity;
+            orbit_pitch -= y_offset * mouse_sensitivity;
+            if (constrain_pitch) {
+                if (orbit_pitch > 89.0f) orbit_pitch = 89.0f;
+                if (orbit_pitch < -89.0f) orbit_pitch = -89.0f;
+            }
+            return;
+        }
+
         x_offset *= mouse_sensitivity;
         y_offset *= mouse_sensitivity;
         yaw += x_offset;
@@ -42,12 +75,27 @@ namespace bud::scene {
     }
 
     void Camera::process_mouse_scroll(float y_offset) {
+        if (mode == CameraMode::ThirdPerson) {
+            orbit_distance -= y_offset;
+            if (orbit_distance < 1.0f) orbit_distance = 1.0f;
+            if (orbit_distance > 50.0f) orbit_distance = 50.0f;
+            return;
+        }
+
         zoom -= y_offset;
         if (zoom < 1.0f) zoom = 1.0f;
         if (zoom > 45.0f) zoom = 45.0f;
     }
 
     void Camera::process_mouse_drag_zoom(float yoffset) {
+        if (mode == CameraMode::ThirdPerson) {
+            float zoom_sensitivity = 0.1f;
+            orbit_distance -= yoffset * zoom_sensitivity;
+            if (orbit_distance < 1.0f) orbit_distance = 1.0f;
+            if (orbit_distance > 50.0f) orbit_distance = 50.0f;
+            return;
+        }
+
         float zoom_sensitivity = 0.1f;
         zoom -= yoffset * zoom_sensitivity;
         if (zoom < 1.0f) zoom = 1.0f;
@@ -67,6 +115,30 @@ namespace bud::scene {
         update_camera_vectors();
     }
 
+    void Camera::update(float dt) {
+        if (mode != CameraMode::ThirdPerson) return;
+
+        // Compute desired camera position from orbit
+        float pitch_rad = bud::math::radians(orbit_pitch);
+        float yaw_rad = bud::math::radians(orbit_yaw);
+        bud::math::vec3 offset;
+        offset.x = cos(pitch_rad) * sin(yaw_rad);
+        offset.y = sin(pitch_rad);
+        offset.z = cos(pitch_rad) * cos(yaw_rad);
+        bud::math::vec3 desired = target_position - offset * orbit_distance;
+
+        // Spring-damper smooth
+        bud::math::vec3 diff = desired - spring_position;
+        bud::math::vec3 accel = diff * spring_stiffness - spring_velocity * spring_damping;
+        spring_velocity += accel * dt;
+        spring_position += spring_velocity * dt;
+
+        position = spring_position;
+        front = bud::math::normalize(target_position - position);
+        right = bud::math::normalize(bud::math::cross(front, world_up));
+        up = bud::math::normalize(bud::math::cross(right, front));
+    }
+
     void Camera::update_camera_vectors() {
         bud::math::vec3 f;
         f.x = cos(bud::math::radians(yaw)) * cos(bud::math::radians(pitch));
@@ -75,6 +147,14 @@ namespace bud::scene {
         front = bud::math::normalize(f);
         right = bud::math::normalize(bud::math::cross(front, world_up));
         up = bud::math::normalize(bud::math::cross(right, front));
+    }
+
+    void Camera::update_freefly_vectors() {
+        update_camera_vectors();
+    }
+
+    void Camera::update_thirdperson_vectors() {
+        // Vectors are computed in update()
     }
 
 }

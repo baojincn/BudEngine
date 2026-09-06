@@ -406,10 +406,13 @@ namespace bud::io {
 
 		const auto* chunks = reinterpret_cast<const asset::AssetChunkEntry*>(ptr + header->chunk_table_offset);
 		const asset::AssetChunkEntry* raw_chunk = nullptr;
+		bool has_vg = false;
 		for (uint32_t c = 0; c < header->chunk_count; ++c) {
+			if (chunks[c].chunk_type == static_cast<uint32_t>(asset::AssetChunkType::VirtualGeometry)) {
+				has_vg = true;
+			}
 			if (chunks[c].chunk_type == static_cast<uint32_t>(asset::AssetChunkType::RawMesh)) {
 				raw_chunk = &chunks[c];
-				break;
 			}
 		}
 
@@ -427,6 +430,7 @@ namespace bud::io {
 
 		const auto& raw = *raw_mesh_opt;
 		MeshData mesh;
+		mesh.has_virtual_geometry = has_vg;
 		mesh.source_path = path.generic_string();
 		mesh.vertices.resize(raw.vertices.size());
 		for (size_t i = 0; i < raw.vertices.size(); ++i) {

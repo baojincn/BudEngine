@@ -124,6 +124,8 @@ namespace bud::graphics {
 				if (frame_resource.page_request_buffer.is_valid()) rhi->destroy_buffer(frame_resource.page_request_buffer);
 				if (frame_resource.page_request_readback.is_valid()) rhi->destroy_buffer(frame_resource.page_request_readback);
 				if (frame_resource.csm_instance_data.is_valid()) rhi->destroy_buffer(frame_resource.csm_instance_data);
+				if (frame_resource.csm_instance_models.is_valid()) rhi->destroy_buffer(frame_resource.csm_instance_models);
+				if (frame_resource.csm_hierarchy_instances.is_valid()) rhi->destroy_buffer(frame_resource.csm_hierarchy_instances);
 				if (frame_resource.visible_pages.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages);
 				if (frame_resource.visible_pages_readback.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages_readback);
 				for (auto& csm_vp : frame_resource.csm_visible_pages) {
@@ -226,6 +228,7 @@ namespace bud::graphics {
 		uint32_t required_draw_count,
 		uint32_t required_scene_instance_count,
 		uint64_t instance_data_stride,
+		uint64_t hierarchy_instance_stride,
 		uint64_t indirect_instance_stride,
 		uint64_t indirect_draw_stride,
 		uint64_t stats_buffer_size)
@@ -246,11 +249,19 @@ namespace bud::graphics {
 		// desired_cluster_capacity).
 		desired_indirect_capacity = std::max(desired_indirect_capacity, desired_cluster_capacity);
 
+		// frame.instance_data holds Renderer::HierarchyInstance records (112 bytes: see the
+		// static_asserts in renderer.cpp and the HierarchyInstance layout in vg_common.glsl),
+		// NOT InstanceData (80 bytes). It used to be sized with instance_data_stride while the
+		// CPU memcpy'd 112-byte records into it, which overran the allocation AND made the
+		// shader-side element count smaller than the instance list (silently truncated /
+		// zeroed instances at the tail - manifests as missing VG geometry and, when read from
+		// a fragment stage, as a device fault).
+		// csm_instance_models and dynamic_instances legitimately use instance_data_stride.
 		if (frame_resource.instance_capacity < desired_instance_capacity || !frame_resource.instance_data.is_valid()) {
 			if (frame_resource.instance_data.is_valid())
 				rhi->destroy_buffer(frame_resource.instance_data);
 			// CPU 每帧直接 memcpy 写入，需要 PersistentMapped（host-visible）以保证 mapped_ptr 有效
-			frame_resource.instance_data = rhi->create_upload_buffer(static_cast<uint64_t>(desired_instance_capacity) * instance_data_stride);
+			frame_resource.instance_data = rhi->create_upload_buffer(static_cast<uint64_t>(desired_instance_capacity) * hierarchy_instance_stride);
 			frame_resource.instance_capacity = desired_instance_capacity;
 		}
 
@@ -293,6 +304,18 @@ namespace bud::graphics {
 				// CPU 每帧写入，需要 PersistentMapped
 				frame_resource.csm_instance_models = rhi->create_upload_buffer(static_cast<uint64_t>(desired_scene_capacity) * instance_data_stride);
 				frame_resource.csm_instance_models_capacity = desired_scene_capacity;
+			}
+
+			// Full-scene HierarchyInstance list for the CSM cascade traversal + the VG
+			// shadow pass. Stride is HierarchyInstance (NOT InstanceData): the shaders
+			// index it with the instance_id packed into the per-cascade visible-page list.
+			if (!frame_resource.csm_hierarchy_instances.is_valid() ||
+				frame_resource.csm_hierarchy_capacity < desired_scene_capacity) {
+				if (frame_resource.csm_hierarchy_instances.is_valid())
+					rhi->destroy_buffer(frame_resource.csm_hierarchy_instances);
+				frame_resource.csm_hierarchy_instances = rhi->create_upload_buffer(
+					static_cast<uint64_t>(desired_scene_capacity) * hierarchy_instance_stride);
+				frame_resource.csm_hierarchy_capacity = desired_scene_capacity;
 			}
 
 			if (!frame_resource.stats_readback.is_valid()) {

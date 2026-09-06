@@ -59,9 +59,11 @@ namespace bud::graphics {
 		std::vector<std::vector<bud::math::AABB>> get_submesh_bounds_snapshot() const;
 		void register_mesh_bounds(uint32_t mesh_id, const bud::math::AABB& aabb);
 
+		void update_physics_debug_vertices(const std::vector<PhysicsDebugVertex>& verts);
+
 		GPUScene& get_gpu_scene() { return gpu_scene; }
 		RHI* get_rhi() { return rhi; }
-		uint32_t register_page_based_mesh(uint32_t page_index, uint32_t meshlet_count,
+		uint32_t register_page_based_mesh(uint32_t page_index, uint32_t cluster_count,
 			uint32_t index_count, const bud::math::AABB& aabb, const bud::math::AABB& global_aabb,
 			uint32_t vertex_data_offset, uint32_t index_data_offset,
 			const std::vector<PageSubMesh>& page_submeshes,
@@ -83,6 +85,18 @@ namespace bud::graphics {
 		};
 
 		void update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb);
+
+		// Shadow reach hysteresis (see update_cascades): scene_bounds change while pages
+		// stream, and a per-frame changing shadow_far would rescale every cascade's texel
+		// footprint and make the shadows creep. We only re-derive when it moved >10%.
+		float cached_shadow_far = -1.0f;
+		float cached_shadow_far_plane = -1.0f;
+		float cached_shadow_far_scene_factor = -1.0f;
+
+		// Per-cascade reach (ortho half extent) anchors with a dead zone, so the shadow
+		// texel grid stays bit-constant while the camera only moves/rotates.
+		// Index i is only valid while cascade i is configured.
+		float cascade_reach_anchor_[MAX_CASCADES] = { -1.0f, -1.0f, -1.0f, -1.0f };
 		void select_occluders_cpu(const RenderScene& render_scene, const SceneView& view, const std::vector<SortItem>& source_list, size_t source_count, std::vector<SortItem>& out_occluders, size_t out_count);
 
 		RHI* rhi;
@@ -104,12 +118,13 @@ namespace bud::graphics {
 		std::unique_ptr<PageEmitPass> page_emit_pass;
 		std::unique_ptr<ClusterCullPass> cluster_cull_pass;
 		std::unique_ptr<ForwardTranslucentPass> forward_translucent_pass;
-		std::unique_ptr<ClusterVisualizationPass> cluster_visualization_pass;
 		std::unique_ptr<UIPass> ui_pass;
 		std::unique_ptr<VisibilityPass> visibility_pass;
 		std::unique_ptr<ScreenSpaceReflectionPass> ssr_pass;
 		std::unique_ptr<ScreenSpaceGlobalIlluminationPass> ssgi_pass;
 		std::unique_ptr<ResolvePass> resolve_pass;
+		std::unique_ptr<PhysicsDebugPass> physics_debug_pass;
+
 		bool has_mesh_shader = false;
 
 		PipelineHandle csm_cull_pipeline;

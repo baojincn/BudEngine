@@ -6,6 +6,12 @@
 
 namespace bud::scene {
 
+	enum class CameraMode {
+		FreeFly,
+		FirstPerson,
+		ThirdPerson,
+	};
+
 	class Camera {
 	public:
 		bud::math::vec3 position;
@@ -38,15 +44,31 @@ namespace bud::scene {
 			return { position - bud::math::vec3(radius), position + bud::math::vec3(radius) };
 		}
 
+		// Camera mode
+		CameraMode get_mode() const { return mode; }
+		void set_mode(CameraMode m);
+
+		// Third-person target (the entity/point the camera orbits around)
+		bud::math::vec3 target_position = bud::math::vec3(0.0f);
+		float orbit_distance = 5.0f;
+		float orbit_pitch = -20.0f;
+		float orbit_yaw = 0.0f;
+		float spring_stiffness = 8.0f;
+		float spring_damping = 4.0f;
+
+		// Call every frame. Handles mode-specific spring-arm smoothing etc.
+		void update(float dt);
+
 	private:
 		void update_camera_vectors();
-	};
+		void update_freefly_vectors();
+		void update_thirdperson_vectors();
 
-	enum class RenderType : uint32_t {
-		VirtualGeometry = 0,
-		Translucent = 1,
-		Dynamic = 2,
-		Custom = 3
+		CameraMode mode = CameraMode::FreeFly;
+
+		// Spring arm state for third-person
+		bud::math::vec3 spring_position = bud::math::vec3(0.0f);
+		bud::math::vec3 spring_velocity = bud::math::vec3(0.0f);
 	};
 
 	struct Entity {
@@ -57,9 +79,10 @@ namespace bud::scene {
 		bud::math::mat4 transform = bud::math::mat4(1.0f);
 		bool is_static = true;
 		bool is_active = true;
-		RenderType render_type = RenderType::VirtualGeometry;
-		
-		// GPU-driven virtual geometry hierarchy parameters
+		bool is_cast_shadow = true;
+		bool is_receive_shadow = true;
+		bool enable_physics = true;
+
 		uint32_t root_group_index = 0xFFFFFFFF;
 		uint32_t base_virtual_page = 0xFFFFFFFF;
 		float lod_bias = 1.0f;
@@ -76,7 +99,7 @@ namespace bud::scene {
 		DirectionalLight directional_light;
 		float ambient_strength = 0.25f;
 		float lod_error_threshold_px = 2.0f;
-		float streaming_unload_radius = 20.0f; // in meters
+		float streaming_unload_radius = 20.0f;
 		std::vector<Entity> entities;
 	};
 }

@@ -130,8 +130,10 @@ namespace bud::graphics {
 				rhi->update_descriptor_set_buffer(ds, 3, frame_res.instance_data);
 				if (rg_hiz_pyramid.is_valid())
 					rhi->update_descriptor_set_image(ds, 4, render_graph.get_texture(rg_hiz_pyramid));
-				else
+				else if (gpu_scene.has_history_hiz())
 					rhi->update_descriptor_set_image(ds, 4, gpu_scene.get_history_hiz(rhi->get_current_frame_index()));
+				else
+					rhi->update_descriptor_set_image(ds, 4, rhi->get_fallback_texture());
 				rhi->update_descriptor_set_buffer(ds, 5, frame_res.page_cluster_mask);
 				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
 
@@ -231,8 +233,10 @@ namespace bud::graphics {
 				rhi->update_descriptor_set_buffer(ds, 3, frame_res.instance_data);
 				if (rg_current_hiz.is_valid())
 					rhi->update_descriptor_set_image(ds, 4, render_graph.get_texture(rg_current_hiz));
-				else
+				else if (gpu_scene.has_history_hiz())
 					rhi->update_descriptor_set_image(ds, 4, gpu_scene.get_current_hiz(rhi->get_current_frame_index()));
+				else
+					rhi->update_descriptor_set_image(ds, 4, rhi->get_fallback_texture());
 				rhi->update_descriptor_set_buffer(ds, 5, frame_res.page_cluster_mask);
 				rhi->update_global_uniforms(rhi->get_current_image_index(), view);
 
@@ -333,18 +337,17 @@ namespace bud::graphics {
 
 				if (indirect_buffer_handle.is_valid()) {
 					auto page_pool_buf = gpu_scene.get_page_pool_buffer();
-					uint32_t gpu_draw_count = static_cast<uint32_t>(ranges.range_a_count + ranges.range_b_count);
-					if (config.enable_virtual_geometry) {
-						uint32_t frame_idx = rhi->get_current_frame_index();
-						gpu_draw_count = std::max(gpu_draw_count,
-							gpu_scene.get_frame_resources(frame_idx).indirect_capacity);
-					}
+					uint32_t frame_idx = rhi->get_current_frame_index();
+					const auto& frame_res = gpu_scene.get_frame_resources(frame_idx);
+					uint32_t cluster_draw_count = config.enable_virtual_geometry
+						? frame_res.visible_cluster_capacity
+						: static_cast<uint32_t>(ranges.range_a_count);
 
 					// 1. Draw Range A (VG Clusters)
 					if (ranges.range_a_count > 0 && page_pool_buf.is_valid()) {
 						rhi->cmd_bind_vertex_buffer(cmd, page_pool_buf);
 						rhi->cmd_bind_index_buffer(cmd, page_pool_buf, true);
-						rhi->cmd_draw_indexed_indirect(cmd, indirect_buffer_handle, 0, static_cast<uint32_t>(ranges.range_a_count), sizeof(bud::graphics::IndirectCommand));
+						rhi->cmd_draw_indexed_indirect(cmd, indirect_buffer_handle, 0, cluster_draw_count, sizeof(bud::graphics::IndirectCommand));
 					}
 
 					// 2. Draw Range B (Traditional Dynamic / Opaque Meshes)
@@ -352,7 +355,7 @@ namespace bud::graphics {
 						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 						rhi->cmd_draw_indexed_indirect(cmd, indirect_buffer_handle,
-							static_cast<uint32_t>(ranges.range_a_count * sizeof(bud::graphics::IndirectCommand)),
+							static_cast<uint32_t>(cluster_draw_count * sizeof(bud::graphics::IndirectCommand)),
 							static_cast<uint32_t>(ranges.range_b_count),
 							sizeof(bud::graphics::IndirectCommand));
 					}

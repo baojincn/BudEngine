@@ -46,7 +46,7 @@ namespace bud::graphics {
 				builder.set_queue(QueueType::AsyncCompute);
 				builder.set_side_effect();
 				builder.read(instance_buffer, ResourceState::ShaderResource);
-				builder.read(hiz_pyramid, ResourceState::UnorderedAccess); // Keep in GENERAL so we can sample it in GENERAL layout
+				builder.read(hiz_pyramid, ResourceState::ShaderResource);
 				RGHandle new_draw = builder.write(indirect_draw_buffer, ResourceState::UnorderedAccess);
 				builder.write(stats_buffer, ResourceState::UnorderedAccess);
 				return new_draw;
@@ -97,7 +97,7 @@ namespace bud::graphics {
 				rhi->cmd_bind_storage_buffer(cmd, pipeline, 0, inst_buf);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline, 1, ind_buf);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline, 2, stat_buf);
-				rhi->cmd_bind_compute_texture(cmd, pipeline, 3, depth_tex, ALL_MIPS, false, true); // is_general=true: pyramid was written as storage image
+				rhi->cmd_bind_compute_texture(cmd, pipeline, 3, depth_tex, ALL_MIPS, false, false);
 				rhi->cmd_bind_compute_ubo(cmd, pipeline, 4);
 
 				struct PushConsts {

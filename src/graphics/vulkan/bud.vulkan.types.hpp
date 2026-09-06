@@ -55,7 +55,23 @@ namespace bud::graphics::vulkan {
 		float shadow_bias_constant;
 		float shadow_bias_slope;
 		uint32_t debug_cluster;
+
+		// --- appended (std140): per-cascade shadow metrics for the receiver bias ---
+		// Offsets only grow, so shader variants that still declare the old, shorter
+		// block keep working (the buffer is simply larger than their declared block).
+		alignas(16) bud::math::vec4 cascade_texel_size;  // world metres per shadow texel
+		alignas(16) bud::math::vec4 cascade_depth_range; // light-space slab thickness (m)
+		float shadow_receiver_bias_texels;               // residual depth offset, in texels
+		float shadow_normal_offset_texels;               // world-space SNO, in texels
 	};
+
+	// Lock the std140 contract with the GLSL UBO copies (vg_common.glsl / forward_main.frag).
+	// Any reordering that moves these offsets silently corrupts the shadow bias tail.
+	static_assert(offsetof(UniformBufferObject, cascade_texel_size) == 544, "UBO: cascade_texel_size must stay at 544");
+	static_assert(offsetof(UniformBufferObject, cascade_depth_range) == 560, "UBO: cascade_depth_range must stay at 560");
+	static_assert(offsetof(UniformBufferObject, shadow_receiver_bias_texels) == 576, "UBO: shadow_receiver_bias_texels must stay at 576");
+	static_assert(offsetof(UniformBufferObject, shadow_normal_offset_texels) == 580, "UBO: shadow_normal_offset_texels must stay at 580");
+	static_assert(sizeof(UniformBufferObject) == 592, "UBO: std140 block size must be 592");
 
 	struct Vertex {
 		float pos[3];

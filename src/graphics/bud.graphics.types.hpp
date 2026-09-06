@@ -235,20 +235,66 @@ namespace bud::graphics {
 	struct RenderConfig {
 		float fixed_logic_timestep = 1.0f / 60.0f;
 		float time_scale = 1.0f;
-		static constexpr bool reversed_z = false;
+		bool reversed_z = true;
 
 		uint32_t shadow_map_size = 2048;
-		float shadow_bias_constant = 1.25f;
-		float shadow_bias_slope = 1.75f;
-		float shadow_ortho_size = 35.0f * bud::core::units::m;
-		float shadow_near_plane = 0.1f * bud::core::units::m;
-		float shadow_far_plane = 60.0f * bud::core::units::m;
+
+		// -----------------------------------------------------------------
+		// Shadow bias: TWO independent stages with TWO different units.
+		// Never share values between them - that was the source of the
+		// "light leaking / shadows detached by metres" artefact.
+		//
+		// (1) Raster stage bias, applied while rendering INTO the shadow map.
+		//     Units = vkCmdSetDepthBias factors (device depth units, NOT
+		//     normalized [0,1] fractions). Only used by CSMShadowPass.
+		// -----------------------------------------------------------------
+		float shadow_bias_constant = 2.0f;  // constantFactor (integer part is what counts)
+		float shadow_bias_slope = 1.75f;    // slopeFactor
+		float shadow_bias_clamp = 0.0f;     // 0 == no clamping (Vulkan convention)
+
+		// (2) Receiver stage bias, applied when sampling the shadow map in
+		//     lighting.glsl. Expressed in SHADOW TEXELS, so it is invariant to
+		//     cascade size / map resolution / camera pitch:
+		//         world_offset = cascade_texel_size * <these factors>
+		float shadow_normal_offset_texels = 1.0f; // world-space offset along N
+		float shadow_receiver_bias_texels = 1.5f; // residual light-depth offset
+
+		float shadow_ortho_size = 35.0f;
+		// ^ Legacy: only a fallback for the shadow caster LOD metric when a cascade has
+		//   no derived extent yet. update_cascades() now sizes every cascade from its own
+		//   frustum slice, so this no longer controls the shadow-map coverage.
+		float shadow_near_plane = 0.1f; // Unused: cascades get a per-cascade slab from update_cascades().
+		float shadow_far_plane = 500.0f;
+		// Cascade boxes never need to be bigger than the scene they enclose.
+		// update_cascades() clamps shadow_far_plane to
+		// scene_bounds_radius * this factor (prevents every cascade covering
+		// the whole world => identical shadow maps + unusable resolution).
+		float shadow_far_scene_factor = 2.5f;
 
 		uint32_t cascade_count = 4;
 		float cascade_split_lambda = 0.75f; // Practical Split Scheme
 
 		bool enable_soft_shadows = true;
 		bool debug_cascades = false;
+		bool debug_physics = false;
+		// Feed the CSM cascade traversals the FULL scene instance list instead of only
+		// the main-camera visible ones. This is the correct CSM model: an object that is
+		// outside the primary frustum but inside a cascade's light box still has to be
+		// rasterized into that cascade, otherwise rotating the camera changes which
+		// objects exist in the shadow map and the shadows visibly break when you look up
+		// or down (the caster count tracked the visible set: 20..102 of 393).
+		// The reason this used to be off is that it also drags in authored backdrop
+		// geometry - the Sponza asset carries a full-footprint lid (sponza_380: a 37x23m
+		// slab at y=13.30..14.22, 100% of the scene footprint, 0.92m thick) which then
+		// blocks the sun from the entire courtyard. That is now handled per entity with
+		// "is_cast_shadow": false in the scene file, and Renderer reports the candidates
+		// by asset path (see BudEngine::extract_scene) so any scene can be cleaned up.
+		bool shadow_full_scene_casters = true;
+		// Opt-in: let alpha-blended translucent meshes write shadow depth too. Off by
+		// default because the shadow passes have no opacity-aware depth stage - a glass
+		// pane would then drop a fully solid shadow. Translucent objects are drawn by the
+		// forward translucent pass and are excluded from every shadow-caster list here.
+		bool shadow_translucent_casters = false;
 
 		bool enable_virtual_geometry = true;
 		bool enable_mesh_shader = true;
@@ -261,13 +307,13 @@ namespace bud::graphics {
 		// Page LOD selection by screen-space error (Nanite-style single threshold):
 		// A LOD level L is used while its accumulated object-space error projects
 		// to <= lod_error_threshold_px pixels on screen.
-		float lod_error_lod1 = 2.0f * bud::core::units::mm; // 0.002 m
-		float lod_error_lod2 = 10.0f * bud::core::units::mm; // 0.010 m
+		float lod_error_lod1 = 0.002f; // 0.002 m
+		float lod_error_lod2 = 0.010f; // 0.010 m
 		float lod_error_threshold_px = 2.0f; // in screen pixels
 
 		// Ambient Occlusion
 		AOMode ao_mode = AOMode::GTAO;
-		float ao_radius = 1.2f * bud::core::units::m; // 1.2 m (architectural scale)
+		float ao_radius = 1.2f; // 1.2 m (architectural scale)
 		float ao_intensity = 0.8f;
 		// 32 samples = 8 steps per slice direction at half-res. Good balance of
 		// quality and cost now that the temporal reprojection is fixed.
@@ -285,16 +331,16 @@ namespace bud::graphics {
 
 		// Screen-Space Reflections (SSR)
 		bool enable_ssr = true;
-		float ssr_max_distance = 30.0f * bud::core::units::m;
-		float ssr_thickness = 0.35f * bud::core::units::m;
+		float ssr_max_distance = 30.0f;
+		float ssr_thickness = 0.35f;
 		uint32_t ssr_max_steps = 48;
 		uint32_t ssr_binary_steps = 8;
 		float ssr_intensity = 1.0f;
 
 		// Screen-Space Global Illumination (SSGI)
 		bool enable_ssgi = true;
-		float ssgi_radius = 8.0f * bud::core::units::m;
-		float ssgi_thickness = 0.5f * bud::core::units::m;
+		float ssgi_radius = 8.0f;
+		float ssgi_thickness = 0.5f;
 		uint32_t ssgi_ray_count = 8;
 		uint32_t ssgi_max_steps = 24;
 		float ssgi_intensity = 1.5f;
@@ -324,6 +370,14 @@ namespace bud::graphics {
 
 		bud::math::mat4 cascade_view_proj_matrices[MAX_CASCADES];
 		float cascade_split_depths[MAX_CASCADES];
+		// Per-cascade shadow-map metrics filled by Renderer::update_cascades().
+		// cascade_texel_size  = world metres covered by one shadow-map texel.
+		// cascade_depth_range = light-space depth slab thickness (metres) of the
+		//                       ortho projection used for that cascade.
+		// The receiver shader converts its "in texels" bias into normalized depth
+		// with texel_size / depth_range, so bias stays correct for every cascade.
+		float cascade_texel_size[MAX_CASCADES] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		float cascade_depth_range[MAX_CASCADES] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
 		bud::math::vec3 light_dir = { 0.5f, 1.0f, 0.3f };
 		bud::math::vec3 light_color = { 1.0f, 1.0f, 1.0f };
@@ -360,7 +414,8 @@ namespace bud::graphics {
 		PositionUV,   // Pos(0) and UV(3)
 		PositionNormal, // Pos(0) and Normal(2)
 		NoVertexInput,// For self-generating vertices (Fullscreen)
-		ImGui         // Special ImGui layout (0,1,2)
+		ImGui,        // Special ImGui layout (0,1,2)
+		DebugLine     // Pos(0), Color(1) — for line debug rendering
 	};
 
 	struct DescriptorBinding {
@@ -378,6 +433,11 @@ namespace bud::graphics {
 		Additive            // ONE, ONE
 	};
 
+	enum class PrimitiveTopology {
+		TriangleList,
+		LineList,
+	};
+
 	struct GraphicsPipelineDesc {
 		ShaderStage vs;
 		ShaderStage fs;
@@ -393,6 +453,7 @@ namespace bud::graphics {
 		bool blending_enable = false;
 		BlendMode blend_mode = BlendMode::Disabled;
 		VertexLayoutType vertex_layout = VertexLayoutType::Default;
+		PrimitiveTopology topology = PrimitiveTopology::TriangleList;
 		bool wireframe = false;
 		// Backend-specific descriptor set layouts to use instead of the global set.
 		// These are VkDescriptorSetLayout handles cast to uint64_t for portability.
@@ -639,10 +700,21 @@ namespace bud::graphics {
 		uint32_t shadow_casters = 0;
 		uint32_t shadow_caster_submeshes = 0;
 
+		// Debug overlay attribution. The physics wireframe is drawn by its own pass with a
+		// single LINE_LIST draw call, which is invisible inside draw_calls; exposing it
+		// separately lets the HUD show what the overlay actually costs (and it proves the
+		// overlay is really being submitted when debug_physics is on).
+		uint32_t physics_debug_draw_calls = 0;
+		uint32_t physics_debug_line_vertices = 0;
+		uint32_t physics_debug_boxes = 0;
+
 		void reset() {
 			draw_calls = 0;
 			drawn_triangles = 0;
 			pipeline_binds = 0;
+			physics_debug_draw_calls = 0;
+			physics_debug_line_vertices = 0;
+			physics_debug_boxes = 0;
 			active_visibility_path = VisibilityPath::Instance;
 			gpu_total_objects = 0;
 			gpu_visible_objects = 0;

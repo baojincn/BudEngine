@@ -1,4 +1,4 @@
-﻿#include <pybind11/numpy.h>
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include "src/runtime/bud.game.hpp"
 #include "src/streaming/bud.streaming.manager.hpp"
@@ -6,7 +6,6 @@
 class TriangleApp : public bud::game::GameFramework {
 private:
 	std::shared_ptr<std::atomic<int>> pending_mesh_loads = std::make_shared<std::atomic<int>>(1);
-	std::unique_ptr<bud::streaming::StreamingManager> streaming_manager;
 public:
 	bool is_fully_loaded() const override;
 

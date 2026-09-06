@@ -1,4 +1,4 @@
-
+﻿
 #include "triangle.hpp"
 #include <string>
 
@@ -8,7 +8,7 @@ int main(int argc, char* argv[]) {
     try {
         bud::game::AppConfig config;
         config.window_title = "Bud Engine";
-        config.scene_file = "Content/Scenes/suntemple_page_scene.json";
+        config.scene_file = "Content/Scenes/sponza_page_scene.json";
 
         // --scene <path> overrides the default scene file (used by the
         // streaming/format verification harness).

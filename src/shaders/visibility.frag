@@ -10,6 +10,9 @@ layout(location = 2) flat in uint frag_instance_id;
 layout(location = 3) in vec2 frag_tex_coord;
 layout(location = 4) in vec3 frag_normal;
 layout(location = 5) flat in uint frag_cluster_id;
+// RenderScene per-instance flags (bit 2 = INSTANCE_FLAG_NO_RECEIVE_SHADOW), forwarded by
+// the mesh stage so this shader never has to touch the instance buffer itself.
+layout(location = 6) flat in uint frag_instance_flags;
 
 layout(location = 0) out uvec4 out_visibility;
 
@@ -58,5 +61,15 @@ void main() {
     out_visibility.r = (frag_cluster_id & 0xFFFFu) | (material_id << 16u);
     out_visibility.g = floatBitsToUint(gl_FragCoord.z);
     out_visibility.b = packHalf2x16(frag_tex_coord);
-    out_visibility.a = packSnorm4x8(vec4(normalize(frag_normal), 0.0));
+    // The 4th channel of the visibility G-buffer is otherwise unused: carry the
+    // per-instance "receive shadow" flag (RenderScene::INSTANCE_FLAG_NO_RECEIVE_SHADOW)
+    // through to the resolve pass. 1.0 = receives, -1.0 = opted out. Any other value
+    // (0.0 = written by a pass that does not know the flag) resolves to "receives", so
+    // the feature fails open on paths we have not wired yet.
+    // 1.0 = receives shadows, -1.0 = this instance opted out. Other values (0.0, written
+    // by gbuffer producers that do not know the flag) resolve as "receives", so anything
+    // not wired yet fails open instead of silently losing shadows.
+    float receive_shadow = ((frag_instance_flags & 4u) != 0u) ? -1.0 : 1.0;
+
+    out_visibility.a = packSnorm4x8(vec4(normalize(frag_normal), receive_shadow));
 }

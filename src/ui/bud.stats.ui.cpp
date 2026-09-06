@@ -32,7 +32,17 @@ namespace bud::ui {
 		std::function<void(float)> set_ssgi_intensity,
 		float current_ssgi_intensity,
 		std::function<void(float)> set_ssgi_blend,
-		float current_ssgi_blend) {
+		float current_ssgi_blend,
+		std::function<void(float)> set_light_elevation,
+		float current_light_elevation,
+		std::function<void(float)> set_light_azimuth,
+		float current_light_azimuth,
+		std::function<void(bud::math::vec3)> set_light_color,
+		bud::math::vec3 current_light_color,
+		std::function<void(float)> set_light_intensity,
+		float current_light_intensity,
+		std::function<void(float)> set_ambient_strength,
+		float current_ambient_strength) {
 
 		if (show_stats) {
 			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
@@ -73,6 +83,10 @@ namespace bud::ui {
 				static uint32_t display_occluder_tris = 0;
 				static uint32_t display_shadow_caster_submeshes = 0;
 
+				static uint32_t display_physics_debug_calls = 0;
+				static uint32_t display_physics_debug_boxes = 0;
+				static uint32_t display_physics_debug_verts = 0;
+
 				float current_ms = delta_time * 1000.0f;
 				float ema_alpha = (delta_time > 0.0f)
 					? (1.0f - std::exp(-delta_time / fps_ema_tau_seconds))
@@ -101,6 +115,9 @@ namespace bud::ui {
 					display_draw_calls = stats.draw_calls;
 					display_drawn_tris = stats.gpu_visible_triangles;
 					display_pipeline_binds = stats.pipeline_binds;
+					display_physics_debug_calls = stats.physics_debug_draw_calls;
+					display_physics_debug_boxes = stats.physics_debug_boxes;
+					display_physics_debug_verts = stats.physics_debug_line_vertices;
 
 					cpu_display_total_tris = stats.cpu_total_triangles;
 					cpu_display_visible_tris = stats.cpu_visible_triangles;
@@ -179,18 +196,22 @@ namespace bud::ui {
 				ImGui::TextColored(dc_color, "Draw Calls: %u", display_draw_calls);
 				ImGui::TextColored(drawn_tri_color, "Rasterized Tris: %u", display_drawn_tris);
 				ImGui::TextColored(pipe_color, "Pipeline Binds: %u", display_pipeline_binds);
+				// Physics wireframe overlay: attributed separately because it is a single
+				// LINE_LIST draw call that otherwise vanishes inside draw_calls. Non-zero
+				// here == the overlay really is being submitted (F3 hotkey is working).
+				ImGui::TextColored(display_physics_debug_calls ? color_warn : color_neutral,
+				                   "Physics Debug: %u calls, %u boxes, %u line verts",
+				                   display_physics_debug_calls, display_physics_debug_boxes, display_physics_debug_verts);
 
-				// CPU CULLING
-				ImGui::Separator();
-				ImGui::TextColored(color_neutral, "CPU Frustum Culling");
-				ImGui::TextColored(color_neutral, "Total Objects/Entities: %u", cpu_display_total_objs);
-				ImGui::TextColored(color_neutral, "Visible Objects/Entities: %u", cpu_display_visible_objs);
-				float cpu_obj_cull_rate = cpu_display_total_objs > 0 ? (1.0f - (float)cpu_display_visible_objs / cpu_display_total_objs) * 100.0f : 0.0f;
-				ImGui::TextColored(color_neutral, "Obj Cull Ratio: %.1f%%", cpu_obj_cull_rate);
-				ImGui::TextColored(color_neutral, "Total Submesh Instances: %u", cpu_display_total_instances);
-				ImGui::TextColored(color_neutral, "Visible Submesh Instances: %u", cpu_display_visible_instances);
-				float cpu_instance_cull_rate = cpu_display_total_instances > 0 ? (1.0f - (float)cpu_display_visible_instances / cpu_display_total_instances) * 100.0f : 0.0f;
-				ImGui::TextColored(color_neutral, "Instance Cull Ratio: %.1f%%", cpu_instance_cull_rate);
+
+				if (cpu_display_total_objs > 0) {
+					ImGui::Separator();
+					ImGui::TextColored(color_neutral, "Non-VG Frustum Culling (CPU Phase)");
+					ImGui::TextColored(color_neutral, "Total Non-VG Objects: %u", cpu_display_total_objs);
+					ImGui::TextColored(color_neutral, "Visible Non-VG Objects: %u", cpu_display_visible_objs);
+					float cpu_obj_cull_rate = (1.0f - (float)cpu_display_visible_objs / cpu_display_total_objs) * 100.0f;
+					ImGui::TextColored(color_neutral, "Non-VG Cull Ratio: %.1f%%", cpu_obj_cull_rate);
+				}
 
 				ImGui::Separator();
 				ImGui::TextColored(color_neutral, "Cluster Rendering");
@@ -289,6 +310,95 @@ namespace bud::ui {
 						ImGui::PopID();
 					}
 				};
+
+				// --- Directional light editing -----------------------------------------------
+				// Direction is edited as elevation / azimuth (degrees). Angle-driven editing can
+				// never produce a zero vector, so the per-frame normalize() in the engine and the
+				// CSM light-space matrices stay safe no matter what the user drags.
+				if (set_light_elevation || set_light_azimuth || set_light_color ||
+					set_light_intensity || set_ambient_strength) {
+					ImGui::Separator();
+					ImGui::TextColored(color_neutral, "Directional Light");
+				}
+
+				// Elev / Azim 放在同一行,两个滑块平分扣除标签后的整行宽度。
+				if (set_light_elevation || set_light_azimuth) {
+					const float row_w = ImGui::GetContentRegionAvail().x;
+					const float spacing = ImGui::GetStyle().ItemSpacing.x;
+					const std::string elev_label = std::format("Elev: {:.0f}\xC2\xB0", current_light_elevation);
+					const std::string azim_label = std::format(" | Azim: {:.0f}\xC2\xB0", current_light_azimuth);
+					const float elev_label_w = ImGui::CalcTextSize(elev_label.c_str()).x;
+					const float azim_label_w = ImGui::CalcTextSize(azim_label.c_str()).x;
+					// [elev_label][slider_elev][azim_label][slider_azim], 3 个 ItemSpacing
+					float slider_total = row_w - elev_label_w - azim_label_w - spacing * 3.0f;
+					if (slider_total < 20.0f) slider_total = 20.0f;
+					const float elev_w = slider_total * 0.5f;
+					const float azim_w = slider_total - elev_w;
+
+					if (set_light_elevation) {
+						ImGui::TextColored(color_neutral, "%s", elev_label.c_str());
+						ImGui::SameLine();
+						ImGui::PushID("light_elev_slider");
+						ImGui::PushItemWidth(elev_w);
+						float tmp_elev = current_light_elevation;
+						if (ImGui::SliderFloat("##light_elev", &tmp_elev, -90.0f, 90.0f, "%.0f")) {
+							set_light_elevation(tmp_elev);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+					}
+					if (set_light_azimuth) {
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, "%s", azim_label.c_str());
+						ImGui::SameLine();
+						ImGui::PushID("light_azim_slider");
+						ImGui::PushItemWidth(azim_w);
+						float tmp_azim = current_light_azimuth;
+						if (ImGui::SliderFloat("##light_azim", &tmp_azim, 0.0f, 359.0f, "%.0f")) {
+							set_light_azimuth(tmp_azim);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+					}
+				}
+
+				if (set_light_color) {
+					ImGui::TextColored(color_neutral, "Color:");
+					ImGui::SameLine();
+					ImGui::PushID("light_color_picker");
+					float light_color_tmp[3] = { current_light_color.r, current_light_color.g, current_light_color.b };
+					if (ImGui::ColorEdit3("##light_color", light_color_tmp, ImGuiColorEditFlags_NoInputs)) {
+						set_light_color(bud::math::vec3(light_color_tmp[0], light_color_tmp[1], light_color_tmp[2]));
+					}
+					ImGui::PopID();
+				}
+
+				if (set_light_intensity) {
+					ImGui::SameLine();
+					ImGui::TextColored(color_neutral, " | Int: %.1f", current_light_intensity);
+					ImGui::SameLine();
+					ImGui::PushID("light_intensity_slider");
+					ImGui::PushItemWidth(60.0f);
+					float tmp_int = current_light_intensity;
+					if (ImGui::SliderFloat("##light_int", &tmp_int, 0.0f, 20.0f, "%.1f")) {
+						set_light_intensity(tmp_int);
+					}
+					ImGui::PopItemWidth();
+					ImGui::PopID();
+				}
+				if (set_ambient_strength) {
+					ImGui::SameLine();
+					ImGui::TextColored(color_neutral, " | Ambient: %.2f", current_ambient_strength);
+					ImGui::SameLine();
+					ImGui::PushID("light_ambient_slider");
+					ImGui::PushItemWidth(60.0f);
+					float tmp_amb = current_ambient_strength;
+					if (ImGui::SliderFloat("##light_ambient", &tmp_amb, 0.0f, 1.0f, "%.2f")) {
+						set_ambient_strength(tmp_amb);
+					}
+					ImGui::PopItemWidth();
+					ImGui::PopID();
+				}
 
 				ImGui::Separator();
 				ImGui::TextColored(color_neutral, "Shadow Casters: %u", display_shadow_casters);

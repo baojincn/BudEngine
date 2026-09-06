@@ -1,4 +1,4 @@
-#include "obj_importer.hpp"
+﻿#include "obj_importer.hpp"
 #include "texture_importer.hpp"
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
@@ -8,6 +8,8 @@
 #include <algorithm>
 
 namespace bud::asset_pipeline {
+
+const std::string default_texture_path = "Content/Textures/default.png";
 
 static std::optional<RawMesh> import_assimp_common(const std::string& filepath, unsigned int postprocess_flags, float scale = 1.0f) {
     Assimp::Importer importer;
@@ -32,7 +34,7 @@ static std::optional<RawMesh> import_assimp_common(const std::string& filepath, 
         base_dir = filepath.substr(0, last_slash + 1);
 
     // Default texture slot 0
-    raw_mesh.textures.push_back("data/textures/default.png");
+    raw_mesh.textures.push_back(default_texture_path);
 
     for (unsigned int i = 0; i < scene->mNumMaterials; ++i) {
         aiMaterial* mat = scene->mMaterials[i];
@@ -104,19 +106,74 @@ static std::optional<RawMesh> import_assimp_common(const std::string& filepath, 
             rm.roughness_factor = roughness_factor;
         }
 
+        // Comprehensive Material Alpha Mode Analysis (Opaque, Mask/AlphaTest, Blend/Translucent)
         rm.alpha_mode = bud::asset::AlphaMode::Opaque;
         rm.double_sided = false;
         rm.alpha_cutoff = 0.5f;
 
+        // 1. Analyze Base Color / Diffuse Texture Alpha (Ground Truth for textured meshes)
+        bool has_texture_alpha = false;
         if (!rm.base_color_texture_path.empty() && rm.base_color_texture_path != raw_mesh.textures[0]) {
             auto alpha_info = TextureImporter::analyze_alpha(rm.base_color_texture_path);
             if (alpha_info.has_alpha) {
+                has_texture_alpha = true;
                 rm.alpha_mode = alpha_info.alpha_mode;
                 rm.alpha_cutoff = alpha_info.alpha_cutoff;
                 if (rm.alpha_mode == bud::asset::AlphaMode::Mask) {
                     rm.double_sided = true;
                 }
             }
+        }
+
+        // 2. Opacity / Transmission Textures (e.g. map_d in OBJ/MTL, opacity map)
+        if (!has_texture_alpha) {
+            aiString opacity_tex_path;
+            if (mat->GetTexture(aiTextureType_OPACITY, 0, &opacity_tex_path) == AI_SUCCESS ||
+                mat->GetTexture(aiTextureType_TRANSMISSION, 0, &opacity_tex_path) == AI_SUCCESS) {
+                std::string p = opacity_tex_path.C_Str();
+                if (p.find(":") == std::string::npos && p.find("/") != 0 && p.find("\\") != 0) p = base_dir + p;
+                if (!p.empty()) {
+                    auto alpha_info = TextureImporter::analyze_alpha(p);
+                    if (alpha_info.has_alpha) {
+                        rm.alpha_mode = alpha_info.alpha_mode;
+                        rm.alpha_cutoff = alpha_info.alpha_cutoff;
+                    } else {
+                        // Default opacity map (map_d) without separate alpha is a black/white cutout mask
+                        rm.alpha_mode = bud::asset::AlphaMode::Mask;
+                        rm.alpha_cutoff = 0.5f;
+                    }
+                    has_texture_alpha = true;
+                    rm.double_sided = true;
+                }
+            }
+        }
+
+        // 3. Material Numeric Properties (for untextured or uniform translucent surfaces like glass/water)
+        if (!has_texture_alpha) {
+            float opacity = 1.0f;
+            if (mat->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS && opacity < 0.99f && opacity > 0.001f) {
+                rm.alpha_mode = bud::asset::AlphaMode::Blend;
+                rm.base_color_factor[3] = opacity;
+            }
+            float transparency = 0.0f;
+            if (mat->Get(AI_MATKEY_TRANSPARENCYFACTOR, transparency) == AI_SUCCESS && transparency > 0.01f) {
+                rm.alpha_mode = bud::asset::AlphaMode::Blend;
+                rm.base_color_factor[3] = 1.0f - transparency;
+            }
+            aiColor4D diff_col;
+            if (mat->Get(AI_MATKEY_COLOR_DIFFUSE, diff_col) == AI_SUCCESS ||
+                mat->Get(AI_MATKEY_BASE_COLOR, diff_col) == AI_SUCCESS) {
+                if (diff_col.a < 0.99f && diff_col.a > 0.001f) {
+                    rm.alpha_mode = bud::asset::AlphaMode::Blend;
+                    rm.base_color_factor[3] = diff_col.a;
+                }
+            }
+        }
+
+        // 4. Double Sided Flag
+        int two_sided = 0;
+        if (mat->Get(AI_MATKEY_TWOSIDED, two_sided) == AI_SUCCESS && two_sided != 0) {
+            rm.double_sided = true;
         }
 
         raw_mesh.materials.push_back(std::move(rm));

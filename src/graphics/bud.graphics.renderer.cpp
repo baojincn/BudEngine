@@ -15,10 +15,15 @@
 #include "src/streaming/bud.streaming.manager.hpp"
 #include "src/core/bud.asset.types.hpp"
 #include "src/runtime/bud.scene.hpp"
-// Compile-time layout validation for C++ / GLSL shared structs
 #include "src/core/bud.layouts.hpp"
-// HierarchyInstance and InstanceData are nested in Renderer, so we validate here
-namespace bud::graphics { namespace {
+
+#include "src/graphics/bud.graphics.sortkey.hpp"
+#include "src/graphics/vulkan/bud.vulkan.memory.hpp"
+
+
+
+namespace bud::graphics {
+namespace {
 struct LayoutValidation {
     static_assert(sizeof(Renderer::HierarchyInstance) == 112,
         "HierarchyInstance size must match GLSL layout (112 bytes)");
@@ -41,9 +46,8 @@ struct LayoutValidation {
     static_assert(offsetof(Renderer::InstanceData, blend_factor) == 72, "");
     static_assert(offsetof(Renderer::InstanceData, padding) == 76, "");
 };
-}} // namespace#include "src/core/bud.math.hpp"
-#include "src/graphics/bud.graphics.sortkey.hpp"
-#include "src/graphics/vulkan/bud.vulkan.memory.hpp"
+}
+}
 
 namespace bud::graphics {
 
@@ -62,7 +66,6 @@ namespace bud::graphics {
 		page_emit_pass = std::make_unique<PageEmitPass>();
 		cluster_cull_pass = std::make_unique<ClusterCullPass>();
 		forward_translucent_pass = std::make_unique<ForwardTranslucentPass>();
-		cluster_visualization_pass = std::make_unique<ClusterVisualizationPass>();
 		ui_pass = std::make_unique<UIPass>();
 		visibility_pass = std::make_unique<VisibilityPass>();
 		ssr_pass = std::make_unique<ScreenSpaceReflectionPass>();
@@ -81,12 +84,13 @@ namespace bud::graphics {
 		page_emit_pass->init(rhi, render_config, asset_manager);
 		cluster_cull_pass->init(rhi, render_config, asset_manager);
 		forward_translucent_pass->init(rhi, render_config, asset_manager);
-		cluster_visualization_pass->init(rhi, render_config, asset_manager);
 		ui_pass->init(rhi, render_config, asset_manager);
 		visibility_pass->init(rhi, render_config, asset_manager);
 		ssr_pass->init(rhi, render_config, asset_manager);
 		ssgi_pass->init(rhi, render_config, asset_manager);
 		resolve_pass->init(rhi, render_config, asset_manager);
+		physics_debug_pass = std::make_unique<PhysicsDebugPass>();
+		physics_debug_pass->init(rhi, render_config, asset_manager);
 
 		auto& geometry_pool = gpu_scene.get_geometry_pool();
 		if (!geometry_pool.initialized) {
@@ -100,7 +104,7 @@ namespace bud::graphics {
 				GPUScene::GeometryPool::index_pool_size / (1024 * 1024));
 		}
 
-		has_mesh_shader = true; // GPU supports mesh shaders (NV / EXT)
+		has_mesh_shader = true;
 		gpu_scene.init(rhi, rhi->get_inflight_frame_count());
 
 		// Load CSM cull shader for GPU-driven shadow culling
@@ -134,11 +138,11 @@ namespace bud::graphics {
 		if (page_emit_pass) page_emit_pass->shutdown(rhi);
 		if (cluster_cull_pass) cluster_cull_pass->shutdown(rhi);
 		if (forward_translucent_pass) forward_translucent_pass->shutdown(rhi);
-		if (cluster_visualization_pass) cluster_visualization_pass->shutdown(rhi);
 		if (visibility_pass) visibility_pass->shutdown(rhi);
 		if (ssr_pass) ssr_pass->shutdown(rhi);
 		if (ssgi_pass) ssgi_pass->shutdown(rhi);
 		if (resolve_pass) resolve_pass->shutdown(rhi);
+		if (physics_debug_pass) physics_debug_pass->shutdown(rhi);
 		if (csm_cull_pipeline.is_valid()) {
 			rhi->destroy_pipeline(csm_cull_pipeline);
 			csm_cull_pipeline.reset();
@@ -195,7 +199,7 @@ namespace bud::graphics {
 		meshes[mesh_id].is_page_based = true;
 	}
 
-	uint32_t Renderer::register_page_based_mesh(uint32_t page_index, uint32_t meshlet_count,
+	uint32_t Renderer::register_page_based_mesh(uint32_t page_index, uint32_t cluster_count,
 		uint32_t index_count, const bud::math::AABB& aabb, const bud::math::AABB& global_aabb,
 		uint32_t vertex_data_offset, uint32_t index_data_offset,
 		const std::vector<PageSubMesh>& page_submeshes,
@@ -625,7 +629,7 @@ namespace bud::graphics {
 		size_t instance_count = render_scene.instance_count.load(std::memory_order_relaxed);
 		const uint32_t cascade_count = std::min(render_config.cascade_count, (uint32_t)MAX_CASCADES);
 		uint32_t total_shadow_casters = 0;
-		uint32_t total_shadow_caster_submeshes = 0;
+		std::atomic<uint32_t> total_shadow_caster_submeshes{0};
 		size_t visible_count = 0;
 		size_t visible_instance_count = 0;
 		size_t total_draw_count = 0;
@@ -641,6 +645,10 @@ namespace bud::graphics {
 				render_config.sky_config.time_of_day += 24.0f;
 		}
 
+		uint32_t non_vg_total_count = 0;
+		uint32_t non_vg_visible_count = 0;
+		uint32_t vg_instance_count = 0;
+
 		if (instance_count > 0) {
 			update_cascades(scene_view, render_config, render_scene.scene_bounds);
 
@@ -649,8 +657,29 @@ namespace bud::graphics {
 
 			auto& main_visible_instances = culled_results[0];
 			main_visible_instances.clear();
-			render_scene.cull_frustum(view_frustums[0], main_visible_instances);
-			//bud::print("[Renderer] MainPass: cull_frustum visible_instances={}", main_visible_instances.size());
+
+			for (size_t i = 0; i < render_scene.size(); ++i) {
+				uint32_t mesh_id = render_scene.mesh_indices[i];
+				if (mesh_id >= meshes.size())
+					continue;
+				const auto& mesh = meshes[mesh_id];
+
+				if (mesh.is_page_based && render_config.enable_virtual_geometry) {
+					// Plan A (UE5 Nanite aligned): Virtual Geometry is 100% GPU-driven.
+					// All VG instances bypass CPU frustum culling and are dispatched to the GPU,
+					// where hierarchy_traversal.comp and visibility.task perform GPU-driven frustum & occlusion culling.
+					main_visible_instances.push_back(static_cast<uint32_t>(i));
+					vg_instance_count++;
+				} else {
+					// Non-VG instances: CPU + GPU hybrid culling.
+					// CPU performs coarse frustum culling against main camera frustum.
+					non_vg_total_count++;
+					if (bud::math::intersect_aabb_frustum(render_scene.world_aabbs[i], view_frustums[0])) {
+						main_visible_instances.push_back(static_cast<uint32_t>(i));
+						non_vg_visible_count++;
+					}
+				}
+			}
 
 			if (cascade_count == 0) {
 				total_shadow_casters = static_cast<uint32_t>(main_visible_instances.size());
@@ -672,11 +701,15 @@ namespace bud::graphics {
 							render_scene.cull_frustum(view_frustums[result_index], visible_instances);
 
 							// Count submesh-level shadow casters
+							uint32_t local_submeshes = 0;
 							for (uint32_t instance : visible_instances) {
 								uint32_t mesh_id = render_scene.mesh_indices[instance];
-								const auto& mesh = meshes[mesh_id];
-								total_shadow_caster_submeshes += static_cast<uint32_t>(mesh.submeshes.size());
+								if (mesh_id < meshes.size()) {
+									const auto& mesh = meshes[mesh_id];
+									local_submeshes += static_cast<uint32_t>(mesh.submeshes.size());
+								}
 							}
+							total_shadow_caster_submeshes.fetch_add(local_submeshes, std::memory_order_relaxed);
 						}
 					},
 					&culling_counter
@@ -696,13 +729,14 @@ namespace bud::graphics {
 			total_draw_count = 0;
 			std::vector<uint32_t> draw_offsets(visible_instance_count + 1);
 			for (size_t k = 0; k < visible_instance_count; ++k) {
+				draw_offsets[k] = (uint32_t)total_draw_count;
+
 				uint32_t i = visible_instances[k];
 				uint32_t mesh_id = render_scene.mesh_indices[i];
 				if (mesh_id >= meshes.size()) continue;
 				const auto& mesh = meshes[mesh_id];
 				uint32_t sub_idx = render_scene.submesh_indices[i];
 
-				draw_offsets[k] = (uint32_t)total_draw_count;
 				if (mesh.is_page_based) {
 					// GPU-driven page-based mesh uses 1 sort item for hierarchy traversal
 					total_draw_count += 1;
@@ -744,6 +778,8 @@ namespace bud::graphics {
 
 						const auto& world_matrix = render_scene.world_matrices[i];
 						uint32_t mesh_id = render_scene.mesh_indices[i];
+						if (mesh_id >= meshes.size())
+							continue;
 						const auto& mesh = meshes[mesh_id];
 						uint32_t sub_idx_original = render_scene.submesh_indices[i];
 
@@ -829,10 +865,6 @@ namespace bud::graphics {
 			auto end_it = std::remove_if(sort_list.begin(), sort_list.begin() + total_draw_count, [](const SortItem& a) { return a.key == UINT64_MAX; });
 			sort_list.erase(end_it, sort_list.end()); // REMOVES INVALID ITEMS!
 			visible_count = sort_list.size();
-			// TEMP DIAGNOSTIC
-			static int diag_frames = 0;
-			if (diag_frames < 5)
-				bud::print("[R dbg] frame {} total_draw={} visible={} inst={}", diag_frames++, total_draw_count, visible_count, instance_count);
 
 			for (size_t i = 0; i < visible_count; ++i) {
 				uint8_t layer = static_cast<uint8_t>((sort_list[i].key >> 60) & 0xF);
@@ -904,6 +936,9 @@ namespace bud::graphics {
 		RGHandle csm_instance_h;
 		size_t scene_split = 0;
 		size_t total_csm_items = 0;
+		// Number of valid entities published into frame.csm_hierarchy_instances this
+		// frame (full-scene shadow casters for the CSM cascade traversals).
+		uint32_t csm_hierarchy_count = 0;
 		for (size_t i = 0; i < instance_count; ++i) {
 			uint32_t mid = render_scene.mesh_indices[i];
 			if (mid < meshes.size() && meshes[mid].is_valid()) {
@@ -924,11 +959,27 @@ namespace bud::graphics {
 			bud::math::vec3 min;
 			uint32_t meshId;
 			bud::math::vec3 max;
-			uint32_t meshletStart;
-			uint32_t meshletCount;
+			uint32_t clusterStart;
+			uint32_t clusterCount;
 			uint32_t flags;
 			uint32_t pageIndex;
 			uint32_t visibilityOffset;
+		};
+
+		// Shadow-caster filter: is this (mesh[, submesh]) rendered as alpha-blended
+		// translucency? Those objects never write shadow depth - they are drawn by the
+		// forward translucent pass, and the shadow passes have no opacity-aware depth
+		// write, so a glass pane would otherwise drop a fully opaque shadow.
+		auto entity_is_translucent = [this](uint32_t mesh_index, uint32_t submesh_index = UINT32_MAX) -> bool {
+			if (mesh_index >= meshes.size()) return false;
+			const auto& m = meshes[mesh_index];
+			if (!m.is_valid() || m.submeshes.empty()) return false;
+			if (submesh_index != UINT32_MAX && submesh_index < m.submeshes.size())
+				return m.submeshes[submesh_index].is_translucent;
+			for (const auto& sub : m.submeshes) {
+				if (sub.is_translucent) return true;
+			}
+			return false;
 		};
 
 		if (instance_count > 0) {
@@ -939,6 +990,7 @@ namespace bud::graphics {
 				static_cast<uint32_t>(total_draw_count),
 				static_cast<uint32_t>(std::max(instance_count, total_csm_items)),
 				sizeof(InstanceData),
+				sizeof(HierarchyInstance),
 				sizeof(DrawData),
 				sizeof(IndirectCommand),
 				1024u);
@@ -980,7 +1032,13 @@ namespace bud::graphics {
 					const auto& mesh = meshes[render_scene.mesh_indices[entity_idx]];
 
 					inst_mapped[i].mesh_id = render_scene.mesh_indices[entity_idx];
-					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+					if (mesh.is_page_based && !mesh.submeshes.empty()) {
+						// VG (page-based) meshes always have submesh_index = INVALID_INDEX in the
+						// sort list. The correct base material ID is stored in submeshes[0].material_id
+						// by the streaming manager during asset registration.
+						inst_mapped[i].material_id = mesh.submeshes[0].material_id;
+					}
+					else if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
 						inst_mapped[i].material_id = mesh.submeshes[item.submesh_index].material_id;
 					}
 					else {
@@ -1028,8 +1086,8 @@ namespace bud::graphics {
 
 						mapped[i].meshId = mesh_index;
 						mapped[i].pageIndex = mesh.page_index;
-						mapped[i].meshletStart = 0;
-						mapped[i].meshletCount = 0;
+						mapped[i].clusterStart = 0;
+						mapped[i].clusterCount = 0;
 						mapped[i].visibilityOffset = 0;
 
 						uint32_t sub_idx = sort_list[i].submesh_index;
@@ -1054,7 +1112,9 @@ namespace bud::graphics {
 						auto world_aabb = local_aabb.transform(render_scene.world_matrices[entity_idx]);
 						mapped[i].min = world_aabb.min;
 						mapped[i].max = world_aabb.max;
-						mapped[i].flags = (mesh.is_page_based ? 1u : 0u) | ((render_scene.flags[entity_idx] & 1) ? 2u : 0u);
+						// DrawData.flags: bit0 page-based, bit1 static, bit2 = no-cast-shadow
+						// (mirrors RenderScene::INSTANCE_FLAG_NO_CAST_SHADOW == 2).
+						mapped[i].flags = (mesh.is_page_based ? 1u : 0u) | ((render_scene.flags[entity_idx] & 1) ? 2u : 0u) | ((render_scene.flags[entity_idx] & 2) ? 4u : 0u);
 					}
 
 					if (auto* buf = rhi->get_buffer(current_inst_buf); buf && buf->mapped_ptr) {
@@ -1085,6 +1145,16 @@ namespace bud::graphics {
 					uint32_t static_idx = 0;
 					uint32_t page_idx = static_cast<uint32_t>(scene_split);
 
+					// Two passes make the TRADITIONAL caster block prefix-contiguous:
+					// pass 0 writes everything allowed to cast (plus all page-based entries,
+					// whose index range is independent), pass 1 writes the traditional
+					// translucent entries that must not cast. static_idx / page_idx are
+					// declared OUTSIDE the pass loop so the page region stays untouched and
+					// the traditional block ends up [0, castable) followed by the skipped ones.
+					// CSMShadowPass can then issue a plain [first, first + count) range
+					// instead of filtering every indirect command.
+					const uint32_t caster_passes = render_config.shadow_translucent_casters ? 1u : 2u;
+					for (uint32_t caster_pass = 0; caster_pass < caster_passes; ++caster_pass)
 					for (size_t i = 0; i < instance_count; ++i) {
 						uint32_t entity_idx = static_cast<uint32_t>(i);
 						uint32_t mesh_index = render_scene.mesh_indices[entity_idx];
@@ -1093,6 +1163,17 @@ namespace bud::graphics {
 						
 						const auto& mesh = meshes[mesh_index];
 						const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_index);
+
+						// Pass filter: pass 0 keeps castable entries (and every page-based one,
+						// which the two passes must not reorder), pass 1 keeps only the
+						// traditional translucent entries that must not cast.
+						if (caster_passes > 1) {
+							const bool traditional = !mesh.is_page_based;
+							const bool castable = !traditional ||
+								!entity_is_translucent(mesh_index, render_scene.submesh_indices[entity_idx]);
+							const bool wanted = (caster_pass == 0) ? castable : (traditional && !castable);
+							if (!wanted) continue;
+						}
 
 						if (mesh.is_page_based) {
 							for (size_t s = 0; s < mesh.submeshes.size(); ++s) {
@@ -1109,9 +1190,9 @@ namespace bud::graphics {
 
 								DrawData d{};
 								d.meshId = mesh_index;
-								d.flags = 1u | ((render_scene.flags[entity_idx] & 1) ? 2u : 0u);
-								d.meshletStart = 0;
-								d.meshletCount = 0;
+								d.flags = 1u | ((render_scene.flags[entity_idx] & 1) ? 2u : 0u) | ((render_scene.flags[entity_idx] & 2) ? 4u : 0u);
+								d.clusterStart = 0;
+								d.clusterCount = 0;
 								d.visibilityOffset = 0;
 								d.vertexOffset = 0;
 								d.materialId = sub.material_id;
@@ -1145,10 +1226,10 @@ namespace bud::graphics {
 							uint32_t write_idx = static_idx++;
 							DrawData d{};
 							d.meshId = mesh_index;
-							d.flags = ((render_scene.flags[entity_idx] & 1) ? 2u : 0u);
+							d.flags = ((render_scene.flags[entity_idx] & 1) ? 2u : 0u) | ((render_scene.flags[entity_idx] & 2) ? 4u : 0u);
 							d.pageIndex = ~0u;
-							d.meshletStart = 0;
-							d.meshletCount = 0;
+							d.clusterStart = 0;
+							d.clusterCount = 0;
 							d.visibilityOffset = 0;
 
 							uint32_t sub_idx = render_scene.submesh_indices[entity_idx];
@@ -1189,6 +1270,98 @@ namespace bud::graphics {
 					csm_instance_h = render_graph.import_buffer("CSMSceneInstanceData", frame.csm_instance_data, ResourceState::UnorderedAccess);
 				}
 
+				// --- Full-scene HierarchyInstance list for shadow casters -----------------
+				// The CSM cascade traversals used to walk frame.instance_data, which only
+				// holds the instances visible to the MAIN camera. Rotating a caster out of
+				// view therefore removed it from the shadow map and its shadow vanished
+				// with it. A shadow map needs every caster inside the cascade box, whether
+				// or not the player can see it; hierarchy_traversal.comp already
+				// frustum-culls each instance against the cascade it is given, so walking
+				// the whole scene only costs one sphere test per off-screen entity.
+				csm_hierarchy_count = 0;
+				if (render_config.shadow_full_scene_casters &&
+					render_config.enable_virtual_geometry && cascade_count > 0 &&
+					frame.csm_hierarchy_instances.is_valid()) {
+					if (auto* hbuf = rhi->get_buffer(frame.csm_hierarchy_instances); hbuf && hbuf->mapped_ptr) {
+						auto* hi_mapped = static_cast<HierarchyInstance*>(hbuf->mapped_ptr);
+						// instance_id is packed into 16 bits of the visible-page entry.
+						const size_t hi_limit = std::min<uint64_t>(frame.csm_hierarchy_capacity, 65536ull);
+						const size_t scene_n = std::min({
+							instance_count,
+							render_scene.world_matrices.size(),
+							render_scene.world_aabbs.size(),
+							render_scene.mesh_indices.size(),
+							render_scene.material_indices.size(),
+							render_scene.flags.size(),
+							render_scene.root_group_indices.size(),
+							render_scene.base_virtual_pages.size(),
+							hi_limit
+							});
+						csm_hierarchy_count = static_cast<uint32_t>(scene_n);
+						for (size_t i = 0; i < scene_n; ++i) {
+							HierarchyInstance hi{};
+							hi.model_matrix = bud::math::mat4(1.0f);
+							hi.global_sphere_center = bud::math::vec3(0.0f);
+							hi.global_sphere_radius = 0.0f;
+							hi.root_group_index = bud::asset::INVALID_INDEX;
+
+							const uint32_t mesh_index = render_scene.mesh_indices[i];
+							if (mesh_index < meshes.size() && meshes[mesh_index].is_valid()) {
+								const auto& mesh = meshes[mesh_index];
+								hi.model_matrix = render_scene.world_matrices[i];
+								hi.mesh_id = mesh_index;
+								hi.flags = render_scene.flags[i];
+								hi.error_threshold = render_config.lod_error_threshold_px;
+								if (mesh.is_page_based && !mesh.submeshes.empty()) {
+									// VG (page-based) mesh: base material lives in submeshes[0],
+									// same convention as the main-view fill above.
+									hi.material_id = mesh.submeshes[0].material_id;
+									hi.root_group_index = render_scene.root_group_indices[i];
+									hi.base_virtual_page = render_scene.base_virtual_pages[i];
+								}
+								else {
+									// Traditional mesh: no VG hierarchy -> the traversal
+									// early-outs, the shadow is drawn by the vertex path.
+									hi.material_id = render_scene.material_indices[i];
+								}
+								const auto& aabb = render_scene.world_aabbs[i];
+								hi.global_sphere_center = (aabb.min + aabb.max) * 0.5f;
+								hi.global_sphere_radius = bud::math::length(aabb.max - aabb.min) * 0.5f;
+							}
+							hi_mapped[i] = hi;
+						}
+					}
+				}
+
+				// --- Throttled shadow-caster diagnostic -------------------------------
+				// Deliberately independent of shadow_full_scene_casters: it reports which
+				// objects feed the cascades and which opted out, so an accidental backdrop
+				// lid (e.g. y=[13.30,14.20] x=[-19.2,18.0] z=[-11.8,11.1]) can be spotted
+				// and marked "is_cast_shadow": false in the scene file.
+				static float s_next_caster_print = -1.0f;
+				if (scene_view.time >= s_next_caster_print) {
+					s_next_caster_print = scene_view.time + 1.0f;
+					const size_t flag_n = std::min({
+						instance_count,
+						render_scene.flags.size(),
+						render_scene.world_aabbs.size(),
+						render_scene.mesh_indices.size()
+						});
+					size_t no_cast = 0;
+					for (size_t i = 0; i < flag_n; ++i) {
+						if (render_scene.flags[i] & RenderScene::INSTANCE_FLAG_NO_CAST_SHADOW)
+							++no_cast;
+					}
+					// bud::print("[CSM] shadow casters: {} (scene instances={}, main-view visible={}, opted out of casting={})",
+					// 	render_config.shadow_full_scene_casters ? "FULL SCENE" : "main-view only",
+					// 	flag_n, visible_count, no_cast);
+
+					// Backdrop discovery deliberately lives in BudEngine::extract_scene,
+					// where the entity's asset_path is available: the instance index here
+					// is produced by a ParallelFor over an atomic counter, so it is not
+					// stable and cannot be used to point back into the scene file.
+				}
+
 				// Read back previous frame stats (delayed latency) from this exact buffer which is guaranteed finished
 				if (frame.stats_readback.is_valid()) {
 					if (auto* buf = rhi->get_buffer(frame.stats_readback); buf && buf->mapped_ptr) {
@@ -1226,8 +1399,8 @@ namespace bud::graphics {
 
 			uint32_t cpu_total_instances = static_cast<uint32_t>(total_draw_count);
 			uint32_t cpu_visible_instances = static_cast<uint32_t>(visible_count);
-			uint32_t cpu_total_meshlets = 0;
-			uint32_t cpu_visible_meshlets = 0;
+			uint32_t cpu_total_clusters = 0;
+			uint32_t cpu_visible_clusters = 0;
 
 			uint32_t cpu_total_tris = 0;
 			uint32_t cpu_visible_tris = 0;
@@ -1258,7 +1431,7 @@ namespace bud::graphics {
 			bool is_mesh_shader_vg = (has_mesh_shader && render_config.enable_mesh_shader && visibility_pass && resolve_pass && render_config.enable_virtual_geometry);
 
 			// Setup GPU Stats
-			rhi->add_culling_stats(scene_total_objs, (uint32_t)visible_instance_count, total_shadow_casters);
+			rhi->add_culling_stats(vg_instance_count > 0 ? vg_instance_count : scene_total_objs, (uint32_t)visible_instance_count, total_shadow_casters);
 			if (is_mesh_shader_vg) {
 				uint32_t vg_visible_pages = 0;
 				uint32_t vg_visible_tris = 0;
@@ -1304,6 +1477,7 @@ namespace bud::graphics {
 				rhi->get_render_stats().heuristic_cutoff_bucket = last_gpu_stats.heuristicCutoffBucket;
 				rhi->get_render_stats().heuristic_remaining = last_gpu_stats.heuristicRemaining;
 				rhi->get_render_stats().gpu_occluder_instances = last_gpu_stats.heuristicVisibleInstances;
+				rhi->get_render_stats().active_visibility_path = render_config.enable_virtual_geometry ? bud::graphics::VisibilityPath::Cluster : bud::graphics::VisibilityPath::Instance;
 			}
 			else {
 				last_gpu_stats = {};
@@ -1317,11 +1491,11 @@ namespace bud::graphics {
 				rhi->get_render_stats().gpu_occluder_instances = 0;
 			}
 
-			// Push CPU Stats
-			rhi->get_render_stats().cpu_total_objects = scene_total_objs;
-			rhi->get_render_stats().cpu_visible_objects = (uint32_t)visible_instance_count;
-			rhi->get_render_stats().cpu_total_instances = cpu_total_instances;
-			rhi->get_render_stats().cpu_visible_instances = cpu_visible_instances;
+			// Push CPU Stats (Non-VG)
+			rhi->get_render_stats().cpu_total_objects = non_vg_total_count;
+			rhi->get_render_stats().cpu_visible_objects = non_vg_visible_count;
+			rhi->get_render_stats().cpu_total_instances = non_vg_total_count;
+			rhi->get_render_stats().cpu_visible_instances = non_vg_visible_count;
 			rhi->get_render_stats().cpu_total_triangles = scene_total_tris;
 			rhi->get_render_stats().cpu_visible_triangles = cpu_visible_tris;
 
@@ -1349,10 +1523,76 @@ namespace bud::graphics {
 				const size_t csm_inst_count = csm_instance_h.is_valid() ? total_csm_items : visible_count;
 				const size_t csm_split = csm_instance_h.is_valid() ? scene_split : ranges.range_a_count;
 
+				// --- Shadow caster lists -------------------------------------------------
+				// Translucent meshes are drawn by the forward translucent pass and must not
+				// rasterize into the shadow map: the shadow passes have no opacity-aware depth
+				// stage, so a glass pane would drop a fully solid shadow.
+				//
+				// The traditional block of the full-scene list is written in TWO PASSES (see
+				// the fill loop above) so everything allowed to cast occupies the PREFIX
+				// [0, command_count) of each cascade block. That keeps the issued range
+				// contiguous and avoids filtering per command. (The per-instance
+				// "is_cast_shadow" opt-out is a different mechanism: it is evaluated by
+				// csm_cull.comp, which emits instance_count = 0 for those slots.)
+				//
+				// csm_cull.comp lays out cascade blocks of exactly `total_instances` entries,
+				// so the reader must use the very same stride; guessing it from a related but
+				// different count is what corrupted every cascade >= 1 previously.
+				CSMShadowPass::ShadowCasterLists csm_casters;
+				const bool is_csm_vg = render_config.enable_virtual_geometry && has_mesh_shader;
+				const size_t csm_cull_total = is_csm_vg ? csm_split : csm_inst_count;
+				const bool skip_translucent_casters = !render_config.shadow_translucent_casters;
+				csm_casters.skip_translucent_casters = skip_translucent_casters;
+				csm_casters.traditional.stride_commands = static_cast<uint32_t>(csm_cull_total);
+
+				if (is_csm_vg) {
+					// Full-scene list layout after the two-pass fill:
+					//   [0, castable)          traditional casters      <- issue these
+					//   [castable, scene_split) traditional, no casting
+					//   [scene_split, total)    page-based (rasterized by the mesh path)
+					size_t trad_castable = 0;
+					if (skip_translucent_casters) {
+						for (size_t e = 0; e < instance_count; ++e) {
+							if (e >= render_scene.mesh_indices.size()) continue;
+							const uint32_t mi = render_scene.mesh_indices[e];
+							if (mi >= meshes.size() || !meshes[mi].is_valid() || meshes[mi].is_page_based) continue;
+							const uint32_t si = (e < render_scene.submesh_indices.size())
+								? render_scene.submesh_indices[e] : UINT32_MAX;
+							if (entity_is_translucent(mi, si)) continue;
+							++trad_castable;
+						}
+					}
+					else {
+						trad_castable = scene_split;
+					}
+					csm_casters.traditional.command_count = static_cast<uint32_t>(trad_castable);
+				}
+				else {
+					// Sorted visible list: [0, range_a) is the VG layer, [range_a, range_a +
+					// range_b) the traditional opaque/masked range, then the translucent
+					// layer last. Previously this branch issued range A (the VG items!)
+					// through the traditional pipeline, or fell through to a legacy path that
+					// bound the page pool as a vertex buffer.
+					csm_casters.traditional.first_command = static_cast<uint32_t>(ranges.range_a_count);
+					size_t trad_castable = 0;
+					for (size_t k = ranges.range_a_count; k < visible_count && k < sort_list.size(); ++k) {
+						const uint32_t ei = sort_list[k].entity_index;
+						if (ei == UINT32_MAX) break;
+						if (ei >= render_scene.mesh_indices.size()) continue;
+						const uint32_t mi = render_scene.mesh_indices[ei];
+						if (mi >= meshes.size() || !meshes[mi].is_valid()) continue;
+						if (meshes[mi].is_page_based) continue;	// not part of range B
+						if (skip_translucent_casters && entity_is_translucent(mi, sort_list[k].submesh_index))
+							break;								// translucent range is contiguous
+						++trad_castable;
+					}
+					csm_casters.traditional.command_count = static_cast<uint32_t>(trad_castable);
+				}
+
 				RGHandle rg_csm_indirect;
 				// GPU-driven CSM culling for traditional dynamic meshes (only when dynamic instances exist)
 				if (csm_cull_pipeline.is_valid() && frame.csm_indirect_draw.is_valid()) {
-					if (!is_mesh_shader_vg || csm_split > 0) {
+					if (!is_csm_vg || csm_cull_total > 0) {
 						rg_csm_indirect = render_graph.import_buffer("CSMIndirectDraw", frame.csm_indirect_draw, ResourceState::UnorderedAccess);
 						render_graph.add_pass("CSM Cull",
 							[=](RGBuilder& builder) {
@@ -1369,7 +1609,7 @@ namespace bud::graphics {
 									uint32_t did_copy;
 									uint32_t static_only;
 								} pc;
-								pc.total_instances = static_cast<uint32_t>(is_mesh_shader_vg ? csm_split : csm_inst_count);
+								pc.total_instances = static_cast<uint32_t>(csm_cull_total);
 								pc.did_copy = 0;
 								pc.static_only = 0;
 								rhi->cmd_push_constants(cmd, csm_cull_pipeline, sizeof(PushConsts), &pc);
@@ -1380,14 +1620,43 @@ namespace bud::graphics {
 				}
 
 				std::array<RGHandle, MAX_CASCADES> rg_csm_visible_pages{};
+
+				// Which VG instance list the shadow cascades walk. This MUST be the same
+				// buffer handed to CSMShadowPass below: the per-cascade visible-page list
+				// stores instance_id indexes into it, so a mismatch would draw casters
+				// with other objects' transforms.
+				const bool full_scene_shadow_casters =
+					render_config.shadow_full_scene_casters && csm_hierarchy_count > 0;
+				const uint32_t vg_shadow_instance_count = full_scene_shadow_casters
+					? csm_hierarchy_count
+					: static_cast<uint32_t>(visible_count);
+				const BufferHandle vg_shadow_instances = full_scene_shadow_casters
+					? frame.csm_hierarchy_instances
+					: BufferHandle{};
+
+				gpu_scene.ensure_hiz_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
+				gpu_scene.ensure_color_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
+
 				if (render_config.enable_virtual_geometry && hierarchy_traversal_pass) {
 					for (uint32_t c_idx = 0; c_idx < cascade_count; ++c_idx) {
 						float lod_error_scale = 1.0f;
-						if (c_idx == 1) lod_error_scale = 2.5f;
-						else if (c_idx == 2) lod_error_scale = 5.0f;
-						else if (c_idx >= 3) lod_error_scale = 10.0f;
 
-						float ortho_extent = render_config.shadow_ortho_size * std::pow(2.0f, static_cast<float>(c_idx));
+						if (c_idx == 1)
+							lod_error_scale = 2.5f;
+						else if (c_idx == 2)
+							lod_error_scale = 5.0f;
+						else if (c_idx >= 3)
+							lod_error_scale = 10.0f;
+
+						// The LOD metric must run on the REAL ortho extent update_cascades()
+						// derived for this cascade (texel footprint * map width), not on the
+						// static shadow_ortho_size * 2^i ladder which had no relation to the
+						// actual boxes: casters ended up rasterized with far too coarse (or
+						// far too fine) page LODs, and the mismatch grew with scene scale.
+						float real_extent = scene_view.cascade_texel_size[c_idx] * static_cast<float>(render_config.shadow_map_size);
+						float ortho_extent = (real_extent > 0.0f)
+							? real_extent
+							: render_config.shadow_ortho_size * std::pow(2.0f, static_cast<float>(c_idx));
 						std::string pass_name = "CSM Cascade " + std::to_string(c_idx) + " Traversal";
 						rg_csm_visible_pages[c_idx] = hierarchy_traversal_pass->add_to_graph(
 							render_graph,
@@ -1395,19 +1664,20 @@ namespace bud::graphics {
 							render_config,
 							render_scene,
 							meshes,
-							visible_count,
+							vg_shadow_instance_count,
 							gpu_scene,
 							current_idx,
 							c_idx + 1,
 							lod_error_scale,
 							ortho_extent,
 							frame.csm_visible_pages[c_idx],
-							pass_name
+							pass_name,
+							vg_shadow_instances
 						);
 					}
 				}
 
-				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), csm_inst_input, csm_inst_count, csm_split, rg_csm_indirect, rg_csm_visible_pages);
+				shadow_map = csm_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, std::move(csm_visible_instances), gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), csm_inst_input, csm_casters, rg_csm_indirect, rg_csm_visible_pages, vg_shadow_instances);
 
 				if (is_mesh_shader_vg) {
 					// Mesh shader visibility path (task+mesh shader)
@@ -1485,13 +1755,12 @@ namespace bud::graphics {
 								scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 							has_main_pass = true;
 
-							if (render_config.enable_cluster_visualization && cluster_visualization_pass) {
-								cluster_visualization_pass->add_to_graph(render_graph, back_buffer, rg_depth,
-									render_scene, scene_view, render_config, meshes, sort_list,
-									visible_count, rg_draw, rg_inst, gpu_scene,
-									gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), ranges.range_a_count);
+							if (physics_debug_pass && render_config.debug_physics) {
+								physics_debug_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+									scene_view, render_config);
 							}
-							else if (forward_translucent_pass && ranges.range_c_count > 0) {
+
+							if (forward_translucent_pass && ranges.range_c_count > 0) {
 								forward_translucent_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
 									render_scene, scene_view, render_config, meshes, sort_list,
 									ranges, rg_draw, rg_inst, gpu_scene,
@@ -1502,92 +1771,97 @@ namespace bud::graphics {
 					}
 				}
 				else {
-					auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), {}, ranges.range_a_count);
+					// Compute visibility path (hierarchy traversal -> page emit -> cluster cull -> indirect visibility draw)
+					RGHandle rg_visible_pages{};
+					if (hierarchy_traversal_pass)
+						rg_visible_pages = hierarchy_traversal_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, visible_count, gpu_scene, current_idx);
 
-					if (depth_prepass.is_valid()) {
-						auto rg_hiz = pyramid_mip_pass->add_to_graph(render_graph, depth_prepass, render_config);
+					gpu_scene.ensure_hiz_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
+					gpu_scene.ensure_color_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
 
-						// Path A: Static Virtual Geometry Culling & Streaming
-						if (render_config.enable_virtual_geometry) {
-							if (hierarchy_traversal_pass) {
-								hierarchy_traversal_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, visible_count, gpu_scene, current_idx);
-							}
-							if (page_emit_pass) {
-								page_emit_pass->add_to_graph(render_graph, render_config, gpu_scene, current_idx);
-							}
-							if (cluster_cull_pass) {
-								cluster_cull_pass->add_to_graph(render_graph, rg_hiz, rg_draw, scene_view, render_config, gpu_scene, current_idx);
+					RGHandle rg_history_hiz{};
+					if (gpu_scene.has_history_hiz() && render_config.enable_hiz_culling) {
+						auto hist_tex = gpu_scene.get_history_hiz(current_idx);
+						if (hist_tex.is_valid())
+							rg_history_hiz = render_graph.import_texture("HistoryHiZ", hist_tex, ResourceState::ShaderResource);
+					}
+
+					RGHandle rg_history_color{};
+					if (gpu_scene.has_history_color() && (render_config.enable_ssr || render_config.enable_ssgi)) {
+						auto hist_col_tex = gpu_scene.get_history_color(current_idx);
+						if (hist_col_tex.is_valid())
+							rg_history_color = render_graph.import_texture("HistorySceneColor", hist_col_tex, ResourceState::ShaderResource);
+					}
+
+					RGHandle rg_dyn_instances{};
+					if (render_config.enable_virtual_geometry && rg_visible_pages.is_valid()) {
+						if (page_emit_pass)
+							page_emit_pass->add_to_graph(render_graph, render_config, gpu_scene, current_idx);
+
+						if (cluster_cull_pass)
+							rg_dyn_instances = cluster_cull_pass->add_to_graph(render_graph, rg_history_hiz, rg_draw, scene_view, render_config, gpu_scene, current_idx);
+					}
+
+					// Visibility Indirect Pass: rasterize indirect draws into VisibilityBuffer + DepthBuffer
+					if (visibility_pass && resolve_pass) {
+						RGHandle rg_depth{};
+						auto rg_visibility = visibility_pass->add_indirect_to_graph(render_graph, back_buffer, rg_depth,
+							scene_view, render_config, render_scene, meshes, sort_list,
+							ranges,
+							rg_draw, rg_dyn_instances.is_valid() ? rg_dyn_instances : rg_instance_data, gpu_scene,
+							gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), &rg_depth);
+
+						// Build Current Frame Hi-Z Pyramid from Depth Buffer
+						RGHandle rg_current_hiz{};
+						if (rg_depth.is_valid() && pyramid_mip_pass) {
+							RGHandle target_hiz{};
+							auto curr_tex = gpu_scene.get_current_hiz(current_idx);
+							if (curr_tex.is_valid())
+								target_hiz = render_graph.import_texture("CurrentHiZ", curr_tex, ResourceState::Undefined);
+
+							rg_current_hiz = pyramid_mip_pass->add_to_graph(render_graph, rg_depth, render_config, target_hiz);
+							if (rg_current_hiz.is_valid()) {
+								gpu_scene.mark_history_hiz_valid();
+								if (render_config.debug_hiz && pyramid_mip_debug_pass)
+									pyramid_mip_debug_pass->add_to_graph(render_graph, back_buffer, rg_current_hiz, render_config.debug_hiz_mip);
 							}
 						}
 
-						// Path B: Dynamic Traditional Mesh GPU Culling (for traditional meshes in Range B)
-						if (ranges.range_b_count > 0 && instance_culling_pass && rg_inst.is_valid() && rg_draw.is_valid()) {
-							rg_draw = instance_culling_pass->add_to_graph(render_graph, rg_inst, rg_draw, rg_stats, rg_hiz, scene_view, ranges.range_a_count + ranges.range_b_count);
+						RGHandle rg_ao{};
+						if (rg_depth.is_valid() && ao_pass && render_config.ao_mode != AOMode::Disabled) {
+							RGHandle raw_ao = ao_pass->add_to_graph(render_graph, rg_depth, scene_view, render_config);
+							if (raw_ao.is_valid() && ao_temporal_pass)
+								raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
+
+							if (raw_ao.is_valid() && ao_blur_pass)
+								rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
+							else
+								rg_ao = raw_ao;
 						}
 
-						if (render_config.debug_hiz && pyramid_mip_debug_pass) {
-							pyramid_mip_debug_pass->add_to_graph(render_graph, back_buffer, rg_hiz, render_config.debug_hiz_mip);
-						}
-						
-						// Visibility Indirect Pass: rasterize indirect draws into VisibilityBuffer + DepthBuffer
-						if (visibility_pass && resolve_pass) {
-							RGHandle rg_depth{};
-							auto rg_visibility = visibility_pass->add_indirect_to_graph(render_graph, back_buffer, rg_depth,
-								scene_view, render_config, render_scene, meshes, sort_list,
-								ranges,
-								rg_draw, rg_instance_data, gpu_scene,
-								gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), &rg_depth);
+						RGHandle rg_ssr{};
+						if (rg_depth.is_valid() && ssr_pass && render_config.enable_ssr)
+							rg_ssr = ssr_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
 
-							RGHandle rg_ao{};
-							if (rg_depth.is_valid() && ao_pass && render_config.ao_mode != AOMode::Disabled) {
-								RGHandle raw_ao = ao_pass->add_to_graph(render_graph, rg_depth, scene_view, render_config);
-								if (raw_ao.is_valid() && ao_temporal_pass) {
-									raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
-								}
-								if (raw_ao.is_valid() && ao_blur_pass) {
-									rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
-								}
-								else {
-									rg_ao = raw_ao;
-								}
-							}
+						RGHandle rg_ssgi{};
+						if (rg_depth.is_valid() && ssgi_pass && render_config.enable_ssgi)
+							rg_ssgi = ssgi_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
 
-							RGHandle rg_history_color{};
-							if (gpu_scene.has_history_color() && (render_config.enable_ssr || render_config.enable_ssgi)) {
-								auto hist_col_tex = gpu_scene.get_history_color(current_idx);
-								if (hist_col_tex.is_valid())
-									rg_history_color = render_graph.import_texture("HistorySceneColor", hist_col_tex, ResourceState::ShaderResource);
-							}
+						if (rg_visibility.is_valid()) {
+							resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
+								scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
+							has_main_pass = true;
 
-							RGHandle rg_ssr{};
-							if (rg_depth.is_valid() && ssr_pass && render_config.enable_ssr) {
-								rg_ssr = ssr_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
-							}
+							if (physics_debug_pass && render_config.debug_physics)
+								physics_debug_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+									scene_view, render_config);
 
-							RGHandle rg_ssgi{};
-							if (rg_depth.is_valid() && ssgi_pass && render_config.enable_ssgi) {
-								rg_ssgi = ssgi_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
-							}
-
-							if (rg_visibility.is_valid()) {
-								resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
-									scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
-								has_main_pass = true;
-
-								if (render_config.enable_cluster_visualization && cluster_visualization_pass) {
-									cluster_visualization_pass->add_to_graph(render_graph, back_buffer, rg_depth,
-										render_scene, scene_view, render_config, meshes, sort_list,
-										visible_count, rg_draw, rg_instance_data, gpu_scene,
-										gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), ranges.range_a_count);
-								}
-								else if (forward_translucent_pass && ranges.range_c_count > 0) {
-									forward_translucent_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
-										render_scene, scene_view, render_config, meshes, sort_list,
-										ranges, rg_draw, rg_instance_data, gpu_scene,
-										gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(),
-										rg_ao, rg_ssr, rg_ssgi, rg_history_color);
-								}
-							}
+							if (forward_translucent_pass && ranges.range_c_count > 0)
+								forward_translucent_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
+									render_scene, scene_view, render_config, meshes, sort_list,
+									ranges, rg_draw, rg_inst, gpu_scene,
+									gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(),
+									rg_ao, rg_ssr, rg_ssgi, rg_history_color);
 						}
 					}
 				}
@@ -1688,6 +1962,11 @@ namespace bud::graphics {
 		render_config = config;
 	}
 
+	void Renderer::update_physics_debug_vertices(const std::vector<PhysicsDebugVertex>& verts) {
+		if (physics_debug_pass)
+			physics_debug_pass->update_vertices(verts);
+	}
+
 	const RenderConfig& Renderer::get_config() const {
 		return render_config;
 	}
@@ -1705,22 +1984,66 @@ namespace bud::graphics {
 	void Renderer::update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb) {
 		auto cam_near = view.near_plane;
 		auto cam_far = view.far_plane;
-		auto shadow_far = config.shadow_far_plane;
-		if (shadow_far > cam_far) {
-			shadow_far = cam_far;
+		if (!(cam_far > cam_near)) {
+			cam_far = cam_near + 1.0f;	// guard: never allow a degenerate camera range
 		}
 
 		const uint32_t cascade_count = std::min(config.cascade_count, MAX_CASCADES);
-
 		auto lambda = config.cascade_split_lambda;
 
+		// Scene extent. Cascades never need to reach further than the world we have:
+		// with shadow_far == cam_far == 500m in a ~60m scene, EVERY cascade box swallowed
+		// the whole scene, all four maps rasterized the same geometry and CSM degenerated
+		// into "4 copies of one blurry map" (shadows sliding with camera pitch).
+		const bool has_scene_bounds = (scene_aabb.max.x >= scene_aabb.min.x);
+		float scene_radius = has_scene_bounds ? bud::math::length(scene_aabb.max - scene_aabb.min) * 0.5f : 0.0f;
+
+		float shadow_far = std::min(config.shadow_far_plane, cam_far);
+		if (scene_radius > 0.0f && config.shadow_far_scene_factor > 0.0f) {
+			shadow_far = std::min(shadow_far, scene_radius * config.shadow_far_scene_factor);
+		}
+		shadow_far = std::max(shadow_far, cam_near * 2.0f);
+
+		// Hysteresis on the scene-derived reach. scene_bounds grow/shrink as virtual
+		// geometry pages stream in and out; if shadow_far tracked that every frame, the
+		// derived texel footprint of every cascade would wobble (observed ~0.4%/s), the
+		// texel-snap grid would rescale under the camera and the shadows would creep
+		// again. Only adopt a new reach once it moved by more than 10%.
+		{
+			// If shadow configuration parameters changed, invalidate cached reach
+			if (config.shadow_far_plane != cached_shadow_far_plane ||
+				config.shadow_far_scene_factor != cached_shadow_far_scene_factor) {
+				cached_shadow_far_plane = config.shadow_far_plane;
+				cached_shadow_far_scene_factor = config.shadow_far_scene_factor;
+				cached_shadow_far = -1.0f;
+			}
+
+			const float derived = shadow_far;
+			if (cached_shadow_far > 0.0f &&
+				std::abs(derived - cached_shadow_far) < 0.1f * std::max(derived, 1.0f))
+				shadow_far = cached_shadow_far;
+			else
+				cached_shadow_far = derived;
+		}
+
 		// 1. Calculate Split Depths (Log-Linear)
+		// The classical formula uses cam_near as the logarithmic base. With a 1cm near
+		// plane that base spans 5 orders of magnitude against shadow_far, the log term
+		// collapses to ~0 and the mix degenerates to a purely uniform split. Clamp the
+		// base to a small fraction of shadow_far so the near cascades really stay near.
+		const float log_base = std::max(cam_near, shadow_far * 1e-3f);
 		float cascade_splits[MAX_CASCADES];
+		for (uint32_t i = 0; i < MAX_CASCADES; ++i) {
+			cascade_splits[i] = 1.0f;
+		}
 		for (uint32_t i = 0; i < cascade_count; ++i) {
 			auto p = (float)(i + 1) / (float)cascade_count;
-			auto log = cam_near * std::pow(shadow_far / cam_near, p);
+			auto log = log_base * std::pow(shadow_far / log_base, p);
 			auto uniform = cam_near + (shadow_far - cam_near) * p;
 			auto d = lambda * log + (1.0f - lambda) * uniform;
+			d = std::max(cam_near, std::min(d, cam_far));
+			// Normalized lerp parameter between the near- and far-plane frustum corners.
+			// Along a camera ray this IS linear in view depth, so it selects the slice.
 			cascade_splits[i] = (d - cam_near) / (cam_far - cam_near);
 			view.cascade_split_depths[i] = d;
 		}
@@ -1728,16 +2051,46 @@ namespace bud::graphics {
 		for (uint32_t i = cascade_count; i < MAX_CASCADES; ++i) {
 			view.cascade_split_depths[i] = view.far_plane;
 			view.cascade_view_proj_matrices[i] = bud::math::mat4(1.0f);
+			// texel_size == 0 doubles as the "cascade unused" sentinel that
+			// lighting.glsl uses to skip a layer instead of sampling a non-existent
+			// slice of the shadow-map array.
+			view.cascade_texel_size[i] = 0.0f;
+			view.cascade_depth_range[i] = 1.0f;
 		}
 
 		// 2. Calculate Matrices
 		auto inv_cam_matrix = bud::math::inverse(view.proj_matrix * view.view_matrix);
 		auto L = bud::math::normalize(view.light_dir);
-		auto light_view_matrix = bud::math::lookAt(L * 100.0f, bud::math::vec3(0.0f), bud::math::vec3(0.0f, 1.0f, 0.0f));
+		auto up = (std::abs(L.y) > 0.99f) ? bud::math::vec3(0.0f, 0.0f, 1.0f) : bud::math::vec3(0.0f, 1.0f, 0.0f);
+		// Rotation-only light view: the eye stays at the world origin, so translating the
+		// camera can never jitter the projection. Only the texel-snap below moves it.
+		auto light_rot_matrix = bud::math::lookAt(bud::math::vec3(0.0f), -L, up);
+		const float shadow_map_texels = (float)std::max<uint32_t>(config.shadow_map_size, 1u);
+		// Casters that sit between the light and a slice but still fall onto it: a whole
+		// scene diagonal is the tight upper bound (the slice itself may be outside the AABB).
+		// Quantised onto a 4m ladder on purpose: scene_bounds grow and shrink as virtual
+		// geometry pages stream in and out, and *which* pages stream depends on where the
+		// camera is pointed, so an unquantised reach re-derived the cascade slab length
+		// under camera motion - and that length is the metres-per-unit-depth the shadow
+		// biases are expressed in (see the slab below). A step is rare; a drift is not.
+		const float caster_reach = std::ceil(std::max(scene_radius * 2.0f, 1.0f) / 4.0f) * 4.0f;
 
-		auto last_split = 0.0f;
 		for (uint32_t i = 0; i < cascade_count; ++i) {
-			auto split = cascade_splits[i];
+			const float prev_d = (i == 0) ? cam_near : view.cascade_split_depths[i - 1];
+			const float curr_d = view.cascade_split_depths[i];
+			const float slice_span = curr_d - prev_d;
+			const float overlap = slice_span * 0.20f;
+
+			float slice_near_d = cam_near;
+			if (i > 0)
+				slice_near_d = std::max(cam_near, prev_d - overlap);
+
+			float slice_far_d = curr_d;
+			if (i < cascade_count - 1)
+				slice_far_d = std::min(cam_far, curr_d + overlap);
+
+			const float slice_near_split = (slice_near_d - cam_near) / (cam_far - cam_near);
+			const float slice_far_split = (slice_far_d - cam_near) / (cam_far - cam_near);
 
 			const float ndc_near = config.reversed_z ? 1.0f : 0.0f;
 			const float ndc_far = config.reversed_z ? 0.0f : 1.0f;
@@ -1751,69 +2104,91 @@ namespace bud::graphics {
 				auto vec_far = inv_cam_matrix * bud::math::vec4(frustum_corners[j + 4], 1.0f);
 				vec_far /= vec_far.w;
 
-				frustum_corners[j] = bud::math::vec3(vec_near + (vec_far - vec_near) * last_split);
-				frustum_corners[j + 4] = bud::math::vec3(vec_near + (vec_far - vec_near) * split);
+				frustum_corners[j] = bud::math::vec3(vec_near + (vec_far - vec_near) * slice_near_split);
+				frustum_corners[j + 4] = bud::math::vec3(vec_near + (vec_far - vec_near) * slice_far_split);
 			}
 
-			// 1. 计算视锥体切片的中心 (用于定位)
+			// 3. 该级联切片的包围球（中心 + 半径）。两者对刚体变换都是不变的，
+			//    所以 texel 物理尺寸只随 FOV / aspect / 切分深度变化，相机移动或俯仰
+			//    时完全恒定 —— 这是消除"阴影随视角滑动"的前提。
 			bud::math::vec3 frustum_center(0.0f);
 			for (const auto& v : frustum_corners)
 				frustum_center += v;
 
 			frustum_center /= 8.0f;
 
-			// 2. 计算包围球半径 (用于固定投影大小)
 			auto radius = 0.0f;
 			for (const auto& v : frustum_corners)
 				radius = std::max(radius, bud::math::length(v - frustum_center));
 
-			radius = std::max(radius, 50.0f);
-			radius *= 2;
+			// 包围球本身已经包住 8 个角点，ortho 半边长直接用它。
+			radius = std::max(radius, 0.25f);
 
-			// 向上取整半径，消除浮点抖动，保证 absolute stability
-			radius = std::ceil(radius * 16.0f) / 16.0f;
+			// Hold the reach on an anchor so camera unprojection float jitter cannot
+			// rescale world_units_per_texel every frame. If the required radius grows
+			// larger than reach_anchor, expand immediately with 4% headroom so it never
+			// clips the slice. If radius shrinks by > 10%, adopt the smaller anchor.
+			float& reach_anchor = cascade_reach_anchor_[i];
+			if (reach_anchor <= 0.0f || radius > reach_anchor || radius < reach_anchor * 0.90f)
+				reach_anchor = radius * 1.04f;
 
-			// 3. 构建仅包含旋转的光照 View 矩阵 (消除位置抖动)
-			auto up = (std::abs(L.y) > 0.99f) ? bud::math::vec3(0.0f, 0.0f, 1.0f) : bud::math::vec3(0.0f, 1.0f, 0.0f);
-			auto light_rot_matrix = bud::math::lookAt(bud::math::vec3(0.0f), -L, up);
+			radius = reach_anchor;
 
-			// 将中心点转到光照空间
+			// 4. 固定的 texel 物理尺寸
+			const float texel_size = (2.0f * radius) / shadow_map_texels;
+
+			// 5. 光空间中心 + Texel Snapping（消除最后不到一个 texel 的抖动）
 			auto center_of_light_space = light_rot_matrix * bud::math::vec4(frustum_center, 1.0f);
+			float snapped_x = std::floor(center_of_light_space.x / texel_size) * texel_size;
+			float snapped_y = std::floor(center_of_light_space.y / texel_size) * texel_size;
 
-			// 4. 计算固定大小的纹素尺寸
-			float diameter = radius * 2.0f;
-			float shadow_map_size = (float)config.shadow_map_size;
-			float world_units_per_texel = diameter / shadow_map_size;
-
-			// 5. Texel Snapping (对齐中心点)
-			float snapped_x = std::floor(center_of_light_space.x / world_units_per_texel) * world_units_per_texel;
-			float snapped_y = std::floor(center_of_light_space.y / world_units_per_texel) * world_units_per_texel;
-
-			// 6. 构建正交投影 (基于对齐后的中心)
 			float min_x = snapped_x - radius;
 			float max_x = snapped_x + radius;
 			float min_y = snapped_y - radius;
 			float max_y = snapped_y + radius;
 
-			// 7. Z 轴裁剪 (Scene Fitting)
-			// 将场景 AABB 转到光照空间，用于确定准确的 Near/Far
-			auto light_scene_aabb = scene_aabb.transform(light_rot_matrix);
+			// 6. 逐级联独立的深度 slab：基于外接球中心与半径推导。
+			//    采用与 XY 正交盒完全一致的外接球方案，确保整个外接球及其接收面在
+			//    光空间 Z 轴上也被 100% 完整囊括，彻底杜绝边界截断和漏光。
+			const float center_d = -center_of_light_space.z;
+			const float far_margin = std::max(radius * 0.20f, 2.0f);
+			const float slab_length = caster_reach + 2.0f * radius + far_margin;
+			float far_z = center_d + radius + far_margin;
+			float near_z = center_d - radius - caster_reach;
+			if (!(far_z > near_z + 1e-3f))
+				near_z = far_z - 1.0f;	// guard: never emit a collapsed/inverted slab
 
-			// Z 轴方向：在 View Space 中，相机看 -Z。
-			// 物体越远 Z 越负。light_scene_aabb.min.z 是最远的，max.z 是最近的。
-			float near_z = -light_scene_aabb.max.z - 100.0f; // 场景最近端 (加缓冲)
-			float far_z = -light_scene_aabb.min.z + 100.0f; // 场景最远端 (加缓冲)
-
-			// 构建最终矩阵
+			// 7. 构建最终矩阵
 			auto light_proj_matrix = config.reversed_z
 				? bud::math::ortho_vk_reversed(min_x, max_x, min_y, max_y, near_z, far_z)
 				: bud::math::ortho_vk(min_x, max_x, min_y, max_y, near_z, far_z);
 
-
 			view.cascade_view_proj_matrices[i] = light_proj_matrix * light_rot_matrix;
-
-			last_split = split;
+			// 导出给接收端 shader：bias 以 texel / 米为单位表达，不再依赖
+			// "归一化深度"这种每级联含义都不同的魔数。
+			view.cascade_texel_size[i] = texel_size;
+			view.cascade_depth_range[i] = far_z - near_z;
 		}
+
+		// --- Throttled CSM diagnostic (<= 1 line set / second) -------------------
+		// Lets you answer "are the cascades actually separated?" from the log instead
+		// of guessing in Nsight. Before the cascade-sizing fix all four rows printed
+		// nearly the same box, which is exactly the symptom of "4 shadow maps identical".
+		// {
+		// 	static float s_next_print = -1.0f;
+		// 	if (view.time >= s_next_print) {
+		// 		s_next_print = view.time + 1.0f;
+		// 		bud::print("[CSM] cascades={} shadow_far={:.4f}m scene_radius={:.4f}m map={}px aspect={:.6f} fov={:.4f}",
+		// 			cascade_count, shadow_far, scene_radius, config.shadow_map_size,
+		// 			view.viewport_width / std::max(view.viewport_height, 1.0f), view.fov);
+		// 		for (uint32_t i = 0; i < cascade_count; ++i) {
+		// 			bud::print("[CSM]   C{}: view_depth<={:8.4f}m ortho_box={:9.4f}m texel={:9.6f}m z_slab={:9.4f}m",
+		// 				i, view.cascade_split_depths[i],
+		// 				view.cascade_texel_size[i] * (float)config.shadow_map_size,
+		// 				view.cascade_texel_size[i], view.cascade_depth_range[i]);
+		// 		}
+		// 	}
+		// }
 	}
 
 	void Renderer::select_occluders_cpu(const RenderScene& render_scene, const SceneView& view, const std::vector<SortItem>& source_list, size_t source_count, std::vector<SortItem>& out_occluders, size_t out_count) {

@@ -10,8 +10,8 @@ struct draw_data {
     vec3 min;
     uint mesh_id;
     vec3 max;
-    uint meshlet_start;
-    uint meshlet_count;
+    uint cluster_start;
+    uint cluster_count;
     uint flags;
     uint page_index;
     uint visibility_offset;
@@ -21,9 +21,9 @@ layout(std430, set = 0, binding = 0) readonly buffer InstanceDataBuffer {
     draw_data data[];
 } instance_data;
 
-layout(std430, set = 0, binding = 1) readonly buffer MeshletVisibilityBuffer {
+layout(std430, set = 0, binding = 1) readonly buffer ClusterVisibilityBuffer {
     uint data[];
-} meshlet_visibility;
+} cluster_visibility;
 
 layout(std430, set = 0, binding = 2) buffer HistogramBuffer {
     uint counts[2048];
@@ -34,8 +34,8 @@ layout(std430, set = 0, binding = 3) buffer StatsBuffer {
     layout(offset = 4) uint visible_instances;
     layout(offset = 8) uint total_triangles;
     layout(offset = 12) uint visible_triangles;
-    layout(offset = 16) uint total_meshlets;
-    layout(offset = 20) uint visible_meshlets;
+    layout(offset = 16) uint total_clusters;
+    layout(offset = 20) uint visible_clusters;
     layout(offset = 24) uint heuristic_total_count;
     layout(offset = 28) uint heuristic_cutoff_bucket;
     layout(offset = 32) uint heuristic_remaining;
@@ -98,7 +98,7 @@ float score_draw(draw_data draw)
     float area = max(extent.x * extent.y + extent.y * extent.z + extent.z * extent.x, 1e-4);
     float depth = max(distance(ubo.cam_pos, (draw.min + draw.max) * 0.5), 1e-3);
     float triangle_bias = float(draw.index_count / 3u) * 0.0001;
-    return area / depth + triangle_bias + float(draw.meshlet_count) * 0.001;
+    return area / depth + triangle_bias + float(draw.cluster_count) * 0.001;
 }
 
 layout(push_constant) uniform PushConstants {

@@ -37,6 +37,9 @@ namespace bud::platform {
 		virtual void set_title(const std::string& title) = 0;
 		virtual const char* get_title() const = 0;
 
+		virtual void set_mouse_relative_mode(bool enabled) = 0;
+		virtual void set_cursor_visible(bool visible) = 0;
+
         int get_width() const {
             int w, h;
             get_size(w, h);

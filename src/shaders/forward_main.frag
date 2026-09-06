@@ -30,6 +30,12 @@ layout(binding = 0) uniform UniformBufferObject {
 	float shadow_bias_constant;
 	float shadow_bias_slope;
 	uint debug_cluster;
+
+	// --- CSM receiver metrics (must match vg_common.glsl / UniformBufferObject) ---
+	vec4 cascade_texel_size;   // world metres per shadow-map texel, per cascade
+	vec4 cascade_depth_range;  // light-space slab thickness (metres), per cascade
+	float shadow_receiver_bias_texels; // residual depth bias, in shadow texels
+	float shadow_normal_offset_texels; // shadow normal offset, in shadow texels
 } ubo;
 
 layout(binding = 1) uniform sampler2D tex_samplers[];

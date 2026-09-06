@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <atomic>
 #include <cstdint>
@@ -62,17 +62,27 @@ namespace bud::graphics {
 			std::atomic<uint32_t> next_group{0};
 			BufferHandle group_buffer; // Stores HierarchyCluster for all assets
 			
-			uint32_t allocate_virtual_pages(uint32_t count) { return next_virtual_page.fetch_add(count); }
+			uint32_t allocate_virtual_pages(uint32_t count) {
+				uint32_t start = next_virtual_page.fetch_add(count);
+				if (start + count > GPUScene::max_page_table_entries) {
+					bud::eprint("[GPUScene] Virtual page table overflow! {} + {} > {} (max_page_table_entries). "
+					            "Reduce scene complexity or increase max_page_table_entries.",
+					            start, count, GPUScene::max_page_table_entries);
+					return ~0u;
+				}
+				return start;
+			}
+
 			uint32_t allocate_groups(uint32_t count) {
-		uint32_t start = next_group.fetch_add(count);
-		// 1024K groups max = 36MB buffer
-		constexpr uint32_t max_groups = 1024u * 1024u;
-		if (start + count > max_groups) {
-			bud::eprint("[GPUScene] Group buffer overflow! {} + {} > {}", start, count, max_groups);
-			return 0;
-		}
-		return start;
-	}
+				uint32_t start = next_group.fetch_add(count);
+				// 1024K groups max = 36MB buffer
+				constexpr uint32_t max_groups = 1024u * 1024u;
+				if (start + count > max_groups) {
+					bud::eprint("[GPUScene] Group buffer overflow! {} + {} > {}", start, count, max_groups);
+					return 0;
+				}
+				return start;
+			}
 		};
 
 		struct FrameResources {
@@ -99,6 +109,14 @@ namespace bud::graphics {
 			// order, bound to the shadow pipeline's instance binding (set 0,
 			// binding 3) while the CSM GPU draws are recorded.
 			BufferHandle csm_instance_models;
+			// Full-scene HierarchyInstance list (entity order), consumed by the CSM cascade
+			// hierarchy traversal and by the VG shadow mesh pass. The main-view list
+			// (instance_data) only holds instances visible to the primary camera, so
+			// shadow casters that rotate out of view would stop being rasterized and their
+			// shadows disappeared. Cascade frustum culling happens inside the traversal, so
+			// walking the whole scene stays cheap.
+			BufferHandle csm_hierarchy_instances;
+			uint32_t csm_hierarchy_capacity = 0;
 			uint32_t instance_capacity = 0;
 			uint32_t csm_indirect_capacity = 0;
 			uint32_t csm_instance_capacity = 0;
@@ -157,6 +175,7 @@ namespace bud::graphics {
 			uint32_t required_draw_count,
 			uint32_t required_scene_instance_count,
 			uint64_t instance_data_stride,
+			uint64_t hierarchy_instance_stride,
 			uint64_t indirect_instance_stride,
 			uint64_t indirect_draw_stride,
 			uint64_t stats_buffer_size);
