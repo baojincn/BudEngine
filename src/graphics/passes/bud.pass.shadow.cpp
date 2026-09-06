@@ -132,7 +132,7 @@ namespace bud::graphics {
 		desc.array_layers = cascade_count;
 		desc.initial_state = ResourceState::DepthRead;
 
-		bool is_vg = config.enable_virtual_geometry && config.enable_mesh_shader;
+		bool is_vg = config.enable_virtual_geometry && shadow_mesh_pipeline.is_valid();
 
 		auto shadow_map_h = std::make_shared<RGHandle>();
 

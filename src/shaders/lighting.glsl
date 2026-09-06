@@ -84,9 +84,14 @@ float SampleCascadeRaw(int layer, vec3 world_pos, vec3 N, vec3 L) {
     // NDC -> [0, 1]
     proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
 
-    // Check if within bounds of this cascade
-    if (proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
-        proj_coords.y < 0.0 || proj_coords.y > 1.0 ||
+    // PCF texel size and filter spread
+    vec2 texel_size = 1.0 / textureSize(shadow_map, 0).xy;
+    float spread = max(1.0, 2.5 / (1.0 + float(layer) * 0.4));
+
+    // Check if within bounds of this cascade, accounting for PCF filter radius
+    float pcf_margin = spread * max(texel_size.x, texel_size.y) * 1.5;
+    if (proj_coords.x < pcf_margin || proj_coords.x > (1.0 - pcf_margin) ||
+        proj_coords.y < pcf_margin || proj_coords.y > (1.0 - pcf_margin) ||
         proj_coords.z < 0.0 || proj_coords.z > 1.0) {
         return -1.0;
     }
@@ -95,18 +100,13 @@ float SampleCascadeRaw(int layer, vec3 world_pos, vec3 N, vec3 L) {
     //     thickness and converted with THIS cascade's own depth slab.
     float bias = ubo.shadow_receiver_bias_texels * texel / max(ubo.cascade_depth_range[layer], 1e-4);
 
-    // PCF
     float shadow_sum = 0.0;
-    vec2 texel_size = 1.0 / textureSize(shadow_map, 0).xy;
-
-    // Spread: normalize world-space filter size across cascade layers
-    float spread = max(1.0, 2.5 / (1.0 + float(layer) * 0.4));
-
     bool is_reversed = ubo.reversed_z != 0u;
     for(int i = 0; i < 16; ++i) {
         vec2 offset = poissonDisk[i] * texel_size * spread;
+        vec2 sample_uv = clamp(proj_coords.xy + offset, vec2(0.5 * texel_size), vec2(1.0 - 0.5 * texel_size));
         float pcf_depth = is_reversed ? (proj_coords.z + bias) : (proj_coords.z - bias);
-        shadow_sum += texture(shadow_map, vec4(proj_coords.xy + offset, float(layer), pcf_depth));
+        shadow_sum += texture(shadow_map, vec4(sample_uv, float(layer), pcf_depth));
     }
 
     return 1.0 - (shadow_sum / 16.0);

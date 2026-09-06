@@ -134,7 +134,7 @@ private:
 	NonVgAssetCallback non_vg_asset_callback;
 
 	// Eviction threshold in world units (1 unit = 1 cm). Set to 10m for testing dynamic streaming.
-	float unload_radius_ = 20.0f * bud::core::units::m;
+	float unload_radius_ = 20.0f;
 
 	// Retry queue for page requests that failed due to pool exhaustion.
 	// These will be retried in the next frame's process_gpu_page_requests().

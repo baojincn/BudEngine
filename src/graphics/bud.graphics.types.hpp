@@ -259,12 +259,12 @@ namespace bud::graphics {
 		float shadow_normal_offset_texels = 1.0f; // world-space offset along N
 		float shadow_receiver_bias_texels = 1.5f; // residual light-depth offset
 
-		float shadow_ortho_size = 35.0f * bud::core::units::m;
+		float shadow_ortho_size = 35.0f;
 		// ^ Legacy: only a fallback for the shadow caster LOD metric when a cascade has
 		//   no derived extent yet. update_cascades() now sizes every cascade from its own
 		//   frustum slice, so this no longer controls the shadow-map coverage.
-		float shadow_near_plane = 0.1f * bud::core::units::m; // Unused: cascades get a per-cascade slab from update_cascades().
-		float shadow_far_plane = 500.0f * bud::core::units::m;
+		float shadow_near_plane = 0.1f; // Unused: cascades get a per-cascade slab from update_cascades().
+		float shadow_far_plane = 500.0f;
 		// Cascade boxes never need to be bigger than the scene they enclose.
 		// update_cascades() clamps shadow_far_plane to
 		// scene_bounds_radius * this factor (prevents every cascade covering
@@ -307,13 +307,13 @@ namespace bud::graphics {
 		// Page LOD selection by screen-space error (Nanite-style single threshold):
 		// A LOD level L is used while its accumulated object-space error projects
 		// to <= lod_error_threshold_px pixels on screen.
-		float lod_error_lod1 = 2.0f * bud::core::units::mm; // 0.002 m
-		float lod_error_lod2 = 10.0f * bud::core::units::mm; // 0.010 m
+		float lod_error_lod1 = 0.002f; // 0.002 m
+		float lod_error_lod2 = 0.010f; // 0.010 m
 		float lod_error_threshold_px = 2.0f; // in screen pixels
 
 		// Ambient Occlusion
 		AOMode ao_mode = AOMode::GTAO;
-		float ao_radius = 1.2f * bud::core::units::m; // 1.2 m (architectural scale)
+		float ao_radius = 1.2f; // 1.2 m (architectural scale)
 		float ao_intensity = 0.8f;
 		// 32 samples = 8 steps per slice direction at half-res. Good balance of
 		// quality and cost now that the temporal reprojection is fixed.
@@ -331,16 +331,16 @@ namespace bud::graphics {
 
 		// Screen-Space Reflections (SSR)
 		bool enable_ssr = true;
-		float ssr_max_distance = 30.0f * bud::core::units::m;
-		float ssr_thickness = 0.35f * bud::core::units::m;
+		float ssr_max_distance = 30.0f;
+		float ssr_thickness = 0.35f;
 		uint32_t ssr_max_steps = 48;
 		uint32_t ssr_binary_steps = 8;
 		float ssr_intensity = 1.0f;
 
 		// Screen-Space Global Illumination (SSGI)
 		bool enable_ssgi = true;
-		float ssgi_radius = 8.0f * bud::core::units::m;
-		float ssgi_thickness = 0.5f * bud::core::units::m;
+		float ssgi_radius = 8.0f;
+		float ssgi_thickness = 0.5f;
 		uint32_t ssgi_ray_count = 8;
 		uint32_t ssgi_max_steps = 24;
 		float ssgi_intensity = 1.5f;

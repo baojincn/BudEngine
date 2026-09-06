@@ -209,6 +209,12 @@ namespace bud::graphics {
 			},
 			[=, &rg, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
 				const auto& frame = gpu_scene.get_frame_resources(current_frame);
+
+				// Reset visible cluster atomic counter before emitting
+				rhi->resource_barrier(cmd, frame.visible_clusters, ResourceState::UnorderedAccess, ResourceState::TransferDst);
+				rhi->cmd_fill_buffer(cmd, frame.visible_clusters, 0, sizeof(uint32_t), 0);
+				rhi->resource_barrier(cmd, frame.visible_clusters, ResourceState::TransferDst, ResourceState::UnorderedAccess);
+
 				rhi->cmd_bind_pipeline(cmd, page_emit_pipeline);
 				
 				rhi->cmd_bind_storage_buffer(cmd, page_emit_pipeline, 0, gpu_scene.get_page_pool_buffer());
@@ -262,13 +268,14 @@ namespace bud::graphics {
 		});
 	}
 
-	void ClusterCullPass::add_to_graph(RenderGraph& rg, RGHandle hiz_pyramid, RGHandle rg_draw, const SceneView& view, const RenderConfig& config, const GPUScene& gpu_scene, uint32_t current_frame) {
-		if (!cluster_cull_pipeline.is_valid()) return;
+	RGHandle ClusterCullPass::add_to_graph(RenderGraph& rg, RGHandle hiz_pyramid, RGHandle rg_draw, const SceneView& view, const RenderConfig& config, const GPUScene& gpu_scene, uint32_t current_frame) {
+		if (!cluster_cull_pipeline.is_valid())
+			return {};
 
 		const auto& frame = gpu_scene.get_frame_resources(current_frame);
 
 		if (!frame.visible_clusters.is_valid() || !frame.indirect_draw.is_valid())
-			return;
+			return {};
 
 		RGHandle rg_visible_clusters = rg.import_buffer("VisibleClusters", frame.visible_clusters, ResourceState::UnorderedAccess);
 		RGHandle rg_dynamic_instances = rg.import_buffer("DynamicInstances", frame.dynamic_instances, ResourceState::UnorderedAccess);
@@ -331,6 +338,7 @@ rhi->cmd_bind_storage_buffer(cmd, cluster_cull_pipeline, 0, frame.instance_data)
 				rhi->cmd_dispatch(cmd, (frame.visible_cluster_capacity + 255) / 256, 1, 1);
 			}
 		);
+		return rg_dynamic_instances;
 	}
 
 }

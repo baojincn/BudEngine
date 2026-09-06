@@ -40,7 +40,7 @@ void TriangleApp::on_init(const AppConfig& config) {
 	render_config.cascade_split_lambda = 0.5;
 	render_config.debug_cascades = false;
 	render_config.enable_virtual_geometry = true;
-	render_config.enable_mesh_shader = true;
+	render_config.enable_mesh_shader = false;
 	renderer->set_config(render_config);
 
 	// 2. Load Scene via Engine Data-Driven Pipeline
@@ -48,7 +48,7 @@ void TriangleApp::on_init(const AppConfig& config) {
 		engine->load_scene_async(config.scene_file, [this, engine, renderer]() {
 			auto& scene = engine->get_scene();
 			if (auto* sm = engine->get_streaming_manager()) {
-				sm->set_unload_radius(scene.streaming_unload_radius * bud::core::units::m);
+				sm->set_unload_radius(scene.streaming_unload_radius);
 			}
 			auto cur_cfg = renderer->get_config();
 			cur_cfg.lod_error_threshold_px = scene.lod_error_threshold_px;

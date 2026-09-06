@@ -118,8 +118,8 @@ namespace bud::engine {
 		bud::scene::CameraSequencer camera_sequencer;
 
 		// 渲染配置
-		float far_plane{ 500.0f * bud::core::units::m };  // 500.0 m
-		float near_plane{ 0.01f * bud::core::units::m };  // 0.01 m (1 cm)
+		float far_plane{ 500.0f };  // 500.0 m
+		float near_plane{ 0.01f };  // 0.01 m (1 cm)
 
 		bool show_debug_stats = true;
 

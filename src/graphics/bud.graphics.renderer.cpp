@@ -1452,6 +1452,7 @@ namespace bud::graphics {
 				rhi->get_render_stats().heuristic_cutoff_bucket = last_gpu_stats.heuristicCutoffBucket;
 				rhi->get_render_stats().heuristic_remaining = last_gpu_stats.heuristicRemaining;
 				rhi->get_render_stats().gpu_occluder_instances = last_gpu_stats.heuristicVisibleInstances;
+				rhi->get_render_stats().active_visibility_path = render_config.enable_virtual_geometry ? bud::graphics::VisibilityPath::Cluster : bud::graphics::VisibilityPath::Instance;
 			}
 			else {
 				last_gpu_stats = {};
@@ -1513,12 +1514,13 @@ namespace bud::graphics {
 				// so the reader must use the very same stride; guessing it from a related but
 				// different count is what corrupted every cascade >= 1 previously.
 				CSMShadowPass::ShadowCasterLists csm_casters;
-				const size_t csm_cull_total = is_mesh_shader_vg ? csm_split : csm_inst_count;
+				const bool is_csm_vg = render_config.enable_virtual_geometry && has_mesh_shader;
+				const size_t csm_cull_total = is_csm_vg ? csm_split : csm_inst_count;
 				const bool skip_translucent_casters = !render_config.shadow_translucent_casters;
 				csm_casters.skip_translucent_casters = skip_translucent_casters;
 				csm_casters.traditional.stride_commands = static_cast<uint32_t>(csm_cull_total);
 
-				if (is_mesh_shader_vg) {
+				if (is_csm_vg) {
 					// Full-scene list layout after the two-pass fill:
 					//   [0, castable)          traditional casters      <- issue these
 					//   [castable, scene_split) traditional, no casting
@@ -1565,7 +1567,7 @@ namespace bud::graphics {
 				RGHandle rg_csm_indirect;
 				// GPU-driven CSM culling for traditional dynamic meshes (only when dynamic instances exist)
 				if (csm_cull_pipeline.is_valid() && frame.csm_indirect_draw.is_valid()) {
-					if (!is_mesh_shader_vg || csm_cull_total > 0) {
+					if (!is_csm_vg || csm_cull_total > 0) {
 						rg_csm_indirect = render_graph.import_buffer("CSMIndirectDraw", frame.csm_indirect_draw, ResourceState::UnorderedAccess);
 						render_graph.add_pass("CSM Cull",
 							[=](RGBuilder& builder) {
@@ -1741,91 +1743,97 @@ namespace bud::graphics {
 					}
 				}
 				else {
-					auto depth_prepass = depth_only_pass->add_to_graph(render_graph, back_buffer, render_scene, scene_view, render_config, meshes, sort_list, visible_count, rg_draw, gpu_scene, gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), {}, ranges.range_a_count);
+					// Compute visibility path (hierarchy traversal -> page emit -> cluster cull -> indirect visibility draw)
+					RGHandle rg_visible_pages{};
+					if (hierarchy_traversal_pass)
+						rg_visible_pages = hierarchy_traversal_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, visible_count, gpu_scene, current_idx);
 
-					if (depth_prepass.is_valid()) {
-						auto rg_hiz = pyramid_mip_pass->add_to_graph(render_graph, depth_prepass, render_config);
+					gpu_scene.ensure_hiz_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
+					gpu_scene.ensure_color_textures(rhi, scene_view.viewport_width, scene_view.viewport_height);
 
-						// Path A: Static Virtual Geometry Culling & Streaming
-						if (render_config.enable_virtual_geometry) {
-							if (hierarchy_traversal_pass) {
-								hierarchy_traversal_pass->add_to_graph(render_graph, scene_view, render_config, render_scene, meshes, visible_count, gpu_scene, current_idx);
-							}
-							if (page_emit_pass) {
-								page_emit_pass->add_to_graph(render_graph, render_config, gpu_scene, current_idx);
-							}
-							if (cluster_cull_pass) {
-								cluster_cull_pass->add_to_graph(render_graph, rg_hiz, rg_draw, scene_view, render_config, gpu_scene, current_idx);
+					RGHandle rg_history_hiz{};
+					if (gpu_scene.has_history_hiz() && render_config.enable_hiz_culling) {
+						auto hist_tex = gpu_scene.get_history_hiz(current_idx);
+						if (hist_tex.is_valid())
+							rg_history_hiz = render_graph.import_texture("HistoryHiZ", hist_tex, ResourceState::ShaderResource);
+					}
+
+					RGHandle rg_history_color{};
+					if (gpu_scene.has_history_color() && (render_config.enable_ssr || render_config.enable_ssgi)) {
+						auto hist_col_tex = gpu_scene.get_history_color(current_idx);
+						if (hist_col_tex.is_valid())
+							rg_history_color = render_graph.import_texture("HistorySceneColor", hist_col_tex, ResourceState::ShaderResource);
+					}
+
+					RGHandle rg_dyn_instances{};
+					if (render_config.enable_virtual_geometry && rg_visible_pages.is_valid()) {
+						if (page_emit_pass)
+							page_emit_pass->add_to_graph(render_graph, render_config, gpu_scene, current_idx);
+
+						if (cluster_cull_pass)
+							rg_dyn_instances = cluster_cull_pass->add_to_graph(render_graph, rg_history_hiz, rg_draw, scene_view, render_config, gpu_scene, current_idx);
+					}
+
+					// Visibility Indirect Pass: rasterize indirect draws into VisibilityBuffer + DepthBuffer
+					if (visibility_pass && resolve_pass) {
+						RGHandle rg_depth{};
+						auto rg_visibility = visibility_pass->add_indirect_to_graph(render_graph, back_buffer, rg_depth,
+							scene_view, render_config, render_scene, meshes, sort_list,
+							ranges,
+							rg_draw, rg_dyn_instances.is_valid() ? rg_dyn_instances : rg_instance_data, gpu_scene,
+							gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), &rg_depth);
+
+						// Build Current Frame Hi-Z Pyramid from Depth Buffer
+						RGHandle rg_current_hiz{};
+						if (rg_depth.is_valid() && pyramid_mip_pass) {
+							RGHandle target_hiz{};
+							auto curr_tex = gpu_scene.get_current_hiz(current_idx);
+							if (curr_tex.is_valid())
+								target_hiz = render_graph.import_texture("CurrentHiZ", curr_tex, ResourceState::Undefined);
+
+							rg_current_hiz = pyramid_mip_pass->add_to_graph(render_graph, rg_depth, render_config, target_hiz);
+							if (rg_current_hiz.is_valid()) {
+								gpu_scene.mark_history_hiz_valid();
+								if (render_config.debug_hiz && pyramid_mip_debug_pass)
+									pyramid_mip_debug_pass->add_to_graph(render_graph, back_buffer, rg_current_hiz, render_config.debug_hiz_mip);
 							}
 						}
 
-						// Path B: Dynamic Traditional Mesh GPU Culling (for traditional meshes in Range B)
-						if (ranges.range_b_count > 0 && instance_culling_pass && rg_inst.is_valid() && rg_draw.is_valid()) {
-							rg_draw = instance_culling_pass->add_to_graph(render_graph, rg_inst, rg_draw, rg_stats, rg_hiz, scene_view, ranges.range_a_count + ranges.range_b_count);
+						RGHandle rg_ao{};
+						if (rg_depth.is_valid() && ao_pass && render_config.ao_mode != AOMode::Disabled) {
+							RGHandle raw_ao = ao_pass->add_to_graph(render_graph, rg_depth, scene_view, render_config);
+							if (raw_ao.is_valid() && ao_temporal_pass)
+								raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
+
+							if (raw_ao.is_valid() && ao_blur_pass)
+								rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
+							else
+								rg_ao = raw_ao;
 						}
 
-						if (render_config.debug_hiz && pyramid_mip_debug_pass) {
-							pyramid_mip_debug_pass->add_to_graph(render_graph, back_buffer, rg_hiz, render_config.debug_hiz_mip);
-						}
-						
-						// Visibility Indirect Pass: rasterize indirect draws into VisibilityBuffer + DepthBuffer
-						if (visibility_pass && resolve_pass) {
-							RGHandle rg_depth{};
-							auto rg_visibility = visibility_pass->add_indirect_to_graph(render_graph, back_buffer, rg_depth,
-								scene_view, render_config, render_scene, meshes, sort_list,
-								ranges,
-								rg_draw, rg_instance_data, gpu_scene,
-								gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), &rg_depth);
+						RGHandle rg_ssr{};
+						if (rg_depth.is_valid() && ssr_pass && render_config.enable_ssr)
+							rg_ssr = ssr_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
 
-							RGHandle rg_ao{};
-							if (rg_depth.is_valid() && ao_pass && render_config.ao_mode != AOMode::Disabled) {
-								RGHandle raw_ao = ao_pass->add_to_graph(render_graph, rg_depth, scene_view, render_config);
-								if (raw_ao.is_valid() && ao_temporal_pass) {
-									raw_ao = ao_temporal_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
-								}
-								if (raw_ao.is_valid() && ao_blur_pass) {
-									rg_ao = ao_blur_pass->add_to_graph(render_graph, raw_ao, rg_depth, scene_view, render_config);
-								}
-								else {
-									rg_ao = raw_ao;
-								}
-							}
+						RGHandle rg_ssgi{};
+						if (rg_depth.is_valid() && ssgi_pass && render_config.enable_ssgi)
+							rg_ssgi = ssgi_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
 
-							RGHandle rg_history_color{};
-							if (gpu_scene.has_history_color() && (render_config.enable_ssr || render_config.enable_ssgi)) {
-								auto hist_col_tex = gpu_scene.get_history_color(current_idx);
-								if (hist_col_tex.is_valid())
-									rg_history_color = render_graph.import_texture("HistorySceneColor", hist_col_tex, ResourceState::ShaderResource);
-							}
+						if (rg_visibility.is_valid()) {
+							resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
+								scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
+							has_main_pass = true;
 
-							RGHandle rg_ssr{};
-							if (rg_depth.is_valid() && ssr_pass && render_config.enable_ssr) {
-								rg_ssr = ssr_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
-							}
+							if (physics_debug_pass && render_config.debug_physics)
+								physics_debug_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+									scene_view, render_config);
 
-							RGHandle rg_ssgi{};
-							if (rg_depth.is_valid() && ssgi_pass && render_config.enable_ssgi) {
-								rg_ssgi = ssgi_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
-							}
-
-							if (rg_visibility.is_valid()) {
-								resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
-									scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
-								has_main_pass = true;
-
-								if (physics_debug_pass && render_config.debug_physics) {
-									physics_debug_pass->add_to_graph(render_graph, back_buffer, rg_depth,
-										scene_view, render_config);
-								}
-
-								if (forward_translucent_pass && ranges.range_c_count > 0) {
-									forward_translucent_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
-										render_scene, scene_view, render_config, meshes, sort_list,
-										ranges, rg_draw, rg_instance_data, gpu_scene,
-										gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(),
-										rg_ao, rg_ssr, rg_ssgi, rg_history_color);
-								}
-							}
+							if (forward_translucent_pass && ranges.range_c_count > 0)
+								forward_translucent_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
+									render_scene, scene_view, render_config, meshes, sort_list,
+									ranges, rg_draw, rg_inst, gpu_scene,
+									gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(),
+									rg_ao, rg_ssr, rg_ssgi, rg_history_color);
 						}
 					}
 				}

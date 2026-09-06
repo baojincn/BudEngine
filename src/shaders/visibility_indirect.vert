@@ -139,7 +139,7 @@ void main() {
 	frag_instance_id = gl_InstanceIndex;
 	frag_tex_coord = uv;
 	frag_normal = normalize(mat3(instance.model) * norm);
-	frag_cluster_id = (instance.page_slot != 0xFFFFFFFFu) ? (instance.page_slot * 64u + (gl_VertexIndex / 128u)) : gl_InstanceIndex;
+	frag_cluster_id = (instance.page_slot != 0xFFFFFFFFu) ? (instance.page_slot * 256u + instance.padding) : gl_InstanceIndex;
 	gl_Position = ubo.proj * ubo.view * world_pos;
 }
 

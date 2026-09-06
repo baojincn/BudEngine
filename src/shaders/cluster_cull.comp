@@ -240,7 +240,7 @@ void main() {
     out_instances.data[idx].material_id = material_id;
     out_instances.data[idx].page_slot = page_slot;
     out_instances.data[idx].blend_factor = 0.0;
-    out_instances.data[idx].pad = 0;
+    out_instances.data[idx].pad = cluster_idx;
 
     // Write indirect command
     out_draws.commands[idx].indexCount = triangle_count * 3u;
