@@ -63,7 +63,7 @@ namespace bud::graphics {
 
 		GPUScene& get_gpu_scene() { return gpu_scene; }
 		RHI* get_rhi() { return rhi; }
-		uint32_t register_page_based_mesh(uint32_t page_index, uint32_t meshlet_count,
+		uint32_t register_page_based_mesh(uint32_t page_index, uint32_t cluster_count,
 			uint32_t index_count, const bud::math::AABB& aabb, const bud::math::AABB& global_aabb,
 			uint32_t vertex_data_offset, uint32_t index_data_offset,
 			const std::vector<PageSubMesh>& page_submeshes,

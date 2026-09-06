@@ -199,7 +199,7 @@ namespace bud::graphics {
 		meshes[mesh_id].is_page_based = true;
 	}
 
-	uint32_t Renderer::register_page_based_mesh(uint32_t page_index, uint32_t meshlet_count,
+	uint32_t Renderer::register_page_based_mesh(uint32_t page_index, uint32_t cluster_count,
 		uint32_t index_count, const bud::math::AABB& aabb, const bud::math::AABB& global_aabb,
 		uint32_t vertex_data_offset, uint32_t index_data_offset,
 		const std::vector<PageSubMesh>& page_submeshes,
@@ -645,6 +645,10 @@ namespace bud::graphics {
 				render_config.sky_config.time_of_day += 24.0f;
 		}
 
+		uint32_t non_vg_total_count = 0;
+		uint32_t non_vg_visible_count = 0;
+		uint32_t vg_instance_count = 0;
+
 		if (instance_count > 0) {
 			update_cascades(scene_view, render_config, render_scene.scene_bounds);
 
@@ -653,8 +657,29 @@ namespace bud::graphics {
 
 			auto& main_visible_instances = culled_results[0];
 			main_visible_instances.clear();
-			render_scene.cull_frustum(view_frustums[0], main_visible_instances);
-			//bud::print("[Renderer] MainPass: cull_frustum visible_instances={}", main_visible_instances.size());
+
+			for (size_t i = 0; i < render_scene.size(); ++i) {
+				uint32_t mesh_id = render_scene.mesh_indices[i];
+				if (mesh_id >= meshes.size())
+					continue;
+				const auto& mesh = meshes[mesh_id];
+
+				if (mesh.is_page_based && render_config.enable_virtual_geometry) {
+					// Plan A (UE5 Nanite aligned): Virtual Geometry is 100% GPU-driven.
+					// All VG instances bypass CPU frustum culling and are dispatched to the GPU,
+					// where hierarchy_traversal.comp and visibility.task perform GPU-driven frustum & occlusion culling.
+					main_visible_instances.push_back(static_cast<uint32_t>(i));
+					vg_instance_count++;
+				} else {
+					// Non-VG instances: CPU + GPU hybrid culling.
+					// CPU performs coarse frustum culling against main camera frustum.
+					non_vg_total_count++;
+					if (bud::math::intersect_aabb_frustum(render_scene.world_aabbs[i], view_frustums[0])) {
+						main_visible_instances.push_back(static_cast<uint32_t>(i));
+						non_vg_visible_count++;
+					}
+				}
+			}
 
 			if (cascade_count == 0) {
 				total_shadow_casters = static_cast<uint32_t>(main_visible_instances.size());
@@ -934,8 +959,8 @@ namespace bud::graphics {
 			bud::math::vec3 min;
 			uint32_t meshId;
 			bud::math::vec3 max;
-			uint32_t meshletStart;
-			uint32_t meshletCount;
+			uint32_t clusterStart;
+			uint32_t clusterCount;
 			uint32_t flags;
 			uint32_t pageIndex;
 			uint32_t visibilityOffset;
@@ -1061,8 +1086,8 @@ namespace bud::graphics {
 
 						mapped[i].meshId = mesh_index;
 						mapped[i].pageIndex = mesh.page_index;
-						mapped[i].meshletStart = 0;
-						mapped[i].meshletCount = 0;
+						mapped[i].clusterStart = 0;
+						mapped[i].clusterCount = 0;
 						mapped[i].visibilityOffset = 0;
 
 						uint32_t sub_idx = sort_list[i].submesh_index;
@@ -1166,8 +1191,8 @@ namespace bud::graphics {
 								DrawData d{};
 								d.meshId = mesh_index;
 								d.flags = 1u | ((render_scene.flags[entity_idx] & 1) ? 2u : 0u) | ((render_scene.flags[entity_idx] & 2) ? 4u : 0u);
-								d.meshletStart = 0;
-								d.meshletCount = 0;
+								d.clusterStart = 0;
+								d.clusterCount = 0;
 								d.visibilityOffset = 0;
 								d.vertexOffset = 0;
 								d.materialId = sub.material_id;
@@ -1203,8 +1228,8 @@ namespace bud::graphics {
 							d.meshId = mesh_index;
 							d.flags = ((render_scene.flags[entity_idx] & 1) ? 2u : 0u) | ((render_scene.flags[entity_idx] & 2) ? 4u : 0u);
 							d.pageIndex = ~0u;
-							d.meshletStart = 0;
-							d.meshletCount = 0;
+							d.clusterStart = 0;
+							d.clusterCount = 0;
 							d.visibilityOffset = 0;
 
 							uint32_t sub_idx = render_scene.submesh_indices[entity_idx];
@@ -1374,8 +1399,8 @@ namespace bud::graphics {
 
 			uint32_t cpu_total_instances = static_cast<uint32_t>(total_draw_count);
 			uint32_t cpu_visible_instances = static_cast<uint32_t>(visible_count);
-			uint32_t cpu_total_meshlets = 0;
-			uint32_t cpu_visible_meshlets = 0;
+			uint32_t cpu_total_clusters = 0;
+			uint32_t cpu_visible_clusters = 0;
 
 			uint32_t cpu_total_tris = 0;
 			uint32_t cpu_visible_tris = 0;
@@ -1406,7 +1431,7 @@ namespace bud::graphics {
 			bool is_mesh_shader_vg = (has_mesh_shader && render_config.enable_mesh_shader && visibility_pass && resolve_pass && render_config.enable_virtual_geometry);
 
 			// Setup GPU Stats
-			rhi->add_culling_stats(scene_total_objs, (uint32_t)visible_instance_count, total_shadow_casters);
+			rhi->add_culling_stats(vg_instance_count > 0 ? vg_instance_count : scene_total_objs, (uint32_t)visible_instance_count, total_shadow_casters);
 			if (is_mesh_shader_vg) {
 				uint32_t vg_visible_pages = 0;
 				uint32_t vg_visible_tris = 0;
@@ -1466,11 +1491,11 @@ namespace bud::graphics {
 				rhi->get_render_stats().gpu_occluder_instances = 0;
 			}
 
-			// Push CPU Stats
-			rhi->get_render_stats().cpu_total_objects = scene_total_objs;
-			rhi->get_render_stats().cpu_visible_objects = (uint32_t)visible_instance_count;
-			rhi->get_render_stats().cpu_total_instances = cpu_total_instances;
-			rhi->get_render_stats().cpu_visible_instances = cpu_visible_instances;
+			// Push CPU Stats (Non-VG)
+			rhi->get_render_stats().cpu_total_objects = non_vg_total_count;
+			rhi->get_render_stats().cpu_visible_objects = non_vg_visible_count;
+			rhi->get_render_stats().cpu_total_instances = non_vg_total_count;
+			rhi->get_render_stats().cpu_visible_instances = non_vg_visible_count;
 			rhi->get_render_stats().cpu_total_triangles = scene_total_tris;
 			rhi->get_render_stats().cpu_visible_triangles = cpu_visible_tris;
 

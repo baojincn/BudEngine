@@ -10,8 +10,8 @@ struct draw_data {
     vec3 min;
     uint mesh_id;
     vec3 max;
-    uint meshlet_start;
-    uint meshlet_count;
+    uint cluster_start;
+    uint cluster_count;
     uint flags;
     uint page_index;
     uint visibility_offset;
@@ -29,9 +29,9 @@ layout(std430, set = 0, binding = 0) readonly buffer InstanceDataBuffer {
     draw_data data[];
 } instance_data;
 
-layout(std430, set = 0, binding = 1) readonly buffer MeshletVisibilityBuffer {
+layout(std430, set = 0, binding = 1) readonly buffer ClusterVisibilityBuffer {
     uint data[];
-} meshlet_visibility;
+} cluster_visibility;
 
 layout(std430, set = 0, binding = 2) buffer IndirectDrawBuffer {
     indirect_command data[];
@@ -42,8 +42,8 @@ layout(std430, set = 0, binding = 3) coherent buffer StatsBuffer {
     layout(offset = 4) uint visible_instances;
     layout(offset = 8) uint total_triangles;
     layout(offset = 12) uint visible_triangles;
-    layout(offset = 16) uint total_meshlets;
-    layout(offset = 20) uint visible_meshlets;
+    layout(offset = 16) uint total_clusters;
+    layout(offset = 20) uint visible_clusters;
     layout(offset = 24) uint heuristic_total_count;
     layout(offset = 28) uint heuristic_cutoff_bucket;
     layout(offset = 32) uint heuristic_remaining;
@@ -114,7 +114,7 @@ float score_draw(draw_data draw)
     float area = max(extent.x * extent.y + extent.y * extent.z + extent.z * extent.x, 1e-4);
     float depth = max(distance(ubo.cam_pos, (draw.min + draw.max) * 0.5), 1e-3);
     float triangle_bias = float(draw.index_count / 3u) * 0.0001;
-    return area / depth + triangle_bias + float(draw.meshlet_count) * 0.001;
+    return area / depth + triangle_bias + float(draw.cluster_count) * 0.001;
 }
 
 layout(push_constant) uniform PushConstants {
@@ -127,11 +127,11 @@ void main()
     if (draw_index >= pc.total_instances) return;
 
     draw_data draw = instance_data.data[draw_index];
-    uint meshlet_visible_hint = meshlet_visibility.data[draw_index];
+    uint cluster_visible_hint = cluster_visibility.data[draw_index];
 
     atomicAdd(stats.total_instances, 1u);
     atomicAdd(stats.total_triangles, draw.index_count / 3u);
-    atomicAdd(stats.total_meshlets, draw.meshlet_count);
+    atomicAdd(stats.total_clusters, draw.cluster_count);
 
 	bool visible = aabb_visible(draw.min, draw.max);
     bool selected = false;
@@ -173,6 +173,6 @@ void main()
         atomicAdd(stats.visible_instances, 1u);
         atomicAdd(stats.heuristic_visible_instances, 1u);
         atomicAdd(stats.visible_triangles, draw.index_count / 3u);
-        atomicAdd(stats.visible_meshlets, draw.meshlet_count);
+        atomicAdd(stats.visible_clusters, draw.cluster_count);
     }
 }

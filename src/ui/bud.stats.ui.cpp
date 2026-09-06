@@ -204,17 +204,14 @@ namespace bud::ui {
 				                   display_physics_debug_calls, display_physics_debug_boxes, display_physics_debug_verts);
 
 
-				// CPU CULLING
-				ImGui::Separator();
-				ImGui::TextColored(color_neutral, "CPU Frustum Culling");
-				ImGui::TextColored(color_neutral, "Total Objects/Entities: %u", cpu_display_total_objs);
-				ImGui::TextColored(color_neutral, "Visible Objects/Entities: %u", cpu_display_visible_objs);
-				float cpu_obj_cull_rate = cpu_display_total_objs > 0 ? (1.0f - (float)cpu_display_visible_objs / cpu_display_total_objs) * 100.0f : 0.0f;
-				ImGui::TextColored(color_neutral, "Obj Cull Ratio: %.1f%%", cpu_obj_cull_rate);
-				ImGui::TextColored(color_neutral, "Total Submesh Instances: %u", cpu_display_total_instances);
-				ImGui::TextColored(color_neutral, "Visible Submesh Instances: %u", cpu_display_visible_instances);
-				float cpu_instance_cull_rate = cpu_display_total_instances > 0 ? (1.0f - (float)cpu_display_visible_instances / cpu_display_total_instances) * 100.0f : 0.0f;
-				ImGui::TextColored(color_neutral, "Instance Cull Ratio: %.1f%%", cpu_instance_cull_rate);
+				if (cpu_display_total_objs > 0) {
+					ImGui::Separator();
+					ImGui::TextColored(color_neutral, "Non-VG Frustum Culling (CPU Phase)");
+					ImGui::TextColored(color_neutral, "Total Non-VG Objects: %u", cpu_display_total_objs);
+					ImGui::TextColored(color_neutral, "Visible Non-VG Objects: %u", cpu_display_visible_objs);
+					float cpu_obj_cull_rate = (1.0f - (float)cpu_display_visible_objs / cpu_display_total_objs) * 100.0f;
+					ImGui::TextColored(color_neutral, "Non-VG Cull Ratio: %.1f%%", cpu_obj_cull_rate);
+				}
 
 				ImGui::Separator();
 				ImGui::TextColored(color_neutral, "Cluster Rendering");

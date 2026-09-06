@@ -10,8 +10,8 @@ struct draw_data {
     vec3 min;
     uint mesh_id;
     vec3 max;
-    uint meshlet_start;
-    uint meshlet_count;
+    uint cluster_start;
+    uint cluster_count;
     uint flags;
     uint page_index;
     uint visibility_offset;

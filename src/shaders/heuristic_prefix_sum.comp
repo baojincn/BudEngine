@@ -18,8 +18,8 @@ layout(std430, set = 0, binding = 3) coherent buffer StatsBuffer {
     layout(offset = 4) uint visible_instances;
     layout(offset = 8) uint total_triangles;
     layout(offset = 12) uint visible_triangles;
-    layout(offset = 16) uint total_meshlets;
-    layout(offset = 20) uint visible_meshlets;
+    layout(offset = 16) uint total_clusters;
+    layout(offset = 20) uint visible_clusters;
     layout(offset = 24) uint heuristic_total_count;
     layout(offset = 28) uint heuristic_cutoff_bucket;
     layout(offset = 32) uint heuristic_remaining;
