@@ -154,10 +154,11 @@ float ShadowCalculation(vec3 world_pos, vec3 N, vec3 L) {
 //   metallic   - metallic factor
 //   roughness  - roughness factor
 // Returns: final linear color (before tone-mapping & gamma)
-vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
+vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec3 geom_normal, vec2 tex_coord,
                         GPUMaterialData mat, vec3 albedo, float ao,
                         float metallic, float roughness, float receive_shadow) {
     vec3 N = normalize(normal);
+    vec3 geom_N = normalize(geom_normal);
     vec3 V = normalize(ubo.cam_pos - world_pos);
     vec3 L = normalize(ubo.light_dir);
     vec3 H = normalize(V + L);
@@ -188,7 +189,8 @@ vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
 
     // receive_shadow == 0 means this surface opted out (per-instance flag): skip the
     // shadow term entirely - which also skips every PCF sample, so opting out is free.
-    float shadow = (receive_shadow > 0.0) ? ShadowCalculation(world_pos, N, L) : 0.0;
+    // Use geometric normal (geom_N) for shadow normal bias to avoid normal-map self-shadow acne.
+    float shadow = (receive_shadow > 0.0) ? ShadowCalculation(world_pos, geom_N, L) : 0.0;
 
 
 
@@ -240,12 +242,20 @@ vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
     return color;
 }
 
+// Convenience overload: single normal provided
+vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
+                        GPUMaterialData mat, vec3 albedo, float ao,
+                        float metallic, float roughness, float receive_shadow) {
+    return calculate_lighting(world_pos, normal, normal, tex_coord, mat, albedo, ao,
+                              metallic, roughness, receive_shadow);
+}
+
 // Convenience overload for receivers that have no per-instance flag available (the
 // forward translucent pass): shadows are always received.
 vec3 calculate_lighting(vec3 world_pos, vec3 normal, vec2 tex_coord,
                         GPUMaterialData mat, vec3 albedo, float ao,
                         float metallic, float roughness) {
-    return calculate_lighting(world_pos, normal, tex_coord, mat, albedo, ao,
+    return calculate_lighting(world_pos, normal, normal, tex_coord, mat, albedo, ao,
                               metallic, roughness, 1.0);
 }
 
