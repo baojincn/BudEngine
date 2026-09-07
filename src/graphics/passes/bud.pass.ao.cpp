@@ -168,8 +168,6 @@ namespace bud::graphics {
 
 				if (!raw_tex.is_valid() || !depth_tex.is_valid() || !blur_tex.is_valid()) return;
 
-				rhi->resource_barrier(cmd, raw_tex, ResourceState::UnorderedAccess, ResourceState::UnorderedAccess);
-
 				rhi->cmd_bind_pipeline(cmd, pipeline);
 				rhi->cmd_bind_compute_texture(cmd, pipeline, 0, raw_tex, 0, false, true); // is_general: read raw AO from GENERAL layout
 				rhi->cmd_bind_compute_texture(cmd, pipeline, 1, depth_tex);
@@ -250,8 +248,8 @@ namespace bud::graphics {
 		const uint32_t read_idx = history_read_index;
 		const uint32_t write_idx = history_read_index ^ 1u;
 
-		RGHandle history_read_h = rg.import_texture("AOHistoryRead", history_textures[read_idx], ResourceState::UnorderedAccess);
-		RGHandle history_write_h = rg.import_texture("AOHistoryWrite", history_textures[write_idx], ResourceState::UnorderedAccess);
+		RGHandle history_read_h = rg.import_texture("AOHistoryRead", history_textures[read_idx]);
+		RGHandle history_write_h = rg.import_texture("AOHistoryWrite", history_textures[write_idx]);
 
 		const bud::math::mat4 prev_view_proj = has_last_view_proj ? last_view_proj : view.view_proj_matrix;
 		const uint32_t has_history = (has_valid_history && has_last_view_proj) ? 1u : 0u;
@@ -282,11 +280,6 @@ namespace bud::graphics {
 				}
 
 				if (!current_tex.is_valid() || !depth_tex.is_valid() || !history_tex.is_valid() || !out_tex.is_valid()) return;
-
-				if (has_history == 0) {
-					rhi->resource_barrier(cmd, history_tex, ResourceState::Undefined, ResourceState::UnorderedAccess);
-					rhi->resource_barrier(cmd, out_tex, ResourceState::Undefined, ResourceState::UnorderedAccess);
-				}
 
 				rhi->cmd_bind_pipeline(cmd, pipeline);
 				rhi->cmd_bind_compute_texture(cmd, pipeline, 0, current_tex);

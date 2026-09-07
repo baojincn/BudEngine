@@ -254,10 +254,6 @@ namespace bud::physics {
             }
         }
 
-        for (auto* shape : jolt_shapes) {
-            if (shape) shape->Release();
-        }
-        jolt_shapes.clear();
         jolt_body_ids.clear();
 
         // Tear the system down before releasing the listeners it points at, then drop
@@ -326,7 +322,6 @@ namespace bud::physics {
         const size_t n = body_count.load(std::memory_order_relaxed);
 
         jolt_body_ids.resize(n, JPH::BodyID::cInvalidBodyID);
-        jolt_shapes.resize(n, nullptr);
 
         const size_t count = std::min({n, body_positions.size(), body_rotations.size(), body_flags.size(), body_half_extents.size()});
         for (size_t i = 0; i < count; ++i) {
@@ -366,9 +361,6 @@ namespace bud::physics {
                     body->SetUserData(reinterpret_cast<uint64_t>(body_user_data[i]));
                     bi.AddBody(body->GetID(), JPH::EActivation::Activate);
                     jolt_body_ids[i] = body->GetID().GetIndexAndSequenceNumber();
-                    jolt_shapes[i] = shape;
-                } else {
-                    shape->Release();
                 }
             } else {
                 // BodyInterface locks the body internally. Never wrap these calls in a
@@ -438,10 +430,6 @@ namespace bud::physics {
             bi.DestroyBody(id);
         }
 
-        if (jolt_shapes[handle.id]) {
-            jolt_shapes[handle.id]->Release();
-            jolt_shapes[handle.id] = nullptr;
-        }
         jolt_body_ids[handle.id] = JPH::BodyID::cInvalidBodyID;
     }
 

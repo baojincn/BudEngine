@@ -1899,7 +1899,6 @@ namespace bud::graphics {
 							},
 							[=](RHI* rhi, CommandHandle cmd) {
 								rhi->cmd_copy_image(cmd, render_graph.get_texture(back_buffer), render_graph.get_texture(rg_curr_color));
-								rhi->resource_barrier(cmd, render_graph.get_texture(rg_curr_color), ResourceState::TransferDst, ResourceState::ShaderResource);
 							}
 						);
 					}

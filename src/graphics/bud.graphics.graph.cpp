@@ -59,6 +59,17 @@ namespace bud::graphics {
 		node.physical_texture = texture;
 		if (texture.is_valid() && rhi) {
 			node.desc = rhi->get_texture_desc(texture);
+			auto* phys_tex = rhi->get_texture(texture);
+			if (phys_tex) {
+				if (current_state == ResourceState::Undefined) {
+					if (name != "Backbuffer" && phys_tex->current_state != ResourceState::Undefined) {
+						current_state = phys_tex->current_state;
+					}
+				} else if (phys_tex->current_state != ResourceState::Undefined) {
+					// Physical tracked state is the ground truth
+					current_state = phys_tex->current_state;
+				}
+			}
 		}
 		node.is_external = texture.is_valid();
 		node.is_transient = !node.is_external;
@@ -78,6 +89,10 @@ namespace bud::graphics {
 		node.is_buffer = true;
 		if (buffer.is_valid() && rhi) {
 			node.buffer_desc = rhi->get_buffer_desc(buffer);
+			auto* phys_buf = rhi->get_buffer(buffer);
+			if (phys_buf && phys_buf->current_state != ResourceState::Undefined) {
+				current_state = phys_buf->current_state;
+			}
 		}
 		node.is_external = buffer.is_valid();
 		node.is_transient = !node.is_external;
@@ -201,6 +216,7 @@ namespace bud::graphics {
 			ResourceState current_state = ResourceState::Undefined;
 			QueueType last_queue = QueueType::Graphics;
 			int last_pass_idx = -1;
+			bool last_was_write = false;
 		};
 		std::vector<ResourceStateTracker> resource_states(resources.size());
 
@@ -234,16 +250,30 @@ namespace bud::graphics {
 				QueueType old_queue = resource_states[rid].last_queue;
 				uint32_t old_family = get_family(old_queue);
 
-				bool needs_barrier = (old_state != new_state) || (old_state == ResourceState::RenderTarget) || (old_state == ResourceState::Undefined);
+				bool is_diff_pass = (resource_states[rid].last_pass_idx != pass_idx);
+				bool is_uav_hazard = (old_state == ResourceState::UnorderedAccess &&
+				                      new_state == ResourceState::UnorderedAccess &&
+				                      is_diff_pass &&
+				                      (resource_states[rid].last_was_write || is_write));
+
+				bool needs_barrier = (old_state != new_state) ||
+				                     (old_state == ResourceState::RenderTarget) ||
+				                     (old_state == ResourceState::Undefined) ||
+				                     is_uav_hazard;
 
 				if (needs_barrier) {
 					pass.before_barriers.push_back({
 						access.handle, old_state, new_state, 0xFFFFFFFF, 0xFFFFFFFF, false, false
 					});
 					resource_states[rid].current_state = new_state;
-					resource_states[rid].last_queue = pass.queue_type;
-					resource_states[rid].last_pass_idx = pass_idx;
 				}
+				resource_states[rid].last_queue = pass.queue_type;
+				if (is_write) {
+					resource_states[rid].last_was_write = true;
+				} else if (is_diff_pass) {
+					resource_states[rid].last_was_write = false;
+				}
+				resource_states[rid].last_pass_idx = pass_idx;
 			};
 
 			for (auto& access : pass.reads) {

@@ -2282,6 +2282,7 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle 
 	depInfo.pBufferMemoryBarriers = &barrier;
 
 	vkCmdPipelineBarrier2(static_cast<VkCommandBuffer>(cmd), &depInfo);
+	vk_buf->current_state = new_state;
 }
 
 void VulkanRHI::resource_barrier_release(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
@@ -2334,6 +2335,7 @@ void VulkanRHI::resource_barrier_release(CommandHandle cmd, bud::graphics::Buffe
 	depInfo.pBufferMemoryBarriers = &barrier;
 
 	vkCmdPipelineBarrier2(static_cast<VkCommandBuffer>(cmd), &depInfo);
+	vk_buf->current_state = new_state;
 }
 
 void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
@@ -2386,6 +2388,7 @@ void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, bud::graphics::Buffe
 	depInfo.pBufferMemoryBarriers = &barrier;
 
 	vkCmdPipelineBarrier2(static_cast<VkCommandBuffer>(cmd), &depInfo);
+	vk_buf->current_state = new_state;
 }
 
 void VulkanRHI::cmd_bind_pipeline(CommandHandle cmd, PipelineHandle pipeline) {
@@ -2566,6 +2569,7 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, TextureHandle texture, bud::
                               oldLayout, newLayout,
                               src.stage, src.access,
                               dst.stage, dst.access);
+    vk_tex->current_state = new_state;
 }
 
 void VulkanRHI::resource_barrier_release(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
@@ -2595,6 +2599,7 @@ void VulkanRHI::resource_barrier_release(CommandHandle cmd, TextureHandle textur
                               src.stage, src.access,
                               VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0,
                               src_queue_family, dst_queue_family);
+    vk_tex->current_state = new_state;
 }
 
 void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
@@ -2624,6 +2629,7 @@ void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, TextureHandle textur
                               VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
                               dst.stage, dst.access,
                               src_queue_family, dst_queue_family);
+    vk_tex->current_state = new_state;
 }
 
 TextureHandle VulkanRHI::get_current_swapchain_texture() {
@@ -3021,6 +3027,7 @@ void VulkanRHI::create_image_views() {
         // Use SRGB variant if swapchain was created with an SRGB surface format
         tex_ptr->format = (swapchain_image_format == VK_FORMAT_B8G8R8A8_SRGB) ? TextureFormat::BGRA8_SRGB : TextureFormat::BGRA8_UNORM;
 		tex_ptr->allocation = VK_NULL_HANDLE; // Swapchain image memory is managed by driver
+		tex_ptr->current_state = ResourceState::Undefined;
 		swapchain_textures_wrappers[i] = *tex_ptr;
 		swapchain_texture_handles[i] = resource_pool->register_texture(tex_ptr);
 	}
@@ -3939,6 +3946,7 @@ TextureHandle VulkanRHI::create_texture(const bud::graphics::TextureDesc& desc, 
 	tex->format = desc.format;
 	tex->mips = desc.mips;
 	tex->array_layers = desc.array_layers;
+	tex->current_state = desc.initial_state;
 
 	if (initial_data && size > 0) {
 		bud::graphics::BufferHandle staging = this->create_upload_buffer(size);
@@ -3956,6 +3964,7 @@ TextureHandle VulkanRHI::create_texture(const bud::graphics::TextureDesc& desc, 
 			else {
 				this->transition_image_layout_immediate(tex->image, to_vk_format(desc.format), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 			}
+			tex->current_state = ResourceState::ShaderResource;
 		}
 
 		this->destroy_buffer(staging);
@@ -4069,6 +4078,7 @@ TextureHandle VulkanRHI::create_texture_async(const bud::graphics::TextureDesc& 
 	tex->format = desc.format;
 	tex->mips = desc.mips;
 	tex->array_layers = desc.array_layers;
+	tex->current_state = desc.initial_state;
 	if (desc.format == TextureFormat::R32G32_UINT)
 		tex->sampler = point_sampler;
 	else

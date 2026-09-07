@@ -167,8 +167,8 @@ namespace bud::graphics {
 			return setup(builder);
 		}
 
-		RGHandle import_texture(const std::string& name, TextureHandle texture, ResourceState current_state);
-		RGHandle import_buffer(const std::string& name, bud::graphics::BufferHandle buffer, ResourceState current_state);
+		RGHandle import_texture(const std::string& name, TextureHandle texture, ResourceState current_state = ResourceState::Undefined);
+		RGHandle import_buffer(const std::string& name, bud::graphics::BufferHandle buffer, ResourceState current_state = ResourceState::Undefined);
 		TextureHandle get_texture(RGHandle handle) const;
 		bud::graphics::BufferHandle get_buffer(RGHandle handle) const;
 		

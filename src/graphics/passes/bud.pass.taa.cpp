@@ -111,10 +111,6 @@ namespace bud::graphics {
 				if (!scene_col_tex.is_valid() || !depth_tex.is_valid() || !out_col_tex.is_valid())
 					return;
 
-				if (!has_valid_history) {
-					rhi->resource_barrier(cmd, out_col_tex, ResourceState::Undefined, ResourceState::UnorderedAccess);
-				}
-
 				rhi->cmd_bind_pipeline(cmd, pipeline);
 				rhi->cmd_bind_compute_texture(cmd, pipeline, 0, scene_col_tex);
 				rhi->cmd_bind_compute_texture(cmd, pipeline, 1, hist_col_tex.is_valid() ? hist_col_tex : rhi->get_fallback_texture());

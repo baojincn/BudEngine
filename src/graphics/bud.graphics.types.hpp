@@ -571,6 +571,7 @@ namespace bud::graphics {
 		TextureType type = TextureType::Texture2D;
 
 		size_t desc_hash = 0;
+		ResourceState current_state = ResourceState::Undefined;
 	};
 
 	class Buffer {
@@ -583,6 +584,7 @@ namespace bud::graphics {
 		void* mapped_ptr = nullptr;
 
 		size_t desc_hash = 0;
+		ResourceState current_state = ResourceState::Undefined;
 	};
 
 

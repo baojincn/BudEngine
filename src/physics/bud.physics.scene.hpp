@@ -229,8 +229,6 @@ namespace bud::physics {
 
         // Jolt body IDs, parallel to SoA columns
         std::vector<uint32_t> jolt_body_ids;
-        // Jolt shapes the body owns (ref-counted)
-        std::vector<JPH::Shape*> jolt_shapes;
 
         std::vector<ShapeDesc> pending_shapes;
 

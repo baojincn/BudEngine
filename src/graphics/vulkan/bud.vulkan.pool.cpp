@@ -232,6 +232,7 @@ namespace bud::graphics::vulkan {
         tex->mips = desc.mips;
         tex->array_layers = desc.array_layers;
         tex->desc_hash = hash_desc(desc); // Store hash for recycling
+        tex->current_state = desc.initial_state;
 
         // 2. 使用 Utils 转换参数
         auto vk_format = to_vk_format(desc.format);
@@ -529,6 +530,7 @@ namespace bud::graphics::vulkan {
         buf->usage = desc.usage;
         buf->memory_usage = desc.memory_usage;
         buf->desc_hash = hash_desc(desc);
+        buf->current_state = desc.usage;
 
         VkBufferCreateInfo buffer_info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         buffer_info.size = desc.size;
