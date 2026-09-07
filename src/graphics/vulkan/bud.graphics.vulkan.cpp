@@ -436,6 +436,17 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	};
 	compute_ssgi_temporal_set_layout = build_ssgi_temporal_compute_layout();
 
+	auto build_taa_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+	compute_taa_set_layout = build_taa_compute_layout();
+
 	// 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
 	for (auto& frame : frames) {
@@ -842,6 +853,7 @@ void VulkanRHI::cleanup() {
 	if (compute_ssgi_set_layout) vkDestroyDescriptorSetLayout(device, compute_ssgi_set_layout, nullptr);
 	if (compute_ssgi_denoise_set_layout) vkDestroyDescriptorSetLayout(device, compute_ssgi_denoise_set_layout, nullptr);
 	if (compute_ssgi_temporal_set_layout) vkDestroyDescriptorSetLayout(device, compute_ssgi_temporal_set_layout, nullptr);
+	if (compute_taa_set_layout) vkDestroyDescriptorSetLayout(device, compute_taa_set_layout, nullptr);
 	compute_hierarchy_traversal_set_layout = VK_NULL_HANDLE;
 	compute_page_emit_set_layout = VK_NULL_HANDLE;
 	compute_cluster_cull_set_layout = VK_NULL_HANDLE;
@@ -851,6 +863,7 @@ void VulkanRHI::cleanup() {
 	compute_ssgi_set_layout = VK_NULL_HANDLE;
 	compute_ssgi_denoise_set_layout = VK_NULL_HANDLE;
 	compute_ssgi_temporal_set_layout = VK_NULL_HANDLE;
+	compute_taa_set_layout = VK_NULL_HANDLE;
 
 	// Device & Instance
 	if (shadow_sampler)
@@ -1315,6 +1328,9 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 	case ComputePipelineDesc::LayoutKind::SSGITemporal:
 		chosen_layout = compute_ssgi_temporal_set_layout;
 		break;
+	case ComputePipelineDesc::LayoutKind::TAA:
+		chosen_layout = compute_taa_set_layout;
+		break;
 	default:
 		chosen_layout = compute_hiz_cull_set_layout;
 		break;
@@ -1363,6 +1379,7 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 			case ComputePipelineDesc::LayoutKind::ClusterCull: return "ClusterCull";
 			case ComputePipelineDesc::LayoutKind::ClearStats: return "ClearStats";
 			case ComputePipelineDesc::LayoutKind::CSMCulling: return "CSMCulling";
+			case ComputePipelineDesc::LayoutKind::TAA: return "TAA";
 			default: return "Compute";
 			}
 		};
@@ -4285,6 +4302,16 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	ubo.shadow_normal_offset_texels = render_config.shadow_normal_offset_texels;
 
 	ubo.debug_cluster = render_config.enable_cluster_visualization ? 1 : 0;
+
+	// TAA reprojection matrices and jitter offset
+	ubo.unjittered_inv_view_proj = bud::math::inverse(scene_view.unjittered_view_proj_matrix);
+	ubo.prev_unjittered_view_proj = scene_view.prev_unjittered_view_proj_matrix;
+	ubo.jitter_offset = bud::math::vec4(
+		scene_view.jitter_offset.x,
+		scene_view.jitter_offset.y,
+		scene_view.jitter_ndc.x,
+		scene_view.jitter_ndc.y
+	);
 
 	if (frames[current_frame].uniform_mapped) {
 		std::memcpy(frames[current_frame].uniform_mapped, &ubo, sizeof(UniformBufferObject));

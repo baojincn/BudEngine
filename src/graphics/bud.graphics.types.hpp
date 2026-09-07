@@ -346,6 +346,11 @@ namespace bud::graphics {
 		float ssgi_intensity = 1.5f;
 		float ssgi_temporal_blend = 0.05f;
 
+		// Temporal Anti-Aliasing (TAA)
+		bool enable_taa = true;
+		float taa_feedback = 0.92f;
+		float taa_jitter_scale = 1.0f;
+
 		// Sky & Physical Atmosphere
 		SkyConfig sky_config;
 	};
@@ -356,6 +361,13 @@ namespace bud::graphics {
 		bud::math::mat4 proj_matrix;
 		bud::math::mat4 view_proj_matrix;
 		bud::math::mat4 prev_view_proj_matrix = bud::math::mat4(1.0f);
+
+		// Unjittered matrices for exact motion vector calculation, shadow cascades, and UI
+		bud::math::mat4 unjittered_proj_matrix = bud::math::mat4(1.0f);
+		bud::math::mat4 unjittered_view_proj_matrix = bud::math::mat4(1.0f);
+		bud::math::mat4 prev_unjittered_view_proj_matrix = bud::math::mat4(1.0f);
+		bud::math::vec2 jitter_offset = bud::math::vec2(0.0f); // In pixels [-0.5, 0.5]
+		bud::math::vec2 jitter_ndc = bud::math::vec2(0.0f);    // In NDC
 
 		bud::math::vec3 camera_position;
 		float fov;
@@ -387,6 +399,7 @@ namespace bud::graphics {
 		bool show_debug_stats = false;
 
 		void update_matrices() {
+			unjittered_view_proj_matrix = unjittered_proj_matrix * view_matrix;
 			view_proj_matrix = proj_matrix * view_matrix;
 		}
 	};
@@ -477,7 +490,8 @@ namespace bud::graphics {
 			ScreenSpaceReflections,
 			ScreenSpaceGlobalIllumination,
 			SSGIDenoise,
-			SSGITemporal
+			SSGITemporal,
+			TAA
 		};
 
 		ShaderStage cs;

@@ -440,4 +440,21 @@ class ResolvePass : public RenderPass {
 			const SceneView& view, const RenderConfig& config);
 	};
 
+	class TAAPass : public RenderPass {
+		TextureHandle history_textures[2];
+		uint32_t history_read_index = 0;
+		bool has_valid_history = false;
+
+		RHI* stored_rhi = nullptr;
+		uint32_t history_width = 0;
+		uint32_t history_height = 0;
+
+	public:
+		~TAAPass() = default;
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle scene_color, RGHandle depth_buffer,
+			const SceneView& view, const RenderConfig& config);
+	};
+
 }

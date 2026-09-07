@@ -571,9 +571,45 @@ namespace bud::engine {
 
 		view_snapshot.show_debug_stats = show_debug_stats;
 
+		view_snapshot.unjittered_proj_matrix = view_snapshot.proj_matrix;
+
+		if (render_config.enable_taa && renderer && renderer->is_taa_ready()) {
+			auto halton_sequence = [](uint32_t index, uint32_t base) -> float {
+				float f = 1.0f;
+				float r = 0.0f;
+				while (index > 0) {
+					f /= static_cast<float>(base);
+					r += f * static_cast<float>(index % base);
+					index /= base;
+				}
+				return r;
+			};
+
+			const uint32_t sample_idx = (taa_frame_index % 16) + 1;
+			++taa_frame_index;
+
+			const float jitter_x = (halton_sequence(sample_idx, 2) - 0.5f) * render_config.taa_jitter_scale;
+			const float jitter_y = (halton_sequence(sample_idx, 3) - 0.5f) * render_config.taa_jitter_scale;
+
+			view_snapshot.jitter_offset = bud::math::vec2(jitter_x, jitter_y);
+
+			const float jitter_ndc_x = (2.0f * jitter_x) / view_snapshot.viewport_width;
+			const float jitter_ndc_y = (2.0f * jitter_y) / view_snapshot.viewport_height;
+
+			view_snapshot.jitter_ndc = bud::math::vec2(jitter_ndc_x, jitter_ndc_y);
+
+			view_snapshot.proj_matrix[2][0] -= jitter_ndc_x;
+			view_snapshot.proj_matrix[2][1] -= jitter_ndc_y;
+		}
+		else {
+			view_snapshot.jitter_offset = bud::math::vec2(0.0f);
+			view_snapshot.jitter_ndc = bud::math::vec2(0.0f);
+		}
+
 		view_snapshot.update_matrices();
-		view_snapshot.prev_view_proj_matrix = has_last_view_proj ? last_view_proj_matrix : view_snapshot.view_proj_matrix;
-		last_view_proj_matrix = view_snapshot.view_proj_matrix;
+		view_snapshot.prev_view_proj_matrix = has_last_view_proj ? last_view_proj_matrix : view_snapshot.unjittered_view_proj_matrix;
+		view_snapshot.prev_unjittered_view_proj_matrix = view_snapshot.prev_view_proj_matrix;
+		last_view_proj_matrix = view_snapshot.unjittered_view_proj_matrix;
 		has_last_view_proj = true;
 
 		render_inflight_index.store(render_scene_index, std::memory_order_release);
@@ -616,6 +652,13 @@ namespace bud::engine {
 				renderer->set_config(cfg);
 			};
 			bool current_ssr_enable = renderer->get_config().enable_ssr;
+
+			auto set_taa_enable = [this](bool v) {
+				auto cfg = renderer->get_config();
+				cfg.enable_taa = v;
+				renderer->set_config(cfg);
+			};
+			bool current_taa_enable = renderer->get_config().enable_taa;
 
 			auto set_ssgi_enable = [this](bool v) {
 				auto cfg = renderer->get_config();
@@ -672,7 +715,7 @@ namespace bud::engine {
 			auto set_light_intensity = [this](float v) { scene.directional_light.intensity = v; };
 			auto set_ambient_strength = [this](float v) { scene.ambient_strength = v; };
 
-			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_ao_mode, current_ao_mode, set_ssr_enable, current_ssr_enable, set_ssgi_enable, current_ssgi_enable, set_ssgi_intensity, current_ssgi_intensity, set_ssgi_blend, current_ssgi_blend, set_light_elevation, current_light_elevation, set_light_azimuth, current_light_azimuth, set_light_color, scene.directional_light.color, set_light_intensity, scene.directional_light.intensity, set_ambient_strength, scene.ambient_strength);
+			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_ao_mode, current_ao_mode, set_ssr_enable, current_ssr_enable, set_taa_enable, current_taa_enable, set_ssgi_enable, current_ssgi_enable, set_ssgi_intensity, current_ssgi_intensity, set_ssgi_blend, current_ssgi_blend, set_light_elevation, current_light_elevation, set_light_azimuth, current_light_azimuth, set_light_color, scene.directional_light.color, set_light_intensity, scene.directional_light.intensity, set_ambient_strength, scene.ambient_strength);
 
 			ImGui::Render();
 

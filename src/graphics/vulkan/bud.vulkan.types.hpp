@@ -63,6 +63,12 @@ namespace bud::graphics::vulkan {
 		alignas(16) bud::math::vec4 cascade_depth_range; // light-space slab thickness (m)
 		float shadow_receiver_bias_texels;               // residual depth offset, in texels
 		float shadow_normal_offset_texels;               // world-space SNO, in texels
+		float _pad_shadow[2] = { 0.0f, 0.0f };           // pad to 16-byte boundary (584 + 8 = 592)
+
+		// --- appended (std140): TAA parameters & reprojection matrices ---
+		alignas(16) bud::math::mat4 unjittered_inv_view_proj;
+		alignas(16) bud::math::mat4 prev_unjittered_view_proj;
+		alignas(16) bud::math::vec4 jitter_offset;       // xy: pixel offset [-0.5, 0.5], zw: NDC offset
 	};
 
 	// Lock the std140 contract with the GLSL UBO copies (vg_common.glsl / forward_main.frag).
@@ -71,7 +77,10 @@ namespace bud::graphics::vulkan {
 	static_assert(offsetof(UniformBufferObject, cascade_depth_range) == 560, "UBO: cascade_depth_range must stay at 560");
 	static_assert(offsetof(UniformBufferObject, shadow_receiver_bias_texels) == 576, "UBO: shadow_receiver_bias_texels must stay at 576");
 	static_assert(offsetof(UniformBufferObject, shadow_normal_offset_texels) == 580, "UBO: shadow_normal_offset_texels must stay at 580");
-	static_assert(sizeof(UniformBufferObject) == 592, "UBO: std140 block size must be 592");
+	static_assert(offsetof(UniformBufferObject, unjittered_inv_view_proj) == 592, "UBO: unjittered_inv_view_proj must stay at 592");
+	static_assert(offsetof(UniformBufferObject, prev_unjittered_view_proj) == 656, "UBO: prev_unjittered_view_proj must stay at 656");
+	static_assert(offsetof(UniformBufferObject, jitter_offset) == 720, "UBO: jitter_offset must stay at 720");
+	static_assert(sizeof(UniformBufferObject) == 736, "UBO: std140 block size must be 736");
 
 	struct Vertex {
 		float pos[3];

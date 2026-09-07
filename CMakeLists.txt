@@ -255,6 +255,7 @@ target_sources(bud_engine_core
 		"src/graphics/passes/bud.pass.ssr.cpp"
 		"src/graphics/passes/bud.pass.ssgi.cpp"
 		"src/graphics/passes/bud.pass.resolve.cpp"
+		"src/graphics/passes/bud.pass.taa.cpp"
 		"src/graphics/passes/bud.pass.ui.cpp"
 		"src/graphics/bud.graphics.graph.cpp"
 		"src/graphics/bud.graphics.renderer.cpp"

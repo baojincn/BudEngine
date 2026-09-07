@@ -40,7 +40,7 @@ void TriangleApp::on_init(const AppConfig& config) {
 	render_config.cascade_split_lambda = 0.5;
 	render_config.debug_cascades = false;
 	render_config.enable_virtual_geometry = true;
-	render_config.enable_mesh_shader = false;
+	render_config.enable_mesh_shader = true;
 	renderer->set_config(render_config);
 
 	// 2. Load Scene via Engine Data-Driven Pipeline

@@ -40,8 +40,18 @@ namespace bud::graphics {
 		if (!resolve_pipeline.is_valid() || !visibility_buffer.is_valid())
 			return {};
 
+		auto out_color_h = std::make_shared<RGHandle>(backbuffer);
+
 		return render_graph.add_pass("Resolve Pass",
 			[=](RGBuilder& builder) {
+				if (!out_color_h->is_valid()) {
+					TextureDesc desc{};
+					desc.width = static_cast<uint32_t>(view.viewport_width);
+					desc.height = static_cast<uint32_t>(view.viewport_height);
+					desc.format = TextureFormat::BGRA8_SRGB;
+					desc.is_transfer_src = true;
+					*out_color_h = builder.create("SceneColor", desc);
+				}
 				builder.read(visibility_buffer, ResourceState::ShaderResource);
 				if (shadow_map.is_valid())
 					builder.read(shadow_map, ResourceState::ShaderResource);
@@ -51,12 +61,12 @@ namespace bud::graphics {
 					builder.read(ssr_map, ResourceState::ShaderResource);
 				if (ssgi_map.is_valid())
 					builder.read(ssgi_map, ResourceState::ShaderResource);
-				builder.write(backbuffer, ResourceState::RenderTarget);
-				return backbuffer;
+				builder.write(*out_color_h, ResourceState::RenderTarget);
+				return *out_color_h;
 			},
 			[=, &render_graph, this](RHI* rhi, CommandHandle cmd) {
 				RenderPassBeginInfo rp_info;
-				rp_info.color_attachments.push_back(render_graph.get_texture(backbuffer));
+				rp_info.color_attachments.push_back(render_graph.get_texture(*out_color_h));
 				rp_info.clear_color = true;
 				rp_info.clear_color_value = { 0.05f, 0.05f, 0.08f, 1.0f };
 				rp_info.render_width = view.viewport_width;

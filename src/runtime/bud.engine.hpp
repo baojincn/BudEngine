@@ -125,6 +125,7 @@ namespace bud::engine {
 
 		bud::math::mat4 last_view_proj_matrix = bud::math::mat4(1.0f);
 		bool has_last_view_proj = false;
+		uint32_t taa_frame_index = 0;
 		std::string imgui_ini_path;
 	};
 }

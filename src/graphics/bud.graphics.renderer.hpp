@@ -51,6 +51,7 @@ namespace bud::graphics {
 
 		void set_config(const RenderConfig& config);
 		const RenderConfig& get_config() const;
+		bool is_taa_ready() const;
 
 		const void* get_readback_pixels() const;
 
@@ -123,6 +124,7 @@ namespace bud::graphics {
 		std::unique_ptr<ScreenSpaceReflectionPass> ssr_pass;
 		std::unique_ptr<ScreenSpaceGlobalIlluminationPass> ssgi_pass;
 		std::unique_ptr<ResolvePass> resolve_pass;
+		std::unique_ptr<TAAPass> taa_pass;
 		std::unique_ptr<PhysicsDebugPass> physics_debug_pass;
 
 		bool has_mesh_shader = false;

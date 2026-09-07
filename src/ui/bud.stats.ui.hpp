@@ -24,6 +24,8 @@ namespace bud::ui {
                            bud::graphics::AOMode current_ao_mode = bud::graphics::AOMode::GTAO,
                            std::function<void(bool)> set_ssr_enable = nullptr,
                            bool current_ssr_enable = true,
+                           std::function<void(bool)> set_taa_enable = nullptr,
+                           bool current_taa_enable = true,
                            std::function<void(bool)> set_ssgi_enable = nullptr,
                            bool current_ssgi_enable = true,
                            std::function<void(float)> set_ssgi_intensity = nullptr,
