@@ -96,6 +96,20 @@ namespace bud::graphics::vulkan {
         return TextureHandle{ slot_idx };
     }
 
+    void VulkanResourcePool::unregister_texture(TextureHandle handle) {
+        std::lock_guard lock(mutex);
+        if (!handle.is_valid() || handle.id >= texture_slots.size())
+            return;
+
+        auto& slot = texture_slots[handle.id];
+        if (!slot.in_use)
+            return;
+
+        slot.texture.reset();
+        slot.in_use = false;
+        free_texture_indices.push_back(handle.id);
+    }
+
     void VulkanResourcePool::release_texture(TextureHandle handle) {
         std::lock_guard lock(mutex);
         if (!handle.is_valid() || handle.id >= texture_slots.size()) {

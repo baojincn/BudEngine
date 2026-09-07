@@ -390,6 +390,9 @@ namespace bud::graphics {
 		float taa_feedback = 0.92f;
 		float taa_jitter_scale = 1.0f;
 
+		// VRAM Aliasing Heap (Transient Memory Overlap)
+		bool enable_vram_aliasing = true;
+
 		// Sky & Physical Atmosphere
 		SkyConfig sky_config;
 	};
@@ -651,6 +654,11 @@ namespace bud::graphics {
 				current_state = state;
 				subresource_states.clear();
 			}
+		}
+
+		void reset_subresource_states(ResourceState state = ResourceState::Undefined) {
+			current_state = state;
+			subresource_states.clear();
 		}
 	};
 

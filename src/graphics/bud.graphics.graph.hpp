@@ -12,6 +12,7 @@
 #include "src/graphics/bud.graphics.types.hpp"
 #include "src/graphics/bud.graphics.pool.hpp"
 #include "src/graphics/bud.graphics.rhi.hpp"
+#include "src/graphics/bud.graphics.transient_heap.hpp"
 
 
 namespace bud::threading { class TaskScheduler; }
@@ -68,6 +69,15 @@ namespace bud::graphics {
 		RGHandle parent_handle = { 0 };
 		ResourceState initial_state = ResourceState::Undefined;
 		bool is_active = false;
+
+		// Transient Aliasing Heap fields
+		int first_pass = -1;
+		int last_pass = -1;
+		bool is_aliased = false;
+		uint64_t heap_offset = 0;
+		uint64_t allocated_size = 0;
+		uint32_t heap_chunk_index = 0;
+		void* virtual_alloc_handle = nullptr;
 	};
 
 
@@ -178,11 +188,16 @@ namespace bud::graphics {
 		void reset() {
 			if (rhi) {
 				auto* pool = rhi->get_resource_pool();
+				auto* heap = rhi->get_transient_heap();
+				if (heap)
+					heap->reset_frame();
+
 				if (pool) {
 					for (auto& node : resources) {
 						if (node.is_transient) {
 							if (node.physical_texture.is_valid()) {
-								pool->release_texture(node.physical_texture);
+								if (!node.is_aliased)
+									pool->release_texture(node.physical_texture);
 								node.physical_texture.reset();
 							}
 							if (node.physical_buffer.is_valid()) {
@@ -243,6 +258,8 @@ namespace bud::graphics {
 		void export_graphviz(const std::string& filepath) const;
 		size_t get_culled_pass_count() const { return culled_pass_count; }
 		size_t get_active_pass_count() const { return sorted_passes.size(); }
+		size_t get_total_transient_unaliased_bytes() const { return total_transient_unaliased_bytes; }
+		size_t get_peak_aliased_bytes() const { return peak_aliased_bytes; }
 
 	private:
 		RHI* rhi;
@@ -253,6 +270,10 @@ namespace bud::graphics {
 		std::vector<std::vector<int>> adjacency_list; // DAG
 		std::vector<int> sorted_passes; // Execution Order
 		size_t culled_pass_count = 0;
+		size_t total_transient_unaliased_bytes = 0;
+		size_t peak_aliased_bytes = 0;
+		size_t last_logged_unaliased = 0;
+		size_t last_logged_peak = 0;
 	};
 
 }

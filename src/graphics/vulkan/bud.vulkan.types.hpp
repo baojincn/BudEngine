@@ -24,6 +24,8 @@ namespace bud::graphics::vulkan {
 		std::vector<VkImageView> mip_views;
 		VkSampler sampler = VK_NULL_HANDLE;
 		VmaAllocation allocation = VK_NULL_HANDLE;
+		bool is_aliased = false;
+		uint64_t heap_offset = 0;
 	};
 
 

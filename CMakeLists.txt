@@ -273,6 +273,7 @@ target_sources(bud_engine_core
 		"src/graphics/vulkan/bud.vulkan.descriptors.cpp"
 		"src/graphics/vulkan/bud.vulkan.pipeline.cpp"
 		"src/graphics/vulkan/bud.vulkan.pool.cpp"
+		"src/graphics/vulkan/bud.vulkan.transient_heap.cpp"
 
 		"src/io/bud.io.cpp"
 		"src/tools/asset_pipeline/core/raw_mesh.cpp"

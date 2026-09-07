@@ -191,6 +191,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 
 	resource_pool = std::make_unique<VulkanResourcePool>(device, memory_allocator.get());
 	memory_allocator->set_resource_pool(resource_pool.get());
+	transient_heap = std::make_unique<VulkanTransientHeap>(device, physical_device, memory_allocator->get_vma_allocator(), resource_pool.get());
 
 	pipeline_cache = std::make_unique<VulkanPipelineCache>();
 	pipeline_cache->init(device);
@@ -809,6 +810,11 @@ void VulkanRHI::cleanup() {
     // Note: memory_allocator->cleanup() flushes deferred frees via on_frame_begin()
     // which calls resource_pool->release_buffer(), so the pool must still exist at
     // that point too — the order below satisfies both constraints.
+    if (transient_heap) {
+        transient_heap->clear_cache();
+        transient_heap.reset();
+    }
+
     if (resource_pool)
         resource_pool->cleanup();
 

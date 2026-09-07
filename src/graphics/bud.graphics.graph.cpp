@@ -580,11 +580,115 @@ namespace bud::graphics {
 		}
 
 	
-		// 4. Resource Allocation (Phase 2)
+		// 3.8 Calculate Resource Lifetime Intervals [first_pass, last_pass]
+		for (size_t i = 0; i < resources.size(); ++i) {
+			resources[i].first_pass = -1;
+			resources[i].last_pass = -1;
+			resources[i].is_aliased = false;
+			resources[i].heap_offset = 0;
+			resources[i].allocated_size = 0;
+			resources[i].heap_chunk_index = 0;
+			resources[i].virtual_alloc_handle = nullptr;
+		}
+
+		for (int p = 0; p < static_cast<int>(sorted_passes.size()); ++p) {
+			int pass_idx = sorted_passes[p];
+			const auto& pass = passes[pass_idx];
+
+			auto track_res = [&](const RGPassNode::Access& access) {
+				if (!access.handle.is_valid())
+					return;
+				uint32_t rid = access.handle.id;
+				if (rid >= resources.size())
+					return;
+				auto& res = resources[rid];
+				if (res.first_pass == -1) {
+					res.first_pass = p;
+					res.last_pass = p;
+				} else {
+					res.last_pass = std::max(res.last_pass, p);
+				}
+			};
+
+			for (const auto& access : pass.reads)
+				track_res(access);
+			for (const auto& access : pass.writes)
+				track_res(access);
+		}
+
+		// 4. Resource Allocation
 		auto* pool = rhi->get_resource_pool();
+		auto* transient_heap = rhi->get_transient_heap();
+		const bool use_aliasing = rhi->get_render_config().enable_vram_aliasing && (transient_heap != nullptr);
+
+		total_transient_unaliased_bytes = 0;
+		peak_aliased_bytes = 0;
+
+		if (use_aliasing && !sorted_passes.empty()) {
+			std::vector<std::vector<uint32_t>> res_starting_at(sorted_passes.size());
+			std::vector<std::vector<uint32_t>> res_ending_at(sorted_passes.size());
+
+			for (size_t rid = 0; rid < resources.size(); ++rid) {
+				auto& node = resources[rid];
+				if (node.is_transient && node.is_active && !node.name.empty() && node.first_pass >= 0 && node.last_pass >= 0) {
+					if (!node.is_buffer && !node.physical_texture.is_valid()) {
+						res_starting_at[node.first_pass].push_back(static_cast<uint32_t>(rid));
+						res_ending_at[node.last_pass].push_back(static_cast<uint32_t>(rid));
+					}
+				}
+			}
+
+			// Chronological pass simulation
+			for (int p = 0; p < static_cast<int>(sorted_passes.size()); ++p) {
+				// 1. Allocate placed textures whose lifetime starts at pass p
+				for (uint32_t rid : res_starting_at[p]) {
+					auto& node = resources[rid];
+					TransientAllocation alloc{};
+					auto handle = transient_heap->allocate_texture(node.desc, alloc);
+					if (handle.is_valid() && alloc.is_valid) {
+						node.physical_texture = handle;
+						node.is_aliased = true;
+						node.heap_offset = alloc.offset;
+						node.allocated_size = alloc.size;
+						node.heap_chunk_index = alloc.chunk_index;
+						node.virtual_alloc_handle = alloc.virtual_alloc_handle;
+						total_transient_unaliased_bytes += alloc.size;
+					} else if (pool) {
+						node.physical_texture = pool->acquire_texture(node.desc);
+						node.is_aliased = false;
+					}
+				}
+
+				// 2. Free virtual allocations for resources whose active lifetime ends at pass p
+				for (uint32_t rid : res_ending_at[p]) {
+					auto& node = resources[rid];
+					if (node.is_aliased && node.virtual_alloc_handle) {
+						TransientAllocation alloc{};
+						alloc.chunk_index = node.heap_chunk_index;
+						alloc.offset = node.heap_offset;
+						alloc.size = node.allocated_size;
+						alloc.virtual_alloc_handle = node.virtual_alloc_handle;
+						alloc.is_valid = true;
+						transient_heap->virtual_free(alloc);
+					}
+				}
+			}
+
+			peak_aliased_bytes = transient_heap->get_stats().peak_allocated_bytes;
+
+			if (total_transient_unaliased_bytes > 0 && (total_transient_unaliased_bytes != last_logged_unaliased || peak_aliased_bytes != last_logged_peak)) {
+				last_logged_unaliased = total_transient_unaliased_bytes;
+				last_logged_peak = peak_aliased_bytes;
+				bud::print("[RenderGraph] VRAM Aliasing Active: unaliased={:.1f}MB, peak_aliased={:.1f}MB, savings={:.1f}%",
+					static_cast<double>(total_transient_unaliased_bytes) / (1024.0 * 1024.0),
+					static_cast<double>(peak_aliased_bytes) / (1024.0 * 1024.0),
+					100.0 * (1.0 - static_cast<double>(peak_aliased_bytes) / static_cast<double>(total_transient_unaliased_bytes)));
+			}
+		}
+
+		// Fallback & buffers: allocate from pool if not already allocated
 		if (pool) {
 			for (auto& node : resources) {
-				// Allocate only if transient, active, and not already allocated
 				if (node.is_transient && node.is_active && !node.name.empty()) {
 					if (!node.is_buffer && !node.physical_texture.is_valid()) {
 						auto handle = pool->acquire_texture(node.desc);
@@ -598,6 +702,7 @@ namespace bud::graphics {
 #endif
 						} else {
 							node.physical_texture = handle;
+							node.is_aliased = false;
 						}
 					} else if (node.is_buffer && !node.physical_buffer.is_valid()) {
 						auto handle = pool->acquire_buffer(node.buffer_desc);
@@ -799,8 +904,16 @@ namespace bud::graphics {
 			std::string border = r.is_external ? "#ea580c" : (r.is_active ? "#4338ca" : "#94a3b8");
 			std::string type_label = r.is_external ? " (External)" : (r.is_buffer ? " (Buffer)" : " (Texture)");
 			std::string active_label = r.is_active ? "" : " [INACTIVE]";
+			std::string lifetime_label = "";
+			if (r.first_pass >= 0 && r.last_pass >= 0) {
+				lifetime_label = " [P" + std::to_string(r.first_pass) + "..P" + std::to_string(r.last_pass) + "]";
+			}
+			std::string alias_label = "";
+			if (r.is_aliased) {
+				alias_label = " [Aliased C" + std::to_string(r.heap_chunk_index) + "@" + std::to_string(r.heap_offset / 1024) + "KB]";
+			}
 
-			dot += "    " + r_id + " [label=\"" + r.name + type_label + active_label + "\", shape=" + shape + ", fillcolor=\"" + color + "\", color=\"" + border + "\", style=filled];\n";
+			dot += "    " + r_id + " [label=\"" + r.name + type_label + active_label + lifetime_label + alias_label + "\", shape=" + shape + ", fillcolor=\"" + color + "\", color=\"" + border + "\", style=filled];\n";
 		}
 		dot += "  }\n\n";
 

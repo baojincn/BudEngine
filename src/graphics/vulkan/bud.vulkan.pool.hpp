@@ -40,6 +40,7 @@ namespace bud::graphics::vulkan {
 		const Texture* get_texture(TextureHandle handle) const override;
 		TextureDesc get_texture_desc(TextureHandle handle) const override;
 		TextureHandle register_texture(std::shared_ptr<VulkanTexture> tex);
+		void unregister_texture(TextureHandle handle);
 
 		// Buffer interface
 		BufferHandle acquire_buffer(const BufferDesc& desc) override;
