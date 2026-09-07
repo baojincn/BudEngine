@@ -1907,34 +1907,29 @@ namespace bud::graphics {
 
 			if (!has_main_pass) {
 				render_graph.add_pass("UI Clear Pass",
-					[=](RGBuilder& builder) { builder.write(back_buffer, ResourceState::RenderTarget); },
-					[this, back_buffer](RHI* rhi, CommandHandle cmd) {
-						RenderPassBeginInfo info;
-						info.color_attachments.push_back(render_graph.get_texture(back_buffer));
-						info.clear_color = true;
-						info.clear_color_value = { 0.5f, 0.5f, 0.5f, 1.0f };
-						rhi->cmd_begin_render_pass(cmd, info);
-						rhi->cmd_end_render_pass(cmd);
-					}
+					[=](RGBuilder& builder) {
+						builder.set_color_attachment(0, back_buffer, true, { 0.5f, 0.5f, 0.5f, 1.0f });
+					},
+					[](RHI*, CommandHandle) {}
 				);
 			}
 		}
 		else {
 			render_graph.add_pass("Empty Scene Clear",
-				[=](RGBuilder& builder) { builder.write(back_buffer, ResourceState::RenderTarget); },
-				[this, back_buffer](RHI* rhi, CommandHandle cmd) {
-					RenderPassBeginInfo info;
-					info.color_attachments.push_back(render_graph.get_texture(back_buffer));
-					info.clear_color = true;
-					info.clear_color_value = { 0.2f, 0.2f, 0.2f, 1.0f };
-					rhi->cmd_begin_render_pass(cmd, info);
-					rhi->cmd_end_render_pass(cmd);
-				}
+				[=](RGBuilder& builder) {
+					builder.set_color_attachment(0, back_buffer, true, { 0.05f, 0.05f, 0.08f, 1.0f });
+				},
+				[](RHI*, CommandHandle) {}
 			);
 		}
 
 		ui_pass->add_to_graph(render_graph, back_buffer);
 		render_graph.compile();
+
+		if (render_config.dump_render_graph && !graphviz_exported_) {
+			render_graph.export_graphviz("tmp/render_graph.dot");
+			graphviz_exported_ = true;
+		}
 
 		render_graph.execute(cmd);
 

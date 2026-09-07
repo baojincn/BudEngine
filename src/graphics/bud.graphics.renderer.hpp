@@ -148,6 +148,7 @@ namespace bud::graphics {
 		std::atomic<uint32_t> next_mesh_id{ 0 };
 		std::unordered_map<std::string, uint32_t> bound_texture_slots;
 		mutable std::mutex texture_slot_mutex;
+		bool graphviz_exported_ = false;
 
 	public:
 		struct HierarchyInstance {

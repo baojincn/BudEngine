@@ -92,7 +92,32 @@ namespace bud::io {
 			f << text << '\n';
 			f.flush();
 		}
+	}
 
+	void VirtualFileSystem::write_text_async(const std::filesystem::path& path, std::string text, bud::threading::Counter* counter, bud::threading::TaskScheduler* scheduler) {
+		auto parent = path.parent_path();
+		if (!parent.empty()) {
+			std::error_code ec;
+			std::filesystem::create_directories(parent, ec);
+		}
+
+		bud::threading::TaskScheduler* use_scheduler = scheduler ? scheduler : bud::threading::t_scheduler;
+		if (use_scheduler) {
+			use_scheduler->spawn("IO.WriteText", [p = path.string(), t = std::move(text)]() mutable {
+				std::ofstream f(p, std::ios::trunc);
+				if (f) {
+					f << t;
+					f.flush();
+				}
+			}, counter);
+			return;
+		}
+
+		std::ofstream f(path, std::ios::trunc);
+		if (f) {
+			f << text;
+			f.flush();
+		}
 	}
 
 	std::optional<std::filesystem::path> VirtualFileSystem::resolve_path(const std::filesystem::path& path) {

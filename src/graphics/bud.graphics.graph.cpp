@@ -1,4 +1,5 @@
 #include "src/graphics/bud.graphics.graph.hpp"
+#include "src/io/bud.io.hpp"
 
 #include <iostream>
 
@@ -44,6 +45,40 @@ namespace bud::graphics {
 		RGHandle handle = RGHandle{ static_cast<uint32_t>(render_graph.resources.size() - 1) };
 
 		return handle;
+	}
+
+	void RGBuilder::set_color_attachment(uint32_t slot, RGHandle handle, bool clear, const bud::math::vec4& clear_color) {
+		if (!handle.is_valid())
+			return;
+		write(handle, ResourceState::RenderTarget);
+		if (slot >= pass_node.color_attachments.size()) {
+			pass_node.color_attachments.resize(slot + 1);
+		}
+		pass_node.color_attachments[slot] = {
+			.handle = handle,
+			.is_depth = false,
+			.clear = clear,
+			.read_only = false,
+			.clear_color = clear_color
+		};
+	}
+
+	void RGBuilder::set_depth_attachment(RGHandle handle, bool clear, float clear_depth, bool read_only) {
+		if (!handle.is_valid())
+			return;
+		if (read_only) {
+			read(handle, ResourceState::DepthRead);
+		} else {
+			write(handle, ResourceState::DepthWrite);
+		}
+		pass_node.has_depth_attachment = true;
+		pass_node.depth_attachment = {
+			.handle = handle,
+			.is_depth = true,
+			.clear = clear,
+			.read_only = read_only,
+			.clear_depth = clear_depth
+		};
 	}
 
 	void RGBuilder::set_side_effect(bool value) {
@@ -124,13 +159,94 @@ namespace bud::graphics {
 	}
 
 	void RenderGraph::compile() {
-		// 1. Build Adjacency List (Naive O(N^2) for prototype)
-		// Better: Map<ResourceId, ProducerPassId>
+		for (auto& pass : passes) {
+			pass.dependencies.clear();
+			pass.before_barriers.clear();
+			pass.after_barriers.clear();
+			pass.is_culled = false;
+			// NOTE: Do not reset pass.has_side_effects; it may have been set during pass setup via builder.set_side_effect()
+		}
+
+		// 1. Identify Resource Producers and Mark External Roots
+		std::unordered_map<uint32_t, std::vector<int>> resource_producers;
+		for (int i = 0; i < static_cast<int>(passes.size()); ++i) {
+			auto& pass = passes[i];
+
+			for (auto& access : pass.writes) {
+				if (!access.handle.is_valid())
+					continue;
+				resource_producers[access.handle.id].push_back(i);
+
+				// If this writes to an external resource (swapchain, persistent buffer/texture), it has side effects (root)
+				if (access.handle.id < resources.size() && resources[access.handle.id].is_external) {
+					pass.has_side_effects = true;
+				}
+			}
+		}
+
+		// 2. Dead Pass Culling (Phase 1.5 - Reverse Reachability from Side-Effect Roots)
+		std::vector<bool> pass_active(passes.size(), false);
+		std::vector<bool> resource_active(resources.size(), false);
+		std::deque<uint32_t> resource_worklist;
+
+		// 2.1 Mark root passes as active and enqueue their read resources
+		for (int i = 0; i < static_cast<int>(passes.size()); ++i) {
+			if (passes[i].has_side_effects) {
+				pass_active[i] = true;
+				for (auto& access : passes[i].reads) {
+					if (access.handle.is_valid()) {
+						resource_worklist.push_back(access.handle.id);
+					}
+				}
+				for (auto& access : passes[i].writes) {
+					if (access.handle.is_valid() && access.handle.id < resources.size()) {
+						resource_active[access.handle.id] = true;
+					}
+				}
+			}
+		}
+
+		// 2.2 Propagate backwards to find all upstream passes & resources required by roots
+		while (!resource_worklist.empty()) {
+			uint32_t res_id = resource_worklist.front();
+			resource_worklist.pop_front();
+
+			if (res_id >= resources.size() || resource_active[res_id])
+				continue;
+			resource_active[res_id] = true;
+
+			auto it = resource_producers.find(res_id);
+			if (it != resource_producers.end()) {
+				for (int producer_idx : it->second) {
+					if (!pass_active[producer_idx]) {
+						pass_active[producer_idx] = true;
+						for (auto& access : passes[producer_idx].reads) {
+							if (access.handle.is_valid()) {
+								resource_worklist.push_back(access.handle.id);
+							}
+						}
+					}
+				}
+			}
+		}
+
+		culled_pass_count = 0;
+		for (size_t i = 0; i < passes.size(); ++i) {
+			passes[i].is_culled = !pass_active[i];
+			if (passes[i].is_culled) {
+				culled_pass_count++;
+			}
+		}
+		for (size_t i = 0; i < resources.size(); ++i) {
+			resources[i].is_active = resource_active[i];
+		}
+
+		// 3. Topological Sort on Active Subgraph (Kahn's Algorithm)
 		adjacency_list.assign(passes.size(), {});
 		std::vector<int> in_degree(passes.size(), 0);
 
 		auto add_dependency = [&](int producer, int consumer) {
-			if (producer < 0 || consumer < 0 || producer == consumer)
+			if (producer < 0 || consumer < 0 || producer == consumer || !pass_active[producer] || !pass_active[consumer])
 				return;
 
 			auto& deps = passes[consumer].dependencies;
@@ -142,55 +258,41 @@ namespace bud::graphics {
 			in_degree[consumer]++;
 		};
 
-		for (auto& pass : passes) {
-			pass.dependencies.clear();
-			pass.before_barriers.clear();
-			pass.has_side_effects = false;
-		}
-
-		// Map: ResourceHandle -> Last Writing Pass Index
-		std::unordered_map<uint32_t, int> resource_writers;
-
-		for (int i = 0; i < passes.size(); ++i) {
+		// Track last writing pass for each resource among active passes
+		std::unordered_map<uint32_t, int> active_resource_writers;
+		for (int i = 0; i < static_cast<int>(passes.size()); ++i) {
+			if (!pass_active[i])
+				continue;
 			auto& pass = passes[i];
-			
-			// Who writes what?
+
 			for (auto& access : pass.writes) {
 				if (!access.handle.is_valid())
 					continue;
-				if (resource_writers.contains(access.handle.id)) {
-					add_dependency(resource_writers[access.handle.id], i);
+				if (active_resource_writers.contains(access.handle.id)) {
+					add_dependency(active_resource_writers[access.handle.id], i);
 				}
-
-				resource_writers[access.handle.id] = i;
-
-				// If this writes to backbuffer, it has side effects (root)
-				if (resources[access.handle.id].is_external) {
-					pass.has_side_effects = true;
-				}
+				active_resource_writers[access.handle.id] = i;
 			}
 
-			// Who reads what?
 			for (auto& access : pass.reads) {
 				if (!access.handle.is_valid())
 					continue;
-				if (resource_writers.contains(access.handle.id)) {
-					int producer = resource_writers[access.handle.id];
+				if (active_resource_writers.contains(access.handle.id)) {
+					int producer = active_resource_writers[access.handle.id];
 					add_dependency(producer, i);
 				}
 			}
 		}
 
-		// 2. Culling (Start from side effects and traverse up)
-		// For prototype, skip complex culling, just execute all connected to root
-		// Or naive: execute topological sort, all passes are executed
-		// TODO: Implement real culling (Phase 1.5)
-		// (Skipped for conciseness)
-
-		// 3. Topological Sort (Kahn's Algorithm)
 		std::deque<int> queue;
-		for (int i = 0; i < passes.size(); ++i) {
-			if (in_degree[i] == 0) queue.push_back(i);
+		int total_active_passes = 0;
+		for (int i = 0; i < static_cast<int>(passes.size()); ++i) {
+			if (pass_active[i]) {
+				total_active_passes++;
+				if (in_degree[i] == 0) {
+					queue.push_back(i);
+				}
+			}
 		}
 
 		sorted_passes.clear();
@@ -206,8 +308,8 @@ namespace bud::graphics {
 			}
 		}
 
-		if (sorted_passes.size() != passes.size()) {
-			std::cerr << "[RenderGraph] Cycle detected! Compiled order might be partial.\n";
+		if (static_cast<int>(sorted_passes.size()) != total_active_passes) {
+			std::cerr << "[RenderGraph] Cycle detected among active passes! Compiled order might be partial.\n";
 		}
 
 		// 3.5. Calculate Barriers (Phase 3)
@@ -289,8 +391,8 @@ namespace bud::graphics {
 		auto* pool = rhi->get_resource_pool();
 		if (pool) {
 			for (auto& node : resources) {
-				// Allocate only if transient and not already allocated
-				if (node.is_transient && !node.name.empty()) {
+				// Allocate only if transient, active, and not already allocated
+				if (node.is_transient && node.is_active && !node.name.empty()) {
 					if (!node.is_buffer && !node.physical_texture.is_valid()) {
 						auto handle = pool->acquire_texture(node.desc);
 						if (!handle.is_valid()) {
@@ -372,8 +474,36 @@ namespace bud::graphics {
 				}
 			}
 
+			// If declarative attachments are specified, begin/end render pass automatically
+			bool has_render_pass = (!pass.color_attachments.empty() || pass.has_depth_attachment);
+			if (has_render_pass) {
+				RenderPassBeginInfo info;
+				for (auto& att : pass.color_attachments) {
+					if (att.handle.is_valid()) {
+						info.color_attachments.push_back(get_texture(att.handle));
+						if (att.clear) {
+							info.clear_color = true;
+							info.clear_color_value = att.clear_color;
+						}
+					}
+				}
+				if (pass.has_depth_attachment && pass.depth_attachment.handle.is_valid()) {
+					info.depth_attachment = get_texture(pass.depth_attachment.handle);
+					info.depth_read_only = pass.depth_attachment.read_only;
+					if (pass.depth_attachment.clear) {
+						info.clear_depth = true;
+						info.clear_depth_value = pass.depth_attachment.clear_depth;
+					}
+				}
+				rhi->cmd_begin_render_pass(target, info);
+			}
+
 			if (pass.execute) {
 				pass.execute(rhi, target);
+			}
+
+			if (has_render_pass) {
+				rhi->cmd_end_render_pass(target);
 			}
 
 			// Inject After Barriers (Release operations)
@@ -415,6 +545,102 @@ namespace bud::graphics {
 
 		std::cerr << "[RenderGraph] execute_parallel is not implemented. Falling back to serial execution.\n";
 		execute(cmd);
+	}
+
+	static const char* to_resource_state_string(ResourceState state) {
+		switch (state) {
+		case ResourceState::Undefined: return "Undefined";
+		case ResourceState::RenderTarget: return "RenderTarget";
+		case ResourceState::ShaderResource: return "ShaderResource";
+		case ResourceState::DepthWrite: return "DepthWrite";
+		case ResourceState::DepthRead: return "DepthRead";
+		case ResourceState::Present: return "Present";
+		case ResourceState::TransferDst: return "TransferDst";
+		case ResourceState::TransferSrc: return "TransferSrc";
+		case ResourceState::UnorderedAccess: return "UnorderedAccess";
+		case ResourceState::IndirectArgument: return "IndirectArgument";
+		case ResourceState::VertexBuffer: return "VertexBuffer";
+		case ResourceState::IndexBuffer: return "IndexBuffer";
+		case ResourceState::Common: return "Common";
+		default: return "Unknown";
+		}
+	}
+
+	void RenderGraph::export_graphviz(const std::string& filepath) const {
+		std::string dot;
+		dot += "digraph RenderGraph {\n";
+		dot += "  rankdir=LR;\n";
+		dot += "  node [fontname=\"Helvetica\", fontsize=10];\n";
+		dot += "  edge [fontname=\"Helvetica\", fontsize=9];\n\n";
+
+		// Passes Subgraph
+		dot += "  subgraph cluster_passes {\n";
+		dot += "    label = \"Passes (Active: " + std::to_string(sorted_passes.size()) + ", Culled: " + std::to_string(culled_pass_count) + ")\";\n";
+		dot += "    style = filled;\n";
+		dot += "    color = \"#f8fafc\";\n";
+		dot += "    node [shape=box, style=\"filled,rounded\"];\n";
+
+		for (size_t i = 0; i < passes.size(); ++i) {
+			const auto& p = passes[i];
+			std::string p_id = "pass_" + std::to_string(i);
+			std::string color = p.is_culled ? "#f1f5f9" : (p.async_compute ? "#e0f2fe" : "#dcfce7");
+			std::string border = p.is_culled ? "#94a3b8" : (p.async_compute ? "#0284c7" : "#16a34a");
+			std::string style = p.is_culled ? "style=\"filled,dashed,rounded\"" : "style=\"filled,rounded\"";
+			std::string status = p.is_culled ? " [CULLED]" : (p.async_compute ? " [ASYNC]" : "");
+			
+			dot += "    " + p_id + " [label=\"" + p.name + status + "\", fillcolor=\"" + color + "\", color=\"" + border + "\", " + style + "];\n";
+		}
+		dot += "  }\n\n";
+
+		// Resources Subgraph
+		dot += "  subgraph cluster_resources {\n";
+		dot += "    label = \"Resources\";\n";
+		dot += "    style = filled;\n";
+		dot += "    color = \"#f1f5f9\";\n";
+
+		for (size_t i = 1; i < resources.size(); ++i) {
+			const auto& r = resources[i];
+			std::string r_id = "res_" + std::to_string(i);
+			std::string shape = r.is_external ? "cylinder" : (r.is_buffer ? "box" : "ellipse");
+			std::string color = r.is_external ? "#fed7aa" : (r.is_active ? "#c7d2fe" : "#e2e8f0");
+			std::string border = r.is_external ? "#ea580c" : (r.is_active ? "#4338ca" : "#94a3b8");
+			std::string type_label = r.is_external ? " (External)" : (r.is_buffer ? " (Buffer)" : " (Texture)");
+			std::string active_label = r.is_active ? "" : " [INACTIVE]";
+
+			dot += "    " + r_id + " [label=\"" + r.name + type_label + active_label + "\", shape=" + shape + ", fillcolor=\"" + color + "\", color=\"" + border + "\", style=filled];\n";
+		}
+		dot += "  }\n\n";
+
+		// Edges
+		for (size_t i = 0; i < passes.size(); ++i) {
+			const auto& p = passes[i];
+			std::string p_id = "pass_" + std::to_string(i);
+
+			// Reads: Resource -> Pass
+			for (const auto& access : p.reads) {
+				if (access.handle.is_valid() && access.handle.id < resources.size()) {
+					std::string r_id = "res_" + std::to_string(access.handle.id);
+					std::string edge_color = p.is_culled ? "#cbd5e1" : "#2563eb";
+					std::string edge_style = p.is_culled ? "style=dashed" : "";
+					dot += "  " + r_id + " -> " + p_id + " [color=\"" + edge_color + "\", label=\"" + to_resource_state_string(access.state) + "\", " + edge_style + "];\n";
+				}
+			}
+
+			// Writes: Pass -> Resource
+			for (const auto& access : p.writes) {
+				if (access.handle.is_valid() && access.handle.id < resources.size()) {
+					std::string r_id = "res_" + std::to_string(access.handle.id);
+					std::string edge_color = p.is_culled ? "#cbd5e1" : "#16a34a";
+					std::string edge_style = p.is_culled ? "style=dashed" : "";
+					dot += "  " + p_id + " -> " + r_id + " [color=\"" + edge_color + "\", label=\"" + to_resource_state_string(access.state) + "\", " + edge_style + "];\n";
+				}
+			}
+		}
+
+		dot += "}\n";
+
+		bud::io::VirtualFileSystem vfs;
+		vfs.write_text_async(filepath, std::move(dot));
 	}
 
 }

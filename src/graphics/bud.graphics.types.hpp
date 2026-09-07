@@ -277,6 +277,7 @@ namespace bud::graphics {
 		bool enable_soft_shadows = true;
 		bool debug_cascades = false;
 		bool debug_physics = false;
+		bool dump_render_graph = false;
 		// Feed the CSM cascade traversals the FULL scene instance list instead of only
 		// the main-camera visible ones. This is the correct CSM model: an object that is
 		// outside the primary frustum but inside a cascade's light box still has to be
