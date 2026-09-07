@@ -258,29 +258,65 @@ namespace bud::graphics {
 			in_degree[consumer]++;
 		};
 
-		// Track last writing pass for each resource among active passes
-		std::unordered_map<uint32_t, int> active_resource_writers;
+		// Track active writers and active readers per resource id among active passes
+		struct ActiveAccessRecord {
+			int pass_idx;
+			SubresourceRange range;
+		};
+		std::unordered_map<uint32_t, std::vector<ActiveAccessRecord>> active_writers;
+		std::unordered_map<uint32_t, std::vector<ActiveAccessRecord>> active_readers;
+
 		for (int i = 0; i < static_cast<int>(passes.size()); ++i) {
 			if (!pass_active[i])
 				continue;
 			auto& pass = passes[i];
 
+			// Process writes (WAW and WAR dependencies)
 			for (auto& access : pass.writes) {
 				if (!access.handle.is_valid())
 					continue;
-				if (active_resource_writers.contains(access.handle.id)) {
-					add_dependency(active_resource_writers[access.handle.id], i);
+				uint32_t rid = access.handle.id;
+				uint32_t total_mips = resources[rid].is_buffer ? 1 : (resources[rid].desc.mips > 0 ? resources[rid].desc.mips : 1);
+				uint32_t total_layers = resources[rid].is_buffer ? 1 : (resources[rid].desc.array_layers > 0 ? resources[rid].desc.array_layers : 1);
+
+				// WAW: depend on previous writers of overlapping subresources
+				if (auto it = active_writers.find(rid); it != active_writers.end()) {
+					for (auto& rec : it->second) {
+						if (access.handle.subresource.overlaps(rec.range, total_mips, total_layers))
+							add_dependency(rec.pass_idx, i);
+					}
 				}
-				active_resource_writers[access.handle.id] = i;
+
+				// WAR: depend on previous readers of overlapping subresources
+				if (auto it = active_readers.find(rid); it != active_readers.end()) {
+					for (auto& rec : it->second) {
+						if (access.handle.subresource.overlaps(rec.range, total_mips, total_layers))
+							add_dependency(rec.pass_idx, i);
+					}
+				}
+
+				if (access.handle.subresource.is_all()) {
+					active_writers[rid].clear();
+					active_readers[rid].clear();
+				}
+				active_writers[rid].push_back({ i, access.handle.subresource });
 			}
 
+			// Process reads (RAW dependencies)
 			for (auto& access : pass.reads) {
 				if (!access.handle.is_valid())
 					continue;
-				if (active_resource_writers.contains(access.handle.id)) {
-					int producer = active_resource_writers[access.handle.id];
-					add_dependency(producer, i);
+				uint32_t rid = access.handle.id;
+				uint32_t total_mips = resources[rid].is_buffer ? 1 : (resources[rid].desc.mips > 0 ? resources[rid].desc.mips : 1);
+				uint32_t total_layers = resources[rid].is_buffer ? 1 : (resources[rid].desc.array_layers > 0 ? resources[rid].desc.array_layers : 1);
+
+				if (auto it = active_writers.find(rid); it != active_writers.end()) {
+					for (auto& rec : it->second) {
+						if (access.handle.subresource.overlaps(rec.range, total_mips, total_layers))
+							add_dependency(rec.pass_idx, i);
+					}
 				}
+				active_readers[rid].push_back({ i, access.handle.subresource });
 			}
 		}
 
@@ -313,12 +349,29 @@ namespace bud::graphics {
 		}
 
 		// 3.5. Calculate Barriers (Phase 3)
-		// Track current state and queue of each resource as we traverse
-		struct ResourceStateTracker {
-			ResourceState current_state = ResourceState::Undefined;
-			QueueType last_queue = QueueType::Graphics;
+		// Track current state and queue of each subresource as we traverse
+		struct SubresourceStateRecord {
+			ResourceState state = ResourceState::Undefined;
+			QueueType queue = QueueType::Graphics;
 			int last_pass_idx = -1;
 			bool last_was_write = false;
+		};
+
+		struct ResourceStateTracker {
+			SubresourceStateRecord whole;
+			std::vector<SubresourceStateRecord> subresources; // empty if whole applies to all
+			uint32_t mips = 1;
+			uint32_t layers = 1;
+
+			void init(uint32_t m, uint32_t l, ResourceState initial_state) {
+				mips = m > 0 ? m : 1;
+				layers = l > 0 ? l : 1;
+				whole.state = initial_state;
+				whole.queue = QueueType::Graphics;
+				whole.last_pass_idx = -1;
+				whole.last_was_write = false;
+				subresources.clear();
+			}
 		};
 		std::vector<ResourceStateTracker> resource_states(resources.size());
 
@@ -327,15 +380,27 @@ namespace bud::graphics {
 		uint32_t transfer_family = rhi->get_transfer_queue_family();
 
 		auto get_family = [&](QueueType q) -> uint32_t {
-			if (q == QueueType::AsyncCompute) return compute_family;
-			if (q == QueueType::Transfer) return transfer_family;
+			if (q == QueueType::AsyncCompute)
+				return compute_family;
+			if (q == QueueType::Transfer)
+				return transfer_family;
 			return gfx_family;
 		};
 		
 		// Initialize external resources state (e.g. swapchain is Present/Undefined)
 		for (size_t i = 1; i < resources.size(); ++i) {
-			if (resources[i].is_external) {
-				resource_states[i].current_state = resources[i].initial_state;
+			uint32_t m = resources[i].is_buffer ? 1 : (resources[i].desc.mips > 0 ? resources[i].desc.mips : 1);
+			uint32_t l = resources[i].is_buffer ? 1 : (resources[i].desc.array_layers > 0 ? resources[i].desc.array_layers : 1);
+			resource_states[i].init(m, l, resources[i].initial_state);
+
+			if (resources[i].is_external && resources[i].physical_texture.is_valid() && rhi) {
+				auto* phys_tex = rhi->get_texture(resources[i].physical_texture);
+				if (phys_tex && !phys_tex->subresource_states.empty()) {
+					resource_states[i].subresources.resize(m * l);
+					for (uint32_t s = 0; s < m * l && s < phys_tex->subresource_states.size(); ++s) {
+						resource_states[i].subresources[s].state = phys_tex->subresource_states[s];
+					}
+				}
 			}
 		}
 
@@ -347,35 +412,163 @@ namespace bud::graphics {
 				if (!access.handle.is_valid())
 					return;
 				uint32_t rid = access.handle.id;
-				ResourceState old_state = resource_states[rid].current_state;
-				ResourceState new_state = access.state;
-				QueueType old_queue = resource_states[rid].last_queue;
-				uint32_t old_family = get_family(old_queue);
+				auto& tracker = resource_states[rid];
+				const auto& range = access.handle.subresource;
+				uint32_t total_mips = tracker.mips;
+				uint32_t total_layers = tracker.layers;
 
-				bool is_diff_pass = (resource_states[rid].last_pass_idx != pass_idx);
-				bool is_uav_hazard = (old_state == ResourceState::UnorderedAccess &&
-				                      new_state == ResourceState::UnorderedAccess &&
-				                      is_diff_pass &&
-				                      (resource_states[rid].last_was_write || is_write));
+				uint32_t start_m = range.base_mip;
+				uint32_t count_m = (range.mip_count == ALL_MIPS || range.mip_count == 0) ? (total_mips > start_m ? total_mips - start_m : 1) : range.mip_count;
+				uint32_t start_l = range.base_layer;
+				uint32_t count_l = (range.layer_count == ALL_LAYERS || range.layer_count == 0) ? (total_layers > start_l ? total_layers - start_l : 1) : range.layer_count;
 
-				bool needs_barrier = (old_state != new_state) ||
-				                     (old_state == ResourceState::RenderTarget) ||
-				                     (old_state == ResourceState::Undefined) ||
-				                     is_uav_hazard;
+				// Fast path: Whole resource access with uniform state
+				if (range.is_all() && tracker.subresources.empty()) {
+					ResourceState old_state = tracker.whole.state;
+					ResourceState new_state = access.state;
+					QueueType old_queue = tracker.whole.queue;
+					uint32_t old_family = get_family(old_queue);
 
-				if (needs_barrier) {
-					pass.before_barriers.push_back({
-						access.handle, old_state, new_state, 0xFFFFFFFF, 0xFFFFFFFF, false, false
-					});
-					resource_states[rid].current_state = new_state;
+					bool is_diff_pass = (tracker.whole.last_pass_idx != pass_idx);
+					bool is_uav_hazard = (old_state == ResourceState::UnorderedAccess &&
+					                      new_state == ResourceState::UnorderedAccess &&
+					                      is_diff_pass &&
+					                      (tracker.whole.last_was_write || is_write));
+
+					bool needs_barrier = (old_state != new_state) ||
+					                     (old_state == ResourceState::RenderTarget) ||
+					                     (old_state == ResourceState::Undefined) ||
+					                     is_uav_hazard;
+
+					bool is_queue_transfer = (old_family != current_family && old_state != ResourceState::Undefined && tracker.whole.last_pass_idx >= 0);
+
+					if (is_queue_transfer) {
+						passes[tracker.whole.last_pass_idx].after_barriers.push_back({
+							access.handle, old_state, new_state, old_family, current_family, false, true
+						});
+						pass.before_barriers.push_back({
+							access.handle, old_state, new_state, old_family, current_family, true, false
+						});
+						tracker.whole.state = new_state;
+					} else if (needs_barrier) {
+						pass.before_barriers.push_back({
+							access.handle, old_state, new_state, 0xFFFFFFFF, 0xFFFFFFFF, false, false
+						});
+						tracker.whole.state = new_state;
+					}
+
+					tracker.whole.queue = pass.queue_type;
+					if (is_write) {
+						tracker.whole.last_was_write = true;
+					} else if (is_diff_pass) {
+						tracker.whole.last_was_write = false;
+					}
+					tracker.whole.last_pass_idx = pass_idx;
+					return;
 				}
-				resource_states[rid].last_queue = pass.queue_type;
-				if (is_write) {
-					resource_states[rid].last_was_write = true;
-				} else if (is_diff_pass) {
-					resource_states[rid].last_was_write = false;
+
+				// Subresource-specific or partitioned access
+				if (tracker.subresources.empty()) {
+					tracker.subresources.assign(total_mips * total_layers, tracker.whole);
 				}
-				resource_states[rid].last_pass_idx = pass_idx;
+
+				for (uint32_t l = start_l; l < start_l + count_l && l < total_layers; ++l) {
+					uint32_t m_curr = start_m;
+					while (m_curr < start_m + count_m && m_curr < total_mips) {
+						uint32_t idx = l * total_mips + m_curr;
+						auto& rec = tracker.subresources[idx];
+						ResourceState old_state = rec.state;
+						ResourceState new_state = access.state;
+						QueueType old_queue = rec.queue;
+						uint32_t old_family = get_family(old_queue);
+
+						bool is_diff_pass = (rec.last_pass_idx != pass_idx);
+						bool is_uav_hazard = (old_state == ResourceState::UnorderedAccess &&
+						                      new_state == ResourceState::UnorderedAccess &&
+						                      is_diff_pass &&
+						                      (rec.last_was_write || is_write));
+
+						bool needs_barrier = (old_state != new_state) ||
+						                     (old_state == ResourceState::RenderTarget) ||
+						                     (old_state == ResourceState::Undefined) ||
+						                     is_uav_hazard;
+
+						bool is_queue_transfer = (old_family != current_family && old_state != ResourceState::Undefined && rec.last_pass_idx >= 0);
+
+						// Determine contiguous run of identical transitions
+						uint32_t run_len = 1;
+						while (m_curr + run_len < start_m + count_m && m_curr + run_len < total_mips) {
+							uint32_t next_idx = l * total_mips + (m_curr + run_len);
+							auto& next_rec = tracker.subresources[next_idx];
+							uint32_t next_old_family = get_family(next_rec.queue);
+							bool next_diff_pass = (next_rec.last_pass_idx != pass_idx);
+							bool next_uav_hazard = (next_rec.state == ResourceState::UnorderedAccess &&
+							                       new_state == ResourceState::UnorderedAccess &&
+							                       next_diff_pass &&
+							                       (next_rec.last_was_write || is_write));
+							bool next_needs_barrier = (next_rec.state != new_state) ||
+							                          (next_rec.state == ResourceState::RenderTarget) ||
+							                          (next_rec.state == ResourceState::Undefined) ||
+							                          next_uav_hazard;
+							bool next_queue_transfer = (next_old_family != current_family && next_rec.state != ResourceState::Undefined && next_rec.last_pass_idx >= 0);
+
+							if (next_rec.state == old_state &&
+								next_rec.queue == old_queue &&
+								next_needs_barrier == needs_barrier &&
+								next_queue_transfer == is_queue_transfer &&
+								(!is_queue_transfer || next_rec.last_pass_idx == rec.last_pass_idx)) {
+								run_len++;
+							} else {
+								break;
+							}
+						}
+
+						RGHandle slice_handle = access.handle.subresource_range(m_curr, run_len, l, 1);
+						if (is_queue_transfer) {
+							passes[rec.last_pass_idx].after_barriers.push_back({
+								slice_handle, old_state, new_state, old_family, current_family, false, true
+							});
+							pass.before_barriers.push_back({
+								slice_handle, old_state, new_state, old_family, current_family, true, false
+							});
+						} else if (needs_barrier) {
+							pass.before_barriers.push_back({
+								slice_handle, old_state, new_state, 0xFFFFFFFF, 0xFFFFFFFF, false, false
+							});
+						}
+
+						for (uint32_t k = 0; k < run_len; ++k) {
+							uint32_t update_idx = l * total_mips + (m_curr + k);
+							auto& r = tracker.subresources[update_idx];
+							if (needs_barrier || is_queue_transfer) {
+								r.state = new_state;
+							}
+							r.queue = pass.queue_type;
+							if (is_write) {
+								r.last_was_write = true;
+							} else if (is_diff_pass) {
+								r.last_was_write = false;
+							}
+							r.last_pass_idx = pass_idx;
+						}
+
+						m_curr += run_len;
+					}
+				}
+
+				// Check if all subresources now share the same state and queue
+				bool all_same = true;
+				for (size_t s = 1; s < tracker.subresources.size(); ++s) {
+					if (tracker.subresources[s].state != tracker.subresources[0].state ||
+						tracker.subresources[s].queue != tracker.subresources[0].queue) {
+						all_same = false;
+						break;
+					}
+				}
+				if (all_same) {
+					tracker.whole = tracker.subresources[0];
+					tracker.subresources.clear();
+				}
 			};
 
 			for (auto& access : pass.reads) {
@@ -461,13 +654,13 @@ namespace bud::graphics {
 				auto buf = get_buffer(barrier.handle);
 				if (barrier.is_acquire) {
 					if (tex.is_valid()) {
-						rhi->resource_barrier_acquire(target, tex, barrier.old_state, barrier.new_state, barrier.src_queue_family, barrier.dst_queue_family);
+						rhi->resource_barrier_acquire(target, tex, barrier.old_state, barrier.new_state, barrier.src_queue_family, barrier.dst_queue_family, barrier.handle.subresource);
 					} else if (buf.is_valid()) {
 						rhi->resource_barrier_acquire(target, buf, barrier.old_state, barrier.new_state, barrier.src_queue_family, barrier.dst_queue_family);
 					}
 				} else {
 					if (tex.is_valid()) {
-						rhi->resource_barrier(target, tex, barrier.old_state, barrier.new_state);
+						rhi->resource_barrier(target, tex, barrier.old_state, barrier.new_state, barrier.handle.subresource);
 					} else if (buf.is_valid()) {
 						rhi->resource_barrier(target, buf, barrier.old_state, barrier.new_state);
 					}
@@ -514,7 +707,7 @@ namespace bud::graphics {
 				auto buf = get_buffer(barrier.handle);
 				if (barrier.is_release) {
 					if (tex.is_valid()) {
-						rhi->resource_barrier_release(target, tex, barrier.old_state, barrier.new_state, barrier.src_queue_family, barrier.dst_queue_family);
+						rhi->resource_barrier_release(target, tex, barrier.old_state, barrier.new_state, barrier.src_queue_family, barrier.dst_queue_family, barrier.handle.subresource);
 					} else if (buf.is_valid()) {
 						rhi->resource_barrier_release(target, buf, barrier.old_state, barrier.new_state, barrier.src_queue_family, barrier.dst_queue_family);
 					}
@@ -622,7 +815,11 @@ namespace bud::graphics {
 					std::string r_id = "res_" + std::to_string(access.handle.id);
 					std::string edge_color = p.is_culled ? "#cbd5e1" : "#2563eb";
 					std::string edge_style = p.is_culled ? "style=dashed" : "";
-					dot += "  " + r_id + " -> " + p_id + " [color=\"" + edge_color + "\", label=\"" + to_resource_state_string(access.state) + "\", " + edge_style + "];\n";
+					std::string sub_info = "";
+					if (!access.handle.subresource.is_all()) {
+						sub_info = " [m" + std::to_string(access.handle.subresource.base_mip) + "]";
+					}
+					dot += "  " + r_id + " -> " + p_id + " [color=\"" + edge_color + "\", label=\"" + to_resource_state_string(access.state) + sub_info + "\", " + edge_style + "];\n";
 				}
 			}
 
@@ -632,7 +829,11 @@ namespace bud::graphics {
 					std::string r_id = "res_" + std::to_string(access.handle.id);
 					std::string edge_color = p.is_culled ? "#cbd5e1" : "#16a34a";
 					std::string edge_style = p.is_culled ? "style=dashed" : "";
-					dot += "  " + p_id + " -> " + r_id + " [color=\"" + edge_color + "\", label=\"" + to_resource_state_string(access.state) + "\", " + edge_style + "];\n";
+					std::string sub_info = "";
+					if (!access.handle.subresource.is_all()) {
+						sub_info = " [m" + std::to_string(access.handle.subresource.base_mip) + "]";
+					}
+					dot += "  " + p_id + " -> " + r_id + " [color=\"" + edge_color + "\", label=\"" + to_resource_state_string(access.state) + sub_info + "\", " + edge_style + "];\n";
 				}
 			}
 		}

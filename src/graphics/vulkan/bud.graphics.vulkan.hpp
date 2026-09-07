@@ -86,11 +86,11 @@ namespace bud::graphics::vulkan {
 		uint32_t get_current_image_index() override;
 
 		// 命令录制 
-		void resource_barrier(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) override;
+		void resource_barrier(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, const SubresourceRange& range = {}) override;
 		void resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) override;
-		void resource_barrier_release(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) override;
+		void resource_barrier_release(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family, const SubresourceRange& range = {}) override;
 		void resource_barrier_release(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) override;
-		void resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) override;
+		void resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family, const SubresourceRange& range = {}) override;
 		void resource_barrier_acquire(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) override;
 		uint32_t get_graphics_queue_family() const override { return graphics_family_index; }
 		uint32_t get_compute_queue_family() const override { return compute_family_index; }

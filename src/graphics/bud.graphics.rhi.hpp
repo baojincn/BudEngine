@@ -62,11 +62,11 @@ namespace bud::graphics {
 		virtual void destroy_pipeline(PipelineHandle pipeline) = 0;
 
 		// 现有接口
-		virtual void resource_barrier(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state) = 0;
+		virtual void resource_barrier(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state, const SubresourceRange& range = {}) = 0;
 		virtual void resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) = 0;
-		virtual void resource_barrier_release(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) = 0;
+		virtual void resource_barrier_release(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family, const SubresourceRange& range = {}) = 0;
 		virtual void resource_barrier_release(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) = 0;
-		virtual void resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) = 0;
+		virtual void resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family, const SubresourceRange& range = {}) = 0;
 		virtual void resource_barrier_acquire(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) = 0;
 		virtual uint32_t get_graphics_queue_family() const = 0;
 		virtual uint32_t get_compute_queue_family() const = 0;

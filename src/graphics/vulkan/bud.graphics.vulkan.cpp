@@ -2540,9 +2540,10 @@ void VulkanRHI::cmd_bind_compute_ubo(CommandHandle cmd, PipelineHandle pipeline,
 	current_compute_bindings[binding] = UBOBinding{};
 }
 
-void VulkanRHI::resource_barrier(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) {
+void VulkanRHI::resource_barrier(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, const SubresourceRange& range) {
     auto vk_tex = get_vulkan_texture(texture);
-    if (!vk_tex) return;
+    if (!vk_tex)
+        return;
     auto src = sync2::get_transition2(old_state);
     auto dst = sync2::get_transition2(new_state);
 
@@ -2564,17 +2565,25 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, TextureHandle texture, bud::
     src.stage = sanitize_stages_for_queue(src.stage, src.access, current_cmd_family, compute_family_index, copy_family_index);
     dst.stage = sanitize_stages_for_queue(dst.stage, dst.access, current_cmd_family, compute_family_index, copy_family_index);
 
+    uint32_t total_mips = (vk_tex->mips > 0 ? vk_tex->mips : 1);
+    uint32_t total_layers = (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1);
+    uint32_t base_mip = range.base_mip;
+    uint32_t mip_count = (range.mip_count == ALL_MIPS || range.mip_count == 0) ? (total_mips > base_mip ? total_mips - base_mip : 1) : range.mip_count;
+    uint32_t base_layer = range.base_layer;
+    uint32_t layer_count = (range.layer_count == ALL_LAYERS || range.layer_count == 0) ? (total_layers > base_layer ? total_layers - base_layer : 1) : range.layer_count;
+
     sync2::cmd_image_barrier2(static_cast<VkCommandBuffer>(cmd), vk_tex->image, aspect,
-                              0, (vk_tex->mips > 0 ? vk_tex->mips : 1), 0, (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1),
+                              base_mip, mip_count, base_layer, layer_count,
                               oldLayout, newLayout,
                               src.stage, src.access,
                               dst.stage, dst.access);
-    vk_tex->current_state = new_state;
+    vk_tex->set_subresource_state(range, new_state);
 }
 
-void VulkanRHI::resource_barrier_release(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
+void VulkanRHI::resource_barrier_release(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family, const SubresourceRange& range) {
     auto vk_tex = get_vulkan_texture(texture);
-    if (!vk_tex) return;
+    if (!vk_tex)
+        return;
     auto src = sync2::get_transition2(old_state);
     auto dst = sync2::get_transition2(new_state);
 
@@ -2593,18 +2602,26 @@ void VulkanRHI::resource_barrier_release(CommandHandle cmd, TextureHandle textur
 
     src.stage = sanitize_stages_for_queue(src.stage, src.access, src_queue_family, compute_family_index, copy_family_index);
 
+    uint32_t total_mips = (vk_tex->mips > 0 ? vk_tex->mips : 1);
+    uint32_t total_layers = (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1);
+    uint32_t base_mip = range.base_mip;
+    uint32_t mip_count = (range.mip_count == ALL_MIPS || range.mip_count == 0) ? (total_mips > base_mip ? total_mips - base_mip : 1) : range.mip_count;
+    uint32_t base_layer = range.base_layer;
+    uint32_t layer_count = (range.layer_count == ALL_LAYERS || range.layer_count == 0) ? (total_layers > base_layer ? total_layers - base_layer : 1) : range.layer_count;
+
     sync2::cmd_image_barrier2(static_cast<VkCommandBuffer>(cmd), vk_tex->image, aspect,
-                              0, (vk_tex->mips > 0 ? vk_tex->mips : 1), 0, (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1),
+                              base_mip, mip_count, base_layer, layer_count,
                               old_layout, new_layout,
                               src.stage, src.access,
                               VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0,
                               src_queue_family, dst_queue_family);
-    vk_tex->current_state = new_state;
+    vk_tex->set_subresource_state(range, new_state);
 }
 
-void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
+void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family, const SubresourceRange& range) {
     auto vk_tex = get_vulkan_texture(texture);
-    if (!vk_tex) return;
+    if (!vk_tex)
+        return;
     auto src = sync2::get_transition2(old_state);
     auto dst = sync2::get_transition2(new_state);
 
@@ -2623,13 +2640,20 @@ void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, TextureHandle textur
 
     dst.stage = sanitize_stages_for_queue(dst.stage, dst.access, dst_queue_family, compute_family_index, copy_family_index);
 
+    uint32_t total_mips = (vk_tex->mips > 0 ? vk_tex->mips : 1);
+    uint32_t total_layers = (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1);
+    uint32_t base_mip = range.base_mip;
+    uint32_t mip_count = (range.mip_count == ALL_MIPS || range.mip_count == 0) ? (total_mips > base_mip ? total_mips - base_mip : 1) : range.mip_count;
+    uint32_t base_layer = range.base_layer;
+    uint32_t layer_count = (range.layer_count == ALL_LAYERS || range.layer_count == 0) ? (total_layers > base_layer ? total_layers - base_layer : 1) : range.layer_count;
+
     sync2::cmd_image_barrier2(static_cast<VkCommandBuffer>(cmd), vk_tex->image, aspect,
-                              0, (vk_tex->mips > 0 ? vk_tex->mips : 1), 0, (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1),
+                              base_mip, mip_count, base_layer, layer_count,
                               old_layout, new_layout,
                               VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
                               dst.stage, dst.access,
                               src_queue_family, dst_queue_family);
-    vk_tex->current_state = new_state;
+    vk_tex->set_subresource_state(range, new_state);
 }
 
 TextureHandle VulkanRHI::get_current_swapchain_texture() {

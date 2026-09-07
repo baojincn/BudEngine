@@ -20,11 +20,37 @@ namespace bud::graphics {
 
 	struct RGHandle {
 		uint32_t id = 0;
+		SubresourceRange subresource{};
+
 		bool is_valid() const {
 			if (id != 0)
 				return true;
 			return false;
 		}
+
+		RGHandle mip(uint32_t mip_level) const {
+			RGHandle copy = *this;
+			copy.subresource.base_mip = mip_level;
+			copy.subresource.mip_count = 1;
+			return copy;
+		}
+
+		RGHandle layer(uint32_t layer_index) const {
+			RGHandle copy = *this;
+			copy.subresource.base_layer = layer_index;
+			copy.subresource.layer_count = 1;
+			return copy;
+		}
+
+		RGHandle subresource_range(uint32_t base_m, uint32_t count_m, uint32_t base_l = 0, uint32_t count_l = ALL_LAYERS) const {
+			RGHandle copy = *this;
+			copy.subresource.base_mip = base_m;
+			copy.subresource.mip_count = count_m;
+			copy.subresource.base_layer = base_l;
+			copy.subresource.layer_count = count_l;
+			return copy;
+		}
+
 		auto operator<=>(const RGHandle&) const = default;
 	};
 
