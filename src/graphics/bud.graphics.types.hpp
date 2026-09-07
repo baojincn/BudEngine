@@ -29,6 +29,44 @@ namespace bud::graphics {
 	inline constexpr uint32_t SHADER_STAGE_COMPUTE_BIT = 0x00000020;
 
 	constexpr uint32_t ALL_MIPS = 0xFFFFFFFF;
+	constexpr uint32_t ALL_LAYERS = 0xFFFFFFFF;
+
+	struct SubresourceRange {
+		uint32_t base_mip = 0;
+		uint32_t mip_count = ALL_MIPS;
+		uint32_t base_layer = 0;
+		uint32_t layer_count = ALL_LAYERS;
+
+		bool is_all() const {
+			if ((mip_count == ALL_MIPS || mip_count == 0) &&
+				(layer_count == ALL_LAYERS || layer_count == 0) &&
+				base_mip == 0 && base_layer == 0)
+				return true;
+			return false;
+		}
+
+		bool overlaps(const SubresourceRange& other, uint32_t total_mips = 1, uint32_t total_layers = 1) const {
+			uint32_t m1_start = base_mip;
+			uint32_t m1_end = (mip_count == ALL_MIPS) ? total_mips : std::min(base_mip + mip_count, total_mips);
+			uint32_t m2_start = other.base_mip;
+			uint32_t m2_end = (other.mip_count == ALL_MIPS) ? total_mips : std::min(other.base_mip + other.mip_count, total_mips);
+
+			if (m1_start >= m2_end || m2_start >= m1_end)
+				return false;
+
+			uint32_t l1_start = base_layer;
+			uint32_t l1_end = (layer_count == ALL_LAYERS) ? total_layers : std::min(base_layer + layer_count, total_layers);
+			uint32_t l2_start = other.base_layer;
+			uint32_t l2_end = (other.layer_count == ALL_LAYERS) ? total_layers : std::min(other.base_layer + other.layer_count, total_layers);
+
+			if (l1_start >= l2_end || l2_start >= l1_end)
+				return false;
+
+			return true;
+		}
+
+		auto operator<=>(const SubresourceRange&) const = default;
+	};
 
 	// Screen-space-error LOD selection for page-backed meshes (Nanite-style
 	// single threshold). A LOD level's object-space error projects to
@@ -277,6 +315,7 @@ namespace bud::graphics {
 		bool enable_soft_shadows = true;
 		bool debug_cascades = false;
 		bool debug_physics = false;
+		bool dump_render_graph = false;
 		// Feed the CSM cascade traversals the FULL scene instance list instead of only
 		// the main-camera visible ones. This is the correct CSM model: an object that is
 		// outside the primary frustum but inside a cascade's light box still has to be
@@ -346,6 +385,14 @@ namespace bud::graphics {
 		float ssgi_intensity = 1.5f;
 		float ssgi_temporal_blend = 0.05f;
 
+		// Temporal Anti-Aliasing (TAA)
+		bool enable_taa = true;
+		float taa_feedback = 0.92f;
+		float taa_jitter_scale = 1.0f;
+
+		// VRAM Aliasing Heap (Transient Memory Overlap)
+		bool enable_vram_aliasing = true;
+
 		// Sky & Physical Atmosphere
 		SkyConfig sky_config;
 	};
@@ -356,6 +403,13 @@ namespace bud::graphics {
 		bud::math::mat4 proj_matrix;
 		bud::math::mat4 view_proj_matrix;
 		bud::math::mat4 prev_view_proj_matrix = bud::math::mat4(1.0f);
+
+		// Unjittered matrices for exact motion vector calculation, shadow cascades, and UI
+		bud::math::mat4 unjittered_proj_matrix = bud::math::mat4(1.0f);
+		bud::math::mat4 unjittered_view_proj_matrix = bud::math::mat4(1.0f);
+		bud::math::mat4 prev_unjittered_view_proj_matrix = bud::math::mat4(1.0f);
+		bud::math::vec2 jitter_offset = bud::math::vec2(0.0f); // In pixels [-0.5, 0.5]
+		bud::math::vec2 jitter_ndc = bud::math::vec2(0.0f);    // In NDC
 
 		bud::math::vec3 camera_position;
 		float fov;
@@ -387,6 +441,7 @@ namespace bud::graphics {
 		bool show_debug_stats = false;
 
 		void update_matrices() {
+			unjittered_view_proj_matrix = unjittered_proj_matrix * view_matrix;
 			view_proj_matrix = proj_matrix * view_matrix;
 		}
 	};
@@ -477,7 +532,8 @@ namespace bud::graphics {
 			ScreenSpaceReflections,
 			ScreenSpaceGlobalIllumination,
 			SSGIDenoise,
-			SSGITemporal
+			SSGITemporal,
+			TAA
 		};
 
 		ShaderStage cs;
@@ -557,6 +613,53 @@ namespace bud::graphics {
 		TextureType type = TextureType::Texture2D;
 
 		size_t desc_hash = 0;
+		ResourceState current_state = ResourceState::Undefined;
+		std::vector<ResourceState> subresource_states;
+
+		ResourceState get_subresource_state(uint32_t mip = 0, uint32_t layer = 0) const {
+			if (subresource_states.empty())
+				return current_state;
+			uint32_t idx = layer * mips + mip;
+			if (idx < subresource_states.size())
+				return subresource_states[idx];
+			return current_state;
+		}
+
+		void set_subresource_state(const SubresourceRange& range, ResourceState state) {
+			if (range.is_all()) {
+				current_state = state;
+				subresource_states.clear();
+				return;
+			}
+			uint32_t total = mips * array_layers;
+			if (subresource_states.empty())
+				subresource_states.assign(total, current_state);
+
+			uint32_t actual_mips = (range.mip_count == ALL_MIPS) ? (mips > range.base_mip ? mips - range.base_mip : 1) : range.mip_count;
+			uint32_t actual_layers = (range.layer_count == ALL_LAYERS) ? (array_layers > range.base_layer ? array_layers - range.base_layer : 1) : range.layer_count;
+			for (uint32_t l = range.base_layer; l < range.base_layer + actual_layers && l < array_layers; ++l) {
+				for (uint32_t m = range.base_mip; m < range.base_mip + actual_mips && m < mips; ++m) {
+					subresource_states[l * mips + m] = state;
+				}
+			}
+
+			bool all_same = true;
+			for (auto s : subresource_states) {
+				if (s != state) {
+					all_same = false;
+					break;
+				}
+			}
+			if (all_same) {
+				current_state = state;
+				subresource_states.clear();
+			}
+		}
+
+		void reset_subresource_states(ResourceState state = ResourceState::Undefined) {
+			current_state = state;
+			subresource_states.clear();
+		}
 	};
 
 	class Buffer {
@@ -569,6 +672,7 @@ namespace bud::graphics {
 		void* mapped_ptr = nullptr;
 
 		size_t desc_hash = 0;
+		ResourceState current_state = ResourceState::Undefined;
 	};
 
 

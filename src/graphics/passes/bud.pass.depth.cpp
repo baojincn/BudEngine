@@ -243,10 +243,12 @@ namespace bud::graphics {
 	}
 
 	RGHandle PyramidMipPass::add_to_graph(RenderGraph& rg, RGHandle depth_buffer, const RenderConfig& config, RGHandle target_pyramid) {
-		if (!pipeline.is_valid()) return {};
+		if (!pipeline.is_valid())
+			return {};
 
 		auto depth_desc = rg.get_texture_desc(depth_buffer);
-		if (depth_desc.width == 0 || depth_desc.height == 0) return {};
+		if (depth_desc.width == 0 || depth_desc.height == 0)
+			return {};
 
 		// Create a POT pyramid texture for easy mip generation
 		uint32_t pot_w = 1 << (uint32_t)std::ceil(std::log2((float)depth_desc.width));
@@ -272,11 +274,10 @@ namespace bud::graphics {
 						*pyramid_h_ptr = builder.create("HiZPyramid", desc);
 					}
 					RGHandle current_pyramid = *pyramid_h_ptr;
-					RGHandle src_handle = (i == 0) ? depth_buffer : current_pyramid;
-					ResourceState src_read_state = (i == 0) ? ResourceState::ShaderResource : ResourceState::UnorderedAccess;
+					RGHandle src_handle = (i == 0) ? depth_buffer : current_pyramid.mip(i - 1);
 
-					builder.read(src_handle, src_read_state);
-					builder.write(current_pyramid, ResourceState::UnorderedAccess);
+					builder.read(src_handle, ResourceState::ShaderResource);
+					builder.write(current_pyramid.mip(i), ResourceState::UnorderedAccess);
 					return current_pyramid;
 				},
 				[=, &rg](RHI* rhi, CommandHandle cmd) {
@@ -295,7 +296,7 @@ namespace bud::graphics {
 						bud::eprint("[PyramidMipPass] Resource lookup failed: {}", e.what());
 						return;
 					}
-					rhi->cmd_bind_compute_texture(cmd, pipeline, 3, src_tex, (i == 0) ? 0 : (i - 1), false, (i > 0)); // is_general=true when reading from the pyramid (it's in GENERAL layout)
+					rhi->cmd_bind_compute_texture(cmd, pipeline, 3, src_tex, (i == 0) ? 0 : (i - 1), false, false);
 					rhi->cmd_bind_compute_texture(cmd, pipeline, 5, dst_tex, i, true);
 
 					struct Push {

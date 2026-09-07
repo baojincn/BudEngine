@@ -8,6 +8,7 @@
 #include "src/platform/bud.platform.hpp"
 #include "src/threading/bud.threading.hpp"
 #include "src/graphics/bud.graphics.types.hpp"
+#include "src/graphics/bud.graphics.transient_heap.hpp"
 
 namespace bud::graphics {
 
@@ -62,11 +63,11 @@ namespace bud::graphics {
 		virtual void destroy_pipeline(PipelineHandle pipeline) = 0;
 
 		// 现有接口
-		virtual void resource_barrier(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state) = 0;
+		virtual void resource_barrier(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state, const SubresourceRange& range = {}) = 0;
 		virtual void resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) = 0;
-		virtual void resource_barrier_release(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) = 0;
+		virtual void resource_barrier_release(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family, const SubresourceRange& range = {}) = 0;
 		virtual void resource_barrier_release(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) = 0;
-		virtual void resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) = 0;
+		virtual void resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, ResourceState old_state, ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family, const SubresourceRange& range = {}) = 0;
 		virtual void resource_barrier_acquire(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) = 0;
 		virtual uint32_t get_graphics_queue_family() const = 0;
 		virtual uint32_t get_compute_queue_family() const = 0;
@@ -142,11 +143,13 @@ namespace bud::graphics {
 		virtual Buffer* get_buffer(BufferHandle handle) = 0;
 		virtual BufferDesc get_buffer_desc(BufferHandle handle) const = 0;
 
+		virtual const RenderConfig& get_render_config() const = 0;
 		virtual void set_render_config(const RenderConfig& new_render_config) = 0;
 		virtual void reload_shaders_async() = 0;
 		virtual void load_model_async(const std::string& filepath) = 0;
 
 		virtual ResourcePool* get_resource_pool() = 0;
+		virtual TransientHeapBase* get_transient_heap() { return nullptr; }
 
 		virtual void cmd_set_depth_bias(CommandHandle cmd, float constant, float clamp, float slope) = 0;
 

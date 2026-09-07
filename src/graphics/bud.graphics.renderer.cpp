@@ -71,6 +71,7 @@ namespace bud::graphics {
 		ssr_pass = std::make_unique<ScreenSpaceReflectionPass>();
 		ssgi_pass = std::make_unique<ScreenSpaceGlobalIlluminationPass>();
 		resolve_pass = std::make_unique<ResolvePass>();
+		taa_pass = std::make_unique<TAAPass>();
 
 		csm_pass->init(rhi, render_config, asset_manager);
 		depth_only_pass->init(rhi, render_config, asset_manager);
@@ -89,6 +90,7 @@ namespace bud::graphics {
 		ssr_pass->init(rhi, render_config, asset_manager);
 		ssgi_pass->init(rhi, render_config, asset_manager);
 		resolve_pass->init(rhi, render_config, asset_manager);
+		taa_pass->init(rhi, render_config, asset_manager);
 		physics_debug_pass = std::make_unique<PhysicsDebugPass>();
 		physics_debug_pass->init(rhi, render_config, asset_manager);
 
@@ -142,6 +144,7 @@ namespace bud::graphics {
 		if (ssr_pass) ssr_pass->shutdown(rhi);
 		if (ssgi_pass) ssgi_pass->shutdown(rhi);
 		if (resolve_pass) resolve_pass->shutdown(rhi);
+		if (taa_pass) taa_pass->shutdown(rhi);
 		if (physics_debug_pass) physics_debug_pass->shutdown(rhi);
 		if (csm_cull_pipeline.is_valid()) {
 			rhi->destroy_pipeline(csm_cull_pipeline);
@@ -1427,6 +1430,7 @@ namespace bud::graphics {
 			}
 
 			bool has_main_pass = false;
+			bool taa_resolved = false;
 			RGHandle shadow_map;
 			bool is_mesh_shader_vg = (has_mesh_shader && render_config.enable_mesh_shader && visibility_pass && resolve_pass && render_config.enable_virtual_geometry);
 
@@ -1751,21 +1755,29 @@ namespace bud::graphics {
 						}
 
 						if (rg_visibility.is_valid() && resolve_pass) {
-							resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
+							const bool use_taa = render_config.enable_taa && taa_pass && taa_pass->is_ready();
+							RGHandle scene_target = use_taa ? RGHandle{} : back_buffer;
+							RGHandle rg_resolved_color = resolve_pass->add_to_graph(render_graph, scene_target, rg_visibility,
 								scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 							has_main_pass = true;
 
 							if (physics_debug_pass && render_config.debug_physics) {
-								physics_debug_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+								physics_debug_pass->add_to_graph(render_graph, rg_resolved_color, rg_depth,
 									scene_view, render_config);
 							}
 
 							if (forward_translucent_pass && ranges.range_c_count > 0) {
-								forward_translucent_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
+								forward_translucent_pass->add_to_graph(render_graph, shadow_map, rg_resolved_color, rg_depth,
 									render_scene, scene_view, render_config, meshes, sort_list,
 									ranges, rg_draw, rg_inst, gpu_scene,
 									gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(),
 									rg_ao, rg_ssr, rg_ssgi, rg_history_color);
+							}
+
+							if (use_taa) {
+								taa_pass->add_to_graph(render_graph, back_buffer, rg_resolved_color, rg_depth,
+									scene_view, render_config);
+								taa_resolved = true;
 							}
 						}
 					}
@@ -1847,21 +1859,29 @@ namespace bud::graphics {
 						if (rg_depth.is_valid() && ssgi_pass && render_config.enable_ssgi)
 							rg_ssgi = ssgi_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
 
-						if (rg_visibility.is_valid()) {
-							resolve_pass->add_to_graph(render_graph, back_buffer, rg_visibility,
+						if (rg_visibility.is_valid() && resolve_pass) {
+							const bool use_taa = render_config.enable_taa && taa_pass && taa_pass->is_ready();
+							RGHandle scene_target = use_taa ? RGHandle{} : back_buffer;
+							RGHandle rg_resolved_color = resolve_pass->add_to_graph(render_graph, scene_target, rg_visibility,
 								scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 							has_main_pass = true;
 
 							if (physics_debug_pass && render_config.debug_physics)
-								physics_debug_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+								physics_debug_pass->add_to_graph(render_graph, rg_resolved_color, rg_depth,
 									scene_view, render_config);
 
 							if (forward_translucent_pass && ranges.range_c_count > 0)
-								forward_translucent_pass->add_to_graph(render_graph, shadow_map, back_buffer, rg_depth,
+								forward_translucent_pass->add_to_graph(render_graph, shadow_map, rg_resolved_color, rg_depth,
 									render_scene, scene_view, render_config, meshes, sort_list,
 									ranges, rg_draw, rg_inst, gpu_scene,
 									gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(),
 									rg_ao, rg_ssr, rg_ssgi, rg_history_color);
+
+							if (use_taa) {
+								taa_pass->add_to_graph(render_graph, back_buffer, rg_resolved_color, rg_depth,
+									scene_view, render_config);
+								taa_resolved = true;
+							}
 						}
 					}
 				}
@@ -1879,7 +1899,6 @@ namespace bud::graphics {
 							},
 							[=](RHI* rhi, CommandHandle cmd) {
 								rhi->cmd_copy_image(cmd, render_graph.get_texture(back_buffer), render_graph.get_texture(rg_curr_color));
-								rhi->resource_barrier(cmd, render_graph.get_texture(rg_curr_color), ResourceState::TransferDst, ResourceState::ShaderResource);
 							}
 						);
 					}
@@ -1888,34 +1907,29 @@ namespace bud::graphics {
 
 			if (!has_main_pass) {
 				render_graph.add_pass("UI Clear Pass",
-					[=](RGBuilder& builder) { builder.write(back_buffer, ResourceState::RenderTarget); },
-					[this, back_buffer](RHI* rhi, CommandHandle cmd) {
-						RenderPassBeginInfo info;
-						info.color_attachments.push_back(render_graph.get_texture(back_buffer));
-						info.clear_color = true;
-						info.clear_color_value = { 0.5f, 0.5f, 0.5f, 1.0f };
-						rhi->cmd_begin_render_pass(cmd, info);
-						rhi->cmd_end_render_pass(cmd);
-					}
+					[=](RGBuilder& builder) {
+						builder.set_color_attachment(0, back_buffer, true, { 0.5f, 0.5f, 0.5f, 1.0f });
+					},
+					[](RHI*, CommandHandle) {}
 				);
 			}
 		}
 		else {
 			render_graph.add_pass("Empty Scene Clear",
-				[=](RGBuilder& builder) { builder.write(back_buffer, ResourceState::RenderTarget); },
-				[this, back_buffer](RHI* rhi, CommandHandle cmd) {
-					RenderPassBeginInfo info;
-					info.color_attachments.push_back(render_graph.get_texture(back_buffer));
-					info.clear_color = true;
-					info.clear_color_value = { 0.2f, 0.2f, 0.2f, 1.0f };
-					rhi->cmd_begin_render_pass(cmd, info);
-					rhi->cmd_end_render_pass(cmd);
-				}
+				[=](RGBuilder& builder) {
+					builder.set_color_attachment(0, back_buffer, true, { 0.05f, 0.05f, 0.08f, 1.0f });
+				},
+				[](RHI*, CommandHandle) {}
 			);
 		}
 
 		ui_pass->add_to_graph(render_graph, back_buffer);
 		render_graph.compile();
+
+		if (render_config.dump_render_graph && !graphviz_exported_) {
+			render_graph.export_graphviz("tmp/render_graph.dot");
+			graphviz_exported_ = true;
+		}
 
 		render_graph.execute(cmd);
 
@@ -1969,6 +1983,10 @@ namespace bud::graphics {
 
 	const RenderConfig& Renderer::get_config() const {
 		return render_config;
+	}
+
+	bool Renderer::is_taa_ready() const {
+		return taa_pass && taa_pass->is_ready();
 	}
 
 	const void* Renderer::get_readback_pixels() const {

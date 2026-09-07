@@ -1,0 +1,210 @@
+#version 460 core
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D current_color_sampler;
+layout(set = 0, binding = 1) uniform sampler2D history_color_sampler;
+layout(set = 0, binding = 2) uniform sampler2D depth_sampler;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D output_resolved_image;
+
+layout(std140, set = 0, binding = 4) uniform UniformBufferObject {
+	mat4 view;
+	mat4 proj;
+	mat4 prev_view_proj;
+	mat4 cascade_view_proj[4];
+	vec4 cascade_split_depths;
+
+	vec3 cam_pos;
+	vec3 light_dir;
+	vec3 light_color;
+	float light_intensity;
+	float ambient_strength;
+	uint cascade_count;
+	uint debug_cascades;
+	uint reversed_z;
+	float shadow_bias_constant;
+	float shadow_bias_slope;
+	uint debug_cluster;
+
+	// --- CSM receiver metrics ---
+	vec4 cascade_texel_size;
+	vec4 cascade_depth_range;
+	float shadow_receiver_bias_texels;
+	float shadow_normal_offset_texels;
+
+	// --- TAA parameters & reprojection matrices ---
+	mat4 unjittered_inv_view_proj;
+	mat4 prev_unjittered_view_proj;
+	vec4 jitter_offset; // xy: pixel offset [-0.5, 0.5], zw: NDC offset
+} ubo;
+
+layout(push_constant) uniform TAAPushConstants {
+	vec2 screen_size;
+	vec2 inv_screen_size;
+	float feedback_factor;
+	uint reset_history;
+	uint reversed_z;
+	float jitter_scale;
+} push_constants;
+
+// YCoCg color space transforms (Karis 2014)
+vec3 rgb_to_ycocg(vec3 rgb) {
+	float y  =  0.25 * rgb.r + 0.50 * rgb.g + 0.25 * rgb.b;
+	float co =  0.50 * rgb.r               - 0.50 * rgb.b;
+	float cg = -0.25 * rgb.r + 0.50 * rgb.g - 0.25 * rgb.b;
+	return vec3(y, co, cg);
+}
+
+vec3 ycocg_to_rgb(vec3 ycocg) {
+	float y  = ycocg.x;
+	float co = ycocg.y;
+	float cg = ycocg.z;
+	float r = y + co - cg;
+	float g = y + cg;
+	float b = y - co - cg;
+	return max(vec3(r, g, b), vec3(0.0));
+}
+
+// 5-tap Catmull-Rom bicubic filter using bilinear hardware texture samples
+vec4 sample_catmull_rom_5tap(sampler2D tex, vec2 uv, vec2 tex_size, vec2 inv_tex_size) {
+	vec2 sample_pos = uv * tex_size;
+	vec2 tc = floor(sample_pos - 0.5) + 0.5;
+	vec2 f = sample_pos - tc;
+	vec2 f2 = f * f;
+	vec2 f3 = f2 * f;
+
+	vec2 w0 = f2 - 0.5 * (f3 + f);
+	vec2 w1 = 1.5 * f3 - 2.5 * f2 + 1.0;
+	vec2 w3 = 0.5 * (f3 - f2);
+	vec2 w2 = 1.0 - w0 - w1 - w3;
+
+	vec2 w12 = w1 + w2;
+	vec2 tc12 = tc + (w2 / w12);
+
+	vec2 tc0 = tc - 1.0;
+	vec2 tc3 = tc + 2.0;
+
+	vec4 c0 = textureLod(tex, vec2(tc12.x, tc0.y) * inv_tex_size, 0.0);
+	vec4 c1 = textureLod(tex, vec2(tc0.x, tc12.y) * inv_tex_size, 0.0);
+	vec4 c2 = textureLod(tex, vec2(tc12.x, tc12.y) * inv_tex_size, 0.0);
+	vec4 c3 = textureLod(tex, vec2(tc3.x, tc12.y) * inv_tex_size, 0.0);
+	vec4 c4 = textureLod(tex, vec2(tc12.x, tc3.y) * inv_tex_size, 0.0);
+
+	float total_weight = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+	vec4 result = (c0 * (w12.x * w0.y) + c1 * (w0.x * w12.y) + c2 * (w12.x * w12.y) + c3 * (w3.x * w12.y) + c4 * (w12.x * w3.y)) / total_weight;
+	return max(result, vec4(0.0));
+}
+
+// Clip reprojected history to local AABB in YCoCg space
+vec3 clip_aabb(vec3 box_min, vec3 box_max, vec3 history_color, vec3 current_color) {
+	vec3 p_clip = 0.5 * (box_max + box_min);
+	vec3 e_clip = 0.5 * (box_max - box_min) + 1e-6;
+
+	vec3 v_clip = history_color - p_clip;
+	vec3 v_unit = v_clip / e_clip;
+	vec3 a_unit = abs(v_unit);
+	float ma_unit = max(a_unit.x, max(a_unit.y, a_unit.z));
+
+	if (ma_unit > 1.0)
+		return p_clip + v_clip / ma_unit;
+	else
+		return history_color;
+}
+
+void main() {
+	ivec2 pixel_coord = ivec2(gl_GlobalInvocationID.xy);
+	if (pixel_coord.x >= int(push_constants.screen_size.x) || pixel_coord.y >= int(push_constants.screen_size.y))
+		return;
+
+	vec2 uv = (vec2(pixel_coord) + 0.5) * push_constants.inv_screen_size;
+
+	// 1. 3x3 Closest-Depth Search for Velocity Vector (eliminates silhouette edge ghosting)
+	float closest_depth = textureLod(depth_sampler, uv, 0.0).r;
+	ivec2 closest_offset = ivec2(0);
+
+	for (int y = -1; y <= 1; ++y) {
+		for (int x = -1; x <= 1; ++x) {
+			float d = texelFetch(depth_sampler, pixel_coord + ivec2(x, y), 0).r;
+			if (push_constants.reversed_z != 0u) {
+				if (d > closest_depth) {
+					closest_depth = d;
+					closest_offset = ivec2(x, y);
+				}
+			} else {
+				if (d < closest_depth) {
+					closest_depth = d;
+					closest_offset = ivec2(x, y);
+				}
+			}
+		}
+	}
+
+	vec2 velocity_uv = uv + vec2(closest_offset) * push_constants.inv_screen_size;
+
+	// 2. Analytical World-Space Motion Vector Reconstruction
+	vec4 clip_curr = vec4(velocity_uv * 2.0 - 1.0, closest_depth, 1.0);
+	vec4 world_pos = ubo.unjittered_inv_view_proj * clip_curr;
+	if (abs(world_pos.w) > 1e-6)
+		world_pos /= world_pos.w;
+
+	vec4 clip_prev = ubo.prev_unjittered_view_proj * world_pos;
+	vec2 prev_ndc = clip_prev.xy / (abs(clip_prev.w) > 1e-6 ? clip_prev.w : 1.0);
+	vec2 prev_uv = prev_ndc * 0.5 + 0.5;
+
+	vec2 motion_vector = velocity_uv - prev_uv;
+	vec2 history_uv = uv - motion_vector;
+
+	// 3. Sample Current 3x3 Neighborhood and Compute YCoCg Variance Bounding Box
+	vec3 current_center = textureLod(current_color_sampler, uv, 0.0).rgb;
+	vec3 m1 = vec3(0.0);
+	vec3 m2 = vec3(0.0);
+	vec3 min_color = vec3(1e6);
+	vec3 max_color = vec3(-1e6);
+
+	for (int y = -1; y <= 1; ++y) {
+		for (int x = -1; x <= 1; ++x) {
+			vec3 sample_rgb = texelFetch(current_color_sampler, pixel_coord + ivec2(x, y), 0).rgb;
+			vec3 sample_ycocg = rgb_to_ycocg(sample_rgb);
+
+			m1 += sample_ycocg;
+			m2 += sample_ycocg * sample_ycocg;
+			min_color = min(min_color, sample_ycocg);
+			max_color = max(max_color, sample_ycocg);
+		}
+	}
+
+	vec3 mean = m1 / 9.0;
+	vec3 stddev = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
+
+	// Karis variance clipping bounds (gamma = 1.25)
+	const float variance_gamma = 1.25;
+	vec3 box_min = max(mean - variance_gamma * stddev, min_color);
+	vec3 box_max = min(mean + variance_gamma * stddev, max_color);
+
+	vec3 current_center_ycocg = rgb_to_ycocg(current_center);
+
+	// 4. Sample and Filter History Color
+	bool is_history_valid = (push_constants.reset_history == 0u) &&
+	                        (history_uv.x >= 0.0 && history_uv.x <= 1.0 &&
+	                         history_uv.y >= 0.0 && history_uv.y <= 1.0);
+
+	vec3 resolved_rgb;
+	if (is_history_valid) {
+		vec4 history_sample = sample_catmull_rom_5tap(history_color_sampler, history_uv, push_constants.screen_size, push_constants.inv_screen_size);
+		vec3 history_ycocg = rgb_to_ycocg(history_sample.rgb);
+
+		// Box clip history color to prevent ghosting
+		history_ycocg = clip_aabb(box_min, box_max, history_ycocg, current_center_ycocg);
+
+		// Velocity-adaptive blend factor: increase responsiveness under fast motion
+		float pixel_velocity_len = length(motion_vector * push_constants.screen_size);
+		float blend_weight = mix(push_constants.feedback_factor, 0.82, clamp(pixel_velocity_len * 0.15, 0.0, 1.0));
+
+		vec3 blended_ycocg = mix(current_center_ycocg, history_ycocg, blend_weight);
+		resolved_rgb = ycocg_to_rgb(blended_ycocg);
+	} else {
+		resolved_rgb = current_center;
+	}
+
+	imageStore(output_resolved_image, pixel_coord, vec4(resolved_rgb, 1.0));
+}

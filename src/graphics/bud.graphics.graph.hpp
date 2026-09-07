@@ -12,6 +12,7 @@
 #include "src/graphics/bud.graphics.types.hpp"
 #include "src/graphics/bud.graphics.pool.hpp"
 #include "src/graphics/bud.graphics.rhi.hpp"
+#include "src/graphics/bud.graphics.transient_heap.hpp"
 
 
 namespace bud::threading { class TaskScheduler; }
@@ -20,11 +21,37 @@ namespace bud::graphics {
 
 	struct RGHandle {
 		uint32_t id = 0;
+		SubresourceRange subresource{};
+
 		bool is_valid() const {
 			if (id != 0)
 				return true;
 			return false;
 		}
+
+		RGHandle mip(uint32_t mip_level) const {
+			RGHandle copy = *this;
+			copy.subresource.base_mip = mip_level;
+			copy.subresource.mip_count = 1;
+			return copy;
+		}
+
+		RGHandle layer(uint32_t layer_index) const {
+			RGHandle copy = *this;
+			copy.subresource.base_layer = layer_index;
+			copy.subresource.layer_count = 1;
+			return copy;
+		}
+
+		RGHandle subresource_range(uint32_t base_m, uint32_t count_m, uint32_t base_l = 0, uint32_t count_l = ALL_LAYERS) const {
+			RGHandle copy = *this;
+			copy.subresource.base_mip = base_m;
+			copy.subresource.mip_count = count_m;
+			copy.subresource.base_layer = base_l;
+			copy.subresource.layer_count = count_l;
+			return copy;
+		}
+
 		auto operator<=>(const RGHandle&) const = default;
 	};
 
@@ -41,6 +68,16 @@ namespace bud::graphics {
 		uint32_t version = 0;
 		RGHandle parent_handle = { 0 };
 		ResourceState initial_state = ResourceState::Undefined;
+		bool is_active = false;
+
+		// Transient Aliasing Heap fields
+		int first_pass = -1;
+		int last_pass = -1;
+		bool is_aliased = false;
+		uint64_t heap_offset = 0;
+		uint64_t allocated_size = 0;
+		uint32_t heap_chunk_index = 0;
+		void* virtual_alloc_handle = nullptr;
 	};
 
 
@@ -61,8 +98,24 @@ namespace bud::graphics {
 		// Culling info
 		uint32_t ref_count = 0;
 		bool has_side_effects = false;
+		bool is_culled = false;
 		QueueType queue_type = QueueType::Graphics;
 		bool async_compute = false;
+
+		// Declarative RenderPass Attachments
+		struct AttachmentDesc {
+			RGHandle handle;
+			bool is_depth = false;
+			bool clear = false;
+			bool read_only = false;
+			bud::math::vec4 clear_color{ 0.0f, 0.0f, 0.0f, 1.0f };
+			float clear_depth = 1.0f;
+			uint32_t base_array_layer = 0;
+			uint32_t layer_count = 1;
+		};
+		std::vector<AttachmentDesc> color_attachments;
+		AttachmentDesc depth_attachment;
+		bool has_depth_attachment = false;
 
 		// Barrier info calculated during compile()
 		struct BarrierInfo { 
@@ -94,6 +147,10 @@ namespace bud::graphics {
 		// Create new transient resource
 		RGHandle create(const std::string& name, const TextureDesc& desc);
 		RGHandle create(const std::string& name, const BufferDesc& desc);
+
+		// Declarative RenderPass Attachments
+		void set_color_attachment(uint32_t slot, RGHandle handle, bool clear = false, const bud::math::vec4& clear_color = { 0.0f, 0.0f, 0.0f, 1.0f });
+		void set_depth_attachment(RGHandle handle, bool clear = false, float clear_depth = 1.0f, bool read_only = false);
 
 		// Mark pass as having side effects (cannot be culled)
 		void set_side_effect(bool value = true);
@@ -131,11 +188,16 @@ namespace bud::graphics {
 		void reset() {
 			if (rhi) {
 				auto* pool = rhi->get_resource_pool();
+				auto* heap = rhi->get_transient_heap();
+				if (heap)
+					heap->reset_frame();
+
 				if (pool) {
 					for (auto& node : resources) {
 						if (node.is_transient) {
 							if (node.physical_texture.is_valid()) {
-								pool->release_texture(node.physical_texture);
+								if (!node.is_aliased)
+									pool->release_texture(node.physical_texture);
 								node.physical_texture.reset();
 							}
 							if (node.physical_buffer.is_valid()) {
@@ -167,8 +229,8 @@ namespace bud::graphics {
 			return setup(builder);
 		}
 
-		RGHandle import_texture(const std::string& name, TextureHandle texture, ResourceState current_state);
-		RGHandle import_buffer(const std::string& name, bud::graphics::BufferHandle buffer, ResourceState current_state);
+		RGHandle import_texture(const std::string& name, TextureHandle texture, ResourceState current_state = ResourceState::Undefined);
+		RGHandle import_buffer(const std::string& name, bud::graphics::BufferHandle buffer, ResourceState current_state = ResourceState::Undefined);
 		TextureHandle get_texture(RGHandle handle) const;
 		bud::graphics::BufferHandle get_buffer(RGHandle handle) const;
 		
@@ -193,6 +255,12 @@ namespace bud::graphics {
 		
 		void execute_parallel(CommandHandle cmd, bud::threading::TaskScheduler* task_scheduler);
 
+		void export_graphviz(const std::string& filepath) const;
+		size_t get_culled_pass_count() const { return culled_pass_count; }
+		size_t get_active_pass_count() const { return sorted_passes.size(); }
+		size_t get_total_transient_unaliased_bytes() const { return total_transient_unaliased_bytes; }
+		size_t get_peak_aliased_bytes() const { return peak_aliased_bytes; }
+
 	private:
 		RHI* rhi;
 		std::vector<RGPassNode> passes;
@@ -201,6 +269,11 @@ namespace bud::graphics {
 		// Compiled Data
 		std::vector<std::vector<int>> adjacency_list; // DAG
 		std::vector<int> sorted_passes; // Execution Order
+		size_t culled_pass_count = 0;
+		size_t total_transient_unaliased_bytes = 0;
+		size_t peak_aliased_bytes = 0;
+		size_t last_logged_unaliased = 0;
+		size_t last_logged_peak = 0;
 	};
 
 }

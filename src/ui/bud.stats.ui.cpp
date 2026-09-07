@@ -27,6 +27,8 @@ namespace bud::ui {
 		bud::graphics::AOMode current_ao_mode,
 		std::function<void(bool)> set_ssr_enable,
 		bool current_ssr_enable,
+		std::function<void(bool)> set_taa_enable,
+		bool current_taa_enable,
 		std::function<void(bool)> set_ssgi_enable,
 		bool current_ssgi_enable,
 		std::function<void(float)> set_ssgi_intensity,
@@ -239,6 +241,18 @@ namespace bud::ui {
 					bool tmp_ssr = current_ssr_enable;
 					if (ImGui::Checkbox("##ssr_enable", &tmp_ssr)) {
 						set_ssr_enable(tmp_ssr);
+					}
+					ImGui::PopID();
+				}
+
+				if (set_taa_enable) {
+					ImGui::SameLine();
+					ImGui::TextColored(color_neutral, " | TAA");
+					ImGui::SameLine();
+					ImGui::PushID("taa_enable_checkbox");
+					bool tmp_taa = current_taa_enable;
+					if (ImGui::Checkbox("##taa_enable", &tmp_taa)) {
+						set_taa_enable(tmp_taa);
 					}
 					ImGui::PopID();
 				}

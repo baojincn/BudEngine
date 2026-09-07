@@ -191,6 +191,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 
 	resource_pool = std::make_unique<VulkanResourcePool>(device, memory_allocator.get());
 	memory_allocator->set_resource_pool(resource_pool.get());
+	transient_heap = std::make_unique<VulkanTransientHeap>(device, physical_device, memory_allocator->get_vma_allocator(), resource_pool.get());
 
 	pipeline_cache = std::make_unique<VulkanPipelineCache>();
 	pipeline_cache->init(device);
@@ -435,6 +436,17 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
 	};
 	compute_ssgi_temporal_set_layout = build_ssgi_temporal_compute_layout();
+
+	auto build_taa_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+	compute_taa_set_layout = build_taa_compute_layout();
 
 	// 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
@@ -798,6 +810,11 @@ void VulkanRHI::cleanup() {
     // Note: memory_allocator->cleanup() flushes deferred frees via on_frame_begin()
     // which calls resource_pool->release_buffer(), so the pool must still exist at
     // that point too — the order below satisfies both constraints.
+    if (transient_heap) {
+        transient_heap->clear_cache();
+        transient_heap.reset();
+    }
+
     if (resource_pool)
         resource_pool->cleanup();
 
@@ -842,6 +859,7 @@ void VulkanRHI::cleanup() {
 	if (compute_ssgi_set_layout) vkDestroyDescriptorSetLayout(device, compute_ssgi_set_layout, nullptr);
 	if (compute_ssgi_denoise_set_layout) vkDestroyDescriptorSetLayout(device, compute_ssgi_denoise_set_layout, nullptr);
 	if (compute_ssgi_temporal_set_layout) vkDestroyDescriptorSetLayout(device, compute_ssgi_temporal_set_layout, nullptr);
+	if (compute_taa_set_layout) vkDestroyDescriptorSetLayout(device, compute_taa_set_layout, nullptr);
 	compute_hierarchy_traversal_set_layout = VK_NULL_HANDLE;
 	compute_page_emit_set_layout = VK_NULL_HANDLE;
 	compute_cluster_cull_set_layout = VK_NULL_HANDLE;
@@ -851,6 +869,7 @@ void VulkanRHI::cleanup() {
 	compute_ssgi_set_layout = VK_NULL_HANDLE;
 	compute_ssgi_denoise_set_layout = VK_NULL_HANDLE;
 	compute_ssgi_temporal_set_layout = VK_NULL_HANDLE;
+	compute_taa_set_layout = VK_NULL_HANDLE;
 
 	// Device & Instance
 	if (shadow_sampler)
@@ -1315,6 +1334,9 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 	case ComputePipelineDesc::LayoutKind::SSGITemporal:
 		chosen_layout = compute_ssgi_temporal_set_layout;
 		break;
+	case ComputePipelineDesc::LayoutKind::TAA:
+		chosen_layout = compute_taa_set_layout;
+		break;
 	default:
 		chosen_layout = compute_hiz_cull_set_layout;
 		break;
@@ -1363,6 +1385,7 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 			case ComputePipelineDesc::LayoutKind::ClusterCull: return "ClusterCull";
 			case ComputePipelineDesc::LayoutKind::ClearStats: return "ClearStats";
 			case ComputePipelineDesc::LayoutKind::CSMCulling: return "CSMCulling";
+			case ComputePipelineDesc::LayoutKind::TAA: return "TAA";
 			default: return "Compute";
 			}
 		};
@@ -2265,6 +2288,7 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle 
 	depInfo.pBufferMemoryBarriers = &barrier;
 
 	vkCmdPipelineBarrier2(static_cast<VkCommandBuffer>(cmd), &depInfo);
+	vk_buf->current_state = new_state;
 }
 
 void VulkanRHI::resource_barrier_release(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
@@ -2317,6 +2341,7 @@ void VulkanRHI::resource_barrier_release(CommandHandle cmd, bud::graphics::Buffe
 	depInfo.pBufferMemoryBarriers = &barrier;
 
 	vkCmdPipelineBarrier2(static_cast<VkCommandBuffer>(cmd), &depInfo);
+	vk_buf->current_state = new_state;
 }
 
 void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
@@ -2369,6 +2394,7 @@ void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, bud::graphics::Buffe
 	depInfo.pBufferMemoryBarriers = &barrier;
 
 	vkCmdPipelineBarrier2(static_cast<VkCommandBuffer>(cmd), &depInfo);
+	vk_buf->current_state = new_state;
 }
 
 void VulkanRHI::cmd_bind_pipeline(CommandHandle cmd, PipelineHandle pipeline) {
@@ -2520,9 +2546,10 @@ void VulkanRHI::cmd_bind_compute_ubo(CommandHandle cmd, PipelineHandle pipeline,
 	current_compute_bindings[binding] = UBOBinding{};
 }
 
-void VulkanRHI::resource_barrier(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) {
+void VulkanRHI::resource_barrier(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, const SubresourceRange& range) {
     auto vk_tex = get_vulkan_texture(texture);
-    if (!vk_tex) return;
+    if (!vk_tex)
+        return;
     auto src = sync2::get_transition2(old_state);
     auto dst = sync2::get_transition2(new_state);
 
@@ -2544,16 +2571,25 @@ void VulkanRHI::resource_barrier(CommandHandle cmd, TextureHandle texture, bud::
     src.stage = sanitize_stages_for_queue(src.stage, src.access, current_cmd_family, compute_family_index, copy_family_index);
     dst.stage = sanitize_stages_for_queue(dst.stage, dst.access, current_cmd_family, compute_family_index, copy_family_index);
 
+    uint32_t total_mips = (vk_tex->mips > 0 ? vk_tex->mips : 1);
+    uint32_t total_layers = (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1);
+    uint32_t base_mip = range.base_mip;
+    uint32_t mip_count = (range.mip_count == ALL_MIPS || range.mip_count == 0) ? (total_mips > base_mip ? total_mips - base_mip : 1) : range.mip_count;
+    uint32_t base_layer = range.base_layer;
+    uint32_t layer_count = (range.layer_count == ALL_LAYERS || range.layer_count == 0) ? (total_layers > base_layer ? total_layers - base_layer : 1) : range.layer_count;
+
     sync2::cmd_image_barrier2(static_cast<VkCommandBuffer>(cmd), vk_tex->image, aspect,
-                              0, (vk_tex->mips > 0 ? vk_tex->mips : 1), 0, (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1),
+                              base_mip, mip_count, base_layer, layer_count,
                               oldLayout, newLayout,
                               src.stage, src.access,
                               dst.stage, dst.access);
+    vk_tex->set_subresource_state(range, new_state);
 }
 
-void VulkanRHI::resource_barrier_release(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
+void VulkanRHI::resource_barrier_release(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family, const SubresourceRange& range) {
     auto vk_tex = get_vulkan_texture(texture);
-    if (!vk_tex) return;
+    if (!vk_tex)
+        return;
     auto src = sync2::get_transition2(old_state);
     auto dst = sync2::get_transition2(new_state);
 
@@ -2572,17 +2608,26 @@ void VulkanRHI::resource_barrier_release(CommandHandle cmd, TextureHandle textur
 
     src.stage = sanitize_stages_for_queue(src.stage, src.access, src_queue_family, compute_family_index, copy_family_index);
 
+    uint32_t total_mips = (vk_tex->mips > 0 ? vk_tex->mips : 1);
+    uint32_t total_layers = (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1);
+    uint32_t base_mip = range.base_mip;
+    uint32_t mip_count = (range.mip_count == ALL_MIPS || range.mip_count == 0) ? (total_mips > base_mip ? total_mips - base_mip : 1) : range.mip_count;
+    uint32_t base_layer = range.base_layer;
+    uint32_t layer_count = (range.layer_count == ALL_LAYERS || range.layer_count == 0) ? (total_layers > base_layer ? total_layers - base_layer : 1) : range.layer_count;
+
     sync2::cmd_image_barrier2(static_cast<VkCommandBuffer>(cmd), vk_tex->image, aspect,
-                              0, (vk_tex->mips > 0 ? vk_tex->mips : 1), 0, (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1),
+                              base_mip, mip_count, base_layer, layer_count,
                               old_layout, new_layout,
                               src.stage, src.access,
                               VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0,
                               src_queue_family, dst_queue_family);
+    vk_tex->set_subresource_state(range, new_state);
 }
 
-void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) {
+void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family, const SubresourceRange& range) {
     auto vk_tex = get_vulkan_texture(texture);
-    if (!vk_tex) return;
+    if (!vk_tex)
+        return;
     auto src = sync2::get_transition2(old_state);
     auto dst = sync2::get_transition2(new_state);
 
@@ -2601,12 +2646,20 @@ void VulkanRHI::resource_barrier_acquire(CommandHandle cmd, TextureHandle textur
 
     dst.stage = sanitize_stages_for_queue(dst.stage, dst.access, dst_queue_family, compute_family_index, copy_family_index);
 
+    uint32_t total_mips = (vk_tex->mips > 0 ? vk_tex->mips : 1);
+    uint32_t total_layers = (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1);
+    uint32_t base_mip = range.base_mip;
+    uint32_t mip_count = (range.mip_count == ALL_MIPS || range.mip_count == 0) ? (total_mips > base_mip ? total_mips - base_mip : 1) : range.mip_count;
+    uint32_t base_layer = range.base_layer;
+    uint32_t layer_count = (range.layer_count == ALL_LAYERS || range.layer_count == 0) ? (total_layers > base_layer ? total_layers - base_layer : 1) : range.layer_count;
+
     sync2::cmd_image_barrier2(static_cast<VkCommandBuffer>(cmd), vk_tex->image, aspect,
-                              0, (vk_tex->mips > 0 ? vk_tex->mips : 1), 0, (vk_tex->array_layers > 0 ? vk_tex->array_layers : 1),
+                              base_mip, mip_count, base_layer, layer_count,
                               old_layout, new_layout,
                               VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
                               dst.stage, dst.access,
                               src_queue_family, dst_queue_family);
+    vk_tex->set_subresource_state(range, new_state);
 }
 
 TextureHandle VulkanRHI::get_current_swapchain_texture() {
@@ -3004,6 +3057,7 @@ void VulkanRHI::create_image_views() {
         // Use SRGB variant if swapchain was created with an SRGB surface format
         tex_ptr->format = (swapchain_image_format == VK_FORMAT_B8G8R8A8_SRGB) ? TextureFormat::BGRA8_SRGB : TextureFormat::BGRA8_UNORM;
 		tex_ptr->allocation = VK_NULL_HANDLE; // Swapchain image memory is managed by driver
+		tex_ptr->current_state = ResourceState::Undefined;
 		swapchain_textures_wrappers[i] = *tex_ptr;
 		swapchain_texture_handles[i] = resource_pool->register_texture(tex_ptr);
 	}
@@ -3922,6 +3976,7 @@ TextureHandle VulkanRHI::create_texture(const bud::graphics::TextureDesc& desc, 
 	tex->format = desc.format;
 	tex->mips = desc.mips;
 	tex->array_layers = desc.array_layers;
+	tex->current_state = desc.initial_state;
 
 	if (initial_data && size > 0) {
 		bud::graphics::BufferHandle staging = this->create_upload_buffer(size);
@@ -3939,6 +3994,7 @@ TextureHandle VulkanRHI::create_texture(const bud::graphics::TextureDesc& desc, 
 			else {
 				this->transition_image_layout_immediate(tex->image, to_vk_format(desc.format), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 			}
+			tex->current_state = ResourceState::ShaderResource;
 		}
 
 		this->destroy_buffer(staging);
@@ -4052,6 +4108,7 @@ TextureHandle VulkanRHI::create_texture_async(const bud::graphics::TextureDesc& 
 	tex->format = desc.format;
 	tex->mips = desc.mips;
 	tex->array_layers = desc.array_layers;
+	tex->current_state = desc.initial_state;
 	if (desc.format == TextureFormat::R32G32_UINT)
 		tex->sampler = point_sampler;
 	else
@@ -4285,6 +4342,16 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 	ubo.shadow_normal_offset_texels = render_config.shadow_normal_offset_texels;
 
 	ubo.debug_cluster = render_config.enable_cluster_visualization ? 1 : 0;
+
+	// TAA reprojection matrices and jitter offset
+	ubo.unjittered_inv_view_proj = bud::math::inverse(scene_view.unjittered_view_proj_matrix);
+	ubo.prev_unjittered_view_proj = scene_view.prev_unjittered_view_proj_matrix;
+	ubo.jitter_offset = bud::math::vec4(
+		scene_view.jitter_offset.x,
+		scene_view.jitter_offset.y,
+		scene_view.jitter_ndc.x,
+		scene_view.jitter_ndc.y
+	);
 
 	if (frames[current_frame].uniform_mapped) {
 		std::memcpy(frames[current_frame].uniform_mapped, &ubo, sizeof(UniformBufferObject));

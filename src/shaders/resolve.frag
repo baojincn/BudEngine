@@ -78,16 +78,6 @@ void main() {
         mat.alpha_mode = 0u;
     }
 
-    vec2 uv_dx = dFdx(uv);
-    vec2 uv_dy = dFdy(uv);
-    if (length(uv_dx) > 0.02) uv_dx = vec2(0.0);
-    if (length(uv_dy) > 0.02) uv_dy = vec2(0.0);
-
-    vec4 albedo_sample = mat.base_color_factor;
-    if (mat.albedo_texture_id > 0u && mat.albedo_texture_id < 1000u) {
-        albedo_sample *= textureGrad(tex_samplers[nonuniformEXT(mat.albedo_texture_id)], uv, uv_dx, uv_dy);
-    }
-
     vec2 screen_size = vec2(textureSize(visibility_tex, 0));
     vec2 screen_uv = gl_FragCoord.xy / screen_size;
     vec2 ndc_xy = screen_uv * 2.0 - 1.0;
@@ -95,13 +85,29 @@ void main() {
     vec4 world_pos_h = inverse(ubo.proj * ubo.view) * clip_pos;
     vec3 world_pos = world_pos_h.xyz / world_pos_h.w;
 
-    if (length(N) < 0.1) {
+    vec3 geom_N = N;
+    if (length(geom_N) < 0.1) {
         vec3 pos_dx = dFdx(world_pos);
         vec3 pos_dy = dFdy(world_pos);
         vec3 cross_n = cross(pos_dx, pos_dy);
-        N = (length(cross_n) > 1e-5) ? normalize(cross_n) : vec3(0.0, 1.0, 0.0);
+        geom_N = (length(cross_n) > 1e-5) ? normalize(cross_n) : vec3(0.0, 1.0, 0.0);
     } else {
-        N = normalize(N);
+        geom_N = normalize(geom_N);
+    }
+    N = geom_N;
+
+    vec2 uv_dx = dFdx(uv);
+    vec2 uv_dy = dFdy(uv);
+    // Wrap correction for repeating textures across [0, 1] boundaries
+    uv_dx -= round(uv_dx);
+    uv_dy -= round(uv_dy);
+    const float max_derivative = 0.5;
+    uv_dx = clamp(uv_dx, vec2(-max_derivative), vec2(max_derivative));
+    uv_dy = clamp(uv_dy, vec2(-max_derivative), vec2(max_derivative));
+
+    vec4 albedo_sample = mat.base_color_factor;
+    if (mat.albedo_texture_id > 0u && mat.albedo_texture_id < 1000u) {
+        albedo_sample *= textureGrad(tex_samplers[nonuniformEXT(mat.albedo_texture_id)], uv, uv_dx, uv_dy);
     }
 
     if (ubo.debug_cascades > 0u) {
@@ -121,7 +127,7 @@ void main() {
             vec3(1.0, 1.0, 0.2)  // Cascade 3: Yellow
         );
         vec3 L = normalize(ubo.light_dir);
-        float ndotl = max(dot(N, L), 0.25);
+        float ndotl = max(dot(geom_N, L), 0.25);
         vec3 debug_color = mix(albedo_sample.rgb * ndotl, cascade_colors[debug_layer] * ndotl, 0.7);
         out_color = vec4(debug_color, 1.0);
         return;
@@ -129,14 +135,28 @@ void main() {
 
     if (mat.normal_texture_id > 0u && mat.normal_texture_id < 1000u) {
         vec3 normal_sample = textureGrad(tex_samplers[nonuniformEXT(mat.normal_texture_id)], uv, uv_dx, uv_dy).xyz * 2.0 - 1.0;
-        vec3 Q1 = dFdx(world_pos);
-        vec3 Q2 = dFdy(world_pos);
-        vec2 st1 = dFdx(uv);
-        vec2 st2 = dFdy(uv);
-        vec3 T = normalize(Q1 * st2.t - Q2 * st1.t);
-        vec3 B = -normalize(cross(N, T));
-        mat3 TBN = mat3(T, B, N);
-        N = normalize(TBN * normal_sample);
+        vec3 dp1 = dFdx(world_pos);
+        vec3 dp2 = dFdy(world_pos);
+        vec2 duv1 = dFdx(uv);
+        vec2 duv2 = dFdy(uv);
+        duv1 -= round(duv1);
+        duv2 -= round(duv2);
+
+        vec3 dp2perp = cross(dp2, geom_N);
+        vec3 dp1perp = cross(geom_N, dp1);
+        vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+        vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+
+        float det = max(dot(T, T), dot(B, B));
+        if (det > 1e-12) {
+            float invmax = inversesqrt(det);
+            mat3 TBN = mat3(T * invmax, B * invmax, geom_N);
+            vec3 perturbed_N = TBN * normal_sample;
+            float n_len_sq = dot(perturbed_N, perturbed_N);
+            if (n_len_sq > 1e-12) {
+                N = perturbed_N * inversesqrt(n_len_sq);
+            }
+        }
     }
 
     float metallic = mat.metallic_factor;
@@ -176,7 +196,7 @@ void main() {
     vec3 ssr_reflection = eval_ssr_reflection(ssr_sample, F_ssr, roughness, albedo_sample.rgb, metallic);
 
     vec3 albedo = albedo_sample.rgb;
-    vec3 color = calculate_lighting(world_pos, N, uv, mat, albedo, ao, metallic, roughness, receive_shadow);
+    vec3 color = calculate_lighting(world_pos, N, geom_N, uv, mat, albedo, ao, metallic, roughness, receive_shadow);
     color += ssr_reflection + ssgi_diffuse;
     color = apply_tonemap_and_gamma(color);
     out_color = vec4(color, albedo_sample.a);

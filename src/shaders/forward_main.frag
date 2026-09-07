@@ -36,6 +36,11 @@ layout(binding = 0) uniform UniformBufferObject {
 	vec4 cascade_depth_range;  // light-space slab thickness (metres), per cascade
 	float shadow_receiver_bias_texels; // residual depth bias, in shadow texels
 	float shadow_normal_offset_texels; // shadow normal offset, in shadow texels
+
+	// --- TAA (appended, std140 offsets locked by C++ static_assert) ---
+	mat4 unjittered_inv_view_proj;
+	mat4 prev_unjittered_view_proj;
+	vec4 jitter_offset; // xy: pixel offset, zw: ndc offset
 } ubo;
 
 layout(binding = 1) uniform sampler2D tex_samplers[];
@@ -129,22 +134,34 @@ void main() {
         ssr_sample = texture(tex_samplers[997], screen_uv);
     }
 
-    vec3 N = normalize(frag_normal);
+    vec3 geom_N = normalize(frag_normal);
     if (!gl_FrontFacing) {
-        N = -N;
+        geom_N = -geom_N;
     }
+    vec3 N = geom_N;
     if (mat.normal_texture_id > 0u && mat.normal_texture_id < 1000u) {
         vec3 normal_sample = texture(tex_samplers[nonuniformEXT(mat.normal_texture_id)], frag_tex_coord).xyz * 2.0 - 1.0;
-        vec3 Q1 = dFdx(frag_world_pos);
-        vec3 Q2 = dFdy(frag_world_pos);
-        vec2 st1 = dFdx(frag_tex_coord);
-        vec2 st2 = dFdy(frag_tex_coord);
-        vec3 cross_vec = Q1 * st2.t - Q2 * st1.t;
-        if (dot(cross_vec, cross_vec) > 1e-6) {
-            vec3 T = normalize(cross_vec);
-            vec3 B = -normalize(cross(N, T));
-            mat3 TBN = mat3(T, B, N);
-            N = normalize(TBN * normal_sample);
+        vec3 dp1 = dFdx(frag_world_pos);
+        vec3 dp2 = dFdy(frag_world_pos);
+        vec2 duv1 = dFdx(frag_tex_coord);
+        vec2 duv2 = dFdy(frag_tex_coord);
+        duv1 -= round(duv1);
+        duv2 -= round(duv2);
+
+        vec3 dp2perp = cross(dp2, geom_N);
+        vec3 dp1perp = cross(geom_N, dp1);
+        vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+        vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+
+        float det = max(dot(T, T), dot(B, B));
+        if (det > 1e-12) {
+            float invmax = inversesqrt(det);
+            mat3 TBN = mat3(T * invmax, B * invmax, geom_N);
+            vec3 perturbed_N = TBN * normal_sample;
+            float n_len_sq = dot(perturbed_N, perturbed_N);
+            if (n_len_sq > 1e-12) {
+                N = perturbed_N * inversesqrt(n_len_sq);
+            }
         }
     }
 
@@ -163,7 +180,7 @@ void main() {
     float G   = GeometrySmith(N, V, L, roughness);
     vec3 F_dir = FresnelSchlick(max(dot(H, V), 0.0), F0);
     vec3 direct_specular = (NDF * G * F_dir) / (4.0 * NdotV * NdotL + 0.0001);
-    float shadow = ShadowCalculation(frag_world_pos, N, L);
+    float shadow = ShadowCalculation(frag_world_pos, geom_N, L);
     direct_specular *= ubo.light_color * ubo.light_intensity * NdotL * (1.0 - shadow);
 
     // Hemispheric Ambient Irradiance

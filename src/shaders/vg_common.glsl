@@ -25,6 +25,11 @@ layout(set = 1, binding = 0) uniform UniformBufferObject {
 	vec4 cascade_depth_range;  // light-space slab thickness (metres), per cascade
 	float shadow_receiver_bias_texels; // residual depth bias, in shadow texels
 	float shadow_normal_offset_texels; // shadow normal offset, in shadow texels
+
+	// --- TAA (appended, std140 offsets locked by C++ static_assert) ---
+	mat4 unjittered_inv_view_proj;
+	mat4 prev_unjittered_view_proj;
+	vec4 jitter_offset; // xy: pixel offset, zw: ndc offset
 } ubo;
 
 struct GPUMaterialData {

@@ -277,8 +277,8 @@ namespace bud::graphics {
 		if (!frame.visible_clusters.is_valid() || !frame.indirect_draw.is_valid())
 			return {};
 
-		RGHandle rg_visible_clusters = rg.import_buffer("VisibleClusters", frame.visible_clusters, ResourceState::UnorderedAccess);
-		RGHandle rg_dynamic_instances = rg.import_buffer("DynamicInstances", frame.dynamic_instances, ResourceState::UnorderedAccess);
+		RGHandle rg_visible_clusters = rg.import_buffer("VisibleClusters", frame.visible_clusters);
+		RGHandle rg_dynamic_instances = rg.import_buffer("DynamicInstances", frame.dynamic_instances);
 
 		rg.add_pass("Cluster Cull",
 			[=](RGBuilder& builder) {
@@ -301,11 +301,9 @@ namespace bud::graphics {
 					rhi->cmd_dispatch(cmd, (dword_count + 63) / 64, 1, 1);
 				}
 
-				rhi->resource_barrier(cmd, frame.visible_clusters, ResourceState::UnorderedAccess, ResourceState::ShaderResource);
+				rhi->cmd_bind_pipeline(cmd, cluster_cull_pipeline);
 
-rhi->cmd_bind_pipeline(cmd, cluster_cull_pipeline);
-
-rhi->cmd_bind_storage_buffer(cmd, cluster_cull_pipeline, 0, frame.instance_data);
+				rhi->cmd_bind_storage_buffer(cmd, cluster_cull_pipeline, 0, frame.instance_data);
 				rhi->cmd_bind_storage_buffer(cmd, cluster_cull_pipeline, 1, gpu_scene.get_page_table_buffer());
 				rhi->cmd_bind_storage_buffer(cmd, cluster_cull_pipeline, 2, gpu_scene.get_page_pool_buffer());
 				rhi->cmd_bind_storage_buffer(cmd, cluster_cull_pipeline, 3, frame.visible_clusters);

@@ -92,6 +92,7 @@ namespace bud::io {
 		std::optional<std::vector<char>> read_binary(const std::filesystem::path& path);
 		bool write_binary(const std::filesystem::path& path, const std::vector<char>& data);
 		void append_text_async(const std::filesystem::path& path, std::string text, bud::threading::Counter* counter = nullptr, bud::threading::TaskScheduler* scheduler = nullptr);
+		void write_text_async(const std::filesystem::path& path, std::string text, bud::threading::Counter* counter = nullptr, bud::threading::TaskScheduler* scheduler = nullptr);
 		std::filesystem::path get_root_path() const { return root_path; }
 		std::optional<nlohmann::json> read_json(const std::filesystem::path& path);
 		bool                          write_json(const std::filesystem::path& path, const nlohmann::json& json);

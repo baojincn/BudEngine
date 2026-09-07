@@ -18,6 +18,7 @@
 #include "src/graphics/vulkan/bud.vulkan.types.hpp"
 #include "src/graphics/vulkan/bud.vulkan.memory.hpp"
 #include "src/graphics/vulkan/bud.vulkan.pool.hpp"
+#include "src/graphics/vulkan/bud.vulkan.transient_heap.hpp"
 #include "src/graphics/vulkan/bud.vulkan.pipeline.hpp"
 #include "src/graphics/vulkan/bud.vulkan.descriptors.hpp"
 
@@ -86,11 +87,11 @@ namespace bud::graphics::vulkan {
 		uint32_t get_current_image_index() override;
 
 		// 命令录制 
-		void resource_barrier(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) override;
+		void resource_barrier(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, const SubresourceRange& range = {}) override;
 		void resource_barrier(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state) override;
-		void resource_barrier_release(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) override;
+		void resource_barrier_release(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family, const SubresourceRange& range = {}) override;
 		void resource_barrier_release(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) override;
-		void resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) override;
+		void resource_barrier_acquire(CommandHandle cmd, TextureHandle texture, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family, const SubresourceRange& range = {}) override;
 		void resource_barrier_acquire(CommandHandle cmd, bud::graphics::BufferHandle buffer, bud::graphics::ResourceState old_state, bud::graphics::ResourceState new_state, uint32_t src_queue_family, uint32_t dst_queue_family) override;
 		uint32_t get_graphics_queue_family() const override { return graphics_family_index; }
 		uint32_t get_compute_queue_family() const override { return compute_family_index; }
@@ -141,6 +142,7 @@ namespace bud::graphics::vulkan {
 		uint32_t get_current_frame_index() const override { return current_frame; }
 
 		// 杂项 / 待重构
+		const bud::graphics::RenderConfig& get_render_config() const override { return render_config; }
 		void set_render_config(const bud::graphics::RenderConfig& new_render_config) override;
 		void update_global_uniforms(uint32_t image_index, const bud::graphics::SceneView& scene_view) override;
 		void reload_shaders_async() override;
@@ -171,6 +173,7 @@ namespace bud::graphics::vulkan {
 
 		VulkanMemoryAllocator* get_memory_allocator() { return memory_allocator.get(); }
 		bud::graphics::ResourcePool* get_resource_pool() override { return resource_pool.get(); }
+		bud::graphics::TransientHeapBase* get_transient_heap() override { return transient_heap.get(); }
 
 		// Debug
 		void cmd_begin_debug_label(CommandHandle cmd, const std::string& name, float r, float g, float b) override;
@@ -394,6 +397,7 @@ namespace bud::graphics::vulkan {
 
 		std::unique_ptr<VulkanMemoryAllocator> memory_allocator;
 		std::unique_ptr<VulkanResourcePool>    resource_pool;
+		std::unique_ptr<VulkanTransientHeap>   transient_heap;
 		std::unique_ptr<VulkanPipelineCache>   pipeline_cache;
 		std::vector<VulkanDescriptorAllocator> descriptor_allocators;
 
@@ -421,6 +425,7 @@ namespace bud::graphics::vulkan {
 		VkDescriptorSetLayout compute_ssgi_set_layout = VK_NULL_HANDLE;
 		VkDescriptorSetLayout compute_ssgi_denoise_set_layout = VK_NULL_HANDLE;
 		VkDescriptorSetLayout compute_ssgi_temporal_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_taa_set_layout = VK_NULL_HANDLE;
 		VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
 		VkSampler default_sampler = VK_NULL_HANDLE;
 		VkSampler point_sampler = VK_NULL_HANDLE;
