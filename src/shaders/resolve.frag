@@ -94,6 +94,10 @@ void main() {
     } else {
         geom_N = normalize(geom_N);
     }
+
+    vec3 V = normalize(ubo.cam_pos - world_pos);
+    if (dot(geom_N, V) < 0.0)
+        geom_N = -geom_N;
     N = geom_N;
 
     vec2 uv_dx = dFdx(uv);
@@ -158,6 +162,8 @@ void main() {
             }
         }
     }
+    if (dot(N, V) < 0.0)
+        N = -N;
 
     float metallic = mat.metallic_factor;
     float roughness = mat.roughness_factor;
@@ -190,7 +196,6 @@ void main() {
         ssr_sample = texture(tex_samplers[997], screen_uv);
     }
 
-    vec3 V = normalize(ubo.cam_pos - world_pos);
     vec3 F0 = mix(vec3(0.04), albedo_sample.rgb, metallic);
     vec3 F_ssr = FresnelSchlick(max(dot(N, V), 0.0), F0);
     vec3 ssr_reflection = eval_ssr_reflection(ssr_sample, F_ssr, roughness, albedo_sample.rgb, metallic);

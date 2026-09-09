@@ -1,6 +1,7 @@
 #include "mesh_builder.hpp"
 #include "virtual_geometry_builder.hpp"
 #include "material_builder.hpp"
+#include "cloth_baker.hpp"
 #include "../cache/asset_cache.hpp"
 #include "../core/serializer.hpp"
 #include "../core/support.hpp"
@@ -137,8 +138,25 @@ bool MeshBuilder::build(const std::string& input_path, const std::string& output
     auto mat_res = MaterialBuilder::build(internal_mesh.materials, internal_mesh.textures);
     writer.add_chunk(AssetChunkType::Material, mat_res.serialized_chunk.data(), mat_res.serialized_chunk.size());
 
-    // 3. Build Virtual Geometry chunk
-    if (options.enable_virtual_geometry) {
+    // 3. Build ClothPhysics chunk (if cloth) or Virtual Geometry chunk (if static)
+    bool is_cloth = false;
+    for (const auto& mat : internal_mesh.materials) {
+        if (ClothBaker::is_cloth_material(mat.name)) {
+            is_cloth = true;
+            break;
+        }
+    }
+    if (!is_cloth && (ClothBaker::is_cloth_material(input_path) || ClothBaker::is_cloth_material(output_path))) {
+        is_cloth = true;
+    }
+
+    if (is_cloth) {
+        support::log_info("[BudAssetPipeline] Identified cloth asset (" + input_path + "). Generating dual-mesh ClothPhysics chunk (skipping Virtual Geometry)...");
+        std::vector<uint8_t> cloth_bytes = ClothBaker::build(*raw_mesh_opt);
+        if (!cloth_bytes.empty()) {
+            writer.add_chunk(AssetChunkType::ClothPhysics, cloth_bytes.data(), cloth_bytes.size());
+        }
+    } else if (options.enable_virtual_geometry) {
         VGBuildResult vg_result = VirtualGeometryBuilder::build(internal_mesh);
 
         // Store 100% of raw 128KB geometry pages into external .budbulk

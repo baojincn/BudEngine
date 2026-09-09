@@ -3,6 +3,7 @@
 #include "src/core/bud.asset.types.hpp"
 #include "src/graphics/bud.graphics.renderer.hpp"
 #include "src/graphics/bud.graphics.rhi.hpp"
+#include "src/physics/bud.cloth.hpp"
 #include <algorithm>
 #include <cfloat>
 #include <cstring>
@@ -34,6 +35,12 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 			}
 			return;
 		}
+	}
+
+	if (bud::physics::is_cloth_name_or_path(path)) {
+		if (non_vg_asset_callback)
+			non_vg_asset_callback(path);
+		return;
 	}
 
 	auto alive = alive_flag;

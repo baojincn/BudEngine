@@ -41,7 +41,9 @@ namespace bud::ui {
                            std::function<void(float)> set_light_intensity = nullptr,
                            float current_light_intensity = 5.0f,
                            std::function<void(float)> set_ambient_strength = nullptr,
-                           float current_ambient_strength = 0.25f);
+                           float current_ambient_strength = 0.25f,
+                           std::function<void(const bud::physics::ClothConfig&)> set_cloth_config = nullptr,
+                           bud::physics::ClothConfig current_cloth_config = {});
     };
 
 }

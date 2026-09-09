@@ -22,6 +22,7 @@ add_library(bud_asset_pipeline STATIC
     builders/material_asset_builder.cpp
     builders/texture_builder.cpp
     builders/mesh_builder.cpp
+    builders/cloth_baker.cpp
     builders/cascade_builder.cpp
     ${CMAKE_SOURCE_DIR}/src/runtime/bud.scene.cpp
     ${CMAKE_SOURCE_DIR}/src/runtime/bud.scene.builder.cpp

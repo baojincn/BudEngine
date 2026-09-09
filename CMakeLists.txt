@@ -287,7 +287,9 @@ target_sources(bud_engine_core
 		"src/runtime/bud.camera_sequencer.cpp"
 		"src/runtime/bud.character_controller.cpp"
 		"src/graphics/passes/bud.pass.physics_debug.cpp"
+		"src/graphics/passes/bud.pass.cloth_debug.cpp"
 		"src/physics/bud.physics.scene.cpp"
+		"src/physics/bud.cloth.cpp"
 
     PUBLIC
 		"src/core/bud.core.hpp"
@@ -308,6 +310,8 @@ target_sources(bud_engine_core
 		"src/physics/bud.physics.hpp"
 		"src/physics/bud.physics.types.hpp"
 		"src/physics/bud.physics.scene.hpp"
+		"src/physics/bud.cloth.hpp"
+		"src/physics/bud.cloth.types.hpp"
 
 		"src/ui/bud.stats.ui.hpp"
 

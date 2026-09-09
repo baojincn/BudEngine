@@ -50,7 +50,7 @@ namespace bud::scene {
 
 		// Third-person target (the entity/point the camera orbits around)
 		bud::math::vec3 target_position = bud::math::vec3(0.0f);
-		float orbit_distance = 5.0f;
+		float orbit_distance = 2.0f; // UE5 third-person template: TargetArmLength = 500cm
 		float orbit_pitch = -20.0f;
 		float orbit_yaw = 0.0f;
 		float spring_stiffness = 8.0f;

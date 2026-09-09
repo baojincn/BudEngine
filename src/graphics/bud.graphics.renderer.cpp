@@ -1,4 +1,4 @@
-#include <memory>
+﻿#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -19,8 +19,7 @@
 
 #include "src/graphics/bud.graphics.sortkey.hpp"
 #include "src/graphics/vulkan/bud.vulkan.memory.hpp"
-
-
+#include "src/physics/bud.cloth.hpp"
 
 namespace bud::graphics {
 namespace {
@@ -94,6 +93,12 @@ namespace bud::graphics {
 		physics_debug_pass = std::make_unique<PhysicsDebugPass>();
 		physics_debug_pass->init(rhi, render_config, asset_manager);
 
+		cloth_debug_pass = std::make_unique<ClothDebugPass>();
+		cloth_debug_pass->init(rhi, render_config, asset_manager);
+
+		cloth_system = std::make_unique<bud::physics::ClothSystem>();
+		cloth_system->init(rhi, asset_manager, &gpu_scene);
+
 		auto& geometry_pool = gpu_scene.get_geometry_pool();
 		if (!geometry_pool.initialized) {
 			geometry_pool.vertex_buffer = rhi->create_gpu_buffer(GPUScene::GeometryPool::vertex_pool_size, ResourceState::VertexBuffer);
@@ -146,6 +151,11 @@ namespace bud::graphics {
 		if (resolve_pass) resolve_pass->shutdown(rhi);
 		if (taa_pass) taa_pass->shutdown(rhi);
 		if (physics_debug_pass) physics_debug_pass->shutdown(rhi);
+		if (cloth_debug_pass) cloth_debug_pass->shutdown(rhi);
+		if (cloth_system) {
+			cloth_system->shutdown();
+			cloth_system.reset();
+		}
 		if (csm_cull_pipeline.is_valid()) {
 			rhi->destroy_pipeline(csm_cull_pipeline);
 			csm_cull_pipeline.reset();
@@ -200,6 +210,17 @@ namespace bud::graphics {
 		meshes[mesh_id].sphere.center = (aabb.min + aabb.max) * 0.5f;
 		meshes[mesh_id].sphere.radius = bud::math::distance(aabb.max, meshes[mesh_id].sphere.center);
 		meshes[mesh_id].is_page_based = true;
+	}
+
+	void Renderer::update_mesh_bounds(uint32_t mesh_id, const bud::math::AABB& aabb) {
+		std::lock_guard mesh_lock(mesh_mutex);
+		if (meshes.size() <= mesh_id)
+			return;
+		// Deliberately does NOT touch is_page_based: simulated cloth meshes are
+		// traditional meshes and must keep rendering through the Range-B path.
+		meshes[mesh_id].aabb = aabb;
+		meshes[mesh_id].sphere.center = (aabb.min + aabb.max) * 0.5f;
+		meshes[mesh_id].sphere.radius = bud::math::distance(aabb.max, meshes[mesh_id].sphere.center);
 	}
 
 	uint32_t Renderer::register_page_based_mesh(uint32_t page_index, uint32_t cluster_count,
@@ -390,6 +411,7 @@ namespace bud::graphics {
 
 		auto mesh_data_copy = std::make_shared<bud::io::MeshData>(mesh_data);
 		uint32_t assigned_mesh_id = 0;
+		int32_t reserved_vertex_offset = -1;
 
 		{
 			std::lock_guard lock(queue->mutex);
@@ -404,7 +426,18 @@ namespace bud::graphics {
 				mesh_bounds[assigned_mesh_id] = cpu_aabb;
 			}
 
-			queue->commands.push_back([this, mesh_data_copy, texture_slot_map, assigned_mesh_id, cpu_aabb]() {
+			// Reserve the mega-buffer region at enqueue time so callers (cloth
+			// registration) get the vertex offset immediately, before the queued
+			// GPU upload actually runs. The FIFO queue keeps reservation order ==
+			// execution order.
+			auto& geometry_pool_for_reserve = gpu_scene.get_geometry_pool();
+			const uint32_t reserve_vertex_count = (uint32_t)mesh_data.vertices.size();
+			const uint32_t reserve_index_count = (uint32_t)mesh_data.indices.size();
+			const uint32_t reserved_vertex_base = geometry_pool_for_reserve.next_vertex.fetch_add(reserve_vertex_count, std::memory_order_relaxed);
+			const uint32_t reserved_index_base = geometry_pool_for_reserve.next_index.fetch_add(reserve_index_count, std::memory_order_relaxed);
+			reserved_vertex_offset = static_cast<int32_t>(reserved_vertex_base);
+
+			queue->commands.push_back([this, mesh_data_copy, texture_slot_map, assigned_mesh_id, cpu_aabb, reserved_vertex_base, reserved_index_base]() {
 				RenderMesh new_mesh;
 
 				new_mesh.aabb = cpu_aabb;
@@ -431,8 +464,8 @@ namespace bud::graphics {
 				}
 
 				// Atomically reserve contiguous region inside the pool
-				const uint32_t vertex_base = geometry_pool.next_vertex.fetch_add(vertex_count, std::memory_order_relaxed);
-				const uint32_t index_base = geometry_pool.next_index.fetch_add(index_count, std::memory_order_relaxed);
+				const uint32_t vertex_base = reserved_vertex_base;
+				const uint32_t index_base = reserved_index_base;
 
 				const uint64_t vertex_pool_byte_offset = (uint64_t)vertex_base * sizeof(bud::io::MeshData::Vertex);
 				const uint64_t index_pool_byte_offset = (uint64_t)index_base * sizeof(uint32_t);
@@ -571,7 +604,7 @@ namespace bud::graphics {
 			});
 		}
 
-		return { assigned_mesh_id, base_material_id };
+		return { assigned_mesh_id, base_material_id, reserved_vertex_offset };
 	}
 
 	void Renderer::flush_upload_queue() {
@@ -794,10 +827,6 @@ namespace bud::graphics {
 						depth_key = static_cast<uint32_t>(depth_normalized * 0x3FFFF);
 
 						if (mesh.is_page_based) {
-							// GPU-driven page-based mesh: generate a single sort item
-							// so the instance is included in the HierarchyInstance buffer
-							// for hierarchy traversal. The actual draws come from the
-							// GPU-written indirect draw buffer.
 							auto& item = sort_list[draw_start];
 							item.entity_index = (uint32_t)i;
 							item.submesh_index = bud::asset::INVALID_INDEX;
@@ -836,6 +865,10 @@ namespace bud::graphics {
 								auto& item = sort_list[draw_start + s];
 								const auto& sub = mesh.submeshes[s];
 								auto world_sub_aabb = sub.aabb.transform(world_matrix);
+								if (!(render_scene.flags[i] & RenderScene::INSTANCE_FLAG_STATIC)) {
+									world_sub_aabb.min -= bud::math::vec3(2.0f);
+									world_sub_aabb.max += bud::math::vec3(2.0f);
+								}
 								if (!bud::math::intersect_aabb_frustum(world_sub_aabb, main_camera_frustum)) {
 									item.key = UINT64_MAX;
 									item.entity_index = (uint32_t)i;
@@ -1593,6 +1626,28 @@ namespace bud::graphics {
 					csm_casters.traditional.command_count = static_cast<uint32_t>(trad_castable);
 				}
 
+				if (cloth_system && cloth_system->has_cloth()) {
+					bud::graphics::BufferHandle mega_vb = gpu_scene.get_geometry_pool().vertex_buffer;
+					if (mega_vb.is_valid()) {
+						render_graph.add_pass("Cloth Simulation and Skinning",
+							[](RGBuilder& builder) {
+								builder.set_side_effect(true);
+							},
+							[this, mega_vb, scene_view](RHI* rhi, CommandHandle cmd) {
+								cloth_system->simulate_and_skin(
+									rhi, cmd,
+									mega_vb,
+									scene_view.delta_time,
+									render_config,
+									scene_view.time,
+									scene_view.camera_position,
+									&gpu_scene
+								);
+							}
+						);
+					}
+				}
+
 				RGHandle rg_csm_indirect;
 				// GPU-driven CSM culling for traditional dynamic meshes (only when dynamic instances exist)
 				if (csm_cull_pipeline.is_valid() && frame.csm_indirect_draw.is_valid()) {
@@ -1710,7 +1765,8 @@ namespace bud::graphics {
 						RGHandle rg_depth{};
 						// Phase 1: Visibility Pass using History Hi-Z
 						auto rg_visibility = visibility_pass->add_to_graph(render_graph, back_buffer, rg_depth,
-							scene_view, render_config, rg_visible_pages, rg_history_hiz, gpu_scene, ranges,
+							scene_view, render_config, render_scene, meshes, sort_list,
+							rg_visible_pages, rg_history_hiz, gpu_scene, ranges,
 							gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(), rg_draw, &rg_depth);
 
 						// Build Current Frame Hi-Z Pyramid from Phase 1 Depth Buffer
@@ -1764,6 +1820,18 @@ namespace bud::graphics {
 							if (physics_debug_pass && render_config.debug_physics) {
 								physics_debug_pass->add_to_graph(render_graph, rg_resolved_color, rg_depth,
 									scene_view, render_config);
+							}
+
+							// Cloth debug overlay: GPU-driven wireframe of the simulation
+							// mesh, drawn straight from the particle/constraint SSBOs (F2).
+							if (cloth_debug_pass && render_config.debug_cloth &&
+								cloth_system && cloth_system->has_cloth()) {
+								if (auto cloth_world = cloth_system->acquire_world()) {
+									cloth_debug_pass->add_to_graph(render_graph, rg_resolved_color, rg_depth,
+										scene_view, render_config,
+										cloth_world->gpu_particles, cloth_world->gpu_constraints,
+										cloth_world->constraint_count);
+								}
 							}
 
 							if (forward_translucent_pass && ranges.range_c_count > 0) {
@@ -1869,6 +1937,17 @@ namespace bud::graphics {
 							if (physics_debug_pass && render_config.debug_physics)
 								physics_debug_pass->add_to_graph(render_graph, rg_resolved_color, rg_depth,
 									scene_view, render_config);
+
+							// Cloth debug overlay (F2), same placement as physics debug.
+							if (cloth_debug_pass && render_config.debug_cloth &&
+								cloth_system && cloth_system->has_cloth()) {
+								if (auto cloth_world = cloth_system->acquire_world()) {
+									cloth_debug_pass->add_to_graph(render_graph, rg_resolved_color, rg_depth,
+										scene_view, render_config,
+										cloth_world->gpu_particles, cloth_world->gpu_constraints,
+										cloth_world->constraint_count);
+								}
+							}
 
 							if (forward_translucent_pass && ranges.range_c_count > 0)
 								forward_translucent_pass->add_to_graph(render_graph, shadow_map, rg_resolved_color, rg_depth,

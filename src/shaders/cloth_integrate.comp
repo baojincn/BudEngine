@@ -1,0 +1,109 @@
+#version 460
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// Global cloth particle pool: xyz = position, w = inv_mass (0.0 = fixed pin)
+struct SimParticle {
+    vec4 position_inv_mass;
+    vec4 prev_position;
+};
+
+layout(std430, set = 0, binding = 0) buffer ParticleBuffer {
+    SimParticle particles[];
+};
+
+// xyz: rest pose (drift safety net), w: per-instance top_y (wind height attenuation)
+layout(std430, set = 0, binding = 1) readonly buffer RestParticleBuffer {
+    SimParticle rest_particles[];
+};
+
+layout(std430, push_constant) uniform PushConstants {
+    vec4  gravity_dt;    // xyz: gravity, w: dt
+    vec4  wind_time;     // xyz: wind_direction, w: time
+    uint  particle_count;
+    float damping;
+    float wind_strength;
+    float pad0;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.particle_count)
+        return;
+
+    float inv_mass = particles[idx].position_inv_mass.w;
+    vec3 current_pos = particles[idx].position_inv_mass.xyz;
+    vec3 prev_pos    = particles[idx].prev_position.xyz;
+
+    if (inv_mass <= 0.0) {
+        particles[idx].prev_position.xyz = current_pos;
+        return;
+    }
+
+    vec3 rest_pos = rest_particles[idx].position_inv_mass.xyz;
+    float top_y   = rest_particles[idx].position_inv_mass.w;
+
+    // Safety net: snap exploded / NaN particles back to the rest pose.
+    // (NaN fails the comparison, so !(drift < limit) catches it too.)
+    float drift = length(current_pos - rest_pos);
+    if (!(drift < 25.0)) {
+        particles[idx].position_inv_mass.xyz = rest_pos;
+        particles[idx].prev_position.xyz     = rest_pos;
+        return;
+    }
+
+    float safe_dt = clamp(pc.gravity_dt.w, 0.001, 0.0333);
+
+    // 1. Physics damping. pc.damping is authored as the fraction of velocity lost
+    //    per 1/60 s frame; convert it to a time-consistent exponential rate so
+    //    running it once per SUBSTEP (N times per frame) does not multiply the
+    //    damping N times - that over-damped the cloth into slow motion.
+    float frame_retention = clamp(1.0 - pc.damping, 1e-3, 1.0);
+    float damping_rate = -log(frame_retention) * 60.0;
+    float velocity_retention = exp(-damping_rate * safe_dt);
+    vec3 velocity = ((current_pos - prev_pos) / safe_dt) * velocity_retention;
+    float v_len = length(velocity);
+    if (v_len > 10.0)
+        velocity *= (10.0 / v_len);
+
+    // 2. Atmospheric breeze field (strictly 0 when wind_strength == 0)
+    vec3 v_wind = vec3(0.0);
+    if (pc.wind_strength > 1e-4) {
+        vec3  wind_direction = pc.wind_time.xyz;
+        float sim_time       = pc.wind_time.w;
+        float wind_dir_len   = length(wind_direction);
+        vec3  wind_dir       = (wind_dir_len > 1e-4) ? (wind_direction / wind_dir_len) : vec3(1.0, 0.0, 0.0);
+        vec3  side_dir       = cross(wind_dir, vec3(0.0, 1.0, 0.0));
+        float s_len          = length(side_dir);
+        side_dir             = (s_len > 1e-4) ? (side_dir / s_len) : vec3(0.0, 0.0, 1.0);
+
+        // Multi-octave organic gust envelope (long-period, gentle natural breeze)
+        float g1 = sin(sim_time * 0.25 + current_pos.x * 0.15 + current_pos.z * 0.10);
+        float g2 = sin(sim_time * 0.42 + 1.35);
+        float g3 = sin(sim_time * 0.65 + current_pos.x * 0.25);
+        float raw_gust = clamp(0.35 + 0.35 * g1 + 0.20 * g2 + 0.10 * g3, 0.0, 1.0);
+        float gust = raw_gust * raw_gust * (3.0 - 2.0 * raw_gust);
+
+        // Prevailing breeze speed
+        float speed = pc.wind_strength * (0.30 + 0.70 * gust);
+
+        // Height attenuation: sheltered near the ceiling/rod, freer towards the bottom hem
+        float drop = max(0.0, top_y - current_pos.y);
+        float height_factor = clamp(drop * 0.35, 0.05, 1.0);
+
+        // Subtle natural ripple across the cloth width (lateral flutter wave)
+        float flutter = sin(sim_time * 1.10 + current_pos.x * 0.50 + current_pos.z * 0.50) * 0.12;
+        v_wind = (wind_dir + side_dir * flutter) * (speed * height_factor);
+    }
+
+    // 3. Fluid relative aerodynamic drag
+    float drag_coeff = (pc.wind_strength < 1e-4) ? 0.95 : 0.45;
+    vec3 v_rel = v_wind - velocity;
+    vec3 aero_accel = v_rel * drag_coeff;
+
+    // 4. Explicit acceleration integration and position prediction
+    vec3 total_accel   = pc.gravity_dt.xyz + (aero_accel * inv_mass);
+    vec3 predicted_pos = current_pos + velocity * safe_dt + total_accel * (safe_dt * safe_dt);
+
+    particles[idx].prev_position.xyz     = current_pos;
+    particles[idx].position_inv_mass.xyz = predicted_pos;
+}

@@ -78,10 +78,12 @@ void TriangleApp::on_update(float delta_time) {
 	static bool prev_v = false;
 	bool curr_v = input.is_key_down(bud::input::Key::V);
 	if (curr_v && !prev_v) {
-		if (cam.get_mode() == bud::scene::CameraMode::FreeFly)
-			cam.set_mode(bud::scene::CameraMode::ThirdPerson);
-		else
-			cam.set_mode(bud::scene::CameraMode::FreeFly);
+		// Toggle between the two walkable modes (FreeFly is disabled for now -
+		// its eye-glued camera looked identical to FP but had no cloth collision).
+		const bool third_person = (cam.get_mode() == bud::scene::CameraMode::ThirdPerson);
+		cam.set_mode(third_person ? bud::scene::CameraMode::FirstPerson
+		                          : bud::scene::CameraMode::ThirdPerson);
+		bud::print("[Camera] mode: {}", third_person ? "FirstPerson" : "ThirdPerson");
 	}
 	prev_v = curr_v;
 

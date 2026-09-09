@@ -448,6 +448,32 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	};
 	compute_taa_set_layout = build_taa_compute_layout();
 
+	auto build_cloth_integrate_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+	compute_cloth_integrate_set_layout = build_cloth_integrate_compute_layout();
+
+	auto build_cloth_solver_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT); // XPBD lambda accumulators
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+	compute_cloth_solver_set_layout = build_cloth_solver_compute_layout();
+
+	auto build_cloth_skinning_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+	compute_cloth_skinning_set_layout = build_cloth_skinning_compute_layout();
+
 	// 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
 	for (auto& frame : frames) {
@@ -860,6 +886,9 @@ void VulkanRHI::cleanup() {
 	if (compute_ssgi_denoise_set_layout) vkDestroyDescriptorSetLayout(device, compute_ssgi_denoise_set_layout, nullptr);
 	if (compute_ssgi_temporal_set_layout) vkDestroyDescriptorSetLayout(device, compute_ssgi_temporal_set_layout, nullptr);
 	if (compute_taa_set_layout) vkDestroyDescriptorSetLayout(device, compute_taa_set_layout, nullptr);
+	if (compute_cloth_integrate_set_layout) vkDestroyDescriptorSetLayout(device, compute_cloth_integrate_set_layout, nullptr);
+	if (compute_cloth_solver_set_layout) vkDestroyDescriptorSetLayout(device, compute_cloth_solver_set_layout, nullptr);
+	if (compute_cloth_skinning_set_layout) vkDestroyDescriptorSetLayout(device, compute_cloth_skinning_set_layout, nullptr);
 	compute_hierarchy_traversal_set_layout = VK_NULL_HANDLE;
 	compute_page_emit_set_layout = VK_NULL_HANDLE;
 	compute_cluster_cull_set_layout = VK_NULL_HANDLE;
@@ -870,6 +899,9 @@ void VulkanRHI::cleanup() {
 	compute_ssgi_denoise_set_layout = VK_NULL_HANDLE;
 	compute_ssgi_temporal_set_layout = VK_NULL_HANDLE;
 	compute_taa_set_layout = VK_NULL_HANDLE;
+	compute_cloth_integrate_set_layout = VK_NULL_HANDLE;
+	compute_cloth_solver_set_layout = VK_NULL_HANDLE;
+	compute_cloth_skinning_set_layout = VK_NULL_HANDLE;
 
 	// Device & Instance
 	if (shadow_sampler)
@@ -1337,6 +1369,15 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 	case ComputePipelineDesc::LayoutKind::TAA:
 		chosen_layout = compute_taa_set_layout;
 		break;
+	case ComputePipelineDesc::LayoutKind::ClothIntegrate:
+		chosen_layout = compute_cloth_integrate_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::ClothSolver:
+		chosen_layout = compute_cloth_solver_set_layout;
+		break;
+	case ComputePipelineDesc::LayoutKind::ClothSkinning:
+		chosen_layout = compute_cloth_skinning_set_layout;
+		break;
 	default:
 		chosen_layout = compute_hiz_cull_set_layout;
 		break;
@@ -1386,6 +1427,9 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 			case ComputePipelineDesc::LayoutKind::ClearStats: return "ClearStats";
 			case ComputePipelineDesc::LayoutKind::CSMCulling: return "CSMCulling";
 			case ComputePipelineDesc::LayoutKind::TAA: return "TAA";
+			case ComputePipelineDesc::LayoutKind::ClothIntegrate: return "ClothIntegrate";
+			case ComputePipelineDesc::LayoutKind::ClothSolver: return "ClothSolver";
+			case ComputePipelineDesc::LayoutKind::ClothSkinning: return "ClothSkinning";
 			default: return "Compute";
 			}
 		};

@@ -22,6 +22,7 @@
 #include "src/runtime/bud.engine.hpp"
 #include "src/runtime/bud.scene.builder.hpp"
 #include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
+#include "src/physics/bud.cloth.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -103,7 +104,7 @@ namespace bud::engine {
 		input_manager->bind_key("ToggleWireframe", bud::input::Key::F5);
 		input_manager->bind_key("ToggleDebugCascades", bud::input::Key::F6);
 		input_manager->bind_key("ToggleDebugPhysics", bud::input::Key::F3);
-		// F2 is deliberately left unbound (reserved for a future hotkey).
+		input_manager->bind_key("ToggleDebugCloth", bud::input::Key::F2);
 		input_manager->bind_key("TogglePause", bud::input::Key::Space);
 		input_manager->bind_key("ToggleRecord", bud::input::Key::F8);
 		input_manager->bind_key("TogglePlayback", bud::input::Key::F9);
@@ -167,6 +168,15 @@ namespace bud::engine {
 				config.debug_physics = !config.debug_physics;
 				renderer->set_config(config);
 				bud::print("[Physics] Debug physics: {}", config.debug_physics ? "ON" : "OFF");
+			}
+		});
+
+		input_manager->register_action_callback("ToggleDebugCloth", [this]() {
+			if (!camera_sequencer.is_playing()) {
+				auto config = renderer->get_config();
+				config.debug_cloth = !config.debug_cloth;
+				renderer->set_config(config);
+				bud::print("[Cloth] Debug visualization: {}", config.debug_cloth ? "ON" : "OFF");
 			}
 		});
 
@@ -318,6 +328,84 @@ namespace bud::engine {
 				dbg_verts.push_back({{p.x, p.y, p.z}, {0.0f, 1.0f, 0.0f}});
 			}
 		}
+		auto push_ring = [&](const bud::math::vec3& center, float ring_r, const bud::math::vec3& color) {
+			constexpr int kSeg = 16;
+			constexpr float kTwoPi = 6.2831853f;
+			for (int i = 0; i < kSeg; ++i) {
+				const float a0 = kTwoPi * float(i) / float(kSeg);
+				const float a1 = kTwoPi * float(i + 1) / float(kSeg);
+				const bud::math::vec3 p0 = center + bud::math::vec3(std::cos(a0) * ring_r, 0.0f, std::sin(a0) * ring_r);
+				const bud::math::vec3 p1 = center + bud::math::vec3(std::cos(a1) * ring_r, 0.0f, std::sin(a1) * ring_r);
+				dbg_verts.push_back({{p0.x, p0.y, p0.z}, {color.x, color.y, color.z}});
+				dbg_verts.push_back({{p1.x, p1.y, p1.z}, {color.x, color.y, color.z}});
+			}
+		};
+
+		// Character controller capsule wireframe (yellow): latitude rings over both
+		// hemispherical caps plus vertical silhouette lines, so it reads as an
+		// actual capsule instead of a bare cylinder. This is the same volume the
+		// cloth solver pushes particles out of in FP/TP modes.
+		if (character_controller) {
+			const float r = character_controller->get_capsule_radius();
+			const float hh = character_controller->get_capsule_height() * 0.5f;
+			const bud::math::vec3 c = character_controller->get_position();
+			const bud::math::vec3 bottom = c - bud::math::vec3(0.0f, hh, 0.0f);
+			const bud::math::vec3 top = c + bud::math::vec3(0.0f, hh, 0.0f);
+			const bud::math::vec3 color(1.0f, 0.9f, 0.1f);
+
+			// Boundary rings at the two sphere centers (cylinder section ends).
+			push_ring(bottom, r, color);
+			push_ring(top, r, color);
+
+			// Hemispherical cap rings at 25/50/70 degrees latitude: the shrinking
+			// radii convey the rounded end caps.
+			for (float deg : {25.0f, 50.0f, 70.0f}) {
+				const float a = bud::math::radians(deg);
+				const float ring_r = r * std::cos(a);
+				const float dy = r * std::sin(a);
+				push_ring(bottom - bud::math::vec3(0.0f, dy, 0.0f), ring_r, color);
+				push_ring(top + bud::math::vec3(0.0f, dy, 0.0f), ring_r, color);
+			}
+
+			// Vertical silhouette lines (every 45 degrees) spanning the cylinder.
+			for (int i = 0; i < 8; ++i) {
+				const float a = 6.2831853f * float(i) / 8.0f;
+				const bud::math::vec3 off(std::cos(a) * r, 0.0f, std::sin(a) * r);
+				const bud::math::vec3 p0 = bottom + off;
+				const bud::math::vec3 p1 = top + off;
+				dbg_verts.push_back({{p0.x, p0.y, p0.z}, {color.x, color.y, color.z}});
+				dbg_verts.push_back({{p1.x, p1.y, p1.z}, {color.x, color.y, color.z}});
+			}
+		}
+
+		// Camera interaction sphere (cyan): the volume that pushes hanging cloth
+		// aside in FP/TP (0.35 m at the camera position). Drawn ONLY in walkable
+		// modes - FreeFly is a spectator mode with cloth collision disabled by
+		// design, so a missing cage there is expected, not a bug.
+		if (character_controller &&
+		    scene.main_camera.get_mode() != bud::scene::CameraMode::FreeFly) {
+			const float sr = 0.35f;
+			const bud::math::vec3 sc = scene.main_camera.position;
+			const bud::math::vec3 color(0.2f, 0.9f, 1.0f);
+			constexpr int kSeg = 16;
+			constexpr float kTwoPi = 6.2831853f;
+			auto push_ring_at = [&](const bud::math::vec3& center, float ring_r,
+			                        const bud::math::vec3& axis_x, const bud::math::vec3& axis_y) {
+				for (int i = 0; i < kSeg; ++i) {
+					const float a0 = kTwoPi * float(i) / float(kSeg);
+					const float a1 = kTwoPi * float(i + 1) / float(kSeg);
+					const bud::math::vec3 p0 = center + axis_x * (std::cos(a0) * ring_r) + axis_y * (std::sin(a0) * ring_r);
+					const bud::math::vec3 p1 = center + axis_x * (std::cos(a1) * ring_r) + axis_y * (std::sin(a1) * ring_r);
+					dbg_verts.push_back({{p0.x, p0.y, p0.z}, {color.x, color.y, color.z}});
+					dbg_verts.push_back({{p1.x, p1.y, p1.z}, {color.x, color.y, color.z}});
+				}
+			};
+			// Three great-circle rings -> unambiguous sphere cage around the camera.
+			push_ring_at(sc, sr, bud::math::vec3(1, 0, 0), bud::math::vec3(0, 1, 0));
+			push_ring_at(sc, sr, bud::math::vec3(0, 1, 0), bud::math::vec3(0, 0, 1));
+			push_ring_at(sc, sr, bud::math::vec3(1, 0, 0), bud::math::vec3(0, 0, 1));
+		}
+
 		renderer->update_physics_debug_vertices(dbg_verts);
 	}
 
@@ -422,6 +510,8 @@ namespace bud::engine {
 					const auto& local_aabb = mesh_bounds[entity.mesh_index];
 					auto world_aabb = local_aabb.transform(world_matrix);
 
+					bool is_cloth = bud::physics::is_cloth_name_or_path(entity.name) || bud::physics::is_cloth_name_or_path(entity.asset_path);
+
 					render_scene.add_instance(
 						world_matrix,
 						world_aabb,
@@ -432,7 +522,8 @@ namespace bud::engine {
 						entity.root_group_index,
 						entity.base_virtual_page,
 						entity.is_cast_shadow,
-						entity.is_receive_shadow
+						entity.is_receive_shadow,
+						is_cloth
 					);
 				}
 			},
@@ -715,12 +806,56 @@ namespace bud::engine {
 			auto set_light_intensity = [this](float v) { scene.directional_light.intensity = v; };
 			auto set_ambient_strength = [this](float v) { scene.ambient_strength = v; };
 
-			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_ao_mode, current_ao_mode, set_ssr_enable, current_ssr_enable, set_taa_enable, current_taa_enable, set_ssgi_enable, current_ssgi_enable, set_ssgi_intensity, current_ssgi_intensity, set_ssgi_blend, current_ssgi_blend, set_light_elevation, current_light_elevation, set_light_azimuth, current_light_azimuth, set_light_color, scene.directional_light.color, set_light_intensity, scene.directional_light.intensity, set_ambient_strength, scene.ambient_strength);
+			auto set_cloth_config = [this](const bud::physics::ClothConfig& cfg) {
+				auto render_cfg = renderer->get_config();
+				render_cfg.cloth_config = cfg;
+				renderer->set_config(render_cfg);
+			};
+			auto current_cloth_config = renderer->get_config().cloth_config;
+
+			bud::ui::StatsUI::render(stats, view_snapshot.delta_time, seq_state, keyframe_count, playback_index, is_paused, is_looping, show_debug_stats, set_occluder, current_occluder, set_occluder_enable, current_occluder_enable, set_ao_mode, current_ao_mode, set_ssr_enable, current_ssr_enable, set_taa_enable, current_taa_enable, set_ssgi_enable, current_ssgi_enable, set_ssgi_intensity, current_ssgi_intensity, set_ssgi_blend, current_ssgi_blend, set_light_elevation, current_light_elevation, set_light_azimuth, current_light_azimuth, set_light_color, scene.directional_light.color, set_light_intensity, scene.directional_light.intensity, set_ambient_strength, scene.ambient_strength, set_cloth_config, current_cloth_config);
 
 			ImGui::Render();
 
             renderer->update_ui_draw_data(ImGui::GetDrawData());
         }
+
+		// Update character capsule + camera colliders for cloth interaction.
+		// FreeFly is a spectator mode by design: neither the (invisible) character
+		// nor the camera participate in cloth collision there.
+		if (renderer && renderer->get_cloth_system()) {
+			// Rebuild the cloth SimWorld if assets / colliders changed this frame (main thread).
+			renderer->get_cloth_system()->flush_pending();
+
+			const bool spectator_mode = scene.main_camera.get_mode() == bud::scene::CameraMode::FreeFly;
+
+			if (spectator_mode || !character_controller) {
+				renderer->get_cloth_system()->set_capsule_collider({}, false);
+				renderer->get_cloth_system()->set_camera_sphere(scene.main_camera.position, 0.0f);
+			}
+			else {
+				bud::physics::CapsuleCollider capsule{};
+				float radius = character_controller->get_capsule_radius();
+				float half_height = character_controller->get_capsule_height() * 0.5f;
+				bud::math::vec3 pos = character_controller->get_position();
+				bud::math::vec3 vel = character_controller->get_linear_velocity();
+
+				capsule.p_bottom = pos - bud::math::vec3(0.0f, half_height, 0.0f);
+				capsule.radius = radius;
+				// Cloth-only extension: reach ~2.05 m above the feet so hanging curtain
+				// hems (raised porches put them near 2 m) are always inside the cloth
+				// collision volume. The Jolt MOVEMENT capsule stays untouched.
+				capsule.p_top = pos + bud::math::vec3(0.0f, half_height + 0.45f, 0.0f);
+				capsule.friction = 0.25f;
+				capsule.velocity = vel;
+
+				renderer->get_cloth_system()->set_capsule_collider(capsule, true);
+
+				// The camera itself also pushes hanging cloth aside (first-person eye
+				// sphere / third-person orbit camera sweeping through fabric).
+				renderer->get_cloth_system()->set_camera_sphere(scene.main_camera.position, 0.35f);
+			}
+		}
 
 		// 发射渲染任务 (Fire and Forget), Pin to Worker 1 for Vulkan WSI safety
 		task_scheduler->spawn_on_thread(1, "RenderTask", [this, render_scene_index, view_snapshot]() mutable {
@@ -769,6 +904,10 @@ namespace bud::engine {
 			bud::math::vec3 scene_min(1e30f), scene_max(-1e30f);
 			for (auto& entity : scene.entities) {
 				if (!entity.is_active || !entity.enable_physics || !entity.is_static) { skipped++; continue; }
+				if (bud::physics::is_cloth_name_or_path(entity.name) || bud::physics::is_cloth_name_or_path(entity.asset_path)) {
+					skipped++;
+					continue;
+				}
 				if (entity.mesh_index == 0xFFFFFFFF || entity.mesh_index >= bounds.size()) { skipped++; continue; }
 				auto world_aabb = bounds[entity.mesh_index].transform(entity.transform);
 				auto s = world_aabb.size();
@@ -861,13 +1000,32 @@ namespace bud::engine {
 			bud::print("> physics: static_aabb solid_boxes={}, big+thick={} -> {} shell faces, dropped={}, skipped={}, scene_bodies={} <",
 			           added, giant, shell_faces, dropped, skipped, physics_scene->size());
 
-			// Never start the run welded inside geometry.
+			// Feed static colliders to cloth system for cloth-rigid interaction
+			if (renderer && renderer->get_cloth_system()) {
+				std::vector<bud::physics::BoxCollider> cloth_boxes;
+				size_t num_bodies = physics_scene->size();
+				cloth_boxes.reserve(num_bodies);
+				for (size_t i = 0; i < num_bodies; ++i) {
+					if (physics_scene->body_flags[i] & bud::physics::PhysicsScene::BODY_FLAG_STATIC)
+						cloth_boxes.push_back({ physics_scene->body_positions[i], physics_scene->body_half_extents[i] });
+				}
+				renderer->get_cloth_system()->set_scene_colliders(std::move(cloth_boxes));
+			}
+
+			// Start in a walkable mode: the scene JSON may author FreeFly, but the
+			// game loop is built around FP/TP (character-driven cloth interaction).
+			scene.main_camera.set_mode(bud::scene::CameraMode::ThirdPerson);
+
+			// Spawn exactly like the original working build: the character is created
+			// at the scene camera position and simply falls to the floor below. No
+			// teleport, no unstick - automatic lifting is unsafe next to AABB proxies
+			// (non-rectangular meshes produce phantom volumes over open areas, and a
+			// lift would deposit the character on an invisible slab above).
 			if (character_controller && physics_scene->size() > 0) {
-				const int stuck = character_controller->unstick_from(physics_scene->body_positions,
-				                                                     physics_scene->body_half_extents);
-				if (stuck != 0)
-					bud::print("[Physics] character spawn overlapped {} static AABB(s) -> re-seeded {}",
-					           stuck < 0 ? -stuck : stuck, stuck < 0 ? "FAILED (still overlapped)" : "to a free spot above");
+				bud::print("[Physics] character spawns at the scene camera position: ({:.2f}, {:.2f}, {:.2f})",
+				           character_controller->get_position().x,
+				           character_controller->get_position().y,
+				           character_controller->get_position().z);
 			}
 		};
 
@@ -876,6 +1034,36 @@ namespace bud::engine {
 	}
 
 	void BudEngine::load_scene_resources_async(std::function<void()> on_finished) {
+		// Shared cloth registration: expand culling bounds (traditional draw path must
+		// stay non-page-based) and load the ClothPhysics chunk. The mega-buffer vertex
+		// offset comes straight from the upload handle (reserved at enqueue time).
+		auto setup_cloth_asset = [this](const std::string& path, const bud::graphics::MeshAssetHandle& handle, const bud::io::MeshData& mesh) {
+			bud::math::AABB cloth_bounds{};
+			for (const auto& v : mesh.vertices) {
+				cloth_bounds.merge(bud::math::vec3(v.pos[0], v.pos[1], v.pos[2]));
+			}
+			cloth_bounds.min -= bud::math::vec3(1.5f);
+			cloth_bounds.max += bud::math::vec3(1.5f);
+			renderer->update_mesh_bounds(handle.mesh_id, cloth_bounds);
+
+			const uint32_t mesh_id = handle.mesh_id;
+			const int32_t vertex_offset = handle.vertex_offset;
+
+			this->asset_manager->load_budasset_async(path, [this, path, mesh_id, vertex_offset](std::shared_ptr<bud::io::BudAssetPackage> pkg) {
+				if (!pkg)
+					return;
+				if (pkg->find_chunk(bud::asset::AssetChunkType::ClothPhysics)) {
+					this->asset_manager->load_budasset_chunk_async(pkg, bud::asset::AssetChunkType::ClothPhysics, [this, path, mesh_id, vertex_offset](std::vector<char> data) {
+						if (data.empty())
+							return;
+						if (renderer->get_cloth_system()) {
+							renderer->get_cloth_system()->register_cloth_asset(path, mesh_id, vertex_offset, data);
+						}
+					});
+				}
+			});
+		};
+
 		std::unordered_set<std::string> unique_asset_paths;
 		for (auto& e : scene.entities) {
 			if (!e.asset_path.empty()) {
@@ -911,15 +1099,26 @@ namespace bud::engine {
 			});
 
 			// Non-VG assets: load via traditional mesh path (no Virtual Geometry chunk).
-			streaming_manager->set_non_vg_asset_callback([this, pending_count, finish, asset_manager = this->asset_manager.get()](const std::string& path) {
-				asset_manager->load_mesh_async(path, [this, pending_count, finish, path](bud::io::MeshData mesh) mutable {
+			streaming_manager->set_non_vg_asset_callback([this, pending_count, finish, asset_manager = this->asset_manager.get(), setup_cloth_asset](const std::string& path) {
+				asset_manager->load_mesh_async(path, [this, pending_count, finish, path, setup_cloth_asset](bud::io::MeshData mesh) mutable {
 					auto mesh_handle = renderer->upload_mesh(mesh);
 					if (mesh_handle.is_valid()) {
 						for (auto& ent : scene.entities) {
 							if (ent.asset_path == path) {
 								ent.mesh_index = mesh_handle.mesh_id;
 								ent.material_index = mesh_handle.material_id;
+								if (bud::physics::is_cloth_name_or_path(path) || bud::physics::is_cloth_name_or_path(ent.name)) {
+									// Cloth renders through the traditional Range-B path with
+									// world-space skinned vertices; never VG / page-based.
+									ent.is_static = false;
+									ent.root_group_index = bud::asset::INVALID_INDEX;
+									ent.base_virtual_page = bud::asset::INVALID_INDEX;
+								}
 							}
+						}
+
+						if (bud::physics::is_cloth_name_or_path(path)) {
+							setup_cloth_asset(path, mesh_handle, mesh);
 						}
 					}
 					if (pending_count->fetch_sub(1) == 1) {
@@ -936,14 +1135,25 @@ namespace bud::engine {
 		else {
 			// No streaming manager: fallback to traditional mesh loading for all assets.
 			for (const auto& asset_path : unique_asset_paths) {
-				asset_manager->load_mesh_async(asset_path, [this, pending_count, finish, asset_path](bud::io::MeshData mesh) mutable {
+				asset_manager->load_mesh_async(asset_path, [this, pending_count, finish, asset_path, setup_cloth_asset](bud::io::MeshData mesh) mutable {
 					auto mesh_handle = renderer->upload_mesh(mesh);
 					if (mesh_handle.is_valid()) {
 						for (auto& ent : scene.entities) {
 							if (ent.asset_path == asset_path) {
 								ent.mesh_index = mesh_handle.mesh_id;
 								ent.material_index = mesh_handle.material_id;
+								if (bud::physics::is_cloth_name_or_path(asset_path) || bud::physics::is_cloth_name_or_path(ent.name)) {
+									// Cloth renders through the traditional Range-B path with
+									// world-space skinned vertices; never VG / page-based.
+									ent.is_static = false;
+									ent.root_group_index = bud::asset::INVALID_INDEX;
+									ent.base_virtual_page = bud::asset::INVALID_INDEX;
+								}
 							}
+						}
+
+						if (bud::physics::is_cloth_name_or_path(asset_path)) {
+							setup_cloth_asset(asset_path, mesh_handle, mesh);
 						}
 					}
 					if (pending_count->fetch_sub(1) == 1) {

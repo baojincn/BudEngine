@@ -18,6 +18,7 @@
 #include "src/graphics/bud.graphics.passes.hpp"
 
 namespace bud::streaming { class StreamingManager; }
+namespace bud::physics { class ClothSystem; }
 
 namespace bud::graphics {
 	struct MeshAssetHandle {
@@ -25,9 +26,13 @@ namespace bud::graphics {
 
 		uint32_t mesh_id;
 		uint32_t material_id;
+		// Reserved at enqueue time inside upload_mesh: destination vertex offset of
+		// this mesh's vertices in the mega vertex buffer (valid even though the GPU
+		// upload itself is queued; -1 only for the invalid handle).
+		int32_t vertex_offset = -1;
 
         static MeshAssetHandle invalid() {
-            return { invalid_id, invalid_id };
+            return { invalid_id, invalid_id, -1 };
         }
         bool is_valid() const {
             if (mesh_id != invalid_id)
@@ -59,11 +64,15 @@ namespace bud::graphics {
 		std::vector<bud::math::AABB> get_mesh_bounds_snapshot() const;
 		std::vector<std::vector<bud::math::AABB>> get_submesh_bounds_snapshot() const;
 		void register_mesh_bounds(uint32_t mesh_id, const bud::math::AABB& aabb);
+		// Update bounds WITHOUT touching is_page_based (used by simulated cloth meshes
+		// which must stay on the traditional Range-B draw path).
+		void update_mesh_bounds(uint32_t mesh_id, const bud::math::AABB& aabb);
 
 		void update_physics_debug_vertices(const std::vector<PhysicsDebugVertex>& verts);
 
 		GPUScene& get_gpu_scene() { return gpu_scene; }
 		RHI* get_rhi() { return rhi; }
+		bud::physics::ClothSystem* get_cloth_system() { return cloth_system.get(); }
 		uint32_t register_page_based_mesh(uint32_t page_index, uint32_t cluster_count,
 			uint32_t index_count, const bud::math::AABB& aabb, const bud::math::AABB& global_aabb,
 			uint32_t vertex_data_offset, uint32_t index_data_offset,
@@ -126,6 +135,8 @@ namespace bud::graphics {
 		std::unique_ptr<ResolvePass> resolve_pass;
 		std::unique_ptr<TAAPass> taa_pass;
 		std::unique_ptr<PhysicsDebugPass> physics_debug_pass;
+		std::unique_ptr<ClothDebugPass> cloth_debug_pass;
+		std::unique_ptr<bud::physics::ClothSystem> cloth_system;
 
 		bool has_mesh_shader = false;
 

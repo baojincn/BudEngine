@@ -426,6 +426,9 @@ namespace bud::graphics::vulkan {
 		VkDescriptorSetLayout compute_ssgi_denoise_set_layout = VK_NULL_HANDLE;
 		VkDescriptorSetLayout compute_ssgi_temporal_set_layout = VK_NULL_HANDLE;
 		VkDescriptorSetLayout compute_taa_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_cloth_integrate_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_cloth_solver_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_cloth_skinning_set_layout = VK_NULL_HANDLE;
 		VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
 		VkSampler default_sampler = VK_NULL_HANDLE;
 		VkSampler point_sampler = VK_NULL_HANDLE;

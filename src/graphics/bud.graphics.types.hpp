@@ -9,6 +9,7 @@
 
 #include "src/core/bud.core.hpp"
 #include "src/core/bud.math.hpp"
+#include "src/physics/bud.cloth.types.hpp"
 
 namespace math = bud::math;
 
@@ -315,6 +316,7 @@ namespace bud::graphics {
 		bool enable_soft_shadows = true;
 		bool debug_cascades = false;
 		bool debug_physics = false;
+		bool debug_cloth = false;
 		bool dump_render_graph = false;
 		// Feed the CSM cascade traversals the FULL scene instance list instead of only
 		// the main-camera visible ones. This is the correct CSM model: an object that is
@@ -395,6 +397,9 @@ namespace bud::graphics {
 
 		// Sky & Physical Atmosphere
 		SkyConfig sky_config;
+
+		// GPU XPBD Cloth Simulation
+		bud::physics::ClothConfig cloth_config;
 	};
 
 	struct SceneView {
@@ -533,7 +538,10 @@ namespace bud::graphics {
 			ScreenSpaceGlobalIllumination,
 			SSGIDenoise,
 			SSGITemporal,
-			TAA
+			TAA,
+			ClothIntegrate,
+			ClothSolver,
+			ClothSkinning
 		};
 
 		ShaderStage cs;
