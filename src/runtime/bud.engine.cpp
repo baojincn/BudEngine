@@ -777,27 +777,86 @@ namespace bud::engine {
 			// changes take effect from the next frame on). Direction is exposed as elevation /
 			// azimuth in degrees; angle-driven editing can never produce a zero vector, which
 			// keeps the per-frame normalize() and the CSM light-space matrices safe.
-			const auto light_dir_len = bud::math::length(scene.directional_light.direction);
-			const float current_light_elevation = (light_dir_len > 1e-6f)
-				? bud::math::degrees(std::asin(scene.directional_light.direction.y / light_dir_len))
-				: 0.0f;
-			const float current_light_azimuth = (light_dir_len > 1e-6f)
-				? std::min(std::fmod(bud::math::degrees(std::atan2(scene.directional_light.direction.x, scene.directional_light.direction.z)) + 360.0f, 360.0f), 359.0f)
-				: 0.0f;
+			constexpr float epsilon_threshold = 1e-6f;
+			constexpr float degrees_full_turn = 360.0f;
+			constexpr float minimum_elevation_degrees = 0.0f;
+			constexpr float maximum_elevation_degrees = 90.0f;
+			constexpr float minimum_azimuth_degrees = 0.0f;
+			constexpr float maximum_azimuth_degrees = 359.0f;
+			constexpr float minimum_normalized_clamping_value = -1.0f;
+			constexpr float maximum_normalized_clamping_value = 1.0f;
 
-			auto set_light_elevation = [this](float elevation_deg) {
+			static float saved_light_elevation = 63.0f;
+			static float saved_light_azimuth = 51.0f;
+			static bool saved_angles_initialized = false;
+
+			const auto& light_dir = scene.directional_light.direction;
+			const float light_direction_length = bud::math::length(light_dir);
+			if (light_direction_length > epsilon_threshold)
+			{
+				// scene.directional_light.direction points toward the light/sun (L in shader).
+				// Elevation angle: angle above the horizontal XZ plane [0.0, 90.0]
+				const float clamped_sun_height = std::clamp(
+					light_dir.y / light_direction_length,
+					minimum_normalized_clamping_value,
+					maximum_normalized_clamping_value
+				);
+				float elev_deg = bud::math::degrees(std::asin(clamped_sun_height));
+				if (elev_deg < minimum_elevation_degrees)
+				{
+					elev_deg = minimum_elevation_degrees;
+				}
+
+				if (elev_deg > maximum_elevation_degrees)
+				{
+					elev_deg = maximum_elevation_degrees;
+				}
+
+				// Only re-extract azimuth if horizontal length is non-zero (avoids pole singularity at 90 deg)
+				const float horizontal_length = std::sqrt(light_dir.x * light_dir.x + light_dir.z * light_dir.z);
+				if (horizontal_length > epsilon_threshold)
+				{
+					float azimuth_degrees = bud::math::degrees(std::atan2(light_dir.x, light_dir.z));
+					azimuth_degrees = std::fmod(azimuth_degrees, degrees_full_turn);
+					if (azimuth_degrees < 0.0f)
+					{
+						azimuth_degrees += degrees_full_turn;
+					}
+
+					if (azimuth_degrees >= degrees_full_turn)
+					{
+						azimuth_degrees = 0.0f;
+					}
+
+					if (azimuth_degrees > maximum_azimuth_degrees)
+					{
+						azimuth_degrees = maximum_azimuth_degrees;
+					}
+
+					saved_light_azimuth = azimuth_degrees;
+				}
+
+				saved_light_elevation = elev_deg;
+				saved_angles_initialized = true;
+			}
+
+			float current_light_elevation = saved_light_elevation;
+			float current_light_azimuth = saved_light_azimuth;
+
+			auto set_light_elevation = [this, minimum_elevation_degrees, maximum_elevation_degrees](float elevation_deg) {
+				saved_light_elevation = std::clamp(elevation_deg, minimum_elevation_degrees, maximum_elevation_degrees);
 				auto& dir = scene.directional_light.direction;
-				const float azimuth_rad = std::atan2(dir.x, dir.z); // keep current azimuth
-				const float elevation_rad = bud::math::radians(elevation_deg);
+				const float azimuth_rad = bud::math::radians(saved_light_azimuth);
+				const float elevation_rad = bud::math::radians(saved_light_elevation);
 				dir = bud::math::vec3(std::cos(elevation_rad) * std::sin(azimuth_rad),
 					std::sin(elevation_rad),
 					std::cos(elevation_rad) * std::cos(azimuth_rad));
 			};
-			auto set_light_azimuth = [this](float azimuth_deg) {
+			auto set_light_azimuth = [this, minimum_azimuth_degrees, maximum_azimuth_degrees](float azimuth_deg) {
+				saved_light_azimuth = std::clamp(azimuth_deg, minimum_azimuth_degrees, maximum_azimuth_degrees);
 				auto& dir = scene.directional_light.direction;
-				const float len = bud::math::length(dir);
-				const float elevation_rad = (len > 1e-6f) ? std::asin(dir.y / len) : 0.0f; // keep current elevation
-				const float azimuth_rad = bud::math::radians(azimuth_deg);
+				const float elevation_rad = bud::math::radians(saved_light_elevation);
+				const float azimuth_rad = bud::math::radians(saved_light_azimuth);
 				dir = bud::math::vec3(std::cos(elevation_rad) * std::sin(azimuth_rad),
 					std::sin(elevation_rad),
 					std::cos(elevation_rad) * std::cos(azimuth_rad));
@@ -1014,7 +1073,7 @@ namespace bud::engine {
 
 			// Start in a walkable mode: the scene JSON may author FreeFly, but the
 			// game loop is built around FP/TP (character-driven cloth interaction).
-			scene.main_camera.set_mode(bud::scene::CameraMode::ThirdPerson);
+			scene.main_camera.set_mode(bud::scene::CameraMode::FirstPerson);
 
 			// Spawn exactly like the original working build: the character is created
 			// at the scene camera position and simply falls to the floor below. No

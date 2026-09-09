@@ -78,12 +78,10 @@ void TriangleApp::on_update(float delta_time) {
 	static bool prev_v = false;
 	bool curr_v = input.is_key_down(bud::input::Key::V);
 	if (curr_v && !prev_v) {
-		// Toggle between the two walkable modes (FreeFly is disabled for now -
-		// its eye-glued camera looked identical to FP but had no cloth collision).
-		const bool third_person = (cam.get_mode() == bud::scene::CameraMode::ThirdPerson);
-		cam.set_mode(third_person ? bud::scene::CameraMode::FirstPerson
+		const bool first_person = (cam.get_mode() == bud::scene::CameraMode::FirstPerson);
+		cam.set_mode(first_person ? bud::scene::CameraMode::FirstPerson
 		                          : bud::scene::CameraMode::ThirdPerson);
-		bud::print("[Camera] mode: {}", third_person ? "FirstPerson" : "ThirdPerson");
+		bud::print("[Camera] mode: {}", first_person ? "FirstPerson" : "ThirdPerson");
 	}
 	prev_v = curr_v;
 
@@ -124,7 +122,7 @@ void TriangleApp::on_update(float delta_time) {
 			float rx = input.get_gamepad_axis(bud::input::GamepadAxis::RightX);
 			float ry = input.get_gamepad_axis(bud::input::GamepadAxis::RightY);
 			if (rx != 0.0f || ry != 0.0f)
-				cam.process_mouse_movement(rx * 300.0f * delta_time, ry * 300.0f * delta_time, true);
+				cam.process_mouse_movement(rx * 600.0f * delta_time, ry * 600.0f * delta_time, true);
 		}
 	}
 

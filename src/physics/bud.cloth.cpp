@@ -60,6 +60,10 @@ namespace bud::physics {
 				rhi->destroy_buffer(world.gpu_bindings);
 				world.gpu_bindings.reset();
 			}
+			if (world.gpu_colliders.is_valid()) {
+				rhi->destroy_buffer(world.gpu_colliders);
+				world.gpu_colliders.reset();
+			}
 			if (world.gpu_cell_heads.is_valid()) {
 				rhi->destroy_buffer(world.gpu_cell_heads);
 				world.gpu_cell_heads.reset();
@@ -144,13 +148,15 @@ namespace bud::physics {
 			}
 			else {
 				// Curtains / tapestries hung along a horizontal rod at the top.
-				const float min_anchor_y = y_min + 0.75f * height_span;
+				// Hard-pin the top 15 cm (inv_mass = 0); the baker already bakes a
+				// smooth 0 → 1 falloff over the top 15 % for the free body below.
+				constexpr float kPinBand = 0.15f;
 				for (auto& p : inst.particles) {
 					auto& pos = p.position_inv_mass;
 					const float u = primary_x ? pos.x : pos.z;
 					const size_t bin = std::clamp<size_t>(static_cast<size_t>((u - width_min) / bin_size), 0, num_bins - 1);
 					const float local_top = bin_max_y[bin];
-					if (pos.y >= min_anchor_y && pos.y >= (local_top - 0.08f)) {
+					if (pos.y >= (local_top - kPinBand)) {
 						pos.w = 0.0f;
 						p.prev_position = pos;
 						pinned++;
@@ -579,6 +585,99 @@ namespace bud::physics {
 		// 3. Select up to 4 pillar colliders near the cloth anchor points.
 		select_columns(*world);
 
+		// 3b. Cloth-vs-rigid-body collision: upload every static scene box near the
+		// cloth region (union of all cloth instances + 2 m margin). All nearby
+		// bodies collide; the four selected pillars are excluded (they already get
+		// the dedicated radial push). The solver only resolves SHALLOW interior
+		// penetrations (deep phantom volumes are skipped per particle), so boxes
+		// whose proxy engulfs the cloth rest pose do not deform the fabric.
+		{
+			bud::math::vec3 lo(1e30f), hi(-1e30f);
+			for (const auto& inst : instances) {
+				if (inst.vertex_offset < 0)
+					continue;
+				lo = glm::min(lo, inst.min_p);
+				hi = glm::max(hi, inst.max_p);
+			}
+			lo -= bud::math::vec3(2.0f);
+			hi += bud::math::vec3(2.0f);
+
+			std::vector<BoxCollider> nearby;
+			nearby.reserve(scene_colliders.size());
+			for (const auto& box : scene_colliders) {
+				if (box.center.x + box.half_extents.x < lo.x || box.center.x - box.half_extents.x > hi.x ||
+				    box.center.y + box.half_extents.y < lo.y || box.center.y - box.half_extents.y > hi.y ||
+				    box.center.z + box.half_extents.z < lo.z || box.center.z - box.half_extents.z > hi.z)
+					continue;
+
+				// Horizontal plates (floors/gallery slabs/roof shells) are thin-Y AABBs
+				// of ring/plate meshes: their proxies fill open air ABOVE their top
+				// face, and the interior min-axis push would pump cloth up onto the
+				// invisible plate forever. The analytic ground plane already covers
+				// walking surfaces, so plates are excluded from cloth collision.
+				if (box.half_extents.y < 0.4f &&
+				    box.half_extents.y < box.half_extents.x &&
+				    box.half_extents.y < box.half_extents.z)
+					continue;
+
+				bool is_selected_column = false;
+				for (uint32_t c = 0; c < world->column_count; ++c) {
+					if (glm::length(box.center - world->columns[c].center) < 0.01f &&
+					    glm::length(box.half_extents - world->columns[c].half_extents) < 0.01f) {
+						is_selected_column = true;
+						break;
+					}
+				}
+				if (is_selected_column)
+					continue;
+
+				nearby.push_back(box);
+			}
+			constexpr size_t kMaxClothColliders = 1024;
+			if (nearby.size() > kMaxClothColliders)
+				nearby.resize(kMaxClothColliders);
+
+			world->collider_count = static_cast<uint32_t>(nearby.size());
+
+			// Per-particle rest-embed mask: particles whose REST pose sits inside a
+			// collider (flush wall mounts behind curtains, banner ends wrapped around
+			// pillars) ignore scene boxes at runtime - ejecting them would unwrap or
+			// crumple the fabric. All OTHER particles collide with every box. The
+			// flag rides in prev_position.w (unused by the solver).
+			for (auto& p : particles) {
+				p.prev_position.w = 0.0f;
+				for (const auto& box : nearby) {
+					const bud::math::vec3 pp(p.position_inv_mass);
+					const bud::math::vec3 d = pp - box.center;
+					const bud::math::vec3 pen = box.half_extents - glm::abs(d);
+					if (pen.x > 0.15f && pen.y > 0.15f && pen.z > 0.15f) {
+						p.prev_position.w = 1.0f;
+						break;
+					}
+				}
+			}
+
+			// Cloth-vs-scene-rigidbody collision with AABB proxy data has proven
+			// unreliable: flush-hanging curtains intersect the fat proxy boxes and
+			// get ejected to the wrong surface, while the embed mask cannot
+			// distinguish shallow-but-intentional proximity from phantom-must-skip
+			// overlap. Colliders remain zeroed until the physics build switches to
+			// triangle-mesh or convex-hull geometry for large statics.
+			world->collider_count = 0;
+			if (world->collider_count > 0) {
+				// GPU layout: two vec4s per box (center, half extents).
+				std::vector<bud::math::vec4> packed(world->collider_count * 2u);
+				for (size_t i = 0; i < world->collider_count; ++i) {
+					packed[i * 2u + 0u] = bud::math::vec4(nearby[i].center, 0.0f);
+					packed[i * 2u + 1u] = bud::math::vec4(nearby[i].half_extents, 0.0f);
+				}
+				world->gpu_colliders = stored_rhi->create_gpu_buffer(
+					static_cast<uint64_t>(packed.size()) * sizeof(bud::math::vec4),
+					bud::graphics::ResourceState::UnorderedAccess);
+				upload_buffer(stored_rhi, packed, world->gpu_colliders);
+			}
+		}
+
 		// 4. Upload GPU buffers.
 		world->gpu_particles = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->particle_count) * sizeof(SimParticle), bud::graphics::ResourceState::UnorderedAccess);
 		world->gpu_rest_particles = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->particle_count) * sizeof(SimParticle), bud::graphics::ResourceState::UnorderedAccess);
@@ -693,15 +792,15 @@ namespace bud::physics {
 		// the break is in the feeding chain; if the values look right, it is in the
 		// solver.
 		static uint32_t s_dbg_frame = 0;
-		if (++s_dbg_frame % 120u == 1u)
-			bud::print("[ClothSystem] sim state: capsule_on={} bottom=({:.2f},{:.2f},{:.2f}) top=({:.2f},{:.2f},{:.2f}) r={:.2f} vel=({:.2f},{:.2f},{:.2f}) | cam_sphere r={:.2f} at ({:.2f},{:.2f},{:.2f})",
-				capsule_on,
-				capsule.p_bottom.x, capsule.p_bottom.y, capsule.p_bottom.z,
-				capsule.p_top.x, capsule.p_top.y, capsule.p_top.z,
-				capsule.radius,
-				capsule.velocity.x, capsule.velocity.y, capsule.velocity.z,
-				camera_sphere.w,
-				camera_sphere.x, camera_sphere.y, camera_sphere.z);
+		// if (++s_dbg_frame % 120u == 1u)
+		// 	bud::print("[ClothSystem] sim state: capsule_on={} bottom=({:.2f},{:.2f},{:.2f}) top=({:.2f},{:.2f},{:.2f}) r={:.2f} vel=({:.2f},{:.2f},{:.2f}) | cam_sphere r={:.2f} at ({:.2f},{:.2f},{:.2f})",
+		// 		capsule_on,
+		// 		capsule.p_bottom.x, capsule.p_bottom.y, capsule.p_bottom.z,
+		// 		capsule.p_top.x, capsule.p_top.y, capsule.p_top.z,
+		// 		capsule.radius,
+		// 		capsule.velocity.x, capsule.velocity.y, capsule.velocity.z,
+		// 		camera_sphere.w,
+		// 		camera_sphere.x, camera_sphere.y, camera_sphere.z);
 
 		const float safe_dt = std::clamp(dt, 0.001f, 0.0333f);
 
@@ -772,13 +871,14 @@ namespace bud::physics {
 				}
 			}
 
-			// 2c. Collision every substep (columns + ground + character capsule + camera sphere).
+			// 2c. Collision every substep (scene rigid bodies + columns + ground + character capsule + camera sphere).
 			{
 				rhi->cmd_bind_pipeline(cmd, pipeline_solver);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 0, world->gpu_particles);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 1, world->gpu_constraints);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 2, world->gpu_lambdas);
-				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 3, world->gpu_cell_heads);
+				if (world->gpu_colliders.is_valid())
+					rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 3, world->gpu_colliders);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 4, world->gpu_particle_next);
 
 				ClothPushConstantsSolver pc_solve{};
@@ -787,7 +887,7 @@ namespace bud::physics {
 				pc_solve.capsule_bottom_radius = bud::math::vec4(capsule.p_bottom, capsule.radius);
 				pc_solve.capsule_top_friction = bud::math::vec4(capsule.p_top, capsule.friction);
 				pc_solve.capsule_velocity = bud::math::vec4(capsule.velocity, 0.0f);
-				pc_solve.misc = bud::math::vec4(0.0f, sub_dt, 0.0f, 0.0f);
+				pc_solve.misc = bud::math::vec4(0.0f, sub_dt, static_cast<float>(world->collider_count), 0.0f);
 				pc_solve.sphere_center_radius = camera_sphere;
 				for (uint32_t b = 0; b < world->column_count && b < 4u; ++b) {
 					pc_solve.box_center[b] = bud::math::vec4(world->columns[b].center, 0.0f);

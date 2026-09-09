@@ -338,15 +338,28 @@ namespace bud::ui {
 
 				// Elev / Azim 放在同一行,两个滑块平分扣除标签后的整行宽度。
 				if (set_light_elevation || set_light_azimuth) {
+					static ImGuiID active_angle_slider_id = 0;
+					if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+						active_angle_slider_id = 0;
+
+					static float cached_elev_display = 0.0f;
+					static float cached_azim_display = 0.0f;
+
+					if (active_angle_slider_id == 0) {
+						cached_elev_display = current_light_elevation;
+						cached_azim_display = current_light_azimuth;
+					}
+
 					const float row_w = ImGui::GetContentRegionAvail().x;
 					const float spacing = ImGui::GetStyle().ItemSpacing.x;
-					const std::string elev_label = std::format("Elev: {:.0f}\xC2\xB0", current_light_elevation);
-					const std::string azim_label = std::format(" | Azim: {:.0f}\xC2\xB0", current_light_azimuth);
-					const float elev_label_w = ImGui::CalcTextSize(elev_label.c_str()).x;
-					const float azim_label_w = ImGui::CalcTextSize(azim_label.c_str()).x;
+					const std::string elev_label = std::format("Elev: {:03.0f}\xC2\xB0", cached_elev_display);
+					const std::string azim_label = std::format(" | Azim: {:03.0f}\xC2\xB0", cached_azim_display);
+					const float elev_label_w = ImGui::CalcTextSize("Elev: 000\xC2\xB0").x;
+					const float azim_label_w = ImGui::CalcTextSize(" | Azim: 000\xC2\xB0").x;
 					// [elev_label][slider_elev][azim_label][slider_azim], 3 个 ItemSpacing
 					float slider_total = row_w - elev_label_w - azim_label_w - spacing * 3.0f;
-					if (slider_total < 20.0f) slider_total = 20.0f;
+					if (slider_total < 20.0f)
+						slider_total = 20.0f;
 					const float elev_w = slider_total * 0.5f;
 					const float azim_w = slider_total - elev_w;
 
@@ -355,10 +368,26 @@ namespace bud::ui {
 						ImGui::SameLine();
 						ImGui::PushID("light_elev_slider");
 						ImGui::PushItemWidth(elev_w);
-						float tmp_elev = current_light_elevation;
-						if (ImGui::SliderFloat("##light_elev", &tmp_elev, -90.0f, 90.0f, "%.0f")) {
-							set_light_elevation(tmp_elev);
+						float tmp_elev = cached_elev_display;
+						const ImGuiID elev_id = ImGui::GetID("##light_elev");
+						const bool is_other_active = (active_angle_slider_id != 0 && active_angle_slider_id != elev_id);
+
+						if (is_other_active)
+							ImGui::BeginDisabled(true);
+
+						if (ImGui::SliderFloat("##light_elev", &tmp_elev, 0.0f, 90.0f, "%03.0f")) {
+							if (!is_other_active) {
+								cached_elev_display = tmp_elev;
+								set_light_elevation(tmp_elev);
+							}
 						}
+
+						if (ImGui::IsItemActive())
+							active_angle_slider_id = elev_id;
+
+						if (is_other_active)
+							ImGui::EndDisabled();
+
 						ImGui::PopItemWidth();
 						ImGui::PopID();
 					}
@@ -368,10 +397,26 @@ namespace bud::ui {
 						ImGui::SameLine();
 						ImGui::PushID("light_azim_slider");
 						ImGui::PushItemWidth(azim_w);
-						float tmp_azim = current_light_azimuth;
-						if (ImGui::SliderFloat("##light_azim", &tmp_azim, 0.0f, 359.0f, "%.0f")) {
-							set_light_azimuth(tmp_azim);
+						float tmp_azim = cached_azim_display;
+						const ImGuiID azim_id = ImGui::GetID("##light_azim");
+						const bool is_other_active = (active_angle_slider_id != 0 && active_angle_slider_id != azim_id);
+
+						if (is_other_active)
+							ImGui::BeginDisabled(true);
+
+						if (ImGui::SliderFloat("##light_azim", &tmp_azim, 0.0f, 359.0f, "%03.0f")) {
+							if (!is_other_active) {
+								cached_azim_display = tmp_azim;
+								set_light_azimuth(tmp_azim);
+							}
 						}
+
+						if (ImGui::IsItemActive())
+							active_angle_slider_id = azim_id;
+
+						if (is_other_active)
+							ImGui::EndDisabled();
+
 						ImGui::PopItemWidth();
 						ImGui::PopID();
 					}
@@ -387,32 +432,65 @@ namespace bud::ui {
 					}
 					ImGui::PopID();
 				}
+				if (set_light_intensity || set_ambient_strength) {
+					static ImGuiID active_intensity_slider_id = 0;
+					if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+						active_intensity_slider_id = 0;
 
-				if (set_light_intensity) {
-					ImGui::SameLine();
-					ImGui::TextColored(color_neutral, " | Int: %.1f", current_light_intensity);
-					ImGui::SameLine();
-					ImGui::PushID("light_intensity_slider");
-					ImGui::PushItemWidth(80.0f);
-					float tmp_int = current_light_intensity;
-					if (ImGui::SliderFloat("##light_int", &tmp_int, 0.0f, 20.0f, "%.1f")) {
-						set_light_intensity(tmp_int);
+					if (set_light_intensity) {
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Int: %.1f", current_light_intensity);
+						ImGui::SameLine();
+						ImGui::PushID("light_intensity_slider");
+						ImGui::PushItemWidth(80.0f);
+						float tmp_int = current_light_intensity;
+						const ImGuiID int_id = ImGui::GetID("##light_int");
+						const bool is_other_active = (active_intensity_slider_id != 0 && active_intensity_slider_id != int_id);
+
+						if (is_other_active)
+							ImGui::BeginDisabled(true);
+
+						if (ImGui::SliderFloat("##light_int", &tmp_int, 0.0f, 20.0f, "%.1f")) {
+							if (!is_other_active)
+								set_light_intensity(tmp_int);
+						}
+
+						if (ImGui::IsItemActive())
+							active_intensity_slider_id = int_id;
+
+						if (is_other_active)
+							ImGui::EndDisabled();
+
+						ImGui::PopItemWidth();
+						ImGui::PopID();
 					}
-					ImGui::PopItemWidth();
-					ImGui::PopID();
-				}
-				if (set_ambient_strength) {
-					ImGui::SameLine();
-					ImGui::TextColored(color_neutral, " | Ambient: %.2f", current_ambient_strength);
-					ImGui::SameLine();
-					ImGui::PushID("light_ambient_slider");
-					ImGui::PushItemWidth(80.0f);
-					float tmp_amb = current_ambient_strength;
-					if (ImGui::SliderFloat("##light_ambient", &tmp_amb, 0.0f, 1.0f, "%.2f")) {
-						set_ambient_strength(tmp_amb);
+					if (set_ambient_strength) {
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Ambient: %.2f", current_ambient_strength);
+						ImGui::SameLine();
+						ImGui::PushID("light_ambient_slider");
+						ImGui::PushItemWidth(80.0f);
+						float tmp_amb = current_ambient_strength;
+						const ImGuiID amb_id = ImGui::GetID("##light_ambient");
+						const bool is_other_active = (active_intensity_slider_id != 0 && active_intensity_slider_id != amb_id);
+
+						if (is_other_active)
+							ImGui::BeginDisabled(true);
+
+						if (ImGui::SliderFloat("##light_ambient", &tmp_amb, 0.0f, 1.0f, "%.2f")) {
+							if (!is_other_active)
+								set_ambient_strength(tmp_amb);
+						}
+
+						if (ImGui::IsItemActive())
+							active_intensity_slider_id = amb_id;
+
+						if (is_other_active)
+							ImGui::EndDisabled();
+
+						ImGui::PopItemWidth();
+						ImGui::PopID();
 					}
-					ImGui::PopItemWidth();
-					ImGui::PopID();
 				}
 
 				// --- GPU XPBD Cloth Simulation controls & presets ---

@@ -27,6 +27,12 @@ layout(std430, set = 0, binding = 2) buffer LambdaBuffer {
     float lambdas[];
 };
 
+// Static scene rigid-body proxy boxes (walls, props, floors near the cloth).
+// Mode 1 binds this; modes 3-5 reuse the slot for the self-collision hash.
+layout(std430, set = 0, binding = 3) readonly buffer ColliderBuffer {
+    vec4 collider_boxes[]; // pairs of (center.xyz, 0) and (half_extent.xyz, 0)
+};
+
 // Self-collision spatial hash: head table + per-particle linked list (modes 3-5)
 layout(std430, set = 0, binding = 3) buffer CellHeadBuffer {
     uint cell_heads[];
@@ -265,15 +271,62 @@ void main() {
             }
         }
 
-        // The next substep's predict derives velocity from (pos - prev), so a raw
-        // positional push-out would inject a huge velocity kick (push / sub_dt) and
-        // fling the cloth. Shift prev by the same delta: the push moves the cloth
-        // positionally without adding energy; the friction below still imparts its
-        // intended velocity change.
+        // Kick-cancel for the analytic colliders above (columns / ground / capsule /
+        // camera sphere): the push is positional, remove its velocity contribution.
+        const vec3 pos_after_other = pos;
         if (modified)
-            particles[id].prev_position.xyz += (pos - pos_before_push);
+            particles[id].prev_position.xyz += (pos_after_other - pos_before_push);
 
-        // 4. Character capsule dynamic friction (drags cloth with the body).
+        // 5. Static scene rigid-body boxes: INTERIOR-ONLY push-out along the
+        //    least-penetration axis with a 2 cm margin. Particles whose REST pose
+        //    was inside a collider (prev_position.w flag, computed at build time)
+        //    are exempt - they are flush mounts or wrapped ends, and ejecting them
+        //    would unwrap/crumple the fabric. Deep penetrations (> 0.5 m) are
+        //    skipped as unresolvable phantom volumes.
+        uint collider_count = uint(pc.misc.z + 0.5);
+        bool box_pushed = false;
+        vec3 box_normal = vec3(0.0);
+        if (particles[id].prev_position.w <= 0.5)
+        for (uint b = 0u; b < collider_count; ++b) {
+            vec3 bc = collider_boxes[b * 2u + 0u].xyz;
+            vec3 be = collider_boxes[b * 2u + 1u].xyz;
+
+            vec3 local = pos - bc;
+            if (abs(local.x) > be.x || abs(local.y) > be.y || abs(local.z) > be.z)
+                continue; // outside the box: scene boxes never pull cloth in
+
+            vec3 pen = be - abs(local); // per-axis face distances (>0 = inside)
+            float min_pen = min(pen.x, min(pen.y, pen.z));
+            if (min_pen > 0.25)
+                continue; // resting inside a proxy volume: unresolvable, do not pump
+
+            if (pen.x <= pen.y && pen.x <= pen.z) {
+                float s = (local.x >= 0.0) ? 1.0 : -1.0;
+                pos.x = bc.x + s * (be.x + 0.02);
+                box_normal = vec3(s, 0.0, 0.0);
+            } else if (pen.y <= pen.z) {
+                float s = (local.y >= 0.0) ? 1.0 : -1.0;
+                pos.y = bc.y + s * (be.y + 0.02);
+                box_normal = vec3(0.0, s, 0.0);
+            } else {
+                float s = (local.z >= 0.0) ? 1.0 : -1.0;
+                pos.z = bc.z + s * (be.z + 0.02);
+                box_normal = vec3(0.0, 0.0, s);
+            }
+            box_pushed = true;
+        }
+
+        if (box_pushed) {
+            // Velocity response: kill the velocity INTO the face, keep the slide.
+            float dtv = max(pc.misc.y, 1e-6);
+            vec3 v_pre = (pos_after_other - particles[id].prev_position.xyz) / dtv;
+            float vn = dot(v_pre, box_normal);
+            vec3 v_tan = v_pre - box_normal * vn;
+            particles[id].prev_position.xyz = pos - v_tan * dtv;
+            modified = true;
+        }
+
+        // 6. Character capsule dynamic friction (drags cloth with the body).
         if (pc.flags.y == 1u) {
             float mu_k = pc.capsule_top_friction.w;
 

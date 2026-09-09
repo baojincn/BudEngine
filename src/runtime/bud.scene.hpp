@@ -50,7 +50,7 @@ namespace bud::scene {
 
 		// Third-person target (the entity/point the camera orbits around)
 		bud::math::vec3 target_position = bud::math::vec3(0.0f);
-		float orbit_distance = 2.0f; // UE5 third-person template: TargetArmLength = 500cm
+		float orbit_distance = 1.0f; // UE5 third-person template: TargetArmLength = 500cm
 		float orbit_pitch = -20.0f;
 		float orbit_yaw = 0.0f;
 		float spring_stiffness = 8.0f;
@@ -64,7 +64,7 @@ namespace bud::scene {
 		void update_freefly_vectors();
 		void update_thirdperson_vectors();
 
-		CameraMode mode = CameraMode::FreeFly;
+		CameraMode mode = CameraMode::FirstPerson;
 
 		// Spring arm state for third-person
 		bud::math::vec3 spring_position = bud::math::vec3(0.0f);

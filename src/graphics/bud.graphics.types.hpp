@@ -260,7 +260,7 @@ namespace bud::graphics {
 		SkyTimeMode time_mode = SkyTimeMode::Manual;
 		float time_of_day = 12.0f; // 0.0 ~ 24.0 hours (12.0 = Noon, 18.0 = Sunset, 0.0 = Midnight)
 		float time_speed = 0.5f;   // Hours per second during 24H cycle
-		float sun_elevation = 55.0f; // Degrees (-90.0 ~ 90.0)
+		float sun_elevation = 85.0f; // Degrees (-90.0 ~ 90.0)
 		float sun_azimuth = 25.0f;   // Degrees (0.0 ~ 360.0)
 		float sun_intensity = 1.3f;
 		bud::math::vec3 sun_color = bud::math::vec3(1.0f, 0.98f, 0.95f);
