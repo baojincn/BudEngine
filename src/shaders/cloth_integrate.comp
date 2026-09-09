@@ -76,10 +76,11 @@ void main() {
         float s_len          = length(side_dir);
         side_dir             = (s_len > 1e-4) ? (side_dir / s_len) : vec3(0.0, 0.0, 1.0);
 
-        // Multi-octave organic gust envelope (long-period, gentle natural breeze)
-        float g1 = sin(sim_time * 0.25 + current_pos.x * 0.15 + current_pos.z * 0.10);
-        float g2 = sin(sim_time * 0.42 + 1.35);
-        float g3 = sin(sim_time * 0.65 + current_pos.x * 0.25);
+        // Multi-octave organic gust envelope (livelier breeze: faster octaves so the
+        // fabric does not read as slow motion).
+        float g1 = sin(sim_time * 0.60 + current_pos.x * 0.15 + current_pos.z * 0.10);
+        float g2 = sin(sim_time * 0.95 + 1.35);
+        float g3 = sin(sim_time * 1.30 + current_pos.x * 0.25);
         float raw_gust = clamp(0.35 + 0.35 * g1 + 0.20 * g2 + 0.10 * g3, 0.0, 1.0);
         float gust = raw_gust * raw_gust * (3.0 - 2.0 * raw_gust);
 
@@ -90,13 +91,13 @@ void main() {
         float drop = max(0.0, top_y - current_pos.y);
         float height_factor = clamp(drop * 0.35, 0.05, 1.0);
 
-        // Subtle natural ripple across the cloth width (lateral flutter wave)
-        float flutter = sin(sim_time * 1.10 + current_pos.x * 0.50 + current_pos.z * 0.50) * 0.12;
+        // Natural ripple across the cloth width (lateral flutter wave)
+        float flutter = sin(sim_time * 2.40 + current_pos.x * 0.50 + current_pos.z * 0.50) * 0.22;
         v_wind = (wind_dir + side_dir * flutter) * (speed * height_factor);
     }
 
-    // 3. Fluid relative aerodynamic drag
-    float drag_coeff = (pc.wind_strength < 1e-4) ? 0.95 : 0.45;
+    // Fluid relative aerodynamic drag (higher coupling = snappier wind response)
+    float drag_coeff = (pc.wind_strength < 1e-4) ? 0.95 : 0.65;
     vec3 v_rel = v_wind - velocity;
     vec3 aero_accel = v_rel * drag_coeff;
 

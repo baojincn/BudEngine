@@ -758,7 +758,14 @@ namespace bud::graphics {
 				}
 			}
 
-			const bud::math::Frustum& main_camera_frustum = view_frustums[0];
+			// Mesh-metadata read scope: `meshes` is resized/assigned by streaming
+			// threads (page registration, mesh uploads). The sizing pass, the
+			// ParallelFor key-gen and the sort below must observe one consistent
+			// snapshot, or the counts drift apart and the sort runs out of bounds
+			// (MSVC reports the heap corruption as "invalid comparator").
+			std::lock_guard mesh_read_lock(mesh_mutex);
+			{
+				const bud::math::Frustum& main_camera_frustum = view_frustums[0];
 
 			const auto& visible_instances = culled_results[0];
 			visible_instance_count = visible_instances.size();
@@ -918,6 +925,7 @@ namespace bud::graphics {
 			if (ranges.range_c_count == 0) {
 				ranges.range_c_start = visible_count;
 			}
+			} // mesh read scope (lock released)
 		}
 
 		rhi->set_render_config(render_config);
@@ -1817,23 +1825,6 @@ namespace bud::graphics {
 								scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 							has_main_pass = true;
 
-							if (physics_debug_pass && render_config.debug_physics) {
-								physics_debug_pass->add_to_graph(render_graph, rg_resolved_color, rg_depth,
-									scene_view, render_config);
-							}
-
-							// Cloth debug overlay: GPU-driven wireframe of the simulation
-							// mesh, drawn straight from the particle/constraint SSBOs (F2).
-							if (cloth_debug_pass && render_config.debug_cloth &&
-								cloth_system && cloth_system->has_cloth()) {
-								if (auto cloth_world = cloth_system->acquire_world()) {
-									cloth_debug_pass->add_to_graph(render_graph, rg_resolved_color, rg_depth,
-										scene_view, render_config,
-										cloth_world->gpu_particles, cloth_world->gpu_constraints,
-										cloth_world->constraint_count);
-								}
-							}
-
 							if (forward_translucent_pass && ranges.range_c_count > 0) {
 								forward_translucent_pass->add_to_graph(render_graph, shadow_map, rg_resolved_color, rg_depth,
 									render_scene, scene_view, render_config, meshes, sort_list,
@@ -1846,6 +1837,26 @@ namespace bud::graphics {
 								taa_pass->add_to_graph(render_graph, back_buffer, rg_resolved_color, rg_depth,
 									scene_view, render_config);
 								taa_resolved = true;
+							}
+
+							// Debug overlays draw AFTER TAA, straight into the output: the
+							// wireframes carry no motion vectors, so accumulating them in
+							// the TAA history would smear them across the screen.
+							if (physics_debug_pass && render_config.debug_physics) {
+								physics_debug_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+									scene_view, render_config);
+							}
+
+							// Cloth debug overlay: GPU-driven wireframe of the simulation
+							// mesh, drawn straight from the particle/constraint SSBOs (F2).
+							if (cloth_debug_pass && render_config.debug_cloth &&
+								cloth_system && cloth_system->has_cloth()) {
+								if (auto cloth_world = cloth_system->acquire_world()) {
+									cloth_debug_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+										scene_view, render_config,
+										cloth_world->gpu_particles, cloth_world->gpu_constraints,
+										cloth_world->constraint_count);
+								}
 							}
 						}
 					}
@@ -1934,21 +1945,6 @@ namespace bud::graphics {
 								scene_view, render_config, gpu_scene, shadow_map, rg_ao, rg_ssr, rg_ssgi);
 							has_main_pass = true;
 
-							if (physics_debug_pass && render_config.debug_physics)
-								physics_debug_pass->add_to_graph(render_graph, rg_resolved_color, rg_depth,
-									scene_view, render_config);
-
-							// Cloth debug overlay (F2), same placement as physics debug.
-							if (cloth_debug_pass && render_config.debug_cloth &&
-								cloth_system && cloth_system->has_cloth()) {
-								if (auto cloth_world = cloth_system->acquire_world()) {
-									cloth_debug_pass->add_to_graph(render_graph, rg_resolved_color, rg_depth,
-										scene_view, render_config,
-										cloth_world->gpu_particles, cloth_world->gpu_constraints,
-										cloth_world->constraint_count);
-								}
-							}
-
 							if (forward_translucent_pass && ranges.range_c_count > 0)
 								forward_translucent_pass->add_to_graph(render_graph, shadow_map, rg_resolved_color, rg_depth,
 									render_scene, scene_view, render_config, meshes, sort_list,
@@ -1960,6 +1956,22 @@ namespace bud::graphics {
 								taa_pass->add_to_graph(render_graph, back_buffer, rg_resolved_color, rg_depth,
 									scene_view, render_config);
 								taa_resolved = true;
+							}
+
+							// Debug overlays (F2/F3) draw AFTER TAA, same rationale as
+							// the primary visibility path above.
+							if (physics_debug_pass && render_config.debug_physics)
+								physics_debug_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+									scene_view, render_config);
+
+							if (cloth_debug_pass && render_config.debug_cloth &&
+								cloth_system && cloth_system->has_cloth()) {
+								if (auto cloth_world = cloth_system->acquire_world()) {
+									cloth_debug_pass->add_to_graph(render_graph, back_buffer, rg_depth,
+										scene_view, render_config,
+										cloth_world->gpu_particles, cloth_world->gpu_constraints,
+										cloth_world->constraint_count);
+								}
 							}
 						}
 					}
