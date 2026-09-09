@@ -56,6 +56,9 @@ namespace bud::physics {
 		bud::graphics::BufferHandle gpu_constraints;    // global particle indices, sorted by color batch
 		bud::graphics::BufferHandle gpu_lambdas;        // per-constraint accumulated XPBD lambda
 		bud::graphics::BufferHandle gpu_bindings;       // global sim tri indices + global destination vertex index
+		bud::graphics::BufferHandle gpu_cell_heads;     // spatial hash table heads (self-collision)
+		bud::graphics::BufferHandle gpu_particle_next;  // per-particle hash linked list
+		uint32_t hash_table_size = 0;
 	};
 
 	class ClothSystem {

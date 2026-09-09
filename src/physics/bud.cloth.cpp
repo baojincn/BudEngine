@@ -60,6 +60,14 @@ namespace bud::physics {
 				rhi->destroy_buffer(world.gpu_bindings);
 				world.gpu_bindings.reset();
 			}
+			if (world.gpu_cell_heads.is_valid()) {
+				rhi->destroy_buffer(world.gpu_cell_heads);
+				world.gpu_cell_heads.reset();
+			}
+			if (world.gpu_particle_next.is_valid()) {
+				rhi->destroy_buffer(world.gpu_particle_next);
+				world.gpu_particle_next.reset();
+			}
 		}
 
 		// Upload helper: staging copy + immediate submit.
@@ -587,6 +595,16 @@ namespace bud::physics {
 			upload_buffer(stored_rhi, bindings, world->gpu_bindings);
 		}
 
+		// Spatial hash for self-collision: head table + per-particle next links.
+		// Table is a power of two (>= 4 entries per particle) so the shader can
+		// mask the hash instead of dividing.
+		uint32_t table = 4096u;
+		while (table < world->particle_count * 4u && table < (1u << 20u))
+			table <<= 1u;
+		world->hash_table_size = table;
+		world->gpu_cell_heads = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(table) * sizeof(uint32_t), bud::graphics::ResourceState::UnorderedAccess);
+		world->gpu_particle_next = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->particle_count) * sizeof(uint32_t), bud::graphics::ResourceState::UnorderedAccess);
+
 		bud::print("[ClothSystem] Built SimWorld: {} particles, {} constraints in {} batches, {} bindings, {} columns",
 			world->particle_count, world->constraint_count, world->batches.size(), world->binding_count, world->column_count);
 		return world;
@@ -721,6 +739,8 @@ namespace bud::physics {
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 0, world->gpu_particles);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 1, world->gpu_constraints);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 2, world->gpu_lambdas);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 3, world->gpu_cell_heads);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 4, world->gpu_particle_next);
 
 				ClothPushConstantsSolver pc_solve{};
 				pc_solve.counts = bud::math::uvec4(0u, world->constraint_count, world->particle_count, world->constraint_count);
@@ -758,6 +778,8 @@ namespace bud::physics {
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 0, world->gpu_particles);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 1, world->gpu_constraints);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 2, world->gpu_lambdas);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 3, world->gpu_cell_heads);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 4, world->gpu_particle_next);
 
 				ClothPushConstantsSolver pc_solve{};
 				pc_solve.counts = bud::math::uvec4(0u, 0u, world->particle_count, world->constraint_count);
@@ -773,6 +795,34 @@ namespace bud::physics {
 				}
 				pc_solve.box_center[0].w = static_cast<float>(world->column_count);
 
+				rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
+				rhi->cmd_dispatch(cmd, (world->particle_count + 63u) / 64u, 1, 1);
+				rhi->resource_barrier(cmd, world->gpu_particles, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
+			}
+
+			// 2d. Self-collision every substep: rebuild the spatial hash, then relax
+			// particle pairs closer than the cloth thickness so the fabric cannot
+			// pass through itself when folded.
+			{
+				rhi->cmd_bind_pipeline(cmd, pipeline_solver);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 0, world->gpu_particles);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 3, world->gpu_cell_heads);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 4, world->gpu_particle_next);
+
+				ClothPushConstantsSolver pc_solve{};
+				pc_solve.counts = bud::math::uvec4(0u, world->hash_table_size, world->particle_count, world->hash_table_size);
+				pc_solve.flags = bud::math::uvec4(3u, 0u, 0u, 0u); // clear hash heads
+				pc_solve.misc = bud::math::vec4(0.0f, sub_dt, 0.0f, 0.0f);
+				rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
+				rhi->cmd_dispatch(cmd, (world->hash_table_size + 63u) / 64u, 1, 1);
+				rhi->resource_barrier(cmd, world->gpu_cell_heads, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
+
+				pc_solve.flags = bud::math::uvec4(4u, 0u, 0u, 0u); // scatter particles into the hash
+				rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
+				rhi->cmd_dispatch(cmd, (world->particle_count + 63u) / 64u, 1, 1);
+				rhi->resource_barrier(cmd, world->gpu_cell_heads, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
+
+				pc_solve.flags = bud::math::uvec4(5u, 0u, 0u, 0u); // self-collision relax
 				rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
 				rhi->cmd_dispatch(cmd, (world->particle_count + 63u) / 64u, 1, 1);
 				rhi->resource_barrier(cmd, world->gpu_particles, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);

@@ -27,6 +27,15 @@ layout(std430, set = 0, binding = 2) buffer LambdaBuffer {
     float lambdas[];
 };
 
+// Self-collision spatial hash: head table + per-particle linked list (modes 3-5)
+layout(std430, set = 0, binding = 3) buffer CellHeadBuffer {
+    uint cell_heads[];
+};
+
+layout(std430, set = 0, binding = 4) buffer ParticleNextBuffer {
+    uint particle_next[];
+};
+
 layout(std430, push_constant) uniform PushConstants {
     uvec4 counts; // x: batch_offset, y: batch_count, z: particle_count, w: constraint_total
     uvec4 flags;  // x: solve_collision_flag (0 = batch, 1 = collision, 2 = clear lambda), y: solve_capsule_flag
@@ -38,6 +47,15 @@ layout(std430, push_constant) uniform PushConstants {
     vec4  misc;                      // x: floor_y, y: dt
     vec4  sphere_center_radius;      // xyz: camera sphere center, w: radius (0 = disabled)
 } pc;
+
+const float kSelfCollisionRadius = 0.02;  // cloth thickness for self-collision (m)
+const float kHashCellSize        = 0.05;  // hash grid cell size (m), >= 2x radius
+
+uint hash_cell(vec3 p) {
+    ivec3 c = ivec3(floor(p / kHashCellSize));
+    uint h = uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u;
+    return h & (pc.counts.w - 1u); // table size is a power of two
+}
 
 void main() {
     uint id = gl_GlobalInvocationID.x;
@@ -97,6 +115,66 @@ void main() {
             particles[c.p1].position_inv_mass.xyz += corr_p1;
         if (w2 > 0.0)
             particles[c.p2].position_inv_mass.xyz += corr_p2;
+        return;
+    }
+
+    // Mode 3: clear the spatial hash head table (batch_count = table size).
+    if (pc.flags.x == 3u) {
+        if (id >= pc.counts.y)
+            return;
+        cell_heads[id] = 0xFFFFFFFFu;
+        return;
+    }
+
+    // Mode 4: scatter particles into the hash grid (linked list per cell).
+    if (pc.flags.x == 4u) {
+        if (id >= pc.counts.z)
+            return;
+        uint cell = hash_cell(particles[id].position_inv_mass.xyz);
+        particle_next[id] = atomicExchange(cell_heads[cell], id);
+        return;
+    }
+
+    // Mode 5: self-collision relaxation - walk the 27 neighbouring hash cells and
+    // push this particle out of any non-adjacent particle closer than the cloth
+    // thickness. Only this particle moves (no write races); the correction is
+    // kick-cancelled so the relaxation does not inject velocity.
+    if (pc.flags.x == 5u) {
+        if (id >= pc.counts.z)
+            return;
+        vec4 pm = particles[id].position_inv_mass;
+        if (pm.w <= 0.0)
+            return;
+
+        vec3 pi = pm.xyz;
+        const vec3 pi_before = pi;
+        bool moved = false;
+        ivec3 center = ivec3(floor(pi / kHashCellSize));
+
+        for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec3 c = center + ivec3(dx, dy, dz);
+            uint h = uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u;
+            uint j = cell_heads[h & (pc.counts.w - 1u)];
+            while (j != 0xFFFFFFFFu) {
+                if (j != id) {
+                    vec3 d = pi - particles[j].position_inv_mass.xyz;
+                    float dist2 = dot(d, d);
+                    if (dist2 < kSelfCollisionRadius * kSelfCollisionRadius && dist2 > 1e-8) {
+                        float dist = sqrt(dist2);
+                        pi += d * ((kSelfCollisionRadius - dist) / dist) * 0.5;
+                        moved = true;
+                    }
+                }
+                j = particle_next[j];
+            }
+        }
+
+        if (moved) {
+            particles[id].position_inv_mass.xyz = pi;
+            particles[id].prev_position.xyz += (pi - pi_before); // no velocity kick
+        }
         return;
     }
 
