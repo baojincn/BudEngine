@@ -413,6 +413,40 @@ $$
 
 ---
 
+### 2.11 GPU 空间哈希自碰撞库仑静/动摩擦力学（Spatial-Hash Coulomb Self-Friction）
+
+当织物发生多层卷曲、折叠堆叠或自碰拍打时，单纯的法向推离无法维持折裥立体感。通过在 Mode 5 空间哈希松弛中引入**库仑摩擦定律（Coulomb's Law of Friction）**，使折叠接触面形成自然的机械咬合与搭扣：
+
+1. **接触对相对切向位移**：
+   对于空间相交粒子对 $(i, j)$，空间间距 $\text{dist} < 2 r_{\text{cloth}}$，法向量 $\mathbf{n} = (\mathbf{p}_i - \mathbf{p}_j) / \text{dist}$，穿透深度 $\delta_n = 2 r_{\text{cloth}} - \text{dist}$：
+   $$
+   \Delta \mathbf{p}_{\text{rel}} = (\mathbf{p}_i - \mathbf{p}_{\text{prev}, i}) - (\mathbf{p}_j - \mathbf{p}_{\text{prev}, j})
+   $$
+   $$
+   \Delta \mathbf{p}_t = \Delta \mathbf{p}_{\text{rel}} - (\Delta \mathbf{p}_{\text{rel}} \cdot \mathbf{n}) \mathbf{n}, \quad \Delta p_t = \|\Delta \mathbf{p}_t\|
+   $$
+
+2. **库仑摩擦准则与状态分支**：
+   法向位移冲量尺度 $f_n = \frac{1}{2} \delta_n$。静摩擦临界位移阈值 $\Delta x_{t, \text{static}} = \mu_s f_n$：
+   - **静摩擦咬合锁定（Stiction / Interlocking，$\Delta p_t \le \Delta x_{t, \text{static}}$）**：
+     $$
+     \Delta \mathbf{x}_{\text{friction}, i} = -0.5 \Delta \mathbf{p}_t
+     $$
+   - **滑动动摩擦阻力（Kinetic Sliding Friction，$\Delta p_t > \Delta x_{t, \text{static}}$）**：
+     $$
+     \Delta \mathbf{x}_{\text{friction}, i} = -0.5 \min(\Delta p_t, \mu_k f_n) \frac{\Delta \mathbf{p}_t}{\Delta p_t}
+     $$
+
+3. **速度耗散更新与数值能量安全准则**：
+   - **法向分离**：执行 Kick-cancel（$\mathbf{p}_{\text{prev}, i} \leftarrow \mathbf{p}_{\text{prev}, i} + \Delta \mathbf{x}_n$），消除非弹性碰撞引起的虚假弹性反弹。
+   - **切向摩擦**：**不执行 Kick-cancel**，使粒子切向滑动速度自然被阻滞耗散：
+     $$
+     \mathbf{v}_{\text{post}} = \mathbf{v}_{\text{pre}} + \frac{\Delta \mathbf{x}_{\text{friction}}}{\Delta t}
+     $$
+   - **耗散上限箝位**：限制 $\|\Delta \mathbf{x}_{\text{friction}}\| \le \|\mathbf{p}_i - \mathbf{p}_{\text{prev}, i}\|$，严格保证摩擦力只做负功，防止任何多邻域累加引发的反向加速或数值发散。
+
+---
+
 ## 3. C++ 内存布局与对齐规范 (std430)
 
 位于 [src/physics/bud.cloth.types.hpp](file:///d:/PersonalProjects/BudEngine/src/physics/bud.cloth.types.hpp)，全部结构体严格遵循 GPU std430 内存对齐，并使用 `static_assert` 强校验：

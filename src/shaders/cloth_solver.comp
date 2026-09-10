@@ -142,9 +142,10 @@ void main() {
     }
 
     // Mode 5: self-collision relaxation - walk the 27 neighbouring hash cells and
-    // push this particle out of any non-adjacent particle closer than the cloth
-    // thickness. Only this particle moves (no write races); the correction is
-    // kick-cancelled so the relaxation does not inject velocity.
+    // push this particle out of any non-adjacent particle closer than the cloth thickness.
+    // In addition to normal separation, applies Coulomb self-friction (static stiction
+    // and dynamic kinetic sliding friction) so folds naturally stack, grip, and crease.
+    // Normal separation is kick-cancelled; tangential friction dissipates sliding velocity.
     if (pc.flags.x == 5u) {
         if (id >= pc.counts.z)
             return;
@@ -154,7 +155,13 @@ void main() {
 
         vec3 pi = pm.xyz;
         const vec3 pi_before = pi;
+        const vec3 dp_i = pi - particles[id].prev_position.xyz;
+
+        float mu_s = pc.misc.z; // static friction coefficient
+        float mu_k = pc.misc.w; // kinetic friction coefficient
+
         bool moved = false;
+        vec3 total_delta_xt = vec3(0.0);
         ivec3 center = ivec3(floor(pi / kHashCellSize));
 
         for (int dz = -1; dz <= 1; ++dz)
@@ -165,12 +172,39 @@ void main() {
             uint j = cell_heads[h & (pc.counts.w - 1u)];
             while (j != 0xFFFFFFFFu) {
                 if (j != id) {
-                    vec3 d = pi - particles[j].position_inv_mass.xyz;
+                    vec3 pj = particles[j].position_inv_mass.xyz;
+                    vec3 d = pi - pj;
                     float dist2 = dot(d, d);
                     if (dist2 < kSelfCollisionRadius * kSelfCollisionRadius && dist2 > 1e-8) {
                         float dist = sqrt(dist2);
-                        pi += d * ((kSelfCollisionRadius - dist) / dist) * 0.5;
+                        vec3 n = d / dist;
+                        float pen = kSelfCollisionRadius - dist;
+                        vec3 delta_xn = n * (pen * 0.5);
+                        pi += delta_xn;
                         moved = true;
+
+                        // Coulomb Self-Friction:
+                        // Relative displacement over this substep between contacting cloth layers
+                        if (mu_s > 0.0) {
+                            vec3 dp_j = pj - particles[j].prev_position.xyz;
+                            vec3 dp_rel = dp_i - dp_j;
+                            vec3 dp_t = dp_rel - dot(dp_rel, n) * n;
+                            float dp_t_len = length(dp_t);
+
+                            if (dp_t_len > 1e-6) {
+                                float fn = pen * 0.5;
+                                float max_static = mu_s * fn;
+
+                                if (dp_t_len <= max_static) {
+                                    // Stiction (static lock): arrest relative tangential sliding completely
+                                    total_delta_xt += -0.5 * dp_t;
+                                } else {
+                                    // Kinetic sliding friction: oppose tangential velocity by mu_k * fn
+                                    float slip_corr = min(dp_t_len, mu_k * fn);
+                                    total_delta_xt += -0.5 * slip_corr * (dp_t / dp_t_len);
+                                }
+                            }
+                        }
                     }
                 }
                 j = particle_next[j];
@@ -178,8 +212,14 @@ void main() {
         }
 
         if (moved) {
-            particles[id].position_inv_mass.xyz = pi;
-            particles[id].prev_position.xyz += (pi - pi_before); // no velocity kick
+            // Strictly dissipative safety clamp: friction cannot reverse particle motion
+            float speed_disp = length(dp_i);
+            float fric_len = length(total_delta_xt);
+            if (fric_len > speed_disp && fric_len > 1e-6)
+                total_delta_xt *= (speed_disp / fric_len);
+
+            particles[id].position_inv_mass.xyz = pi + total_delta_xt;
+            particles[id].prev_position.xyz += (pi - pi_before); // normal kick-cancel (no bounce velocity)
         }
         return;
     }

@@ -74,7 +74,7 @@ namespace bud::physics {
 		bud::math::vec4 capsule_bottom_radius{ 0.0f, 0.0f, 0.0f, 0.3f }; // xyz: p_bottom, w: radius
 		bud::math::vec4 capsule_top_friction{ 0.0f, 1.0f, 0.0f, 0.25f }; // xyz: p_top, w: friction mu_k
 		bud::math::vec4 capsule_velocity{ 0.0f };                        // xyz: character velocity, w: unused
-		bud::math::vec4 misc{ 0.0f, 0.0166f, 0.0f, 0.0f };               // x: floor_y, y: dt
+		bud::math::vec4 misc{ 0.0f, 0.0166f, 0.0f, 0.0f };               // x: floor_y, y: dt, z: self_friction_static, w: self_friction_kinetic
 		bud::math::vec4 sphere_center_radius{ 0.0f };                    // xyz: camera sphere center, w: radius (0 = disabled)
 	};
 	static_assert(sizeof(ClothPushConstantsSolver) == 240, "ClothPushConstantsSolver must be exactly 240 bytes");
@@ -105,6 +105,7 @@ namespace bud::physics {
 		float weft_compliance = 2e-5f;   // 纬向抗拉顺应度
 		float shear_compliance = 6e-4f;  // 斜向剪切顺应度 (Trellis 效应产生自然折褶)
 		float bend_compliance = 2.5e-3f; // 抗弯顺应度
+		float self_friction = 0.35f;     // 自碰撞折叠摩擦力系数 (静摩擦 mu_s = 1.25 * fric, 动摩擦 mu_k = 0.85 * fric)
 	};
 
 	inline void apply_cloth_preset(ClothConfig& cfg, ClothPreset preset) {
@@ -118,6 +119,7 @@ namespace bud::physics {
 			cfg.weft_compliance = 2e-5f;
 			cfg.shear_compliance = 6e-4f;
 			cfg.bend_compliance = 2.5e-3f;
+			cfg.self_friction = 0.45f;
 			break;
 		case ClothPreset::Silk:
 			cfg.damping = 0.015f;
@@ -127,6 +129,7 @@ namespace bud::physics {
 			cfg.weft_compliance = 5e-6f;
 			cfg.shear_compliance = 2.5e-3f;
 			cfg.bend_compliance = 1.0e-2f;
+			cfg.self_friction = 0.15f;
 			break;
 		case ClothPreset::CottonLinen:
 			cfg.damping = 0.05f;
@@ -136,6 +139,7 @@ namespace bud::physics {
 			cfg.weft_compliance = 2e-5f;
 			cfg.shear_compliance = 1.2e-3f;
 			cfg.bend_compliance = 4.0e-3f;
+			cfg.self_friction = 0.35f;
 			break;
 		case ClothPreset::HeavyDenim:
 			cfg.damping = 0.12f;
@@ -145,6 +149,7 @@ namespace bud::physics {
 			cfg.weft_compliance = 1e-5f;
 			cfg.shear_compliance = 2.0e-4f;
 			cfg.bend_compliance = 1.0e-3f;
+			cfg.self_friction = 0.55f;
 			break;
 		default:
 			break;

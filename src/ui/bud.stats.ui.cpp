@@ -352,9 +352,9 @@ namespace bud::ui {
 
 					const float row_w = ImGui::GetContentRegionAvail().x;
 					const float spacing = ImGui::GetStyle().ItemSpacing.x;
-					const std::string elev_label = std::format("Elev: {:03.0f}\xC2\xB0", cached_elev_display);
+					const std::string elev_label = std::format("Elev: {:02.0f}\xC2\xB0", cached_elev_display);
 					const std::string azim_label = std::format(" | Azim: {:03.0f}\xC2\xB0", cached_azim_display);
-					const float elev_label_w = ImGui::CalcTextSize("Elev: 000\xC2\xB0").x;
+					const float elev_label_w = ImGui::CalcTextSize("Elev: 00\xC2\xB0").x;
 					const float azim_label_w = ImGui::CalcTextSize(" | Azim: 000\xC2\xB0").x;
 					// [elev_label][slider_elev][azim_label][slider_azim], 3 个 ItemSpacing
 					float slider_total = row_w - elev_label_w - azim_label_w - spacing * 3.0f;
@@ -375,7 +375,7 @@ namespace bud::ui {
 						if (is_other_active)
 							ImGui::BeginDisabled(true);
 
-						if (ImGui::SliderFloat("##light_elev", &tmp_elev, 0.0f, 90.0f, "%03.0f")) {
+						if (ImGui::SliderFloat("##light_elev", &tmp_elev, 0.0f, 90.0f, "%02.0f")) {
 							if (!is_other_active) {
 								cached_elev_display = tmp_elev;
 								set_light_elevation(tmp_elev);
@@ -442,7 +442,7 @@ namespace bud::ui {
 						ImGui::TextColored(color_neutral, " | Int: %.1f", current_light_intensity);
 						ImGui::SameLine();
 						ImGui::PushID("light_intensity_slider");
-						ImGui::PushItemWidth(80.0f);
+						ImGui::PushItemWidth(100.0f);
 						float tmp_int = current_light_intensity;
 						const ImGuiID int_id = ImGui::GetID("##light_int");
 						const bool is_other_active = (active_intensity_slider_id != 0 && active_intensity_slider_id != int_id);
@@ -469,7 +469,7 @@ namespace bud::ui {
 						ImGui::TextColored(color_neutral, " | Ambient: %.2f", current_ambient_strength);
 						ImGui::SameLine();
 						ImGui::PushID("light_ambient_slider");
-						ImGui::PushItemWidth(80.0f);
+						ImGui::PushItemWidth(100.0f);
 						float tmp_amb = current_ambient_strength;
 						const ImGuiID amb_id = ImGui::GetID("##light_ambient");
 						const bool is_other_active = (active_intensity_slider_id != 0 && active_intensity_slider_id != amb_id);
@@ -536,12 +536,12 @@ namespace bud::ui {
 						ImGui::PopID();
 
 						// Wind, Damping and Iterations controls
-						ImGui::TextColored(color_neutral, "Wind: %.2f", current_cloth_config.wind_strength);
+						ImGui::TextColored(color_neutral, "Wind: %0.2f", current_cloth_config.wind_strength);
 						ImGui::SameLine();
 						ImGui::PushID("cloth_wind_slider");
-						ImGui::PushItemWidth(80.0f);
+						ImGui::PushItemWidth(100.0f);
 						float tmp_wind = current_cloth_config.wind_strength;
-						if (ImGui::SliderFloat("##cloth_wind", &tmp_wind, 0.0f, 6.0f, "%.2f")) {
+						if (ImGui::SliderFloat("##cloth_wind", &tmp_wind, 0.0f, 6.0f, "%0.2f")) {
 							auto cfg = current_cloth_config;
 							cfg.wind_strength = tmp_wind;
 							set_cloth_config(cfg);
@@ -550,12 +550,12 @@ namespace bud::ui {
 						ImGui::PopID();
 
 						ImGui::SameLine();
-						ImGui::TextColored(color_neutral, " | Damp: %.3f", current_cloth_config.damping);
+						ImGui::TextColored(color_neutral, " | Damp: %0.3f", current_cloth_config.damping);
 						ImGui::SameLine();
 						ImGui::PushID("cloth_damp_slider");
-						ImGui::PushItemWidth(80.0f);
+						ImGui::PushItemWidth(100.0f);
 						float tmp_damp = current_cloth_config.damping;
-						if (ImGui::SliderFloat("##cloth_damp", &tmp_damp, 0.0f, 1.0f, "%.3f")) {
+						if (ImGui::SliderFloat("##cloth_damp", &tmp_damp, 0.0f, 1.0f, "%0.3f")) {
 							auto cfg = current_cloth_config;
 							cfg.damping = tmp_damp;
 							set_cloth_config(cfg);
@@ -563,15 +563,29 @@ namespace bud::ui {
 						ImGui::PopItemWidth();
 						ImGui::PopID();
 
-						ImGui::SameLine();
-						ImGui::TextColored(color_neutral, " | Iter: %u", current_cloth_config.solver_iterations);
+						//ImGui::SameLine();
+						ImGui::TextColored(color_neutral, "Iter: %02u", current_cloth_config.solver_iterations);
 						ImGui::SameLine();
 						ImGui::PushID("cloth_iter_slider");
-						ImGui::PushItemWidth(70.0f);
+						ImGui::PushItemWidth(100.0f);
 						int tmp_iter = static_cast<int>(current_cloth_config.solver_iterations);
 						if (ImGui::SliderInt("##cloth_iter", &tmp_iter, 1, 16)) {
 							auto cfg = current_cloth_config;
 							cfg.solver_iterations = static_cast<uint32_t>(tmp_iter);
+							set_cloth_config(cfg);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Fric: %0.2f", current_cloth_config.self_friction);
+						ImGui::SameLine();
+						ImGui::PushID("cloth_fric_slider");
+						ImGui::PushItemWidth(100.0f);
+						float tmp_fric = current_cloth_config.self_friction;
+						if (ImGui::SliderFloat("##cloth_fric", &tmp_fric, 0.0f, 1.0f, "%0.2f")) {
+							auto cfg = current_cloth_config;
+							cfg.self_friction = tmp_fric;
 							set_cloth_config(cfg);
 						}
 						ImGui::PopItemWidth();

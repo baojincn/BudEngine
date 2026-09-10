@@ -1040,7 +1040,7 @@ namespace bud::physics {
 				ClothPushConstantsSolver pc_solve{};
 				pc_solve.counts = bud::math::uvec4(0u, world->hash_table_size, world->particle_count, world->hash_table_size);
 				pc_solve.flags = bud::math::uvec4(3u, 0u, 0u, 0u); // clear hash heads
-				pc_solve.misc = bud::math::vec4(0.0f, sub_dt, 0.0f, 0.0f);
+				pc_solve.misc = bud::math::vec4(0.0f, sub_dt, config.cloth_config.self_friction * 1.25f, config.cloth_config.self_friction * 0.85f);
 				rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
 				rhi->cmd_dispatch(cmd, (world->hash_table_size + 63u) / 64u, 1, 1);
 				rhi->resource_barrier(cmd, world->gpu_cell_heads, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
