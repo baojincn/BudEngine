@@ -447,6 +447,50 @@ $$
 
 ---
 
+### 2.12 薄壳小迎角气动失速与阻力极线（Airfoil Polar & Stall Dynamics）
+
+真实柔性薄膜织物在风场中的升阻力具有极强烈的迎角非线性特征。通过引入 Viterna-Glauert 薄翼极线函数，构建跨越小迎角线性理论与大迎角钝体背压区的统一平滑力学模型：
+
+1. **瞬时迎角 $\alpha$（Angle of Attack）提取**：
+   $$
+   \sin\alpha = \text{clamp}\left( \frac{|\mathbf{v}_{\text{rel}} \cdot \mathbf{n}|}{\|\mathbf{v}_{\text{rel}}\|}, 0.0, 1.0 \right), \quad \cos\alpha = \text{clamp}\left( \frac{\|\mathbf{v}_t\|}{\|\mathbf{v}_{\text{rel}}\|}, 0.0, 1.0 \right)
+   $$
+   $$
+   \alpha = \arcsin(\sin\alpha)
+   $$
+
+2. **分段气动极线与失速过渡（Viterna-Glauert Polar）**：
+   - **失速前线弹性区（Pre-Stall Regime，$\alpha \le 16^\circ$）**：
+     由库塔条件（Kutta Condition）主导，具备高达 $2\pi$ 的极陡升力线斜率，在极微弱掠射风下即刻激发出自激行波颤振（Flutter）：
+     $$
+     C_L^{\text{pre}}(\alpha) = 2\pi \sin\alpha \approx 6.28 \sin\alpha, \quad C_D^{\text{pre}}(\alpha) = 0.05 + 1.80 \sin^2\alpha
+     $$
+   - **失速后钝体压力差（Post-Stall Regime，$\alpha > 22^\circ$）**：
+     附面层发生大范围分离，转入基尔霍夫-瑞利钝体迎风背压区：
+     $$
+     C_L^{\text{post}}(\alpha) = C_{D, \text{max}} \sin\alpha \cos\alpha, \quad C_D^{\text{post}}(\alpha) = C_{D, \text{max}} \sin^2\alpha \quad (C_{D, \text{max}} \approx 1.90)
+     $$
+   - **平滑失速权重过渡（Smooth Transition）**：
+     $$
+     w_{\text{stall}} = \text{smoothstep}(0.24, 0.40, \alpha)
+     $$
+     $$
+     C_L(\alpha) = \text{mix}(C_L^{\text{pre}}, C_L^{\text{post}}, w_{\text{stall}}), \quad C_D(\alpha) = \text{mix}(C_D^{\text{pre}}, C_D^{\text{post}}, w_{\text{stall}})
+     $$
+
+3. **矢量加速度合成**：
+   $$
+   \mathbf{a}_{\text{lift}} = \hat{\mathbf{l}} \left( \frac{1}{2} \rho \frac{A}{m} C_L(\alpha) \|\mathbf{v}_{\text{rel}}\|^2 \text{sgn}(\mathbf{v}_{\text{rel}} \cdot \mathbf{n}) \right)
+   $$
+   $$
+   \mathbf{a}_{\text{drag}} = \hat{\mathbf{v}}_{\text{rel}} \left( \frac{1}{2} \rho \frac{A}{m} C_D(\alpha) \|\mathbf{v}_{\text{rel}}\|^2 \right)
+   $$
+   $$
+   \mathbf{a}_{\text{total}} = \mathbf{g} + \mathbf{a}_{\text{lift}} + \mathbf{a}_{\text{drag}} + c_{\text{air}} \mathbf{v}_{\text{rel}}
+   $$
+
+---
+
 ## 3. C++ 内存布局与对齐规范 (std430)
 
 位于 [src/physics/bud.cloth.types.hpp](file:///d:/PersonalProjects/BudEngine/src/physics/bud.cloth.types.hpp)，全部结构体严格遵循 GPU std430 内存对齐，并使用 `static_assert` 强校验：

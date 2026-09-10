@@ -126,7 +126,7 @@ void main() {
         v_wind = (wind_dir * base_speed + turb) * height_factor;
     }
 
-    // 4. Thin-shell aerodynamics: Normal Pressure Drag + Aerodynamic Lift + Tangential Skin Friction
+    // 4. Thin-shell aerodynamics: Thin-Airfoil Polar (2*PI linear pre-stall slope + stall transition + bluff body drag)
     vec3 v_rel = v_wind - velocity;
     float v_rel_len = length(v_rel);
 
@@ -137,37 +137,55 @@ void main() {
         vec3 vt = v_rel - vn * normal;
         float vt_len = length(vt);
 
-        // Dynamic aerodynamic acceleration coefficients:
-        // In SI units: a = 0.5 * rho * (A / m) * C
-        // For medium fabric (sigma = m/A ~ 0.15 kg/m^2): 0.5 * rho * (A/m) ~ 4.1 m^-1
-        // Form drag Cn ~ 1.2 - 1.8; Thin-foil lift Cl ~ 0.8 - 1.4
-        const float cn   = 4.20;  // normal pressure form drag
-        const float cl   = 3.20;  // aerodynamic thin-membrane circulation lift
-        const float ct   = 0.10;  // tangential skin friction shear
-        const float cair = 0.25;  // ambient low-speed air resistance damping
+        // Sin and Cos of angle of attack alpha (angle between fabric surface and relative wind):
+        float sin_alpha = clamp(abs(vn) / v_rel_len, 0.0, 1.0);
+        float cos_alpha = clamp(vt_len / v_rel_len, 0.0, 1.0);
+        float alpha = asin(sin_alpha); // angle of attack in radians [0, PI/2]
 
-        // (1) Normal form drag: acts perpendicular to the cloth surface
-        vec3 a_normal = normal * (cn * vn * abs(vn));
+        // Viterna-Glauert Thin-Airfoil Polar:
+        // 1. Pre-stall regime (small angle of attack alpha < 16 deg / 0.28 rad):
+        //    Linear thin-airfoil theory (Kutta condition): Cl = 2*PI * sin(alpha) (~6.28 * alpha)
+        //    Steep 2*PI lift slope triggers energetic self-excited flutter even in gentle grazing breezes.
+        //    Induced & skin friction drag: Cd_pre = 0.05 + 1.80 * sin^2(alpha)
+        const float kTwoPi = 6.2831853;
+        float cl_pre = kTwoPi * sin_alpha;
+        float cd_pre = 0.05 + 1.80 * (sin_alpha * sin_alpha);
 
-        // (2) Aerodynamic lift: perpendicular to relative wind, directed towards suction side
-        // Cross product produces rotation axis normal to (v_rel, n); second cross gives lift direction in plane
+        // 2. Post-stall regime (separated bluff-body flow, alpha > 22 deg / 0.38 rad):
+        //    Bluff-body cross-flow back-pressure: Cl_post = Cd_max * sin(alpha) * cos(alpha)
+        //    Bluff-body form drag: Cd_post = Cd_max * sin^2(alpha)
+        const float kCdMax = 1.90;
+        float cl_post = kCdMax * sin_alpha * cos_alpha;
+        float cd_post = kCdMax * (sin_alpha * sin_alpha);
+
+        // 3. Smooth stall transition blending:
+        //    Stall onset occurs at ~15 deg (0.26 rad), fully stalled by ~24 deg (0.42 rad)
+        float stall_weight = smoothstep(0.24, 0.40, alpha);
+        float cl_polar = mix(cl_pre, cl_post, stall_weight);
+        float cd_polar = mix(cd_pre, cd_post, stall_weight);
+
+        // Dynamic pressure acceleration factor: q / sigma = 0.5 * rho * (A/m) * v_rel^2
+        // Effective acceleration scaling constant:
+        const float kAeroScale = 2.25;
+        float dyn_accel = kAeroScale * (v_rel_len * v_rel_len);
+
+        // (1) Aerodynamic Lift: acts perpendicular to relative wind, directed towards suction side
         vec3 lift_axis = cross(v_rel_dir, normal);
         float lift_axis_len = length(lift_axis);
         vec3 a_lift = vec3(0.0);
         if (lift_axis_len > 1e-4) {
             vec3 lift_dir = cross(lift_axis / lift_axis_len, v_rel_dir);
-            // Thin-airfoil lift coefficient C_L ~ sin(2 * alpha) = 2 * sin(alpha) * cos(alpha)
-            float angle_factor = (abs(vn) * vt_len) / (v_rel_len * v_rel_len + 1e-6);
-            a_lift = lift_dir * (cl * v_rel_len * v_rel_len * angle_factor * sign(vn));
+            a_lift = lift_dir * (cl_polar * dyn_accel * sign(vn));
         }
 
-        // (3) Tangential viscous skin friction
-        vec3 a_tangent = (vt_len > 1e-4) ? (vt * (ct * vt_len)) : vec3(0.0);
+        // (2) Aerodynamic Drag: acts along relative wind direction (form + skin friction)
+        vec3 a_drag = v_rel_dir * (cd_polar * dyn_accel);
 
-        // (4) Ambient air cushion resistance
+        // (3) Ambient low-speed air cushion resistance
+        const float cair = 0.20;
         vec3 a_cushion = v_rel * cair;
 
-        aero_accel = a_normal + a_lift + a_tangent + a_cushion;
+        aero_accel = a_lift + a_drag + a_cushion;
 
         // Bounded acceleration safety clamp (allow up to 65 m/s^2 for dynamic gusts)
         const float max_aero = 65.0;
