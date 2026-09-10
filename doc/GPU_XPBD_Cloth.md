@@ -491,6 +491,39 @@ $$
 
 ---
 
+### 2.13 自然风向动态游弋与空间相干活动标架（Atmospheric Wind Direction Wandering）
+
+自然大气回流风向绝非静态固定沿单一轴线吹拂。通过在主导风向周围建立正交活动标架，施加具有横向对流延迟的多频复合偏航（Yaw）与俯仰（Pitch）微扰，使布料呈现自然游弋的呼吸感与游龙式涌动：
+
+1. **主导风向标准正交活动标架（Orthonormal Wind Frame）**：
+   给定用户设定的名义主风向基准向量 $\mathbf{d}_0 = \text{normalize}(\mathbf{w}_{\text{dir}})$：
+   $$
+   \hat{\mathbf{w}}_f = \mathbf{d}_0 \quad (\text{迎风前向主轴})
+   $$
+   $$
+   \hat{\mathbf{w}}_r = \frac{\hat{\mathbf{w}}_f \times \mathbf{u}_y}{\|\hat{\mathbf{w}}_f \times \mathbf{u}_y\|} \quad (\text{水平横向侧风轴})
+   $$
+   $$
+   \hat{\mathbf{w}}_u = \hat{\mathbf{w}}_r \times \hat{\mathbf{w}}_f \quad (\text{垂直上升气流轴})
+   $$
+
+2. **多频时空复合游弋角与对流空间延迟**：
+   投影计算粒子沿横向跨度的对流位置 $s_{\text{cross}} = \mathbf{p} \cdot \hat{\mathbf{w}}_r$：
+   $$
+   \theta_{\text{yaw}}(t, \mathbf{p}) = w_{\text{wander}} \left[ 0.28 \sin(0.42 t + 0.18 s_{\text{cross}}) + 0.14 \sin(0.85 t + 1.25) + 0.08 \sin(1.60 t) \right]
+   $$
+   $$
+   \theta_{\text{pitch}}(t, \mathbf{p}) = w_{\text{wander}} \left[ 0.08 \sin(0.65 t + 0.70) + 0.05 \cos(1.20 t + 0.12 s_{\text{cross}}) + 0.03 \right]
+   $$
+
+3. **严格 3D 酉旋转瞬时风向**：
+   $$
+   \mathbf{w}_{\text{wandered}} = \hat{\mathbf{w}}_f \cos\theta_y \cos\theta_p + \hat{\mathbf{w}}_r \sin\theta_y \cos\theta_p + \hat{\mathbf{w}}_u \sin\theta_p
+   $$
+   模长严格恒定 $\|\mathbf{w}_{\text{wandered}}\| \equiv 1.0$，既保留了风速标量动力学，又赋予了迎风面富于生命力的偏航摆动与立体翻卷。
+
+---
+
 ## 3. C++ 内存布局与对齐规范 (std430)
 
 位于 [src/physics/bud.cloth.types.hpp](file:///d:/PersonalProjects/BudEngine/src/physics/bud.cloth.types.hpp)，全部结构体严格遵循 GPU std430 内存对齐，并使用 `static_assert` 强校验：

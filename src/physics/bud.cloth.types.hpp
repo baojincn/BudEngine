@@ -50,7 +50,7 @@ namespace bud::physics {
 		uint32_t particle_count = 0;
 		float damping = 0.08f;
 		float wind_strength = 0.25f;
-		float pad0 = 0.0f;
+		float wind_wandering = 0.35f;
 	};
 	static_assert(sizeof(ClothPushConstantsIntegrate) == 48, "ClothPushConstantsIntegrate must be 48 bytes");
 
@@ -106,6 +106,7 @@ namespace bud::physics {
 		float shear_compliance = 6e-4f;  // 斜向剪切顺应度 (Trellis 效应产生自然折褶)
 		float bend_compliance = 2.5e-3f; // 抗弯顺应度
 		float self_friction = 0.35f;     // 自碰撞折叠摩擦力系数 (静摩擦 mu_s = 1.25 * fric, 动摩擦 mu_k = 0.85 * fric)
+		float wind_wandering = 0.35f;    // 自然风向动态游弋幅度 (0.0=固定主轴, 1.0=大范围游弋)
 	};
 
 	inline void apply_cloth_preset(ClothConfig& cfg, ClothPreset preset) {
@@ -120,6 +121,7 @@ namespace bud::physics {
 			cfg.shear_compliance = 6e-4f;
 			cfg.bend_compliance = 2.5e-3f;
 			cfg.self_friction = 0.45f;
+			cfg.wind_wandering = 0.35f;
 			break;
 		case ClothPreset::Silk:
 			cfg.damping = 0.015f;
@@ -130,6 +132,7 @@ namespace bud::physics {
 			cfg.shear_compliance = 2.5e-3f;
 			cfg.bend_compliance = 1.0e-2f;
 			cfg.self_friction = 0.15f;
+			cfg.wind_wandering = 0.50f;
 			break;
 		case ClothPreset::CottonLinen:
 			cfg.damping = 0.05f;
@@ -140,6 +143,7 @@ namespace bud::physics {
 			cfg.shear_compliance = 1.2e-3f;
 			cfg.bend_compliance = 4.0e-3f;
 			cfg.self_friction = 0.35f;
+			cfg.wind_wandering = 0.35f;
 			break;
 		case ClothPreset::HeavyDenim:
 			cfg.damping = 0.12f;
@@ -150,6 +154,7 @@ namespace bud::physics {
 			cfg.shear_compliance = 2.0e-4f;
 			cfg.bend_compliance = 1.0e-3f;
 			cfg.self_friction = 0.55f;
+			cfg.wind_wandering = 0.20f;
 			break;
 		default:
 			break;

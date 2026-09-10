@@ -590,6 +590,20 @@ namespace bud::ui {
 						}
 						ImGui::PopItemWidth();
 						ImGui::PopID();
+
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Wander: %0.2f", current_cloth_config.wind_wandering);
+						ImGui::SameLine();
+						ImGui::PushID("cloth_wander_slider");
+						ImGui::PushItemWidth(100.0f);
+						float tmp_wander = current_cloth_config.wind_wandering;
+						if (ImGui::SliderFloat("##cloth_wander", &tmp_wander, 0.0f, 1.0f, "%0.2f")) {
+							auto cfg = current_cloth_config;
+							cfg.wind_wandering = tmp_wander;
+							set_cloth_config(cfg);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
 					}
 				}
 

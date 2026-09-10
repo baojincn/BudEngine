@@ -956,6 +956,7 @@ namespace bud::physics {
 			pc_int.particle_count = world->particle_count;
 			pc_int.damping = config.cloth_config.damping;
 			pc_int.wind_strength = config.cloth_config.wind_strength;
+			pc_int.wind_wandering = config.cloth_config.wind_wandering;
 			rhi->cmd_push_constants(cmd, pipeline_integrate, sizeof(ClothPushConstantsIntegrate), &pc_int);
 			rhi->cmd_dispatch(cmd, (world->particle_count + 63u) / 64u, 1, 1);
 			rhi->resource_barrier(cmd, world->gpu_particles, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);

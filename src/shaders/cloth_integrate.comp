@@ -24,7 +24,7 @@ layout(std430, push_constant) uniform PushConstants {
     uint  particle_count;
     float damping;
     float wind_strength;
-    float pad0;
+    float wind_wandering;
 } pc;
 
 void main() {
@@ -76,13 +76,41 @@ void main() {
             normal = n_cross / n_len;
     }
 
-    // 3. Incompressible 3D Analytical Curl Wind Field (strictly 0 when wind_strength == 0)
+    // 3. Incompressible 3D Analytical Curl Wind Field with Atmospheric Direction Wandering
     vec3 v_wind = vec3(0.0);
     if (pc.wind_strength > 1e-4) {
         vec3  wind_direction = pc.wind_time.xyz;
         float sim_time       = pc.wind_time.w;
         float wind_dir_len   = length(wind_direction);
-        vec3  wind_dir       = (wind_dir_len > 1e-4) ? (wind_direction / wind_dir_len) : vec3(1.0, 0.0, 0.0);
+        vec3  base_wind_dir  = (wind_dir_len > 1e-4) ? (wind_direction / wind_dir_len) : vec3(1.0, 0.0, 0.0);
+
+        // Orthonormal activity frame around the baseline wind direction:
+        // wf: forward wind axis, wr: lateral cross-wind axis, wu: vertical up-wash axis
+        vec3 wf = base_wind_dir;
+        vec3 up_ref = (abs(wf.y) < 0.95) ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+        vec3 wr = normalize(cross(wf, up_ref));
+        vec3 wu = cross(wr, wf);
+
+        // Multi-frequency spatio-temporal wandering angles (yaw & pitch):
+        // s_cross: spatial phase projection across the curtain width (creates dragon-like rolling wave flow)
+        float s_cross = dot(current_pos, wr);
+        float w_scale = pc.wind_wandering;
+
+        // Yaw wandering: sweeps smoothly by +/- 20~28 degrees
+        float yaw_raw = 0.28 * sin(sim_time * 0.42 + s_cross * 0.18) +
+                        0.14 * sin(sim_time * 0.85 + 1.25) +
+                        0.08 * sin(sim_time * 1.60);
+        float theta_yaw = yaw_raw * w_scale;
+
+        // Pitch wandering: subtle vertical breathing +/- 4~8 degrees with gentle updraft bias (+0.03)
+        float pitch_raw = 0.08 * sin(sim_time * 0.65 + 0.70) +
+                          0.05 * cos(sim_time * 1.20 + s_cross * 0.12) + 0.03;
+        float theta_pitch = pitch_raw * w_scale;
+
+        // Exact unitary 3D rotation of wind vector:
+        vec3 wind_dir = normalize(wf * (cos(theta_yaw) * cos(theta_pitch)) +
+                                  wr * (sin(theta_yaw) * cos(theta_pitch)) +
+                                  wu * sin(theta_pitch));
 
         // Height attenuation: sheltered right at the rod/ceiling, fully exposed across the cloth body
         float drop = max(0.0, top_y - current_pos.y);
