@@ -56,6 +56,22 @@ namespace bud::physics {
 				rhi->destroy_buffer(world.gpu_lambdas);
 				world.gpu_lambdas.reset();
 			}
+			if (world.gpu_triangle_constraints.is_valid()) {
+				rhi->destroy_buffer(world.gpu_triangle_constraints);
+				world.gpu_triangle_constraints.reset();
+			}
+			if (world.gpu_triangle_lambdas.is_valid()) {
+				rhi->destroy_buffer(world.gpu_triangle_lambdas);
+				world.gpu_triangle_lambdas.reset();
+			}
+			if (world.gpu_bending_constraints.is_valid()) {
+				rhi->destroy_buffer(world.gpu_bending_constraints);
+				world.gpu_bending_constraints.reset();
+			}
+			if (world.gpu_bending_lambdas.is_valid()) {
+				rhi->destroy_buffer(world.gpu_bending_lambdas);
+				world.gpu_bending_lambdas.reset();
+			}
 			if (world.gpu_bindings.is_valid()) {
 				rhi->destroy_buffer(world.gpu_bindings);
 				world.gpu_bindings.reset();
@@ -533,6 +549,7 @@ namespace bud::physics {
 		std::vector<SimParticle> rest(world->particle_count);
 		std::vector<DistanceConstraint> constraints;
 		constraints.reserve(world->constraint_count);
+		std::vector<DistanceConstraint> raw_bending_constraints;
 		std::vector<ClothSkinBinding> bindings;
 		bindings.reserve(world->binding_count);
 
@@ -565,6 +582,7 @@ namespace bud::physics {
 
 					if (c.compliance >= 2.0e-3f) {
 						c.compliance = current_config.bend_compliance;
+						raw_bending_constraints.push_back(c);
 					} else if (len > 1e-5f) {
 						const float dy = std::abs(d.y / len);
 						if (dy > 0.82f) {
@@ -711,6 +729,170 @@ namespace bud::physics {
 			sorted_constraints.insert(sorted_constraints.end(), bucket.begin(), bucket.end());
 		}
 
+		// 2.1 Extract unique sim mesh triangles for Continuum CST membrane solver
+		struct TriKey {
+			uint32_t p0 = 0;
+			uint32_t p1 = 0;
+			uint32_t p2 = 0;
+			bool operator<(const TriKey& o) const {
+				if (p0 != o.p0)
+					return p0 < o.p0;
+				if (p1 != o.p1)
+					return p1 < o.p1;
+				return p2 < o.p2;
+			}
+		};
+		std::map<TriKey, TriangleConstraint> unique_tri_map;
+
+		for (const auto& b : bindings) {
+			const uint32_t t0 = b.sim_tri_idx[0];
+			const uint32_t t1 = b.sim_tri_idx[1];
+			const uint32_t t2 = b.sim_tri_idx[2];
+			if (t0 >= world->particle_count || t1 >= world->particle_count || t2 >= world->particle_count)
+				continue;
+			if (t0 == t1 || t1 == t2 || t2 == t0)
+				continue;
+
+			uint32_t s0 = t0;
+			uint32_t s1 = t1;
+			uint32_t s2 = t2;
+			if (s0 > s1)
+				std::swap(s0, s1);
+			if (s1 > s2)
+				std::swap(s1, s2);
+			if (s0 > s1)
+				std::swap(s0, s1);
+			TriKey key{ s0, s1, s2 };
+			if (unique_tri_map.find(key) != unique_tri_map.end())
+				continue;
+
+			const bud::math::vec3 x0(rest[t0].position_inv_mass);
+			const bud::math::vec3 x1(rest[t1].position_inv_mass);
+			const bud::math::vec3 x2(rest[t2].position_inv_mass);
+
+			const bud::math::vec3 e1 = x1 - x0;
+			const bud::math::vec3 e2 = x2 - x0;
+			bud::math::vec3 n = bud::math::cross(e1, e2);
+			const float n_len = bud::math::length(n);
+			if (n_len < 1e-7f)
+				continue;
+
+			n /= n_len;
+			const float rest_area = 0.5f * n_len;
+
+			// Align u with global vertical / warp direction (project (0, 1, 0) onto triangle plane)
+			const bud::math::vec3 up(0.0f, 1.0f, 0.0f);
+			bud::math::vec3 u = up - bud::math::dot(up, n) * n;
+			const float u_len = bud::math::length(u);
+			if (u_len > 1e-4f)
+				u /= u_len;
+			else
+				u = bud::math::normalize(e1);
+
+			const bud::math::vec3 v = bud::math::normalize(bud::math::cross(n, u));
+
+			// Material coordinates of x0, x1, x2 in 2D (u, v) plane:
+			const float x1_u = bud::math::dot(e1, u);
+			const float x1_v = bud::math::dot(e1, v);
+			const float x2_u = bud::math::dot(e2, u);
+			const float x2_v = bud::math::dot(e2, v);
+
+			const float det_dm = x1_u * x2_v - x2_u * x1_v;
+			if (std::abs(det_dm) < 1e-7f)
+				continue;
+
+			const float inv_det = 1.0f / det_dm;
+			const float d00 =  x2_v * inv_det;
+			const float d01 = -x2_u * inv_det;
+			const float d10 = -x1_v * inv_det;
+			const float d11 =  x1_u * inv_det;
+
+			TriangleConstraint tc{};
+			tc.p0 = t0;
+			tc.p1 = t1;
+			tc.p2 = t2;
+			tc.rest_area = rest_area;
+			tc.dm_inv = bud::math::vec4(d00, d01, d10, d11);
+			unique_tri_map[key] = tc;
+		}
+
+		std::vector<TriangleConstraint> triangle_constraints;
+		triangle_constraints.reserve(unique_tri_map.size());
+		for (const auto& kv : unique_tri_map) {
+			triangle_constraints.push_back(kv.second);
+		}
+		world->triangle_count = static_cast<uint32_t>(triangle_constraints.size());
+
+		// Graph coloring for triangles:
+		std::vector<std::vector<uint32_t>> used_tri_colors(world->particle_count);
+		std::vector<std::vector<TriangleConstraint>> tri_color_buckets;
+		for (const auto& tc : triangle_constraints) {
+			uint32_t chosen = 0;
+			for (;; ++chosen) {
+				const auto& u0 = used_tri_colors[tc.p0];
+				const auto& u1 = used_tri_colors[tc.p1];
+				const auto& u2 = used_tri_colors[tc.p2];
+				const bool c0 = std::find(u0.begin(), u0.end(), chosen) != u0.end();
+				const bool c1 = std::find(u1.begin(), u1.end(), chosen) != u1.end();
+				const bool c2 = std::find(u2.begin(), u2.end(), chosen) != u2.end();
+				if (!c0 && !c1 && !c2)
+					break;
+			}
+			if (chosen >= tri_color_buckets.size())
+				tri_color_buckets.emplace_back();
+			tri_color_buckets[chosen].push_back(tc);
+			used_tri_colors[tc.p0].push_back(chosen);
+			used_tri_colors[tc.p1].push_back(chosen);
+			used_tri_colors[tc.p2].push_back(chosen);
+		}
+
+		std::vector<TriangleConstraint> sorted_tri_constraints;
+		sorted_tri_constraints.reserve(triangle_constraints.size());
+		world->triangle_batches.clear();
+		for (const auto& bucket : tri_color_buckets) {
+			if (bucket.empty())
+				continue;
+			ConstraintBatch b;
+			b.offset = static_cast<uint32_t>(sorted_tri_constraints.size());
+			b.count = static_cast<uint32_t>(bucket.size());
+			world->triangle_batches.push_back(b);
+			sorted_tri_constraints.insert(sorted_tri_constraints.end(), bucket.begin(), bucket.end());
+		}
+
+		// 2.2 Graph coloring for bending constraints (used in Continuum mode)
+		std::vector<std::vector<uint32_t>> used_bend_colors(world->particle_count);
+		std::vector<std::vector<DistanceConstraint>> bend_color_buckets;
+		for (const auto& bc : raw_bending_constraints) {
+			uint32_t chosen = 0;
+			for (;; ++chosen) {
+				const auto& u1 = used_bend_colors[bc.p1];
+				const auto& u2 = used_bend_colors[bc.p2];
+				const bool c1 = std::find(u1.begin(), u1.end(), chosen) != u1.end();
+				const bool c2 = std::find(u2.begin(), u2.end(), chosen) != u2.end();
+				if (!c1 && !c2)
+					break;
+			}
+			if (chosen >= bend_color_buckets.size())
+				bend_color_buckets.emplace_back();
+			bend_color_buckets[chosen].push_back(bc);
+			used_bend_colors[bc.p1].push_back(chosen);
+			used_bend_colors[bc.p2].push_back(chosen);
+		}
+
+		std::vector<DistanceConstraint> sorted_bending_constraints;
+		sorted_bending_constraints.reserve(raw_bending_constraints.size());
+		world->bending_batches.clear();
+		for (const auto& bucket : bend_color_buckets) {
+			if (bucket.empty())
+				continue;
+			ConstraintBatch b;
+			b.offset = static_cast<uint32_t>(sorted_bending_constraints.size());
+			b.count = static_cast<uint32_t>(bucket.size());
+			world->bending_batches.push_back(b);
+			sorted_bending_constraints.insert(sorted_bending_constraints.end(), bucket.begin(), bucket.end());
+		}
+		world->bending_count = static_cast<uint32_t>(sorted_bending_constraints.size());
+
 		// 3. Select up to 4 pillar colliders near the cloth anchor points.
 		select_columns(*world);
 
@@ -822,6 +1004,16 @@ namespace bud::physics {
 		if (world->binding_count > 0) {
 			upload_buffer(stored_rhi, bindings, world->gpu_bindings);
 		}
+		if (world->triangle_count > 0) {
+			world->gpu_triangle_constraints = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->triangle_count) * sizeof(TriangleConstraint), bud::graphics::ResourceState::UnorderedAccess);
+			world->gpu_triangle_lambdas = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->triangle_count) * 4u * sizeof(float), bud::graphics::ResourceState::UnorderedAccess);
+			upload_buffer(stored_rhi, sorted_tri_constraints, world->gpu_triangle_constraints);
+		}
+		if (world->bending_count > 0) {
+			world->gpu_bending_constraints = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->bending_count) * sizeof(DistanceConstraint), bud::graphics::ResourceState::UnorderedAccess);
+			world->gpu_bending_lambdas = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->bending_count) * sizeof(float), bud::graphics::ResourceState::UnorderedAccess);
+			upload_buffer(stored_rhi, sorted_bending_constraints, world->gpu_bending_constraints);
+		}
 
 		// Spatial hash for self-collision: head table + per-particle next links.
 		// Table is a power of two (>= 4 entries per particle) so the shader can
@@ -833,8 +1025,8 @@ namespace bud::physics {
 		world->gpu_cell_heads = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(table) * sizeof(uint32_t), bud::graphics::ResourceState::UnorderedAccess);
 		world->gpu_particle_next = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->particle_count) * sizeof(uint32_t), bud::graphics::ResourceState::UnorderedAccess);
 
-		bud::print("[ClothSystem] Built SimWorld: {} particles, {} constraints in {} batches, {} bindings, {} columns",
-			world->particle_count, world->constraint_count, world->batches.size(), world->binding_count, world->column_count);
+		bud::print("[ClothSystem] Built SimWorld: {} particles, {} constraints in {} batches, {} triangles in {} batches, {} bindings, {} columns",
+			world->particle_count, world->constraint_count, world->batches.size(), world->triangle_count, world->triangle_batches.size(), world->binding_count, world->column_count);
 		return world;
 	}
 
@@ -971,7 +1163,71 @@ namespace bud::physics {
 			rhi->resource_barrier(cmd, world->gpu_particles, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
 
 			// 2b. Reset lambda accumulators, then one full Gauss-Seidel pass.
-			if (world->constraint_count > 0) {
+			const bool is_continuum = (config.cloth_config.solver_type == ClothSolverType::XPBD_Continuum &&
+			                           world->triangle_count > 0 &&
+			                           world->gpu_triangle_constraints.is_valid());
+
+			if (is_continuum) {
+				// Continuum CST Triangle Membrane Solver:
+				rhi->cmd_bind_pipeline(cmd, pipeline_solver);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 0, world->gpu_particles);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 1, world->gpu_triangle_constraints);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 2, world->gpu_triangle_lambdas);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 3, world->gpu_cell_heads);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 4, world->gpu_particle_next);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 5, world->gpu_rest_particles);
+
+				ClothPushConstantsSolver pc_solve{};
+				const uint32_t total_tri_lambdas = world->triangle_count * 4u;
+				pc_solve.counts = bud::math::uvec4(0u, total_tri_lambdas, world->particle_count, total_tri_lambdas);
+				pc_solve.flags = bud::math::uvec4(7u, 0u, 0u, 0u); // Mode 7: clear triangle lambdas
+				pc_solve.misc = bud::math::vec4(0.0f, sub_dt, 0.0f, 0.0f);
+				rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
+				rhi->cmd_dispatch(cmd, (total_tri_lambdas + 63u) / 64u, 1, 1);
+				rhi->resource_barrier(cmd, world->gpu_triangle_lambdas, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
+				rhi->resource_barrier(cmd, world->gpu_particles, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
+
+				for (const auto& batch : world->triangle_batches) {
+					if (batch.count == 0)
+						continue;
+					pc_solve.counts = bud::math::uvec4(batch.offset, batch.count, world->particle_count, world->triangle_count);
+					pc_solve.flags = bud::math::uvec4(6u, 0u, 0u, 0u); // Mode 6: Continuum CST membrane
+					pc_solve.box_extent[0] = bud::math::vec4(
+						config.cloth_config.warp_compliance,
+						config.cloth_config.weft_compliance,
+						config.cloth_config.shear_compliance,
+						0.0f);
+					pc_solve.misc = bud::math::vec4(0.0f, sub_dt, 0.0f, 0.0f);
+
+					rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
+					rhi->cmd_dispatch(cmd, (batch.count + 63u) / 64u, 1, 1);
+					rhi->resource_barrier(cmd, world->gpu_particles, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
+				}
+
+				// Curvature / bending pass using bending distance constraints
+				if (world->bending_count > 0 && world->gpu_bending_constraints.is_valid()) {
+					rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 1, world->gpu_bending_constraints);
+					rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 2, world->gpu_bending_lambdas);
+
+					pc_solve.counts = bud::math::uvec4(0u, world->bending_count, world->particle_count, world->bending_count);
+					pc_solve.flags = bud::math::uvec4(2u, 0u, 0u, 0u); // Mode 2: clear bending lambdas
+					rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
+					rhi->cmd_dispatch(cmd, (world->bending_count + 63u) / 64u, 1, 1);
+					rhi->resource_barrier(cmd, world->gpu_bending_lambdas, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
+					rhi->resource_barrier(cmd, world->gpu_particles, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
+
+					for (const auto& batch : world->bending_batches) {
+						if (batch.count == 0)
+							continue;
+						pc_solve.counts = bud::math::uvec4(batch.offset, batch.count, world->particle_count, world->bending_count);
+						pc_solve.flags = bud::math::uvec4(0u, capsule_on ? 1u : 0u, 0u, 0u); // Mode 0: distance constraint
+						rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
+						rhi->cmd_dispatch(cmd, (batch.count + 63u) / 64u, 1, 1);
+						rhi->resource_barrier(cmd, world->gpu_particles, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
+					}
+				}
+			} else if (world->constraint_count > 0) {
+				// Standard Mass-Spring distance constraints
 				rhi->cmd_bind_pipeline(cmd, pipeline_solver);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 0, world->gpu_particles);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 1, world->gpu_constraints);
@@ -1011,7 +1267,7 @@ namespace bud::physics {
 			}
 
 			// 2c. Collision every substep (scene rigid bodies + columns + ground + character capsule + camera sphere).
-			{
+			if (config.cloth_config.enable_scene_collision) {
 				rhi->cmd_bind_pipeline(cmd, pipeline_solver);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 0, world->gpu_particles);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 1, world->gpu_constraints);

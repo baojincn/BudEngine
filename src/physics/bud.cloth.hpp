@@ -46,20 +46,28 @@ namespace bud::physics {
 		uint32_t particle_count = 0;
 		uint32_t constraint_count = 0;
 		uint32_t binding_count = 0;
+		uint32_t triangle_count = 0;
+		uint32_t bending_count = 0;
 
-		std::vector<ConstraintBatch> batches;    // proper graph-coloring: no two constraints in a batch share a particle
-		BoxCollider columns[4]{};                // up to 4 slender pillar colliders selected at build time
+		std::vector<ConstraintBatch> batches;          // proper graph-coloring: no two distance constraints in a batch share a particle
+		std::vector<ConstraintBatch> triangle_batches; // Continuum CST triangle batches (conflict-free)
+		std::vector<ConstraintBatch> bending_batches;  // bending-only distance constraint batches
+		BoxCollider columns[4]{};                      // up to 4 slender pillar colliders selected at build time
 		uint32_t column_count = 0;
 
 		bud::graphics::BufferHandle gpu_particles;
-		bud::graphics::BufferHandle gpu_rest_particles; // xyz: rest pose, w: per-particle top_y (wind attenuation)
-		bud::graphics::BufferHandle gpu_constraints;    // global particle indices, sorted by color batch
-		bud::graphics::BufferHandle gpu_lambdas;        // per-constraint accumulated XPBD lambda
-		bud::graphics::BufferHandle gpu_bindings;       // global sim tri indices + global destination vertex index
-		bud::graphics::BufferHandle gpu_colliders;      // vetted scene boxes for cloth-vs-rigidbody collision
+		bud::graphics::BufferHandle gpu_rest_particles;       // xyz: rest pose, w: per-particle top_y (wind attenuation)
+		bud::graphics::BufferHandle gpu_constraints;          // global particle indices, sorted by color batch
+		bud::graphics::BufferHandle gpu_lambdas;              // per-constraint accumulated XPBD lambda
+		bud::graphics::BufferHandle gpu_triangle_constraints; // Continuum CST triangle constraints
+		bud::graphics::BufferHandle gpu_triangle_lambdas;     // per-triangle accumulated XPBD lambdas
+		bud::graphics::BufferHandle gpu_bending_constraints;  // bending-only distance constraints
+		bud::graphics::BufferHandle gpu_bending_lambdas;      // bending-only accumulated XPBD lambdas
+		bud::graphics::BufferHandle gpu_bindings;             // global sim tri indices + global destination vertex index
+		bud::graphics::BufferHandle gpu_colliders;            // vetted scene boxes for cloth-vs-rigidbody collision
 		uint32_t collider_count = 0;
-		bud::graphics::BufferHandle gpu_cell_heads;     // spatial hash table heads (self-collision)
-		bud::graphics::BufferHandle gpu_particle_next;  // per-particle hash linked list
+		bud::graphics::BufferHandle gpu_cell_heads;           // spatial hash table heads (self-collision)
+		bud::graphics::BufferHandle gpu_particle_next;        // per-particle hash linked list
 		uint32_t hash_table_size = 0;
 	};
 

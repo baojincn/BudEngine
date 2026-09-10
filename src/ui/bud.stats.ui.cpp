@@ -517,7 +517,7 @@ namespace bud::ui {
 						int solver_idx = static_cast<int>(current_cloth_config.solver_type);
 						const char* solver_names[] = {
 							"XPBD (Mass-Spring)",
-							"XPBD (Continuum) [Stub]",
+							"XPBD (Continuum)",
 							"Projective Dynamics [Stub]",
 							"Implicit FEM (PCG) [Stub]"
 						};
@@ -529,7 +529,8 @@ namespace bud::ui {
 						ImGui::PopItemWidth();
 						ImGui::PopID();				
 						
-						if (current_cloth_config.solver_type != bud::physics::ClothSolverType::XPBD_MassSpring) {
+						if (current_cloth_config.solver_type != bud::physics::ClothSolverType::XPBD_MassSpring &&
+						    current_cloth_config.solver_type != bud::physics::ClothSolverType::XPBD_Continuum) {
 							ImGui::SameLine();
 							ImGui::TextColored(color_neutral, "[Stub: Fallback XPBD]");
 						}

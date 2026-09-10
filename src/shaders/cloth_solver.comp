@@ -19,10 +19,10 @@ layout(std430, set = 0, binding = 0) buffer ParticleBuffer {
 };
 
 layout(std430, set = 0, binding = 1) readonly buffer ConstraintBuffer {
-    DistanceConstraint constraints[];
+    uvec4 raw_constraints[];
 };
 
-// Per-constraint accumulated XPBD lambda (cleared once per frame, mode 2)
+// Per-constraint accumulated XPBD lambda (cleared once per frame, mode 2 or 7)
 layout(std430, set = 0, binding = 2) buffer LambdaBuffer {
     float lambdas[];
 };
@@ -49,9 +49,9 @@ layout(std430, set = 0, binding = 5) readonly buffer RestParticleBuffer {
 
 layout(std430, push_constant) uniform PushConstants {
     uvec4 counts; // x: batch_offset, y: batch_count, z: particle_count, w: constraint_total
-    uvec4 flags;  // x: solve_collision_flag (0 = batch, 1 = collision, 2 = clear lambda), y: solve_capsule_flag
+    uvec4 flags;  // x: solve_collision_flag (0 = batch, 1 = collision, 2 = clear lambda, 6 = continuum, 7 = clear tri lambda), y: solve_capsule_flag
     vec4  box_center[4];             // [0].w = box_count
-    vec4  box_extent[4];
+    vec4  box_extent[4];             // Mode 6: [0].xyz = (warp_comp, weft_comp, shear_comp)
     vec4  capsule_bottom_radius;     // xyz: A, w: radius
     vec4  capsule_top_friction;      // xyz: B, w: friction mu_k
     vec4  capsule_velocity;          // xyz: character linear velocity, w: unused
@@ -80,6 +80,14 @@ void main() {
         return;
     }
 
+    // Mode 7: clear per-triangle lambda accumulators (batch_count = triangle_total * 4).
+    if (pc.flags.x == 7u) {
+        if (id >= pc.counts.w)
+            return;
+        lambdas[id] = 0.0;
+        return;
+    }
+
     // Mode 0: color-batch Gauss-Seidel constraint projection with true XPBD lambda
     // accumulation (stiffness is independent of the iteration count).
     if (pc.flags.x == 0u) {
@@ -87,24 +95,29 @@ void main() {
             return;
 
         uint ci = pc.counts.x + id;
-        DistanceConstraint c = constraints[ci];
-        float w1 = particles[c.p1].position_inv_mass.w;
-        float w2 = particles[c.p2].position_inv_mass.w;
+        uvec4 raw_c = raw_constraints[ci];
+        uint cp1 = raw_c.x;
+        uint cp2 = raw_c.y;
+        float rest_length = uintBitsToFloat(raw_c.z);
+        float compliance = uintBitsToFloat(raw_c.w);
+
+        float w1 = particles[cp1].position_inv_mass.w;
+        float w2 = particles[cp2].position_inv_mass.w;
         float w_sum = w1 + w2;
         if (w_sum <= 0.0)
             return;
 
-        vec3 p1 = particles[c.p1].position_inv_mass.xyz;
-        vec3 p2 = particles[c.p2].position_inv_mass.xyz;
+        vec3 p1 = particles[cp1].position_inv_mass.xyz;
+        vec3 p2 = particles[cp2].position_inv_mass.xyz;
         vec3 dir = p1 - p2;
         float cur_len = length(dir);
         if (cur_len < 1e-6)
             return;
 
         float safe_dt = clamp(pc.misc.y, 0.001, 0.0333);
-        float alpha_tilde = c.compliance / (safe_dt * safe_dt);
+        float alpha_tilde = compliance / (safe_dt * safe_dt);
         float lambda_total = lambdas[ci];
-        float C = cur_len - c.rest_length;
+        float C = cur_len - rest_length;
         float dlambda = (-C - alpha_tilde * lambda_total) / (w_sum + alpha_tilde);
         lambdas[ci] = lambda_total + dlambda;
 
@@ -124,9 +137,158 @@ void main() {
         // Within one color batch no other thread writes p1 or p2 (guaranteed by
         // the build-time graph coloring).
         if (w1 > 0.0)
-            particles[c.p1].position_inv_mass.xyz += corr_p1;
+            particles[cp1].position_inv_mass.xyz += corr_p1;
         if (w2 > 0.0)
-            particles[c.p2].position_inv_mass.xyz += corr_p2;
+            particles[cp2].position_inv_mass.xyz += corr_p2;
+        return;
+    }
+
+    // Mode 6: Continuum Constant Strain Triangle (CST) membrane projection
+    if (pc.flags.x == 6u) {
+        if (id >= pc.counts.y)
+            return;
+
+        uint ti = pc.counts.x + id;
+        uvec4 raw0 = raw_constraints[ti * 2u + 0u];
+        uvec4 raw1 = raw_constraints[ti * 2u + 1u];
+        uint p0 = raw0.x;
+        uint p1 = raw0.y;
+        uint p2 = raw0.z;
+        vec4 dm_inv = vec4(uintBitsToFloat(raw1.x), uintBitsToFloat(raw1.y), uintBitsToFloat(raw1.z), uintBitsToFloat(raw1.w));
+
+        float w0 = particles[p0].position_inv_mass.w;
+        float w1 = particles[p1].position_inv_mass.w;
+        float w2 = particles[p2].position_inv_mass.w;
+        float w_sum = w0 + w1 + w2;
+        if (w_sum <= 0.0)
+            return;
+
+        vec3 x0 = particles[p0].position_inv_mass.xyz;
+        vec3 x1 = particles[p1].position_inv_mass.xyz;
+        vec3 x2 = particles[p2].position_inv_mass.xyz;
+
+        vec3 orig_x0 = x0;
+        vec3 orig_x1 = x1;
+        vec3 orig_x2 = x2;
+
+        float safe_dt = clamp(pc.misc.y, 0.001, 0.0333);
+        float dt2 = safe_dt * safe_dt;
+
+        float alpha_warp  = pc.box_extent[0].x / dt2;
+        float alpha_weft  = pc.box_extent[0].y / dt2;
+        float alpha_shear = pc.box_extent[0].z / dt2;
+
+        uint l_base = ti * 4u;
+        float lam_warp  = lambdas[l_base + 0u];
+        float lam_weft  = lambdas[l_base + 1u];
+        float lam_shear = lambdas[l_base + 2u];
+
+        float d00 = dm_inv.x;
+        float d01 = dm_inv.y;
+        float d10 = dm_inv.z;
+        float d11 = dm_inv.w;
+
+        // Deformation gradient derivative coefficients:
+        // f1 = d00*(x1 - x0) + d10*(x2 - x0) = (-d00 - d10)*x0 + d00*x1 + d10*x2
+        // f2 = d01*(x1 - x0) + d11*(x2 - x0) = (-d01 - d11)*x0 + d01*x1 + d11*x2
+        float k01 = -d00 - d10;
+        float k11 =  d00;
+        float k21 =  d10;
+
+        float k02 = -d01 - d11;
+        float k12 =  d01;
+        float k22 =  d11;
+
+        // 1. Warp stretch constraint: C1 = |f1| - 1.0
+        vec3 e1 = x1 - x0;
+        vec3 e2 = x2 - x0;
+        vec3 f1 = d00 * e1 + d10 * e2;
+        float len_f1 = length(f1);
+        if (len_f1 > 1e-6) {
+            vec3 f1_hat = f1 / len_f1;
+            float c1 = len_f1 - 1.0;
+            float d1 = w0 * (k01 * k01) + w1 * (k11 * k11) + w2 * (k21 * k21);
+            float dlam1 = (-c1 - alpha_warp * lam_warp) / (d1 + alpha_warp);
+            lam_warp += dlam1;
+
+            vec3 disp = f1_hat * dlam1;
+            if (w0 > 0.0)
+                x0 += (w0 * k01) * disp;
+            if (w1 > 0.0)
+                x1 += (w1 * k11) * disp;
+            if (w2 > 0.0)
+                x2 += (w2 * k21) * disp;
+        }
+
+        // 2. Weft stretch constraint: C2 = |f2| - 1.0
+        e1 = x1 - x0;
+        e2 = x2 - x0;
+        vec3 f2 = d01 * e1 + d11 * e2;
+        float len_f2 = length(f2);
+        if (len_f2 > 1e-6) {
+            vec3 f2_hat = f2 / len_f2;
+            float c2 = len_f2 - 1.0;
+            float d2 = w0 * (k02 * k02) + w1 * (k12 * k12) + w2 * (k22 * k22);
+            float dlam2 = (-c2 - alpha_weft * lam_weft) / (d2 + alpha_weft);
+            lam_weft += dlam2;
+
+            vec3 disp = f2_hat * dlam2;
+            if (w0 > 0.0)
+                x0 += (w0 * k02) * disp;
+            if (w1 > 0.0)
+                x1 += (w1 * k12) * disp;
+            if (w2 > 0.0)
+                x2 += (w2 * k22) * disp;
+        }
+
+        // 3. Shear constraint: C3 = dot(f1, f2)
+        e1 = x1 - x0;
+        e2 = x2 - x0;
+        f1 = d00 * e1 + d10 * e2;
+        f2 = d01 * e1 + d11 * e2;
+        float c3 = dot(f1, f2);
+        vec3 g0 = k01 * f2 + k02 * f1;
+        vec3 g1 = k11 * f2 + k12 * f1;
+        vec3 g2 = k21 * f2 + k22 * f1;
+        float d3 = w0 * dot(g0, g0) + w1 * dot(g1, g1) + w2 * dot(g2, g2);
+        if (d3 > 1e-8) {
+            float dlam3 = (-c3 - alpha_shear * lam_shear) / (d3 + alpha_shear);
+            lam_shear += dlam3;
+
+            if (w0 > 0.0)
+                x0 += (w0 * dlam3) * g0;
+            if (w1 > 0.0)
+                x1 += (w1 * dlam3) * g1;
+            if (w2 > 0.0)
+                x2 += (w2 * dlam3) * g2;
+        }
+
+        lambdas[l_base + 0u] = lam_warp;
+        lambdas[l_base + 1u] = lam_weft;
+        lambdas[l_base + 2u] = lam_shear;
+
+        // Apply safety displacement limit (max 50cm per substep)
+        const float max_step = 0.50;
+        vec3 corr0 = x0 - orig_x0;
+        vec3 corr1 = x1 - orig_x1;
+        vec3 corr2 = x2 - orig_x2;
+
+        float l0 = length(corr0);
+        if (l0 > max_step)
+            corr0 *= (max_step / l0);
+        float l1 = length(corr1);
+        if (l1 > max_step)
+            corr1 *= (max_step / l1);
+        float l2 = length(corr2);
+        if (l2 > max_step)
+            corr2 *= (max_step / l2);
+
+        if (w0 > 0.0)
+            particles[p0].position_inv_mass.xyz = orig_x0 + corr0;
+        if (w1 > 0.0)
+            particles[p1].position_inv_mass.xyz = orig_x1 + corr1;
+        if (w2 > 0.0)
+            particles[p2].position_inv_mass.xyz = orig_x2 + corr2;
         return;
     }
 

@@ -24,6 +24,16 @@ namespace bud::physics {
 	};
 	static_assert(sizeof(DistanceConstraint) == 16, "DistanceConstraint must be 16 bytes aligned");
 
+	// 2.1 XPBD Continuum CST membrane triangle constraint (32 bytes aligned)
+	struct alignas(16) TriangleConstraint {
+		uint32_t p0 = 0;          // particle 0 index
+		uint32_t p1 = 0;          // particle 1 index
+		uint32_t p2 = 0;          // particle 2 index
+		float rest_area = 0.0f;   // un-deformed triangle area A0
+		bud::math::vec4 dm_inv{ 0.0f, 0.0f, 0.0f, 0.0f }; // x: d00, y: d01, z: d10, w: d11 (inverse material matrix)
+	};
+	static_assert(sizeof(TriangleConstraint) == 32, "TriangleConstraint must be 32 bytes aligned");
+
 	// 3. Dual-mesh barycentric skinning binding (32 bytes aligned)
 	struct alignas(16) ClothSkinBinding {
 		uint32_t sim_tri_idx[3] = { 0, 0, 0 }; // SimMesh triangle 3 particle indices
