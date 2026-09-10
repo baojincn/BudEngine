@@ -98,8 +98,8 @@ namespace bud::physics {
 		bool enable_scene_collision = true;
 		ClothPreset preset = ClothPreset::HeavyTapestry;
 		uint32_t solver_iterations = 8;
-		float damping = 0.08f;
-		float wind_strength = 0.35f;
+		float damping = 0.07f;
+		float wind_strength = 0.85f;
 		bud::math::vec3 wind_direction{ 1.0f, 0.0f, 0.3f };
 	};
 
@@ -107,23 +107,23 @@ namespace bud::physics {
 		cfg.preset = preset;
 		switch (preset) {
 		case ClothPreset::HeavyTapestry:
-			cfg.damping = 0.08f;
-			cfg.wind_strength = 0.35f;
+			cfg.damping = 0.07f;
+			cfg.wind_strength = 0.85f;
 			cfg.solver_iterations = 8;
 			break;
 		case ClothPreset::Silk:
-			cfg.damping = 0.02f;
-			cfg.wind_strength = 0.75f;
+			cfg.damping = 0.015f;
+			cfg.wind_strength = 1.40f;
 			cfg.solver_iterations = 6;
 			break;
 		case ClothPreset::CottonLinen:
-			cfg.damping = 0.06f;
-			cfg.wind_strength = 0.50f;
+			cfg.damping = 0.05f;
+			cfg.wind_strength = 1.00f;
 			cfg.solver_iterations = 8;
 			break;
 		case ClothPreset::HeavyDenim:
 			cfg.damping = 0.12f;
-			cfg.wind_strength = 0.25f;
+			cfg.wind_strength = 0.60f;
 			cfg.solver_iterations = 8;
 			break;
 		default:

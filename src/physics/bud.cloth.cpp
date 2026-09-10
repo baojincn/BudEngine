@@ -547,6 +547,94 @@ namespace bud::physics {
 			}
 		}
 
+		// 1.1 Reconstruct topological neighbor pairs (u, v) for every particle to enable
+		// zero-overhead dynamic 3D surface normal computation in cloth_integrate.comp.
+		struct ParticleNeighborInfo {
+			uint32_t neighbor_u = UINT32_MAX;
+			uint32_t neighbor_v = UINT32_MAX;
+			float max_area = -1.0f;
+		};
+		std::vector<ParticleNeighborInfo> particle_neighbors(world->particle_count);
+
+		for (const auto& b : bindings) {
+			const uint32_t t0 = b.sim_tri_idx[0];
+			const uint32_t t1 = b.sim_tri_idx[1];
+			const uint32_t t2 = b.sim_tri_idx[2];
+			if (t0 >= world->particle_count || t1 >= world->particle_count || t2 >= world->particle_count)
+				continue;
+			if (t0 == t1 || t1 == t2 || t2 == t0)
+				continue;
+
+			const bud::math::vec3 p0(rest[t0].position_inv_mass);
+			const bud::math::vec3 p1(rest[t1].position_inv_mass);
+			const bud::math::vec3 p2(rest[t2].position_inv_mass);
+
+			const bud::math::vec3 e1 = p1 - p0;
+			const bud::math::vec3 e2 = p2 - p0;
+			const bud::math::vec3 n = bud::math::cross(e1, e2);
+			const float tri_area = bud::math::length(n);
+			if (tri_area < 1e-6f)
+				continue;
+
+			// Cyclically consistent oriented neighbor pairs for each vertex:
+			// (p1 - p0) x (p2 - p0) == (p2 - p1) x (p0 - p1) == (p0 - p2) x (p1 - p2) == n
+			if (tri_area > particle_neighbors[t0].max_area) {
+				particle_neighbors[t0].max_area = tri_area;
+				particle_neighbors[t0].neighbor_u = t1;
+				particle_neighbors[t0].neighbor_v = t2;
+			}
+			if (tri_area > particle_neighbors[t1].max_area) {
+				particle_neighbors[t1].max_area = tri_area;
+				particle_neighbors[t1].neighbor_u = t2;
+				particle_neighbors[t1].neighbor_v = t0;
+			}
+			if (tri_area > particle_neighbors[t2].max_area) {
+				particle_neighbors[t2].max_area = tri_area;
+				particle_neighbors[t2].neighbor_u = t0;
+				particle_neighbors[t2].neighbor_v = t1;
+			}
+		}
+
+		// Fallback for any edge particle not touched by bindings: connect via distance constraints
+		for (const auto& c : constraints) {
+			if (c.p1 >= world->particle_count || c.p2 >= world->particle_count || c.p1 == c.p2)
+				continue;
+
+			if (particle_neighbors[c.p1].neighbor_u == UINT32_MAX)
+				particle_neighbors[c.p1].neighbor_u = c.p2;
+			else if (particle_neighbors[c.p1].neighbor_v == UINT32_MAX && particle_neighbors[c.p1].neighbor_u != c.p2)
+				particle_neighbors[c.p1].neighbor_v = c.p2;
+
+			if (particle_neighbors[c.p2].neighbor_u == UINT32_MAX)
+				particle_neighbors[c.p2].neighbor_u = c.p1;
+			else if (particle_neighbors[c.p2].neighbor_v == UINT32_MAX && particle_neighbors[c.p2].neighbor_u != c.p1)
+				particle_neighbors[c.p2].neighbor_v = c.p1;
+		}
+
+		// Pack into rest[i].prev_position (16 bytes per particle, previously unused):
+		// x: neighbor_u (bitcast float)
+		// y: neighbor_v (bitcast float)
+		// z: reference rest area
+		// w: 1.0f (valid topology flag)
+		for (uint32_t i = 0; i < world->particle_count; ++i) {
+			uint32_t nu = particle_neighbors[i].neighbor_u;
+			uint32_t nv = particle_neighbors[i].neighbor_v;
+			if (nu >= world->particle_count)
+				nu = i;
+			if (nv >= world->particle_count)
+				nv = (nu != i) ? nu : i;
+
+			float nu_f = 0.0f;
+			float nv_f = 0.0f;
+			std::memcpy(&nu_f, &nu, sizeof(float));
+			std::memcpy(&nv_f, &nv, sizeof(float));
+
+			rest[i].prev_position.x = nu_f;
+			rest[i].prev_position.y = nv_f;
+			rest[i].prev_position.z = std::max(particle_neighbors[i].max_area, 0.001f);
+			rest[i].prev_position.w = (nu != i && nv != i && nu != nv) ? 1.0f : 0.0f;
+		}
+
 		// 2. Proper greedy graph coloring: per-particle set of used colors guarantees
 		// that no two constraints inside one batch touch the same particle, so a batch
 		// dispatch has zero write conflicts (true Gauss-Seidel).
