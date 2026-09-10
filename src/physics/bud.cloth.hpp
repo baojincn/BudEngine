@@ -93,6 +93,10 @@ namespace bud::physics {
 		// radius = 0 disables it. Thread-safe.
 		void set_camera_sphere(const bud::math::vec3& center, float radius);
 
+		// Update simulation configuration (preset, compliances, damping, wind). Thread-safe.
+		void set_config(const ClothConfig& config);
+		ClothConfig get_config() const;
+
 		// Render-thread: step XPBD simulation and skin render vertices into mega_vertex_buffer.
 		void simulate_and_skin(bud::graphics::RHI* rhi, bud::graphics::CommandHandle cmd,
 			bud::graphics::BufferHandle mega_vertex_buffer,
@@ -114,6 +118,7 @@ namespace bud::physics {
 		};
 		std::vector<RetiredWorld> retired_worlds;
 		bool world_dirty = false;
+		ClothConfig current_config{};
 
 		CapsuleCollider current_capsule{};
 		bool capsule_enabled = false;

@@ -869,6 +869,8 @@ namespace bud::engine {
 				auto render_cfg = renderer->get_config();
 				render_cfg.cloth_config = cfg;
 				renderer->set_config(render_cfg);
+				if (renderer && renderer->get_cloth_system())
+					renderer->get_cloth_system()->set_config(cfg);
 			};
 			auto current_cloth_config = renderer->get_config().cloth_config;
 

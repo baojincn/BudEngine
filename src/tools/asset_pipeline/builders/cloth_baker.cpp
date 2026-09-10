@@ -17,8 +17,10 @@ constexpr float kPositionWeldThreshold = 0.001f; // 1mm spatial weld threshold
 constexpr float kPositionWeldGridCell = 0.001f;
 constexpr float kPinningTopFraction = 0.15f;     // Top 15% is pinning transition
 constexpr float kAbsolutePinMargin = 0.05f;     // Top 5% is absolute fixed pin
-constexpr float kStructuralCompliance = 1e-4f;
-constexpr float kBendingCompliance = 5e-3f;
+constexpr float kWarpCompliance = 1e-5f;
+constexpr float kWeftCompliance = 2e-5f;
+constexpr float kShearCompliance = 6e-4f;
+constexpr float kBendingCompliance = 2.5e-3f;
 constexpr float kLod1DecimateRatio = 0.40f;      // 40% triangles for LOD1
 constexpr float kLod1MaxError = 0.08f;           // 8cm max error for LOD1
 
@@ -186,11 +188,20 @@ GeneratedSimMesh build_sim_mesh(const std::vector<bud::math::vec3>& positions, c
         if (len < 1e-6f)
             continue;
 
+        bud::math::vec3 dir = (positions[p2] - positions[p1]) / len;
+        float dy = std::abs(dir.y);
+
         bud::physics::DistanceConstraint c;
         c.p1 = p1;
         c.p2 = p2;
         c.rest_length = len;
-        c.compliance = kStructuralCompliance;
+        if (dy > 0.82f)
+            c.compliance = kWarpCompliance;
+        else if (dy < 0.28f)
+            c.compliance = kWeftCompliance;
+        else
+            c.compliance = kShearCompliance;
+
         mesh.constraints.push_back(c);
     }
 

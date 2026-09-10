@@ -196,6 +196,7 @@ namespace bud::physics {
 		stored_rhi = rhi;
 		stored_asset_manager = asset_manager;
 		stored_gpu_scene = gpu_scene;
+		apply_cloth_preset(current_config, ClothPreset::HeavyTapestry);
 		load_pipelines();
 	}
 
@@ -387,6 +388,23 @@ namespace bud::physics {
 		world_dirty = true; // column selection happens at world build time
 	}
 
+	void ClothSystem::set_config(const ClothConfig& config) {
+		std::lock_guard lock(state_mutex);
+		if (current_config.preset != config.preset ||
+			current_config.warp_compliance != config.warp_compliance ||
+			current_config.weft_compliance != config.weft_compliance ||
+			current_config.shear_compliance != config.shear_compliance ||
+			current_config.bend_compliance != config.bend_compliance) {
+			world_dirty = true;
+		}
+		current_config = config;
+	}
+
+	ClothConfig ClothSystem::get_config() const {
+		std::lock_guard lock(const_cast<std::mutex&>(state_mutex));
+		return current_config;
+	}
+
 	void ClothSystem::retire_world(std::shared_ptr<ClothSimWorld> world, uint64_t current_frame) {
 		if (!world)
 			return;
@@ -536,6 +554,28 @@ namespace bud::physics {
 			for (auto c : inst.constraints) {
 				c.p1 += inst_base;
 				c.p2 += inst_base;
+
+				// Classify constraint into Warp, Weft, Bias/Shear, and Bending:
+				if (c.p1 < world->particle_count && c.p2 < world->particle_count) {
+					const bud::math::vec3 p1(rest[c.p1].position_inv_mass);
+					const bud::math::vec3 p2(rest[c.p2].position_inv_mass);
+					const bud::math::vec3 d = p2 - p1;
+					const float len = bud::math::length(d);
+
+					if (c.compliance >= 2.0e-3f) {
+						c.compliance = current_config.bend_compliance;
+					} else if (len > 1e-5f) {
+						const float dy = std::abs(d.y / len);
+						if (dy > 0.82f) {
+							c.compliance = current_config.warp_compliance;
+						} else if (dy < 0.28f) {
+							c.compliance = current_config.weft_compliance;
+						} else {
+							c.compliance = current_config.shear_compliance;
+						}
+					}
+				}
+
 				constraints.push_back(c);
 			}
 			for (auto b : inst.bindings) {

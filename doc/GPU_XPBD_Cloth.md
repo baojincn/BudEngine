@@ -333,22 +333,26 @@ $$
 \mathbf{a}_N = c_N (\mathbf{v}_{\text{rel}} \cdot \mathbf{n}) |\mathbf{v}_{\text{rel}} \cdot \mathbf{n}| \mathbf{n}
 $$
 
-当织物被风吹鼓起并发生倾斜时，法向量 $\mathbf{n}$ 朝向上方旋转，此时法向力 $\mathbf{a}_N$ 的垂直分量即为**迎风空气动力学升力**（Aerodynamic Lift），托起织物漂浮在空中：
+**薄翼环量气动升力**（Thin-Airfoil Circulation Lift）：气流绕过倾斜柔性薄板表面产生低压抽吸区，升力垂直于相对风速并指向吸力面（低压侧），直接托举布料克服重力向上飞扬：
 
 $$
-\mathbf{a}_{\text{lift}} = \mathbf{a}_N - (\mathbf{a}_N \cdot \hat{\mathbf{v}}_{\text{rel}}) \hat{\mathbf{v}}_{\text{rel}}
+\hat{\mathbf{l}}_{\text{axis}} = \frac{\hat{\mathbf{v}}_{\text{rel}} \times \mathbf{n}}{\|\hat{\mathbf{v}}_{\text{rel}} \times \mathbf{n}\|}, \quad \hat{\mathbf{l}} = \hat{\mathbf{l}}_{\text{axis}} \times \hat{\mathbf{v}}_{\text{rel}}
 $$
 
-织物表面伴随极微弱的切向流体粘性剪切摩擦（Skin Friction Shear Drag，$c_T \ll c_N$）：
+$$
+\mathbf{a}_{\text{lift}} = c_L \|\mathbf{v}_{\text{rel}}\|^2 \cdot \frac{|v_n| \|\mathbf{v}_t\|}{\|\mathbf{v}_{\text{rel}}\|^2} \cdot \text{sgn}(v_n) \hat{\mathbf{l}}
+$$
+
+织物表面伴随切向流体粘性剪切摩擦（Skin Friction Shear Drag）与低速空气缓冲阻尼（Air Cushion Damping）：
 
 $$
-\mathbf{a}_T = c_T \|\mathbf{v}_t\| \mathbf{v}_t
+\mathbf{a}_T = c_T \|\mathbf{v}_t\| \mathbf{v}_t, \quad \mathbf{a}_{\text{cushion}} = c_{\text{air}} \mathbf{v}_{\text{rel}}
 $$
 
 总空气动力学加速度与严格 Verlet 显式位置预测公式：
 
 $$
-\mathbf{a}_{\text{total}} = \mathbf{g} + \mathbf{a}_N + \mathbf{a}_T + c_{\text{air}} \mathbf{v}_{\text{rel}}
+\mathbf{a}_{\text{total}} = \mathbf{g} + \mathbf{a}_N + \mathbf{a}_{\text{lift}} + \mathbf{a}_T + \mathbf{a}_{\text{cushion}}
 $$
 
 $$
@@ -375,6 +379,37 @@ $$
 1. **宏观大气大涡**（$\lambda_1 \approx 3.5\,\text{m}, \omega_1 = 1.8\,\text{rad/s}$）：驱动全帘幕的宏观卷曲与迎风大浪；
 2. **中尺度卷曲涡**（$\lambda_2 \approx 1.4\,\text{m}, \omega_2 = 3.6\,\text{rad/s}$）：在织物表面产生对角斜向行进波浪；
 3. **自由下摆颤振波**（$\lambda_3 \approx 0.45\,\text{m}, \omega_3 = 7.2\,\text{rad/s}$）：受开尔文-亥姆霍兹不稳定性与边缘脱落涡驱动，沿悬空下落高度以 $(drop / H)^2$ 二次放大，在帘幕底边产生逼真自然的高频褶皱与颤振（Edge Flutter）。
+
+---
+
+### 2.10 织物正交经纬各向异性与 Trellis 剪切垂褶本构（Anisotropic Woven XPBD Model）
+
+真实梭织物（Woven Fabrics）由两组正交纱线经纬交织而成，其力学响应呈现强烈的**经向（Warp）、纬向（Weft）强抗拉**与**斜向 45°（Bias / Trellis Shear）低抗剪**的各向异性本构：
+
+1. **经纬向不可伸长性（Warp & Weft Inextensibility）**：
+   纱线纤维本身承受轴向拉伸，抵抗重力承重，顺应度极低：
+   $$
+   \alpha_{\text{warp}} \approx 10^{-6} \sim 10^{-5}\,\text{m/N}, \quad \alpha_{\text{weft}} \approx 2 \times 10^{-5}\,\text{m/N}
+   $$
+   彻底消除传统各向同性弹性网格下布料在重力下拉长变薄的“非物理橡胶感”。
+
+2. **斜向 Trellis 剪切与自然圆锥形垂褶（Conical Drape Flutes / Pleats）**：
+   沿 45° 对角线拉伸时，矩形网孔在交叉点发生相对旋转剪切，仅受纤维间微弱摩擦与扭转阻碍：
+   $$
+   \alpha_{\text{shear}} \approx 50 \sim 150 \times \alpha_{\text{warp}} \approx 6 \times 10^{-4} \sim 2.5 \times 10^{-3}\,\text{m/N}
+   $$
+   在重力拉伸经纱时，泊松效应与对角剪切自由变形促使 2D 流形自发发生面外屈曲（Out-of-Plane Buckling），自然形成明暗起伏、层次丰富的圆锥形纵向折褶（Drapes）。
+
+3. **几何朝向各向异性投影分类准则**：
+   在初始静止位形下，根据约束边缘向量 $\hat{\mathbf{e}}_0 = (\mathbf{p}_2 - \mathbf{p}_1) / L_0$ 的垂直投影分量 $|\hat{e}_{0y}|$ 分类：
+   $$
+   \alpha(c) = \begin{cases}
+   \alpha_{\text{bend}}, & c \text{ 为跨面弯曲约束} \\
+   \alpha_{\text{warp}}, & |\hat{e}_{0y}| > 0.82 \quad (\text{经向，夹角} < 35^\circ) \\
+   \alpha_{\text{weft}}, & |\hat{e}_{0y}| < 0.28 \quad (\text{纬向，夹角} < 16^\circ) \\
+   \alpha_{\text{shear}}, & 0.28 \le |\hat{e}_{0y}| \le 0.82 \quad (\text{斜向剪切，Trellis})
+   \end{cases}
+   $$
 
 ---
 

@@ -84,9 +84,9 @@ void main() {
         float wind_dir_len   = length(wind_direction);
         vec3  wind_dir       = (wind_dir_len > 1e-4) ? (wind_direction / wind_dir_len) : vec3(1.0, 0.0, 0.0);
 
-        // Height attenuation: sheltered near the ceiling/rod, freer towards the bottom hem
+        // Height attenuation: sheltered right at the rod/ceiling, fully exposed across the cloth body
         float drop = max(0.0, top_y - current_pos.y);
-        float height_factor = clamp(drop * 0.40, 0.05, 1.0);
+        float height_factor = clamp(drop * 2.50, 0.15, 1.0);
 
         // Atmospheric gust envelope: multi-octave non-linear surge
         float g1 = sin(sim_time * 0.50 + current_pos.x * 0.12 + current_pos.z * 0.08);
@@ -94,7 +94,12 @@ void main() {
         float g3 = sin(sim_time * 1.65 + current_pos.x * 0.22);
         float gust_raw = clamp(0.32 + 0.38 * g1 + 0.20 * g2 + 0.10 * g3, 0.0, 1.0);
         float gust = gust_raw * gust_raw * (3.0 - 2.0 * gust_raw);
-        float base_speed = pc.wind_strength * (0.30 + 0.70 * gust);
+
+        // Standard wind speed scaling:
+        // wind_strength = 1.0 corresponds to a nominal brisk breeze (~3.2 m/s).
+        // At wind_strength = 1.0, speed oscillates naturally between 2.0 m/s and 3.5 m/s.
+        const float kWindVelocityScale = 3.20;
+        float base_speed = pc.wind_strength * kWindVelocityScale * (0.60 + 0.40 * gust);
 
         // Incompressible 3D Analytical Curl Turbulence:
         // Superposition of divergence-free wave modes: u_k = (k_k x A_k) * cos(k_k . p + omega_k * t)
@@ -111,41 +116,61 @@ void main() {
         vec3 curl2 = cross(k2, a2) * cos(dot(k2, current_pos) + sim_time * 3.60);
 
         // Mode 3: High-frequency micro-flutter wave (wavelength ~0.45m, frequency ~7.2 rad/s)
-        // Amplified near the free bottom hem by quadratic drop factor (drop * 0.5)^2
+        // Amplified near the free bottom hem by quadratic drop factor
         vec3 k3 = vec3(1.40, -0.80, 1.20);
         vec3 a3 = vec3(0.10, 0.25, 0.20);
-        float hem_flutter = clamp(drop * drop * 0.28, 0.0, 1.8);
+        float hem_flutter = clamp(drop * drop * 0.35, 0.0, 2.0);
         vec3 curl3 = cross(k3, a3) * cos(dot(k3, current_pos) + sim_time * 7.20) * hem_flutter;
 
-        vec3 turb = (curl1 * 1.20 + curl2 * 0.85 + curl3 * 0.55) * pc.wind_strength;
+        vec3 turb = (curl1 * 0.85 + curl2 * 0.60 + curl3 * 0.40) * pc.wind_strength;
         v_wind = (wind_dir * base_speed + turb) * height_factor;
     }
 
-    // 4. Thin-shell aerodynamics: Normal Pressure Form Drag + Dynamic Lift + Tangential Skin Friction
+    // 4. Thin-shell aerodynamics: Normal Pressure Drag + Aerodynamic Lift + Tangential Skin Friction
     vec3 v_rel = v_wind - velocity;
     float v_rel_len = length(v_rel);
 
     vec3 aero_accel = vec3(0.0);
     if (v_rel_len > 1e-4) {
+        vec3 v_rel_dir = v_rel / v_rel_len;
         float vn = dot(v_rel, normal);
         vec3 vt = v_rel - vn * normal;
         float vt_len = length(vt);
 
-        // Dynamic pressure coefficients:
-        // Form drag pushes perpendicular to the fabric face along normal.
-        // Tilting normal during billowing naturally creates aerodynamic lift.
-        const float cn = 1.30;   // normal pressure / form drag coefficient
-        const float ct = 0.06;   // tangential skin friction shear coefficient
-        const float cair = 0.15; // low-speed ambient air damping
+        // Dynamic aerodynamic acceleration coefficients:
+        // In SI units: a = 0.5 * rho * (A / m) * C
+        // For medium fabric (sigma = m/A ~ 0.15 kg/m^2): 0.5 * rho * (A/m) ~ 4.1 m^-1
+        // Form drag Cn ~ 1.2 - 1.8; Thin-foil lift Cl ~ 0.8 - 1.4
+        const float cn   = 4.20;  // normal pressure form drag
+        const float cl   = 3.20;  // aerodynamic thin-membrane circulation lift
+        const float ct   = 0.10;  // tangential skin friction shear
+        const float cair = 0.25;  // ambient low-speed air resistance damping
 
+        // (1) Normal form drag: acts perpendicular to the cloth surface
         vec3 a_normal = normal * (cn * vn * abs(vn));
+
+        // (2) Aerodynamic lift: perpendicular to relative wind, directed towards suction side
+        // Cross product produces rotation axis normal to (v_rel, n); second cross gives lift direction in plane
+        vec3 lift_axis = cross(v_rel_dir, normal);
+        float lift_axis_len = length(lift_axis);
+        vec3 a_lift = vec3(0.0);
+        if (lift_axis_len > 1e-4) {
+            vec3 lift_dir = cross(lift_axis / lift_axis_len, v_rel_dir);
+            // Thin-airfoil lift coefficient C_L ~ sin(2 * alpha) = 2 * sin(alpha) * cos(alpha)
+            float angle_factor = (abs(vn) * vt_len) / (v_rel_len * v_rel_len + 1e-6);
+            a_lift = lift_dir * (cl * v_rel_len * v_rel_len * angle_factor * sign(vn));
+        }
+
+        // (3) Tangential viscous skin friction
         vec3 a_tangent = (vt_len > 1e-4) ? (vt * (ct * vt_len)) : vec3(0.0);
+
+        // (4) Ambient air cushion resistance
         vec3 a_cushion = v_rel * cair;
 
-        aero_accel = a_normal + a_tangent + a_cushion;
+        aero_accel = a_normal + a_lift + a_tangent + a_cushion;
 
-        // Bounded acceleration safety clamp
-        const float max_aero = 40.0;
+        // Bounded acceleration safety clamp (allow up to 65 m/s^2 for dynamic gusts)
+        const float max_aero = 65.0;
         float a_len = length(aero_accel);
         if (a_len > max_aero)
             aero_accel *= (max_aero / a_len);

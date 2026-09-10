@@ -101,6 +101,10 @@ namespace bud::physics {
 		float damping = 0.07f;
 		float wind_strength = 0.85f;
 		bud::math::vec3 wind_direction{ 1.0f, 0.0f, 0.3f };
+		float warp_compliance = 1e-5f;   // 经向抗拉顺应度 (几乎不可伸长)
+		float weft_compliance = 2e-5f;   // 纬向抗拉顺应度
+		float shear_compliance = 6e-4f;  // 斜向剪切顺应度 (Trellis 效应产生自然折褶)
+		float bend_compliance = 2.5e-3f; // 抗弯顺应度
 	};
 
 	inline void apply_cloth_preset(ClothConfig& cfg, ClothPreset preset) {
@@ -110,21 +114,37 @@ namespace bud::physics {
 			cfg.damping = 0.07f;
 			cfg.wind_strength = 0.85f;
 			cfg.solver_iterations = 8;
+			cfg.warp_compliance = 1e-5f;
+			cfg.weft_compliance = 2e-5f;
+			cfg.shear_compliance = 6e-4f;
+			cfg.bend_compliance = 2.5e-3f;
 			break;
 		case ClothPreset::Silk:
 			cfg.damping = 0.015f;
 			cfg.wind_strength = 1.40f;
 			cfg.solver_iterations = 6;
+			cfg.warp_compliance = 2e-6f;
+			cfg.weft_compliance = 5e-6f;
+			cfg.shear_compliance = 2.5e-3f;
+			cfg.bend_compliance = 1.0e-2f;
 			break;
 		case ClothPreset::CottonLinen:
 			cfg.damping = 0.05f;
 			cfg.wind_strength = 1.00f;
 			cfg.solver_iterations = 8;
+			cfg.warp_compliance = 1e-5f;
+			cfg.weft_compliance = 2e-5f;
+			cfg.shear_compliance = 1.2e-3f;
+			cfg.bend_compliance = 4.0e-3f;
 			break;
 		case ClothPreset::HeavyDenim:
 			cfg.damping = 0.12f;
 			cfg.wind_strength = 0.60f;
 			cfg.solver_iterations = 8;
+			cfg.warp_compliance = 5e-6f;
+			cfg.weft_compliance = 1e-5f;
+			cfg.shear_compliance = 2.0e-4f;
+			cfg.bend_compliance = 1.0e-3f;
 			break;
 		default:
 			break;
