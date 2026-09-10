@@ -591,8 +591,7 @@ namespace bud::ui {
 						ImGui::PopItemWidth();
 						ImGui::PopID();
 
-						ImGui::SameLine();
-						ImGui::TextColored(color_neutral, " | Wander: %0.2f", current_cloth_config.wind_wandering);
+						ImGui::TextColored(color_neutral, "Wander: %0.2f", current_cloth_config.wind_wandering);
 						ImGui::SameLine();
 						ImGui::PushID("cloth_wander_slider");
 						ImGui::PushItemWidth(100.0f);
@@ -600,6 +599,20 @@ namespace bud::ui {
 						if (ImGui::SliderFloat("##cloth_wander", &tmp_wander, 0.0f, 1.0f, "%0.2f")) {
 							auto cfg = current_cloth_config;
 							cfg.wind_wandering = tmp_wander;
+							set_cloth_config(cfg);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Shadow: %0.2f", current_cloth_config.wind_shadow_intensity);
+						ImGui::SameLine();
+						ImGui::PushID("cloth_shadow_slider");
+						ImGui::PushItemWidth(100.0f);
+						float tmp_shadow = current_cloth_config.wind_shadow_intensity;
+						if (ImGui::SliderFloat("##cloth_shadow", &tmp_shadow, 0.0f, 1.0f, "%0.2f")) {
+							auto cfg = current_cloth_config;
+							cfg.wind_shadow_intensity = tmp_shadow;
 							set_cloth_config(cfg);
 						}
 						ImGui::PopItemWidth();

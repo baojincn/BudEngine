@@ -524,6 +524,47 @@ $$
 
 ---
 
+### 2.14 建筑物立柱风影回流遮蔽与尾流空腔动力学（Architectural Wind Shadowing & Wake Cavity）
+
+真实室内或半室外走廊场景（如 Sponza 中庭建筑群）中，高大立柱和刚体建筑构件会强烈阻断来流风，在其背风面（Downwind）形成低速回流“风影空腔”（Wake Cavity / Recirculation Zone）。布料靠近立柱背风侧的局部区域应受到显著的风速衰减与遮蔽：
+
+1. **立柱背风流向坐标与正交侧向距**：
+   对于场景中被提取的纤细立柱 $b$（中心位置 $\mathbf{C}_b$，截面特征半径 $R_b$），以及粒子瞬时空间坐标 $\mathbf{p}$，计算相对于立柱中心的位移矢量 $\Delta \mathbf{x} = \mathbf{p} - \mathbf{C}_b$：
+   - 沿瞬时动态风向 $\hat{\mathbf{w}}_{\text{dir}}$ 的背风纵向流向距离：
+     $$
+     s = \Delta \mathbf{x} \cdot \hat{\mathbf{w}}_{\text{dir}}
+     $$
+   - 垂直于风向轴线的正交侧向距离：
+     $$
+     \mathbf{d}_{\perp} = \Delta \mathbf{x} - s \hat{\mathbf{w}}_{\text{dir}}, \quad d_{\perp} = \|\mathbf{d}_{\perp}\|
+     $$
+
+2. **自相似剪切尾流扩散半径与空腔衰减函数**：
+   流体绕圆柱分离后，尾流边界层随流动下游距离 $s$ 发生线性湍流扩散：
+   $$
+   R_{\text{wake}}(s) = R_b + 0.12 s
+   $$
+   当粒子处于立柱下游背风区（$s > 0$ 且 $s < 4.0\,\text{m}$，侧向距 $d_\perp < R_{\text{wake}}$）时，构建侧向高斯状边界层衰减与纵向流向复苏函数：
+   $$
+   f_{\text{lateral}} = \text{smoothstep}\left(0.0, 1.0, \frac{d_{\perp}}{R_{\text{wake}}}\right), \quad f_{\text{longitudinal}} = \text{smoothstep}(0.5, 3.5, s)
+   $$
+   $$
+   k_{\text{shadow}} = \text{clamp}(1.0 - (f_{\text{lateral}} + f_{\text{longitudinal}}), 0.0, 1.0)
+   $$
+
+3. **多立柱风影遮蔽极小值合成**：
+   结合用户风影强度配置参数 $\beta_{\text{shadow}} \in [0, 1]$，单立柱风速折减系数为：
+   $$
+   f_{\text{occlusion}, b} = 1.0 - \beta_{\text{shadow}} \cdot 0.85 \cdot k_{\text{shadow}, b}
+   $$
+   全场景风速向量综合衰减为：
+   $$
+   f_{\text{occlusion}} = \min_{b} f_{\text{occlusion}, b}, \quad \mathbf{v}_{\text{wind}} \leftarrow \mathbf{v}_{\text{wind}} \cdot f_{\text{occlusion}}
+   $$
+   在立柱正后方背风死区，风速可平滑衰减达 85%，呈现帘幕贴柱下垂的安详静止状态；而探出背风空腔的侧边与底边则立即迎风起舞，形成极富视觉反差与物理深度的流动动态。
+
+---
+
 ## 3. C++ 内存布局与对齐规范 (std430)
 
 位于 [src/physics/bud.cloth.types.hpp](file:///d:/PersonalProjects/BudEngine/src/physics/bud.cloth.types.hpp)，全部结构体严格遵循 GPU std430 内存对齐，并使用 `static_assert` 强校验：
@@ -570,16 +611,21 @@ namespace bud::physics {
     };
     static_assert(sizeof(CapsuleCollider) == 48, "CapsuleCollider must be 48 bytes aligned");
 
-    // 5. 外力预测阶段 PushConstants (48 字节对齐)
+    // 5. 外力预测阶段 PushConstants (128 字节对齐)
     struct ClothPushConstantsIntegrate {
         bud::math::vec4 gravity_dt{ 0.0f, -9.81f, 0.0f, 1.0f / 60.0f };
         bud::math::vec4 wind_time{ 1.0f, 0.0f, 0.3f, 0.0f };
         uint32_t particle_count = 0;
         float damping = 0.08f;
         float wind_strength = 0.25f;
-        float pad0 = 0.0f;
+        float wind_wandering = 0.35f;
+        float wind_shadow_intensity = 0.80f;
+        float pad1 = 0.0f;
+        float pad2 = 0.0f;
+        float pad3 = 0.0f;
+        bud::math::vec4 column_data[4]{}; // xyz: center, w: radius (<= 0 = inactive)
     };
-    static_assert(sizeof(ClothPushConstantsIntegrate) == 48, "ClothPushConstantsIntegrate must be 48 bytes");
+    static_assert(sizeof(ClothPushConstantsIntegrate) == 128, "ClothPushConstantsIntegrate must be 128 bytes");
 
     // 6. 约束与多源碰撞求解阶段 PushConstants (240 字节严格对齐)
     struct ClothPushConstantsSolver {

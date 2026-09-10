@@ -43,7 +43,7 @@ namespace bud::physics {
 	};
 	static_assert(sizeof(CapsuleCollider) == 48, "CapsuleCollider must be 48 bytes aligned");
 
-	// Push constants for cloth_integrate.comp (strictly 48 bytes)
+	// Push constants for cloth_integrate.comp (strictly 128 bytes)
 	struct ClothPushConstantsIntegrate {
 		bud::math::vec4 gravity_dt{ 0.0f, -9.81f, 0.0f, 1.0f / 60.0f }; // xyz: gravity, w: dt
 		bud::math::vec4 wind_time{ 1.0f, 0.0f, 0.3f, 0.0f };            // xyz: wind_direction, w: time
@@ -51,8 +51,13 @@ namespace bud::physics {
 		float damping = 0.08f;
 		float wind_strength = 0.25f;
 		float wind_wandering = 0.35f;
+		float wind_shadow_intensity = 0.80f;
+		float pad1 = 0.0f;
+		float pad2 = 0.0f;
+		float pad3 = 0.0f;
+		bud::math::vec4 column_data[4]{};                                // xyz: center, w: radius (<=0 = inactive)
 	};
-	static_assert(sizeof(ClothPushConstantsIntegrate) == 48, "ClothPushConstantsIntegrate must be 48 bytes");
+	static_assert(sizeof(ClothPushConstantsIntegrate) == 128, "ClothPushConstantsIntegrate must be 128 bytes");
 
 	struct BoxCollider {
 		bud::math::vec3 center{ 0.0f };
@@ -107,6 +112,7 @@ namespace bud::physics {
 		float bend_compliance = 2.5e-3f; // 抗弯顺应度
 		float self_friction = 0.35f;     // 自碰撞折叠摩擦力系数 (静摩擦 mu_s = 1.25 * fric, 动摩擦 mu_k = 0.85 * fric)
 		float wind_wandering = 0.35f;    // 自然风向动态游弋幅度 (0.0=固定主轴, 1.0=大范围游弋)
+		float wind_shadow_intensity = 0.80f; // 建筑物立柱风影遮蔽强度 (0.0=无风影, 1.0=完全遮蔽)
 	};
 
 	inline void apply_cloth_preset(ClothConfig& cfg, ClothPreset preset) {
@@ -122,6 +128,7 @@ namespace bud::physics {
 			cfg.bend_compliance = 2.5e-3f;
 			cfg.self_friction = 0.45f;
 			cfg.wind_wandering = 0.35f;
+			cfg.wind_shadow_intensity = 0.85f;
 			break;
 		case ClothPreset::Silk:
 			cfg.damping = 0.015f;
@@ -133,6 +140,7 @@ namespace bud::physics {
 			cfg.bend_compliance = 1.0e-2f;
 			cfg.self_friction = 0.15f;
 			cfg.wind_wandering = 0.50f;
+			cfg.wind_shadow_intensity = 0.90f;
 			break;
 		case ClothPreset::CottonLinen:
 			cfg.damping = 0.05f;
@@ -144,6 +152,7 @@ namespace bud::physics {
 			cfg.bend_compliance = 4.0e-3f;
 			cfg.self_friction = 0.35f;
 			cfg.wind_wandering = 0.35f;
+			cfg.wind_shadow_intensity = 0.80f;
 			break;
 		case ClothPreset::HeavyDenim:
 			cfg.damping = 0.12f;
@@ -155,6 +164,7 @@ namespace bud::physics {
 			cfg.bend_compliance = 1.0e-3f;
 			cfg.self_friction = 0.55f;
 			cfg.wind_wandering = 0.20f;
+			cfg.wind_shadow_intensity = 0.70f;
 			break;
 		default:
 			break;

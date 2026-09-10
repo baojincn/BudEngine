@@ -25,6 +25,11 @@ layout(std430, push_constant) uniform PushConstants {
     float damping;
     float wind_strength;
     float wind_wandering;
+    float wind_shadow_intensity;
+    float pad1;
+    float pad2;
+    float pad3;
+    vec4  column_data[4]; // xyz: center, w: radius (<=0 = inactive)
 } pc;
 
 void main() {
@@ -152,6 +157,35 @@ void main() {
 
         vec3 turb = (curl1 * 0.85 + curl2 * 0.60 + curl3 * 0.40) * pc.wind_strength;
         v_wind = (wind_dir * base_speed + turb) * height_factor;
+
+        // Architectural Wind Shadowing / Wake Cavity Occlusion:
+        // Slender architectural columns cast downwind dead-air / recirculation cavities.
+        if (pc.wind_shadow_intensity > 1e-4) {
+            float f_occlusion = 1.0;
+            for (int b = 0; b < 4; ++b) {
+                float r_col = pc.column_data[b].w;
+                if (r_col <= 0.0)
+                    continue;
+                vec3 delta_x = current_pos - pc.column_data[b].xyz;
+                // Downwind distance along the instantaneous dynamic wind vector:
+                float s = dot(delta_x, wind_dir);
+                if (s > 0.0 && s < 4.0) {
+                    // Crosswind orthogonal distance from the column wake centerline:
+                    vec3 d_perp_vec = delta_x - s * wind_dir;
+                    float d_perp = length(d_perp_vec);
+                    // Turbulent wake expands downstream:
+                    float r_wake = r_col + 0.12 * s;
+                    if (d_perp < r_wake) {
+                        float f_lateral = smoothstep(0.0, 1.0, d_perp / r_wake);
+                        float f_longitudinal = smoothstep(0.5, 3.5, s);
+                        float k_shadow = clamp(1.0 - (f_lateral + f_longitudinal), 0.0, 1.0);
+                        float col_atten = 1.0 - pc.wind_shadow_intensity * 0.85 * k_shadow;
+                        f_occlusion = min(f_occlusion, col_atten);
+                    }
+                }
+            }
+            v_wind *= f_occlusion;
+        }
     }
 
     // 4. Thin-shell aerodynamics: Thin-Airfoil Polar (2*PI linear pre-stall slope + stall transition + bluff body drag)
