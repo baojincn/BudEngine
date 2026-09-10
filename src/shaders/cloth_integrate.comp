@@ -152,7 +152,7 @@ void main() {
         // Amplified near the free bottom hem by quadratic drop factor
         vec3 k3 = vec3(1.40, -0.80, 1.20);
         vec3 a3 = vec3(0.10, 0.25, 0.20);
-        float hem_flutter = clamp(drop * drop * 0.35, 0.0, 2.0);
+        float hem_flutter = clamp(drop * 0.20, 0.0, 0.85);
         vec3 curl3 = cross(k3, a3) * cos(dot(k3, current_pos) + sim_time * 7.20) * hem_flutter;
 
         vec3 turb = (curl1 * 0.85 + curl2 * 0.60 + curl3 * 0.40) * pc.wind_strength;

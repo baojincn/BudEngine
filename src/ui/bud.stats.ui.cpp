@@ -617,6 +617,15 @@ namespace bud::ui {
 						}
 						ImGui::PopItemWidth();
 						ImGui::PopID();
+
+						ImGui::TextColored(color_neutral, "Self-Col:");
+						ImGui::SameLine();
+						bool tmp_self_col = current_cloth_config.self_collision;
+						if (ImGui::Checkbox("##cloth_self_col", &tmp_self_col)) {
+							auto cfg = current_cloth_config;
+							cfg.self_collision = tmp_self_col;
+							set_cloth_config(cfg);
+						}
 					}
 				}
 

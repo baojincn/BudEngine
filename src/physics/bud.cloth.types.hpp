@@ -109,10 +109,11 @@ namespace bud::physics {
 		float warp_compliance = 1e-5f;   // 经向抗拉顺应度 (几乎不可伸长)
 		float weft_compliance = 2e-5f;   // 纬向抗拉顺应度
 		float shear_compliance = 6e-4f;  // 斜向剪切顺应度 (Trellis 效应产生自然折褶)
-		float bend_compliance = 2.5e-3f; // 抗弯顺应度
-		float self_friction = 0.35f;     // 自碰撞折叠摩擦力系数 (静摩擦 mu_s = 1.25 * fric, 动摩擦 mu_k = 0.85 * fric)
+		float bend_compliance = 1.0e-3f; // 抗弯顺应度 (适度抗弯防止零半径锐角折死)
+		float self_friction = 0.05f;     // 自碰撞折叠摩擦力系数 (轻柔摩擦，杜绝假死锁打卷)
 		float wind_wandering = 0.35f;    // 自然风向动态游弋幅度 (0.0=固定主轴, 1.0=大范围游弋)
 		float wind_shadow_intensity = 0.80f; // 建筑物立柱风影遮蔽强度 (0.0=无风影, 1.0=完全遮蔽)
+		bool  self_collision = false;    // 3A 工业标准：单层垂帘默认关闭自碰撞以保证极致自然悬垂，需要时一键开启
 	};
 
 	inline void apply_cloth_preset(ClothConfig& cfg, ClothPreset preset) {
@@ -125,8 +126,8 @@ namespace bud::physics {
 			cfg.warp_compliance = 1e-5f;
 			cfg.weft_compliance = 2e-5f;
 			cfg.shear_compliance = 6e-4f;
-			cfg.bend_compliance = 2.5e-3f;
-			cfg.self_friction = 0.45f;
+			cfg.bend_compliance = 1.0e-3f;
+			cfg.self_friction = 0.05f;
 			cfg.wind_wandering = 0.35f;
 			cfg.wind_shadow_intensity = 0.85f;
 			break;
@@ -137,8 +138,8 @@ namespace bud::physics {
 			cfg.warp_compliance = 2e-6f;
 			cfg.weft_compliance = 5e-6f;
 			cfg.shear_compliance = 2.5e-3f;
-			cfg.bend_compliance = 1.0e-2f;
-			cfg.self_friction = 0.15f;
+			cfg.bend_compliance = 4.0e-3f;
+			cfg.self_friction = 0.02f;
 			cfg.wind_wandering = 0.50f;
 			cfg.wind_shadow_intensity = 0.90f;
 			break;
@@ -149,8 +150,8 @@ namespace bud::physics {
 			cfg.warp_compliance = 1e-5f;
 			cfg.weft_compliance = 2e-5f;
 			cfg.shear_compliance = 1.2e-3f;
-			cfg.bend_compliance = 4.0e-3f;
-			cfg.self_friction = 0.35f;
+			cfg.bend_compliance = 1.5e-3f;
+			cfg.self_friction = 0.05f;
 			cfg.wind_wandering = 0.35f;
 			cfg.wind_shadow_intensity = 0.80f;
 			break;
@@ -161,8 +162,8 @@ namespace bud::physics {
 			cfg.warp_compliance = 5e-6f;
 			cfg.weft_compliance = 1e-5f;
 			cfg.shear_compliance = 2.0e-4f;
-			cfg.bend_compliance = 1.0e-3f;
-			cfg.self_friction = 0.55f;
+			cfg.bend_compliance = 5.0e-4f;
+			cfg.self_friction = 0.08f;
 			cfg.wind_wandering = 0.20f;
 			cfg.wind_shadow_intensity = 0.70f;
 			break;

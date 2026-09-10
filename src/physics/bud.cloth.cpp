@@ -977,6 +977,7 @@ namespace bud::physics {
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 2, world->gpu_lambdas);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 3, world->gpu_cell_heads);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 4, world->gpu_particle_next);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 5, world->gpu_rest_particles);
 
 				ClothPushConstantsSolver pc_solve{};
 				pc_solve.counts = bud::math::uvec4(0u, world->constraint_count, world->particle_count, world->constraint_count);
@@ -1017,6 +1018,7 @@ namespace bud::physics {
 				if (world->gpu_colliders.is_valid())
 					rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 3, world->gpu_colliders);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 4, world->gpu_particle_next);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 5, world->gpu_rest_particles);
 
 				ClothPushConstantsSolver pc_solve{};
 				pc_solve.counts = bud::math::uvec4(0u, 0u, world->particle_count, world->constraint_count);
@@ -1040,11 +1042,12 @@ namespace bud::physics {
 			// 2d. Self-collision every substep: rebuild the spatial hash, then relax
 			// particle pairs closer than the cloth thickness so the fabric cannot
 			// pass through itself when folded.
-			{
+			if (config.cloth_config.self_collision) {
 				rhi->cmd_bind_pipeline(cmd, pipeline_solver);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 0, world->gpu_particles);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 3, world->gpu_cell_heads);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 4, world->gpu_particle_next);
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 5, world->gpu_rest_particles);
 
 				ClothPushConstantsSolver pc_solve{};
 				pc_solve.counts = bud::math::uvec4(0u, world->hash_table_size, world->particle_count, world->hash_table_size);
@@ -1059,12 +1062,10 @@ namespace bud::physics {
 				rhi->cmd_dispatch(cmd, (world->particle_count + 63u) / 64u, 1, 1);
 				rhi->resource_barrier(cmd, world->gpu_cell_heads, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
 
-				for (uint32_t pass = 0; pass < 2; ++pass) {
-					pc_solve.flags = bud::math::uvec4(5u, 0u, 0u, 0u); // self-collision relax (2-pass)
-					rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
-					rhi->cmd_dispatch(cmd, (world->particle_count + 63u) / 64u, 1, 1);
-					rhi->resource_barrier(cmd, world->gpu_particles, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
-				}
+				pc_solve.flags = bud::math::uvec4(5u, 0u, 0u, 0u); // self-collision relax
+				rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
+				rhi->cmd_dispatch(cmd, (world->particle_count + 63u) / 64u, 1, 1);
+				rhi->resource_barrier(cmd, world->gpu_particles, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
 			}
 		}
 

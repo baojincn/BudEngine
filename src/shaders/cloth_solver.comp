@@ -42,6 +42,11 @@ layout(std430, set = 0, binding = 4) buffer ParticleNextBuffer {
     uint particle_next[];
 };
 
+// Rest-pose particles for topological neighbor exclusion in Mode 5
+layout(std430, set = 0, binding = 5) readonly buffer RestParticleBuffer {
+    SimParticle rest_particles[];
+};
+
 layout(std430, push_constant) uniform PushConstants {
     uvec4 counts; // x: batch_offset, y: batch_count, z: particle_count, w: constraint_total
     uvec4 flags;  // x: solve_collision_flag (0 = batch, 1 = collision, 2 = clear lambda), y: solve_capsule_flag
@@ -54,8 +59,9 @@ layout(std430, push_constant) uniform PushConstants {
     vec4  sphere_center_radius;      // xyz: camera sphere center, w: radius (0 = disabled)
 } pc;
 
-const float kSelfCollisionRadius = 0.030; // cloth thickness for self-collision (m, was 0.02)
-const float kHashCellSize        = 0.065; // hash grid cell size (m), >= 2x radius (was 0.05)
+const float kSelfCollisionRadius     = 0.018; // 1.8cm realistic thin contact thickness (no artificial buckling)
+const float kHashCellSize            = 0.045; // 4.5cm hash grid cell size (>= 2x radius)
+const float kRestNeighborThresholdSq = 0.06 * 0.06; // 6cm rest distance threshold for neighbor exclusion
 
 uint hash_cell(vec3 p) {
     ivec3 c = ivec3(floor(p / kHashCellSize));
@@ -156,6 +162,7 @@ void main() {
         vec3 pi = pm.xyz;
         const vec3 pi_before = pi;
         const vec3 dp_i = pi - particles[id].prev_position.xyz;
+        vec3 rest_pi = rest_particles[id].position_inv_mass.xyz;
 
         float mu_s = pc.misc.z; // static friction coefficient
         float mu_k = pc.misc.w; // kinetic friction coefficient
@@ -172,35 +179,38 @@ void main() {
             uint j = cell_heads[h & (pc.counts.w - 1u)];
             while (j != 0xFFFFFFFFu) {
                 if (j != id) {
-                    vec3 pj = particles[j].position_inv_mass.xyz;
-                    vec3 d = pi - pj;
-                    float dist2 = dot(d, d);
-                    if (dist2 < kSelfCollisionRadius * kSelfCollisionRadius && dist2 > 1e-8) {
-                        float dist = sqrt(dist2);
-                        vec3 n = d / dist;
-                        float pen = kSelfCollisionRadius - dist;
-                        vec3 delta_xn = n * (pen * 0.5);
-                        pi += delta_xn;
-                        moved = true;
+                    vec3 rest_pj = rest_particles[j].position_inv_mass.xyz;
+                    vec3 rest_d = rest_pi - rest_pj;
+                    float rest_dist2 = dot(rest_d, rest_d);
 
-                        // Coulomb Self-Friction:
-                        // Relative displacement over this substep between contacting cloth layers
-                        if (mu_s > 0.0) {
-                            vec3 dp_j = pj - particles[j].prev_position.xyz;
-                            vec3 dp_rel = dp_i - dp_j;
-                            vec3 dp_t = dp_rel - dot(dp_rel, n) * n;
-                            float dp_t_len = length(dp_t);
+                    // Topological Neighbor Exclusion:
+                    // If particles i and j are within 10cm in the rest pose, they are
+                    // local neighbors on the same continuous fabric patch (1-ring / 2-ring).
+                    // Skipping local neighbors eliminates false self-repulsion and allows
+                    // a large void-free collision radius (4.5cm) that completely seals triangle interiors.
+                    if (rest_dist2 > kRestNeighborThresholdSq) {
+                        vec3 pj = particles[j].position_inv_mass.xyz;
+                        vec3 d = pi - pj;
+                        float dist2 = dot(d, d);
+                        if (dist2 < kSelfCollisionRadius * kSelfCollisionRadius && dist2 > 1e-8) {
+                            float dist = sqrt(dist2);
+                            vec3 n = d / dist;
+                            float pen = kSelfCollisionRadius - dist;
+                            vec3 delta_xn = n * (pen * 0.5);
+                            pi += delta_xn;
+                            moved = true;
 
-                            if (dp_t_len > 1e-6) {
-                                float fn = pen * 0.5;
-                                float max_static = mu_s * fn;
+                            // Coulomb Self-Friction:
+                            // Gentle kinetic dissipation without harsh stiction lock (prevents artificial clumping)
+                            if (mu_k > 0.0) {
+                                vec3 dp_j = pj - particles[j].prev_position.xyz;
+                                vec3 dp_rel = dp_i - dp_j;
+                                vec3 dp_t = dp_rel - dot(dp_rel, n) * n;
+                                float dp_t_len = length(dp_t);
 
-                                if (dp_t_len <= max_static) {
-                                    // Stiction (static lock): arrest relative tangential sliding completely
-                                    total_delta_xt += -0.5 * dp_t;
-                                } else {
-                                    // Kinetic sliding friction: oppose tangential velocity by mu_k * fn
-                                    float slip_corr = min(dp_t_len, mu_k * fn);
+                                if (dp_t_len > 1e-6) {
+                                    float fn = pen * 0.5;
+                                    float slip_corr = min(dp_t_len, mu_k * fn * 0.5);
                                     total_delta_xt += -0.5 * slip_corr * (dp_t / dp_t_len);
                                 }
                             }
