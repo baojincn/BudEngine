@@ -1059,10 +1059,12 @@ namespace bud::physics {
 				rhi->cmd_dispatch(cmd, (world->particle_count + 63u) / 64u, 1, 1);
 				rhi->resource_barrier(cmd, world->gpu_cell_heads, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
 
-				pc_solve.flags = bud::math::uvec4(5u, 0u, 0u, 0u); // self-collision relax
-				rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
-				rhi->cmd_dispatch(cmd, (world->particle_count + 63u) / 64u, 1, 1);
-				rhi->resource_barrier(cmd, world->gpu_particles, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
+				for (uint32_t pass = 0; pass < 2; ++pass) {
+					pc_solve.flags = bud::math::uvec4(5u, 0u, 0u, 0u); // self-collision relax (2-pass)
+					rhi->cmd_push_constants(cmd, pipeline_solver, sizeof(ClothPushConstantsSolver), &pc_solve);
+					rhi->cmd_dispatch(cmd, (world->particle_count + 63u) / 64u, 1, 1);
+					rhi->resource_barrier(cmd, world->gpu_particles, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::UnorderedAccess);
+				}
 			}
 		}
 

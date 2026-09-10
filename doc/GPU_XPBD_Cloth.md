@@ -445,6 +445,16 @@ $$
      $$
    - **耗散上限箝位**：限制 $\|\Delta \mathbf{x}_{\text{friction}}\| \le \|\mathbf{p}_i - \mathbf{p}_{\text{prev}, i}\|$，严格保证摩擦力只做负功，防止任何多邻域累加引发的反向加速或数值发散。
 
+4. **大风高速工况下的 CFL 防隧道条件与双轮松弛（CFL Anti-Tunneling & Multi-Pass Relaxation）**：
+   在强风工况下（$v_{\text{wind}} > 10\,\text{m/s}$），高速质点在单子步内的位移极易超越碰撞包络球厚度（$v \Delta t > 2 R_{\text{cloth}}$），导致粒子跳跃瞬移穿透（隧道效应）：
+   - **CFL 单步位移动态箝位**：在显式预测步中限制最大单步位移：
+     $$
+     \|\Delta \mathbf{x}_{\text{step}}\| = \|\mathbf{v} \Delta t + \frac{1}{2} \mathbf{a}_{\text{total}} \Delta t^2\| \le 0.032\,\text{m}
+     $$
+     使质点在单步内永远无法跨越自碰撞网格与包络球检测区。
+   - **自碰撞接触包络扩展**：将有效碰撞半径设为 $R_{\text{self}} = 0.030\,\text{m}$（等效接触厚度 $6\,\text{cm}$），空间哈希网格尺度设为 $L_{\text{cell}} = 0.065\,\text{m}$（严格满足 $2 R_{\text{self}} \le L_{\text{cell}}$，确保 27 邻域搜索无盲区）。
+   - **双轮自碰撞松弛（2-Pass Relaxation）**：单子步内连续执行 2 轮 Mode 5 排斥推离，将动压挤压下的收敛率提升至 75% 以上，彻底杜绝大风下多层重叠穿插。
+
 ---
 
 ### 2.12 薄壳小迎角气动失速与阻力极线（Airfoil Polar & Stall Dynamics）

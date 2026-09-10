@@ -54,8 +54,8 @@ layout(std430, push_constant) uniform PushConstants {
     vec4  sphere_center_radius;      // xyz: camera sphere center, w: radius (0 = disabled)
 } pc;
 
-const float kSelfCollisionRadius = 0.02;  // cloth thickness for self-collision (m)
-const float kHashCellSize        = 0.05;  // hash grid cell size (m), >= 2x radius
+const float kSelfCollisionRadius = 0.030; // cloth thickness for self-collision (m, was 0.02)
+const float kHashCellSize        = 0.065; // hash grid cell size (m), >= 2x radius (was 0.05)
 
 uint hash_cell(vec3 p) {
     ivec3 c = ivec3(floor(p / kHashCellSize));
@@ -249,7 +249,7 @@ void main() {
                 box_extent.z > 0.05 && box_extent.z <= 0.45 &&
                 box_extent.y >= 0.80) {
                 float y_min = box_center.y - box_extent.y - 0.1;
-                float y_max = box_center.y + box_extent.y - 0.25; // exclude top 25cm rod mount region
+                float y_max = box_center.y + box_extent.y - 0.05; // only exclude top 5cm rod mount region
 
                 if (pos.y >= y_min && pos.y <= y_max) {
                     float radius = clamp(max(box_extent.x, box_extent.z), 0.15, 0.30);
@@ -337,7 +337,7 @@ void main() {
 
             vec3 pen = be - abs(local); // per-axis face distances (>0 = inside)
             float min_pen = min(pen.x, min(pen.y, pen.z));
-            if (min_pen > 0.25)
+            if (min_pen > 0.50)
                 continue; // resting inside a proxy volume: unresolvable, do not pump
 
             if (pen.x <= pen.y && pen.x <= pen.z) {

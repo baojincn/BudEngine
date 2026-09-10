@@ -258,8 +258,18 @@ void main() {
 
     // 5. Strict Verlet acceleration integration and position prediction:
     // x(t + dt) = x(t) + v(t) * dt + 0.5 * a(t) * dt^2
-    vec3 total_accel   = pc.gravity_dt.xyz + aero_accel;
-    vec3 predicted_pos = current_pos + velocity * safe_dt + 0.5 * total_accel * (safe_dt * safe_dt);
+    vec3 total_accel = pc.gravity_dt.xyz + aero_accel;
+    vec3 step_disp   = velocity * safe_dt + 0.5 * total_accel * (safe_dt * safe_dt);
+
+    // CFL Anti-Tunneling displacement limiter:
+    // In violent wind gusts, prevent any single substep from teleporting particles across
+    // the collision envelope (kSelfCollisionRadius = 0.030m, kHashCellSize = 0.065m).
+    const float kMaxSubstepDisp = 0.032; // 3.2cm max single-substep displacement
+    float disp_len = length(step_disp);
+    if (disp_len > kMaxSubstepDisp)
+        step_disp *= (kMaxSubstepDisp / disp_len);
+
+    vec3 predicted_pos = current_pos + step_disp;
 
     particles[idx].prev_position.xyz     = current_pos;
     particles[idx].position_inv_mass.xyz = predicted_pos;
