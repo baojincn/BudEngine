@@ -91,6 +91,13 @@ namespace bud::physics {
 		float padding[2] = { 0.0f, 0.0f };
 	};
 
+	enum class ClothSolverType : int {
+		XPBD_MassSpring = 0,    // 质点-弹簧几何约束 XPBD (当前实现)
+		XPBD_Continuum = 1,     // 基于应变张量 XPBD / FEM-XPBD (待接入)
+		ProjectiveDynamics = 2, // 投影动力学 Local-Global 解算器 (待接入)
+		Implicit_FEM = 3        // 隐式非线性共旋有限元 + GPU PCG (待接入)
+	};
+
 	enum class ClothPreset : int {
 		HeavyTapestry = 0, // Sponza 厚重羊毛挂毯/毛毯 (默认推荐)
 		Silk = 1,          // 轻薄真丝
@@ -101,6 +108,7 @@ namespace bud::physics {
 	struct ClothConfig {
 		bool enable_simulation = true;
 		bool enable_scene_collision = true;
+		ClothSolverType solver_type = ClothSolverType::XPBD_MassSpring;
 		ClothPreset preset = ClothPreset::HeavyTapestry;
 		uint32_t solver_iterations = 8;
 		float damping = 0.07f;

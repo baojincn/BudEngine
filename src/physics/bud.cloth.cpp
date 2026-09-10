@@ -390,7 +390,8 @@ namespace bud::physics {
 
 	void ClothSystem::set_config(const ClothConfig& config) {
 		std::lock_guard lock(state_mutex);
-		if (current_config.preset != config.preset ||
+		if (current_config.solver_type != config.solver_type ||
+			current_config.preset != config.preset ||
 			current_config.warp_compliance != config.warp_compliance ||
 			current_config.weft_compliance != config.weft_compliance ||
 			current_config.shear_compliance != config.shear_compliance ||

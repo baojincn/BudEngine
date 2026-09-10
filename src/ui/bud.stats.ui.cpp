@@ -496,7 +496,7 @@ namespace bud::ui {
 				// --- GPU XPBD Cloth Simulation controls & presets ---
 				if (set_cloth_config) {
 					ImGui::Separator();
-					ImGui::TextColored(color_neutral, "Cloth Sim (XPBD)");
+					ImGui::TextColored(color_neutral, "Cloth Sim");
 					ImGui::SameLine();
 					ImGui::PushID("cloth_sim_enable");
 					bool tmp_sim = current_cloth_config.enable_simulation;
@@ -508,6 +508,32 @@ namespace bud::ui {
 					ImGui::PopID();
 
 					if (current_cloth_config.enable_simulation) {
+						// Solver model selector (supports switching between different physics solvers)
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, "Solver:");
+						ImGui::SameLine();
+						ImGui::PushID("cloth_solver_combo");
+						ImGui::PushItemWidth(200.0f);
+						int solver_idx = static_cast<int>(current_cloth_config.solver_type);
+						const char* solver_names[] = {
+							"XPBD (Mass-Spring)",
+							"XPBD (Continuum) [Stub]",
+							"Projective Dynamics [Stub]",
+							"Implicit FEM (PCG) [Stub]"
+						};
+						if (ImGui::Combo("##cloth_solver", &solver_idx, solver_names, IM_ARRAYSIZE(solver_names))) {
+							auto cfg = current_cloth_config;
+							cfg.solver_type = static_cast<bud::physics::ClothSolverType>(solver_idx);
+							set_cloth_config(cfg);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();				
+						
+						if (current_cloth_config.solver_type != bud::physics::ClothSolverType::XPBD_MassSpring) {
+							ImGui::SameLine();
+							ImGui::TextColored(color_neutral, "[Stub: Fallback XPBD]");
+						}
+
 						ImGui::SameLine();
 						ImGui::TextColored(color_neutral, " | Preset:");
 						ImGui::SameLine();
@@ -522,19 +548,7 @@ namespace bud::ui {
 						}
 						ImGui::PopItemWidth();
 						ImGui::PopID();
-
-						ImGui::SameLine();
-						ImGui::TextColored(color_neutral, " | Col");
-						ImGui::SameLine();
-						ImGui::PushID("cloth_col_enable");
-						bool tmp_col = current_cloth_config.enable_scene_collision;
-						if (ImGui::Checkbox("##cloth_col_enable", &tmp_col)) {
-							auto cfg = current_cloth_config;
-							cfg.enable_scene_collision = tmp_col;
-							set_cloth_config(cfg);
-						}
-						ImGui::PopID();
-
+						
 						// Wind, Damping and Iterations controls
 						ImGui::TextColored(color_neutral, "Wind: %0.2f", current_cloth_config.wind_strength);
 						ImGui::SameLine();
@@ -618,7 +632,7 @@ namespace bud::ui {
 						ImGui::PopItemWidth();
 						ImGui::PopID();
 
-						ImGui::TextColored(color_neutral, "Self-Col:");
+						ImGui::TextColored(color_neutral, "Self Collision");
 						ImGui::SameLine();
 						bool tmp_self_col = current_cloth_config.self_collision;
 						if (ImGui::Checkbox("##cloth_self_col", &tmp_self_col)) {
@@ -626,6 +640,18 @@ namespace bud::ui {
 							cfg.self_collision = tmp_self_col;
 							set_cloth_config(cfg);
 						}
+
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Scene Collision");
+						ImGui::SameLine();
+						ImGui::PushID("cloth_col_enable");
+						bool tmp_col = current_cloth_config.enable_scene_collision;
+						if (ImGui::Checkbox("##cloth_col_enable", &tmp_col)) {
+							auto cfg = current_cloth_config;
+							cfg.enable_scene_collision = tmp_col;
+							set_cloth_config(cfg);
+						}
+						ImGui::PopID();
 					}
 				}
 
