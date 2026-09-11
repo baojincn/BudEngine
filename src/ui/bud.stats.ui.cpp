@@ -44,15 +44,19 @@ namespace bud::ui {
 		std::function<void(float)> set_light_intensity,
 		float current_light_intensity,
 		std::function<void(float)> set_ambient_strength,
-		float current_ambient_strength) {
+		float current_ambient_strength,
+		std::function<void(const bud::physics::ClothConfig&)> set_cloth_config,
+		bud::physics::ClothConfig current_cloth_config) {
 
 		if (show_stats) {
 			ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
-            ImGui::SetNextWindowBgAlpha(0.35f);
-            ImGui::SetNextWindowSizeConstraints(ImVec2(380.0f, 0.0f), ImVec2(FLT_MAX, FLT_MAX));
+			ImGui::SetNextWindowBgAlpha(0.35f);
+			ImGui::SetNextWindowSizeConstraints(ImVec2(540.0f, 0.0f), ImVec2(FLT_MAX, FLT_MAX));
 			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 8.0f));
 
-            if (ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
+			if (ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav)) {
+				ImGui::SetWindowFontScale(1.5f);
+
 				static float update_timer = 0.0f;
 				static float display_fps = 0.0f;
 				static float display_ms = 0.0f;
@@ -146,9 +150,6 @@ namespace bud::ui {
 					update_timer = 0.0f;
 				}
 
-
-				ImGui::SetWindowFontScale(1.5f);
-
 				ImVec4 color_good(0.4f, 1.0f, 0.4f, 1.0f);
 				ImVec4 color_warn(1.0f, 1.0f, 0.4f, 1.0f);
 				ImVec4 color_bad(1.0f, 0.4f, 0.4f, 1.0f);
@@ -223,7 +224,7 @@ namespace bud::ui {
 					ImGui::TextColored(color_neutral, " | AO:");
 					ImGui::SameLine();
 					ImGui::PushID("ao_mode_combo");
-					ImGui::PushItemWidth(70.0f);
+					ImGui::PushItemWidth(95.0f);
 					int current_idx = static_cast<int>(current_ao_mode);
 					const char* items[] = { "Off", "SSAO", "GTAO" };
 					if (ImGui::Combo("##ao_mode", &current_idx, items, IM_ARRAYSIZE(items))) {
@@ -274,7 +275,7 @@ namespace bud::ui {
 						ImGui::TextColored(color_neutral, "SSGI Int: %.1f", current_ssgi_intensity);
 						ImGui::SameLine();
 						ImGui::PushID("ssgi_intensity_slider");
-						ImGui::PushItemWidth(60.0f);
+						ImGui::PushItemWidth(80.0f);
 						float tmp = current_ssgi_intensity;
 						if (ImGui::SliderFloat("##ssgi_intensity", &tmp, 0.0f, 4.0f, "%.1f")) {
 							set_ssgi_intensity(tmp);
@@ -287,7 +288,7 @@ namespace bud::ui {
 						ImGui::TextColored(color_neutral, " | Blend: %.2f", current_ssgi_blend);
 						ImGui::SameLine();
 						ImGui::PushID("ssgi_blend_slider");
-						ImGui::PushItemWidth(60.0f);
+						ImGui::PushItemWidth(80.0f);
 						float tmp = current_ssgi_blend;
 						if (ImGui::SliderFloat("##ssgi_blend", &tmp, 0.01f, 0.20f, "%.2f")) {
 							set_ssgi_blend(tmp);
@@ -302,7 +303,7 @@ namespace bud::ui {
 						ImGui::TextColored(color_neutral, "Heuristic Occluder Frac: %.1f%%", current_occluder * 100.0f);
 						ImGui::SameLine();
 						ImGui::PushID("occluder_slider");
-						ImGui::PushItemWidth(60.0f);
+						ImGui::PushItemWidth(80.0f);
 						float tmp = current_occluder;
 						if (ImGui::SliderFloat("##occluder", &tmp, 0.0f, 1.0f, "%.2f")) {
 							set_occluder(tmp);
@@ -337,15 +338,28 @@ namespace bud::ui {
 
 				// Elev / Azim 放在同一行,两个滑块平分扣除标签后的整行宽度。
 				if (set_light_elevation || set_light_azimuth) {
+					static ImGuiID active_angle_slider_id = 0;
+					if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+						active_angle_slider_id = 0;
+
+					static float cached_elev_display = 0.0f;
+					static float cached_azim_display = 0.0f;
+
+					if (active_angle_slider_id == 0) {
+						cached_elev_display = current_light_elevation;
+						cached_azim_display = current_light_azimuth;
+					}
+
 					const float row_w = ImGui::GetContentRegionAvail().x;
 					const float spacing = ImGui::GetStyle().ItemSpacing.x;
-					const std::string elev_label = std::format("Elev: {:.0f}\xC2\xB0", current_light_elevation);
-					const std::string azim_label = std::format(" | Azim: {:.0f}\xC2\xB0", current_light_azimuth);
-					const float elev_label_w = ImGui::CalcTextSize(elev_label.c_str()).x;
-					const float azim_label_w = ImGui::CalcTextSize(azim_label.c_str()).x;
+					const std::string elev_label = std::format("Elev: {:02.0f}\xC2\xB0", cached_elev_display);
+					const std::string azim_label = std::format(" | Azim: {:03.0f}\xC2\xB0", cached_azim_display);
+					const float elev_label_w = ImGui::CalcTextSize("Elev: 00\xC2\xB0").x;
+					const float azim_label_w = ImGui::CalcTextSize(" | Azim: 000\xC2\xB0").x;
 					// [elev_label][slider_elev][azim_label][slider_azim], 3 个 ItemSpacing
 					float slider_total = row_w - elev_label_w - azim_label_w - spacing * 3.0f;
-					if (slider_total < 20.0f) slider_total = 20.0f;
+					if (slider_total < 20.0f)
+						slider_total = 20.0f;
 					const float elev_w = slider_total * 0.5f;
 					const float azim_w = slider_total - elev_w;
 
@@ -354,10 +368,26 @@ namespace bud::ui {
 						ImGui::SameLine();
 						ImGui::PushID("light_elev_slider");
 						ImGui::PushItemWidth(elev_w);
-						float tmp_elev = current_light_elevation;
-						if (ImGui::SliderFloat("##light_elev", &tmp_elev, -90.0f, 90.0f, "%.0f")) {
-							set_light_elevation(tmp_elev);
+						float tmp_elev = cached_elev_display;
+						const ImGuiID elev_id = ImGui::GetID("##light_elev");
+						const bool is_other_active = (active_angle_slider_id != 0 && active_angle_slider_id != elev_id);
+
+						if (is_other_active)
+							ImGui::BeginDisabled(true);
+
+						if (ImGui::SliderFloat("##light_elev", &tmp_elev, 0.0f, 90.0f, "%02.0f")) {
+							if (!is_other_active) {
+								cached_elev_display = tmp_elev;
+								set_light_elevation(tmp_elev);
+							}
 						}
+
+						if (ImGui::IsItemActive())
+							active_angle_slider_id = elev_id;
+
+						if (is_other_active)
+							ImGui::EndDisabled();
+
 						ImGui::PopItemWidth();
 						ImGui::PopID();
 					}
@@ -367,10 +397,26 @@ namespace bud::ui {
 						ImGui::SameLine();
 						ImGui::PushID("light_azim_slider");
 						ImGui::PushItemWidth(azim_w);
-						float tmp_azim = current_light_azimuth;
-						if (ImGui::SliderFloat("##light_azim", &tmp_azim, 0.0f, 359.0f, "%.0f")) {
-							set_light_azimuth(tmp_azim);
+						float tmp_azim = cached_azim_display;
+						const ImGuiID azim_id = ImGui::GetID("##light_azim");
+						const bool is_other_active = (active_angle_slider_id != 0 && active_angle_slider_id != azim_id);
+
+						if (is_other_active)
+							ImGui::BeginDisabled(true);
+
+						if (ImGui::SliderFloat("##light_azim", &tmp_azim, 0.0f, 359.0f, "%03.0f")) {
+							if (!is_other_active) {
+								cached_azim_display = tmp_azim;
+								set_light_azimuth(tmp_azim);
+							}
 						}
+
+						if (ImGui::IsItemActive())
+							active_angle_slider_id = azim_id;
+
+						if (is_other_active)
+							ImGui::EndDisabled();
+
 						ImGui::PopItemWidth();
 						ImGui::PopID();
 					}
@@ -386,32 +432,228 @@ namespace bud::ui {
 					}
 					ImGui::PopID();
 				}
+				if (set_light_intensity || set_ambient_strength) {
+					static ImGuiID active_intensity_slider_id = 0;
+					if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+						active_intensity_slider_id = 0;
 
-				if (set_light_intensity) {
-					ImGui::SameLine();
-					ImGui::TextColored(color_neutral, " | Int: %.1f", current_light_intensity);
-					ImGui::SameLine();
-					ImGui::PushID("light_intensity_slider");
-					ImGui::PushItemWidth(60.0f);
-					float tmp_int = current_light_intensity;
-					if (ImGui::SliderFloat("##light_int", &tmp_int, 0.0f, 20.0f, "%.1f")) {
-						set_light_intensity(tmp_int);
+					if (set_light_intensity) {
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Int: %.1f", current_light_intensity);
+						ImGui::SameLine();
+						ImGui::PushID("light_intensity_slider");
+						ImGui::PushItemWidth(100.0f);
+						float tmp_int = current_light_intensity;
+						const ImGuiID int_id = ImGui::GetID("##light_int");
+						const bool is_other_active = (active_intensity_slider_id != 0 && active_intensity_slider_id != int_id);
+
+						if (is_other_active)
+							ImGui::BeginDisabled(true);
+
+						if (ImGui::SliderFloat("##light_int", &tmp_int, 0.0f, 20.0f, "%.1f")) {
+							if (!is_other_active)
+								set_light_intensity(tmp_int);
+						}
+
+						if (ImGui::IsItemActive())
+							active_intensity_slider_id = int_id;
+
+						if (is_other_active)
+							ImGui::EndDisabled();
+
+						ImGui::PopItemWidth();
+						ImGui::PopID();
 					}
-					ImGui::PopItemWidth();
-					ImGui::PopID();
+					if (set_ambient_strength) {
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Ambient: %.2f", current_ambient_strength);
+						ImGui::SameLine();
+						ImGui::PushID("light_ambient_slider");
+						ImGui::PushItemWidth(100.0f);
+						float tmp_amb = current_ambient_strength;
+						const ImGuiID amb_id = ImGui::GetID("##light_ambient");
+						const bool is_other_active = (active_intensity_slider_id != 0 && active_intensity_slider_id != amb_id);
+
+						if (is_other_active)
+							ImGui::BeginDisabled(true);
+
+						if (ImGui::SliderFloat("##light_ambient", &tmp_amb, 0.0f, 1.0f, "%.2f")) {
+							if (!is_other_active)
+								set_ambient_strength(tmp_amb);
+						}
+
+						if (ImGui::IsItemActive())
+							active_intensity_slider_id = amb_id;
+
+						if (is_other_active)
+							ImGui::EndDisabled();
+
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+					}
 				}
-				if (set_ambient_strength) {
+
+				// --- GPU XPBD Cloth Simulation controls & presets ---
+				if (set_cloth_config) {
+					ImGui::Separator();
+					ImGui::TextColored(color_neutral, "Cloth Sim");
 					ImGui::SameLine();
-					ImGui::TextColored(color_neutral, " | Ambient: %.2f", current_ambient_strength);
-					ImGui::SameLine();
-					ImGui::PushID("light_ambient_slider");
-					ImGui::PushItemWidth(60.0f);
-					float tmp_amb = current_ambient_strength;
-					if (ImGui::SliderFloat("##light_ambient", &tmp_amb, 0.0f, 1.0f, "%.2f")) {
-						set_ambient_strength(tmp_amb);
+					ImGui::PushID("cloth_sim_enable");
+					bool tmp_sim = current_cloth_config.enable_simulation;
+					if (ImGui::Checkbox("##cloth_sim_enable", &tmp_sim)) {
+						auto cfg = current_cloth_config;
+						cfg.enable_simulation = tmp_sim;
+						set_cloth_config(cfg);
 					}
-					ImGui::PopItemWidth();
 					ImGui::PopID();
+
+					if (current_cloth_config.enable_simulation) {
+						// Solver model selector (supports switching between different physics solvers)
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, "Solver:");
+						ImGui::SameLine();
+						ImGui::PushID("cloth_solver_combo");
+						ImGui::PushItemWidth(200.0f);
+						int solver_idx = static_cast<int>(current_cloth_config.solver_type);
+						const char* solver_names[] = {
+							"XPBD (Mass-Spring)",
+							"XPBD (Continuum)",
+							"Projective Dynamics [Stub]",
+							"Implicit FEM (PCG) [Stub]"
+						};
+						if (ImGui::Combo("##cloth_solver", &solver_idx, solver_names, IM_ARRAYSIZE(solver_names))) {
+							auto cfg = current_cloth_config;
+							cfg.solver_type = static_cast<bud::physics::ClothSolverType>(solver_idx);
+							set_cloth_config(cfg);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();				
+						
+						if (current_cloth_config.solver_type != bud::physics::ClothSolverType::XPBD_MassSpring &&
+						    current_cloth_config.solver_type != bud::physics::ClothSolverType::XPBD_Continuum) {
+							ImGui::SameLine();
+							ImGui::TextColored(color_neutral, "[Stub: Fallback XPBD]");
+						}
+
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Preset:");
+						ImGui::SameLine();
+						ImGui::PushID("cloth_preset_combo");
+						ImGui::PushItemWidth(140.0f);
+						int preset_idx = static_cast<int>(current_cloth_config.preset);
+						const char* preset_names[] = { "Heavy Tapestry", "Silk", "Cotton / Linen", "Heavy Denim" };
+						if (ImGui::Combo("##cloth_preset", &preset_idx, preset_names, IM_ARRAYSIZE(preset_names))) {
+							auto cfg = current_cloth_config;
+							bud::physics::apply_cloth_preset(cfg, static_cast<bud::physics::ClothPreset>(preset_idx));
+							set_cloth_config(cfg);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+						
+						// Wind, Damping and Iterations controls
+						ImGui::TextColored(color_neutral, "Wind: %0.2f", current_cloth_config.wind_strength);
+						ImGui::SameLine();
+						ImGui::PushID("cloth_wind_slider");
+						ImGui::PushItemWidth(100.0f);
+						float tmp_wind = current_cloth_config.wind_strength;
+						if (ImGui::SliderFloat("##cloth_wind", &tmp_wind, 0.0f, 6.0f, "%0.2f")) {
+							auto cfg = current_cloth_config;
+							cfg.wind_strength = tmp_wind;
+							set_cloth_config(cfg);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Damp: %0.3f", current_cloth_config.damping);
+						ImGui::SameLine();
+						ImGui::PushID("cloth_damp_slider");
+						ImGui::PushItemWidth(100.0f);
+						float tmp_damp = current_cloth_config.damping;
+						if (ImGui::SliderFloat("##cloth_damp", &tmp_damp, 0.0f, 1.0f, "%0.3f")) {
+							auto cfg = current_cloth_config;
+							cfg.damping = tmp_damp;
+							set_cloth_config(cfg);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+
+						//ImGui::SameLine();
+						ImGui::TextColored(color_neutral, "Iter: %02u", current_cloth_config.solver_iterations);
+						ImGui::SameLine();
+						ImGui::PushID("cloth_iter_slider");
+						ImGui::PushItemWidth(100.0f);
+						int tmp_iter = static_cast<int>(current_cloth_config.solver_iterations);
+						if (ImGui::SliderInt("##cloth_iter", &tmp_iter, 1, 16)) {
+							auto cfg = current_cloth_config;
+							cfg.solver_iterations = static_cast<uint32_t>(tmp_iter);
+							set_cloth_config(cfg);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Fric: %0.2f", current_cloth_config.self_friction);
+						ImGui::SameLine();
+						ImGui::PushID("cloth_fric_slider");
+						ImGui::PushItemWidth(100.0f);
+						float tmp_fric = current_cloth_config.self_friction;
+						if (ImGui::SliderFloat("##cloth_fric", &tmp_fric, 0.0f, 1.0f, "%0.2f")) {
+							auto cfg = current_cloth_config;
+							cfg.self_friction = tmp_fric;
+							set_cloth_config(cfg);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+
+						ImGui::TextColored(color_neutral, "Wander: %0.2f", current_cloth_config.wind_wandering);
+						ImGui::SameLine();
+						ImGui::PushID("cloth_wander_slider");
+						ImGui::PushItemWidth(100.0f);
+						float tmp_wander = current_cloth_config.wind_wandering;
+						if (ImGui::SliderFloat("##cloth_wander", &tmp_wander, 0.0f, 1.0f, "%0.2f")) {
+							auto cfg = current_cloth_config;
+							cfg.wind_wandering = tmp_wander;
+							set_cloth_config(cfg);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Shadow: %0.2f", current_cloth_config.wind_shadow_intensity);
+						ImGui::SameLine();
+						ImGui::PushID("cloth_shadow_slider");
+						ImGui::PushItemWidth(100.0f);
+						float tmp_shadow = current_cloth_config.wind_shadow_intensity;
+						if (ImGui::SliderFloat("##cloth_shadow", &tmp_shadow, 0.0f, 1.0f, "%0.2f")) {
+							auto cfg = current_cloth_config;
+							cfg.wind_shadow_intensity = tmp_shadow;
+							set_cloth_config(cfg);
+						}
+						ImGui::PopItemWidth();
+						ImGui::PopID();
+
+						ImGui::TextColored(color_neutral, "Self Collision");
+						ImGui::SameLine();
+						bool tmp_self_col = current_cloth_config.self_collision;
+						if (ImGui::Checkbox("##cloth_self_col", &tmp_self_col)) {
+							auto cfg = current_cloth_config;
+							cfg.self_collision = tmp_self_col;
+							set_cloth_config(cfg);
+						}
+
+						ImGui::SameLine();
+						ImGui::TextColored(color_neutral, " | Scene Collision");
+						ImGui::SameLine();
+						ImGui::PushID("cloth_col_enable");
+						bool tmp_col = current_cloth_config.enable_scene_collision;
+						if (ImGui::Checkbox("##cloth_col_enable", &tmp_col)) {
+							auto cfg = current_cloth_config;
+							cfg.enable_scene_collision = tmp_col;
+							set_cloth_config(cfg);
+						}
+						ImGui::PopID();
+					}
 				}
 
 				ImGui::Separator();

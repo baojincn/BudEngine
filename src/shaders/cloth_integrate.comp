@@ -1,0 +1,276 @@
+#version 460
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// Global cloth particle pool: xyz = position, w = inv_mass (0.0 = fixed pin)
+struct SimParticle {
+    vec4 position_inv_mass;
+    vec4 prev_position;
+};
+
+layout(std430, set = 0, binding = 0) buffer ParticleBuffer {
+    SimParticle particles[];
+};
+
+// xyz: rest pose (drift safety net), w: per-instance top_y (wind height attenuation)
+// prev_position.xy: bitcast uint topological neighbor indices (u, v) for dynamic normal reconstruction
+// prev_position.z: rest triangle area, prev_position.w: valid topology flag
+layout(std430, set = 0, binding = 1) readonly buffer RestParticleBuffer {
+    SimParticle rest_particles[];
+};
+
+layout(std430, push_constant) uniform PushConstants {
+    vec4  gravity_dt;    // xyz: gravity, w: dt
+    vec4  wind_time;     // xyz: wind_direction, w: time
+    uint  particle_count;
+    float damping;
+    float wind_strength;
+    float wind_wandering;
+    float wind_shadow_intensity;
+    float pad1;
+    float pad2;
+    float pad3;
+    vec4  column_data[4]; // xyz: center, w: radius (<=0 = inactive)
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.particle_count)
+        return;
+
+    float inv_mass = particles[idx].position_inv_mass.w;
+    vec3 current_pos = particles[idx].position_inv_mass.xyz;
+    vec3 prev_pos    = particles[idx].prev_position.xyz;
+
+    if (inv_mass <= 0.0) {
+        particles[idx].prev_position.xyz = current_pos;
+        return;
+    }
+
+    vec3 rest_pos = rest_particles[idx].position_inv_mass.xyz;
+    float top_y   = rest_particles[idx].position_inv_mass.w;
+
+    // Safety net: snap exploded / NaN particles back to the rest pose.
+    float drift = length(current_pos - rest_pos);
+    if (!(drift < 25.0)) {
+        particles[idx].position_inv_mass.xyz = rest_pos;
+        particles[idx].prev_position.xyz     = rest_pos;
+        return;
+    }
+
+    float safe_dt = clamp(pc.gravity_dt.w, 0.001, 0.0333);
+
+    // 1. Physics damping (exponential rate invariant to small-substep count)
+    float frame_retention = clamp(1.0 - pc.damping, 1e-3, 1.0);
+    float damping_rate = -log(frame_retention) * 60.0;
+    float velocity_retention = exp(-damping_rate * safe_dt);
+    vec3 velocity = ((current_pos - prev_pos) / safe_dt) * velocity_retention;
+    float v_len = length(velocity);
+    if (v_len > 12.0)
+        velocity *= (12.0 / v_len);
+
+    // 2. Reconstruct dynamic instantaneous 3D surface normal from topological neighbors
+    uint nu = floatBitsToUint(rest_particles[idx].prev_position.x);
+    uint nv = floatBitsToUint(rest_particles[idx].prev_position.y);
+    vec3 normal = vec3(0.0, 0.0, 1.0);
+    if (nu < pc.particle_count && nv < pc.particle_count && nu != idx && nv != idx && nu != nv) {
+        vec3 pu = particles[nu].position_inv_mass.xyz;
+        vec3 pv = particles[nv].position_inv_mass.xyz;
+        vec3 n_cross = cross(pu - current_pos, pv - current_pos);
+        float n_len = length(n_cross);
+        if (n_len > 1e-5)
+            normal = n_cross / n_len;
+    }
+
+    // 3. Incompressible 3D Analytical Curl Wind Field with Atmospheric Direction Wandering
+    vec3 v_wind = vec3(0.0);
+    if (pc.wind_strength > 1e-4) {
+        vec3  wind_direction = pc.wind_time.xyz;
+        float sim_time       = pc.wind_time.w;
+        float wind_dir_len   = length(wind_direction);
+        vec3  base_wind_dir  = (wind_dir_len > 1e-4) ? (wind_direction / wind_dir_len) : vec3(1.0, 0.0, 0.0);
+
+        // Orthonormal activity frame around the baseline wind direction:
+        // wf: forward wind axis, wr: lateral cross-wind axis, wu: vertical up-wash axis
+        vec3 wf = base_wind_dir;
+        vec3 up_ref = (abs(wf.y) < 0.95) ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+        vec3 wr = normalize(cross(wf, up_ref));
+        vec3 wu = cross(wr, wf);
+
+        // Multi-frequency spatio-temporal wandering angles (yaw & pitch):
+        // s_cross: spatial phase projection across the curtain width (creates dragon-like rolling wave flow)
+        float s_cross = dot(current_pos, wr);
+        float w_scale = pc.wind_wandering;
+
+        // Yaw wandering: sweeps smoothly by +/- 20~28 degrees
+        float yaw_raw = 0.28 * sin(sim_time * 0.42 + s_cross * 0.18) +
+                        0.14 * sin(sim_time * 0.85 + 1.25) +
+                        0.08 * sin(sim_time * 1.60);
+        float theta_yaw = yaw_raw * w_scale;
+
+        // Pitch wandering: subtle vertical breathing +/- 4~8 degrees with gentle updraft bias (+0.03)
+        float pitch_raw = 0.08 * sin(sim_time * 0.65 + 0.70) +
+                          0.05 * cos(sim_time * 1.20 + s_cross * 0.12) + 0.03;
+        float theta_pitch = pitch_raw * w_scale;
+
+        // Exact unitary 3D rotation of wind vector:
+        vec3 wind_dir = normalize(wf * (cos(theta_yaw) * cos(theta_pitch)) +
+                                  wr * (sin(theta_yaw) * cos(theta_pitch)) +
+                                  wu * sin(theta_pitch));
+
+        // Height attenuation: sheltered right at the rod/ceiling, fully exposed across the cloth body
+        float drop = max(0.0, top_y - current_pos.y);
+        float height_factor = clamp(drop * 2.50, 0.15, 1.0);
+
+        // Atmospheric gust envelope: multi-octave non-linear surge
+        float g1 = sin(sim_time * 0.50 + current_pos.x * 0.12 + current_pos.z * 0.08);
+        float g2 = sin(sim_time * 0.90 + current_pos.z * 0.18 + 1.25);
+        float g3 = sin(sim_time * 1.65 + current_pos.x * 0.22);
+        float gust_raw = clamp(0.32 + 0.38 * g1 + 0.20 * g2 + 0.10 * g3, 0.0, 1.0);
+        float gust = gust_raw * gust_raw * (3.0 - 2.0 * gust_raw);
+
+        // Standard wind speed scaling:
+        // wind_strength = 1.0 corresponds to a nominal brisk breeze (~3.2 m/s).
+        // At wind_strength = 1.0, speed oscillates naturally between 2.0 m/s and 3.5 m/s.
+        const float kWindVelocityScale = 3.20;
+        float base_speed = pc.wind_strength * kWindVelocityScale * (0.60 + 0.40 * gust);
+
+        // Incompressible 3D Analytical Curl Turbulence:
+        // Superposition of divergence-free wave modes: u_k = (k_k x A_k) * cos(k_k . p + omega_k * t)
+        // Strictly divergence-free (div u = 0), preventing spongy volume distortions.
+
+        // Mode 1: Large atmospheric swirl (wavelength ~3.5m, frequency ~1.8 rad/s)
+        vec3 k1 = vec3(0.28, 0.20, 0.25);
+        vec3 a1 = vec3(0.15, 0.45, -0.20);
+        vec3 curl1 = cross(k1, a1) * cos(dot(k1, current_pos) + sim_time * 1.80);
+
+        // Mode 2: Meso-scale rotational eddy (wavelength ~1.4m, frequency ~3.6 rad/s)
+        vec3 k2 = vec3(-0.65, 0.40, 0.55);
+        vec3 a2 = vec3(0.35, -0.15, 0.30);
+        vec3 curl2 = cross(k2, a2) * cos(dot(k2, current_pos) + sim_time * 3.60);
+
+        // Mode 3: High-frequency micro-flutter wave (wavelength ~0.45m, frequency ~7.2 rad/s)
+        // Amplified near the free bottom hem by quadratic drop factor
+        vec3 k3 = vec3(1.40, -0.80, 1.20);
+        vec3 a3 = vec3(0.10, 0.25, 0.20);
+        float hem_flutter = clamp(drop * 0.20, 0.0, 0.85);
+        vec3 curl3 = cross(k3, a3) * cos(dot(k3, current_pos) + sim_time * 7.20) * hem_flutter;
+
+        vec3 turb = (curl1 * 0.85 + curl2 * 0.60 + curl3 * 0.40) * pc.wind_strength;
+        v_wind = (wind_dir * base_speed + turb) * height_factor;
+
+        // Architectural Wind Shadowing / Wake Cavity Occlusion:
+        // Slender architectural columns cast downwind dead-air / recirculation cavities.
+        if (pc.wind_shadow_intensity > 1e-4) {
+            float f_occlusion = 1.0;
+            for (int b = 0; b < 4; ++b) {
+                float r_col = pc.column_data[b].w;
+                if (r_col <= 0.0)
+                    continue;
+                vec3 delta_x = current_pos - pc.column_data[b].xyz;
+                // Downwind distance along the instantaneous dynamic wind vector:
+                float s = dot(delta_x, wind_dir);
+                if (s > 0.0 && s < 4.0) {
+                    // Crosswind orthogonal distance from the column wake centerline:
+                    vec3 d_perp_vec = delta_x - s * wind_dir;
+                    float d_perp = length(d_perp_vec);
+                    // Turbulent wake expands downstream:
+                    float r_wake = r_col + 0.12 * s;
+                    if (d_perp < r_wake) {
+                        float f_lateral = smoothstep(0.0, 1.0, d_perp / r_wake);
+                        float f_longitudinal = smoothstep(0.5, 3.5, s);
+                        float k_shadow = clamp(1.0 - (f_lateral + f_longitudinal), 0.0, 1.0);
+                        float col_atten = 1.0 - pc.wind_shadow_intensity * 0.85 * k_shadow;
+                        f_occlusion = min(f_occlusion, col_atten);
+                    }
+                }
+            }
+            v_wind *= f_occlusion;
+        }
+    }
+
+    // 4. Thin-shell aerodynamics: Thin-Airfoil Polar (2*PI linear pre-stall slope + stall transition + bluff body drag)
+    vec3 v_rel = v_wind - velocity;
+    float v_rel_len = length(v_rel);
+
+    vec3 aero_accel = vec3(0.0);
+    if (v_rel_len > 1e-4) {
+        vec3 v_rel_dir = v_rel / v_rel_len;
+        float vn = dot(v_rel, normal);
+        vec3 vt = v_rel - vn * normal;
+        float vt_len = length(vt);
+
+        // Sin and Cos of angle of attack alpha (angle between fabric surface and relative wind):
+        float sin_alpha = clamp(abs(vn) / v_rel_len, 0.0, 1.0);
+        float cos_alpha = clamp(vt_len / v_rel_len, 0.0, 1.0);
+        float alpha = asin(sin_alpha); // angle of attack in radians [0, PI/2]
+
+        // Viterna-Glauert Thin-Airfoil Polar:
+        // 1. Pre-stall regime (small angle of attack alpha < 16 deg / 0.28 rad):
+        //    Linear thin-airfoil theory (Kutta condition): Cl = 2*PI * sin(alpha) (~6.28 * alpha)
+        //    Steep 2*PI lift slope triggers energetic self-excited flutter even in gentle grazing breezes.
+        //    Induced & skin friction drag: Cd_pre = 0.05 + 1.80 * sin^2(alpha)
+        const float kTwoPi = 6.2831853;
+        float cl_pre = kTwoPi * sin_alpha;
+        float cd_pre = 0.05 + 1.80 * (sin_alpha * sin_alpha);
+
+        // 2. Post-stall regime (separated bluff-body flow, alpha > 22 deg / 0.38 rad):
+        //    Bluff-body cross-flow back-pressure: Cl_post = Cd_max * sin(alpha) * cos(alpha)
+        //    Bluff-body form drag: Cd_post = Cd_max * sin^2(alpha)
+        const float kCdMax = 1.90;
+        float cl_post = kCdMax * sin_alpha * cos_alpha;
+        float cd_post = kCdMax * (sin_alpha * sin_alpha);
+
+        // 3. Smooth stall transition blending:
+        //    Stall onset occurs at ~15 deg (0.26 rad), fully stalled by ~24 deg (0.42 rad)
+        float stall_weight = smoothstep(0.24, 0.40, alpha);
+        float cl_polar = mix(cl_pre, cl_post, stall_weight);
+        float cd_polar = mix(cd_pre, cd_post, stall_weight);
+
+        // Dynamic pressure acceleration factor: q / sigma = 0.5 * rho * (A/m) * v_rel^2
+        // Effective acceleration scaling constant:
+        const float kAeroScale = 2.25;
+        float dyn_accel = kAeroScale * (v_rel_len * v_rel_len);
+
+        // (1) Aerodynamic Lift: acts perpendicular to relative wind, directed towards suction side
+        vec3 lift_axis = cross(v_rel_dir, normal);
+        float lift_axis_len = length(lift_axis);
+        vec3 a_lift = vec3(0.0);
+        if (lift_axis_len > 1e-4) {
+            vec3 lift_dir = cross(lift_axis / lift_axis_len, v_rel_dir);
+            a_lift = lift_dir * (cl_polar * dyn_accel * sign(vn));
+        }
+
+        // (2) Aerodynamic Drag: acts along relative wind direction (form + skin friction)
+        vec3 a_drag = v_rel_dir * (cd_polar * dyn_accel);
+
+        // (3) Ambient low-speed air cushion resistance
+        const float cair = 0.20;
+        vec3 a_cushion = v_rel * cair;
+
+        aero_accel = a_lift + a_drag + a_cushion;
+
+        // Bounded acceleration safety clamp (allow up to 65 m/s^2 for dynamic gusts)
+        const float max_aero = 65.0;
+        float a_len = length(aero_accel);
+        if (a_len > max_aero)
+            aero_accel *= (max_aero / a_len);
+    }
+
+    // 5. Strict Verlet acceleration integration and position prediction:
+    // x(t + dt) = x(t) + v(t) * dt + 0.5 * a(t) * dt^2
+    vec3 total_accel = pc.gravity_dt.xyz + aero_accel;
+    vec3 step_disp   = velocity * safe_dt + 0.5 * total_accel * (safe_dt * safe_dt);
+
+    // CFL Anti-Tunneling displacement limiter:
+    // In violent wind gusts, prevent any single substep from teleporting particles across
+    // the collision envelope (kSelfCollisionRadius = 0.030m, kHashCellSize = 0.065m).
+    const float kMaxSubstepDisp = 0.032; // 3.2cm max single-substep displacement
+    float disp_len = length(step_disp);
+    if (disp_len > kMaxSubstepDisp)
+        step_disp *= (kMaxSubstepDisp / disp_len);
+
+    vec3 predicted_pos = current_pos + step_disp;
+
+    particles[idx].prev_position.xyz     = current_pos;
+    particles[idx].position_inv_mass.xyz = predicted_pos;
+}

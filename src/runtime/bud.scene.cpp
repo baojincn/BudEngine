@@ -116,24 +116,20 @@ namespace bud::scene {
     }
 
     void Camera::update(float dt) {
+        (void)dt;
         if (mode != CameraMode::ThirdPerson) return;
 
-        // Compute desired camera position from orbit
+        // UE5-style rigid follow (camera lag disabled): the camera pose derives
+        // directly from the orbit yaw/pitch and distance. A spring-damper here made
+        // the view sway and drift everywhere.
         float pitch_rad = bud::math::radians(orbit_pitch);
         float yaw_rad = bud::math::radians(orbit_yaw);
         bud::math::vec3 offset;
         offset.x = cos(pitch_rad) * sin(yaw_rad);
         offset.y = sin(pitch_rad);
         offset.z = cos(pitch_rad) * cos(yaw_rad);
-        bud::math::vec3 desired = target_position - offset * orbit_distance;
+        position = target_position - offset * orbit_distance;
 
-        // Spring-damper smooth
-        bud::math::vec3 diff = desired - spring_position;
-        bud::math::vec3 accel = diff * spring_stiffness - spring_velocity * spring_damping;
-        spring_velocity += accel * dt;
-        spring_position += spring_velocity * dt;
-
-        position = spring_position;
         front = bud::math::normalize(target_position - position);
         right = bud::math::normalize(bud::math::cross(front, world_up));
         up = bud::math::normalize(bud::math::cross(right, front));

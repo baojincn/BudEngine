@@ -10,6 +10,7 @@ layout(location = 2) flat in uint frag_instance_id;
 layout(location = 3) in vec2 frag_tex_coord;
 layout(location = 4) in vec3 frag_normal;
 layout(location = 5) flat in uint frag_cluster_id;
+layout(location = 6) flat in uint frag_instance_flags;
 
 layout(location = 0) out uvec4 out_visibility;
 
@@ -57,6 +58,8 @@ void main() {
     out_visibility.r = (frag_cluster_id & 0xFFFFu) | (material_id << 16u);
     out_visibility.g = floatBitsToUint(gl_FragCoord.z);
     out_visibility.b = packHalf2x16(frag_tex_coord);
-    out_visibility.a = packSnorm4x8(vec4(normalize(frag_normal), 0.0));
+    float receive_shadow = ((frag_instance_flags & 4u) != 0u) ? -1.0 : 1.0;
+    float n_len = length(frag_normal);
+    vec3 safe_n = (n_len > 1e-4) ? (frag_normal / n_len) : vec3(0.0, 1.0, 0.0);
+    out_visibility.a = packSnorm4x8(vec4(safe_n, receive_shadow));
 }
-

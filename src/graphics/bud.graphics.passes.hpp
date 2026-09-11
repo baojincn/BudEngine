@@ -328,6 +328,9 @@ namespace bud::graphics {
 		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle depth_buffer,
 			const SceneView& view,
 			const RenderConfig& config,
+			const RenderScene& render_scene,
+			const std::vector<RenderMesh>& meshes,
+			const std::vector<SortItem>& sort_list,
 			RGHandle rg_visible_pages,
 			RGHandle rg_hiz_pyramid,
 			const GPUScene& gpu_scene,
@@ -438,6 +441,23 @@ class ResolvePass : public RenderPass {
 		void update_vertices(const std::vector<PhysicsDebugVertex>& verts);
 		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle depth_buffer,
 			const SceneView& view, const RenderConfig& config);
+	};
+
+	// GPU-driven cloth debug overlay: renders the simulation wireframe (constraint
+	// edges) straight from the particle/constraint SSBOs with a pull-model vertex
+	// shader. No CPU readback, no per-frame uploads. Toggle: F2 (RenderConfig::debug_cloth).
+	class ClothDebugPass : public RenderPass {
+		PipelineHandle pipeline;
+		uint64_t set_layout = 0;
+		BufferHandle ubo_buffer;
+
+	public:
+		~ClothDebugPass() = default;
+		void shutdown(RHI* rhi) override;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle depth_buffer,
+			const SceneView& view, const RenderConfig& config,
+			BufferHandle gpu_particles, BufferHandle gpu_constraints, uint32_t constraint_count);
 	};
 
 	class TAAPass : public RenderPass {

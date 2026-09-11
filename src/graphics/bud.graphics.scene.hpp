@@ -32,6 +32,7 @@ namespace bud::graphics {
 			INSTANCE_FLAG_STATIC = 1 << 0,			// set = static (existing convention)
 			INSTANCE_FLAG_NO_CAST_SHADOW = 1 << 1,		// set = never rasterized into the shadow maps
 			INSTANCE_FLAG_NO_RECEIVE_SHADOW = 1 << 2,		// set = ignores the directional shadow term
+			INSTANCE_FLAG_CLOTH = 1 << 3,			// set = dynamic simulated cloth (world-space vertices)
 		};
 
 		// 标志位 (Bit 0 = IsStatic, Bit 1 = NoCastShadow, Bit 2 = NoReceiveShadow)
@@ -89,7 +90,7 @@ namespace bud::graphics {
 		void cull_frustum(const bud::math::Frustum& frustum, std::vector<uint32_t>& out_indices) const;
 		bool intersect_scene(const bud::math::AABB& aabb) const;
 
-		inline void add_instance(const bud::math::mat4& transform, const bud::math::AABB& aabb, uint32_t mesh_index, uint32_t submesh_index, uint32_t material_index, bool is_static, uint32_t root_group_index = 0xFFFFFFFF, uint32_t base_virtual_page = 0xFFFFFFFF, bool cast_shadow = true, bool receive_shadow = true) {
+		inline void add_instance(const bud::math::mat4& transform, const bud::math::AABB& aabb, uint32_t mesh_index, uint32_t submesh_index, uint32_t material_index, bool is_static, uint32_t root_group_index = 0xFFFFFFFF, uint32_t base_virtual_page = 0xFFFFFFFF, bool cast_shadow = true, bool receive_shadow = true, bool is_cloth = false) {
 			size_t idx = instance_count.fetch_add(1, std::memory_order_relaxed);
 
 			if (idx >= world_matrices.size()) [[unlikely]] {
@@ -108,7 +109,8 @@ namespace bud::graphics {
 			flags[idx] = static_cast<uint8_t>(
 				(is_static ? INSTANCE_FLAG_STATIC : 0) |
 				(cast_shadow ? 0 : INSTANCE_FLAG_NO_CAST_SHADOW) |
-				(receive_shadow ? 0 : INSTANCE_FLAG_NO_RECEIVE_SHADOW));
+				(receive_shadow ? 0 : INSTANCE_FLAG_NO_RECEIVE_SHADOW) |
+				(is_cloth ? INSTANCE_FLAG_CLOTH : 0));
 		}
 
 		inline size_t size() const {

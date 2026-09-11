@@ -71,6 +71,9 @@ namespace bud::graphics {
 	}
 	RGHandle VisibilityPass::add_to_graph(RenderGraph& render_graph, RGHandle backbuffer, RGHandle depth_buffer,
 		const SceneView& view, const RenderConfig& config,
+		const RenderScene& render_scene,
+		const std::vector<RenderMesh>& meshes,
+		const std::vector<SortItem>& sort_list,
 		RGHandle rg_visible_pages, RGHandle rg_hiz_pyramid, const GPUScene& gpu_scene,
 		const SceneDrawRanges& ranges,
 		BufferHandle mega_vertex_buffer,
@@ -102,13 +105,11 @@ namespace bud::graphics {
 				builder.read(rg_visible_pages, ResourceState::ShaderResource);
 				if (rg_hiz_pyramid.is_valid())
 					builder.read(rg_hiz_pyramid, ResourceState::ShaderResource);
-				if (rg_draw.is_valid() && ranges.range_b_count > 0)
-					builder.read(rg_draw, ResourceState::IndirectArgument);
 				builder.write(*vis_h, ResourceState::RenderTarget);
 				builder.write(*depth_h, ResourceState::DepthWrite);
 				return *vis_h;
 			},
-			[=, &render_graph, &gpu_scene, this](RHI* rhi, CommandHandle cmd) {
+			[=, &render_graph, &gpu_scene, &render_scene, &meshes, &sort_list, this](RHI* rhi, CommandHandle cmd) {
 				TextureHandle visibility_texture_handle = render_graph.get_texture(*vis_h);
 				TextureHandle depth_texture_handle = render_graph.get_texture(*depth_h);
 				RenderPassBeginInfo rp_info;
@@ -171,12 +172,30 @@ namespace bud::graphics {
 					rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 					rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 
-					BufferHandle ind_buf = rg_draw.is_valid() ? render_graph.get_buffer(rg_draw) : BufferHandle{};
-					if (ind_buf.is_valid()) {
-						rhi->cmd_draw_indexed_indirect(cmd, ind_buf,
-							static_cast<uint32_t>(ranges.range_a_count * sizeof(bud::graphics::IndirectCommand)),
-							static_cast<uint32_t>(ranges.range_b_count),
-							sizeof(bud::graphics::IndirectCommand));
+					const size_t b_start = ranges.range_a_count;
+					const size_t b_end = ranges.range_a_count + ranges.range_b_count;
+
+					for (size_t i = b_start; i < b_end && i < sort_list.size(); ++i) {
+						const auto& item = sort_list[i];
+						uint32_t idx = item.entity_index;
+						if (idx >= render_scene.mesh_indices.size())
+							continue;
+
+						uint32_t mesh_id = render_scene.mesh_indices[idx];
+						if (mesh_id >= meshes.size())
+							continue;
+						const auto& mesh = meshes[mesh_id];
+						if (!mesh.is_valid())
+							continue;
+						const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
+
+						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+							const auto& sub = mesh.submeshes[item.submesh_index];
+							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, static_cast<uint32_t>(i));
+						}
+						else {
+							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, static_cast<uint32_t>(i));
+						}
 					}
 				}
 
@@ -354,10 +373,30 @@ namespace bud::graphics {
 					if (ranges.range_b_count > 0 && mega_vertex_buffer.is_valid()) {
 						rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
-						rhi->cmd_draw_indexed_indirect(cmd, indirect_buffer_handle,
-							static_cast<uint32_t>(cluster_draw_count * sizeof(bud::graphics::IndirectCommand)),
-							static_cast<uint32_t>(ranges.range_b_count),
-							sizeof(bud::graphics::IndirectCommand));
+						const size_t b_start = ranges.range_a_count;
+						const size_t b_end = ranges.range_a_count + ranges.range_b_count;
+						for (size_t i = b_start; i < b_end && i < sort_list.size(); ++i) {
+							const auto& item = sort_list[i];
+							uint32_t idx = item.entity_index;
+							if (idx >= render_scene.mesh_indices.size())
+								continue;
+
+							uint32_t mesh_id = render_scene.mesh_indices[idx];
+							if (mesh_id >= meshes.size())
+								continue;
+							const auto& mesh = meshes[mesh_id];
+							if (!mesh.is_valid())
+								continue;
+							const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
+
+							if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+								const auto& sub = mesh.submeshes[item.submesh_index];
+								rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, static_cast<uint32_t>(i));
+							}
+							else {
+								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, static_cast<uint32_t>(i));
+							}
+						}
 					}
 				}
 				else {

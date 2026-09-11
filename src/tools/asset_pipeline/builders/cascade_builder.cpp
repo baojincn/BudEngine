@@ -2,6 +2,7 @@
 #include "texture_builder.hpp"
 #include "material_asset_builder.hpp"
 #include "mesh_builder.hpp"
+#include "cloth_baker.hpp"
 #include "../cache/asset_cache.hpp"
 #include "../cache/asset_registry.hpp"
 #include "../core/support.hpp"
@@ -302,7 +303,16 @@ bool CascadeBuilder::build_package_from_raw(
                 ent.name = options.entity_prefix.empty() ? sname_readable : (options.entity_prefix + "_" + sname_readable);
                 ent.asset_path = out_mesh_path;
                 ent.is_active = true;
-                ent.is_static = true;
+
+                bool is_cloth_ent = false;
+                if (sub.material_index < cooked_mesh.materials.size()) {
+                    if (ClothBaker::is_cloth_material(cooked_mesh.materials[sub.material_index].name))
+                        is_cloth_ent = true;
+                }
+                if (!is_cloth_ent && (ClothBaker::is_cloth_material(sname_readable) || ClothBaker::is_cloth_material(out_mesh_path)))
+                    is_cloth_ent = true;
+
+                ent.is_static = !is_cloth_ent;
                 ent.mesh_index = 0;
                 ent.material_index = 0;
                 ent.transform = glm::mat4(1.0f);
@@ -359,7 +369,18 @@ bool CascadeBuilder::build_package_from_raw(
             ent.name = options.entity_prefix.empty() ? stem : (options.entity_prefix + "_" + stem);
             ent.asset_path = out_mesh_path;
             ent.is_active = true;
-            ent.is_static = true;
+
+            bool is_cloth_ent = false;
+            for (const auto& mat : cooked_mesh.materials) {
+                if (ClothBaker::is_cloth_material(mat.name)) {
+                    is_cloth_ent = true;
+                    break;
+                }
+            }
+            if (!is_cloth_ent && (ClothBaker::is_cloth_material(stem) || ClothBaker::is_cloth_material(out_mesh_path)))
+                is_cloth_ent = true;
+
+            ent.is_static = !is_cloth_ent;
             ent.mesh_index = 0;
             ent.material_index = 0;
             ent.transform = glm::mat4(1.0f);

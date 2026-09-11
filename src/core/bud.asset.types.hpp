@@ -40,7 +40,8 @@ namespace bud::asset {
 		Texture = 4,
 		Collision = 5,
 		RawMesh = 6,
-		RawTexture = 7
+		RawTexture = 7,
+		ClothPhysics = 8
 	};
 
 	enum class AssetChunkFlags : uint32_t {
@@ -301,6 +302,27 @@ namespace bud::asset {
 		uint32_t color;
 	};
 	static_assert(sizeof(VGPackedVertex) == 16, "VGPackedVertex must be 16 bytes");
+
+	inline constexpr uint32_t CLOTH_PHYSICS_MAGIC = 0x59485043; // 'CPHY'
+	inline constexpr uint32_t CLOTH_PHYSICS_VERSION = 1;
+	inline constexpr uint32_t MAX_CLOTH_LODS = 4;
+
+	struct ClothPhysicsLODHeader {
+		uint32_t sim_particle_count;
+		uint32_t sim_particle_offset; // byte offset relative to payload start
+		uint32_t constraint_count;
+		uint32_t constraint_offset;
+		uint32_t binding_count;
+		uint32_t binding_offset;
+	};
+
+	struct ClothPhysicsChunkHeader {
+		uint32_t magic;
+		uint32_t version;
+		uint32_t lod_count;
+		float lod_switch_distances[MAX_CLOTH_LODS];
+		ClothPhysicsLODHeader lods[MAX_CLOTH_LODS];
+	};
 
 	#pragma pack(pop)
 

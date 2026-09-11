@@ -269,8 +269,14 @@ namespace bud::graphics {
 							if (!bud::math::intersect_sphere_frustum(world_sphere, cascade_view_frustum_dbg)) return;
 							const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
 
+							// Simulated cloth keeps world-space vertices in the mega buffer
+							// (RenderScene::INSTANCE_FLAG_CLOTH == 8): never re-apply the
+							// instance model matrix or the shadow is double-transformed.
+							if (idx < render_scene.flags.size() && (render_scene.flags[idx] & 8))
+								push_consts.model = bud::math::mat4(1.0f);
+							else
+								push_consts.model = model_matrix;
 							push_consts.use_gpu_driven = 0;
-							push_consts.model = model_matrix;
 							push_consts.page_slot = ~0u;
 
 							rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
