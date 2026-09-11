@@ -40,4 +40,10 @@ namespace bud::game {
         }
     }
 
+    const void* GameFramework::get_readback_pixels() const {
+        if (engine)
+            return engine->get_readback_pixels();
+        return nullptr;
+    }
+
 }

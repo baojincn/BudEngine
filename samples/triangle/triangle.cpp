@@ -140,19 +140,3 @@ void TriangleApp::on_update(float delta_time) {
 void TriangleApp::on_shutdown() {
 	bud::print("[TriangleApp] Shutting down.");
 }
-
-pybind11::array_t<uint8_t> TriangleApp::step(float dt) {
-	step_puppet(dt);
-
-	auto engine = get_engine();
-	const void* pixels = engine->get_readback_pixels();
-	if (!pixels)
-		return pybind11::array_t<uint8_t>();
-
-	auto& engine_config = engine->get_engine_config();
-	pybind11::array_t<uint8_t> result({ engine_config.height, engine_config.width, 4 });
-    auto req = result.request();
-    std::memcpy(req.ptr, pixels, (uint64_t)engine_config.width * engine_config.height * 4);
-
-	return result;
-}

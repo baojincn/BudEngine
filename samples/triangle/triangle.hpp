@@ -1,5 +1,7 @@
-#include <pybind11/numpy.h>
-#include <pybind11/pybind11.h>
+#pragma once
+
+#include <memory>
+#include <atomic>
 #include "src/runtime/bud.game.hpp"
 #include "src/streaming/bud.streaming.manager.hpp"
 
@@ -14,10 +16,4 @@ public:
 	void on_update(float delta_time) override;
 
 	void on_shutdown() override;
-
-	void init_environment(const bud::game::AppConfig& config) {
-		init_puppet(config);
-	}
-
-	pybind11::array_t<uint8_t> step(float dt);
 };

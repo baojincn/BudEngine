@@ -483,27 +483,18 @@ add_custom_target(GenerateShaderReport
 
 # End, tools
 
-# Python ML Bridge
+# Python ML Bridge / Gym Environment
 set(Python3_FIND_VIRTUALENV FIRST)
 
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
- message(STATUS "Python include: ${Python3_INCLUDE_DIRS}")
-     if(NOT Python3_INCLUDE_DIRS)
-       message(FATAL_ERROR "Python3 development headers not found. Install python dev or ensure vcpkg python3 for the triplet is installed.")
-     endif()
-
-    # Ensure triangle_sample links to Python import library when Python is available
-    if(Python3_FOUND)
-        target_link_libraries(triangle_sample PRIVATE Python3::Python)
-    endif()
-find_package(pybind11 CONFIG REQUIRED)
-
-# Ensure bud_engine_core can compile pybind11-using sources when Python was found
-if(Python3_FOUND)
-    target_include_directories(bud_engine_core PUBLIC ${Python3_INCLUDE_DIRS})
+message(STATUS "Python include: ${Python3_INCLUDE_DIRS}")
+if(NOT Python3_INCLUDE_DIRS)
+    message(FATAL_ERROR "Python3 development headers not found. Install python dev or ensure vcpkg python3 for the triplet is installed.")
 endif()
 
-pybind11_add_module(bud_rl src/ml/bud.ml.rl_py_bind.cpp "samples/triangle/triangle.cpp")
+find_package(pybind11 CONFIG REQUIRED)
+
+pybind11_add_module(bud_rl samples/gym_env/gym_env.cpp samples/gym_env/py_bindings.cpp)
+target_include_directories(bud_rl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bud_rl PRIVATE pybind11::module bud_engine_core)
-# Output to where python might run
 set_target_properties(bud_rl PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")

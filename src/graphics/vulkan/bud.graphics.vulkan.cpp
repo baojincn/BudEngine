@@ -201,10 +201,21 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		alloc.init(device);
 	}
 
+	frames.resize(max_frames_in_flight);
+
 	// 交换链与呈现资源
 	if (!headless_mode) {
 		create_swapchain(plat_window);
 		create_image_views();
+	}
+	else {
+		int w = 1280;
+		int h = 720;
+		if (plat_window)
+			plat_window->get_size(w, h);
+		swapchain_extent.width = static_cast<uint32_t>(w > 0 ? w : 1280);
+		swapchain_extent.height = static_cast<uint32_t>(h > 0 ? h : 720);
+		swapchain_image_format = VK_FORMAT_R8G8B8A8_SRGB;
 	}
 
 	// 命令池与同步对象
@@ -1632,9 +1643,11 @@ void VulkanRHI::flush_active_graphics_segment() {
     std::vector<uint64_t> wait_values;
 
     if (is_first_graphics_submit_in_frame) {
-        wait_semaphores.push_back(frames[current_frame].image_available_semaphore);
-        wait_stages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        wait_values.push_back(0);
+        if (!headless_mode) {
+            wait_semaphores.push_back(frames[current_frame].image_available_semaphore);
+            wait_stages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            wait_values.push_back(0);
+        }
         is_first_graphics_submit_in_frame = false;
     }
 
@@ -1729,12 +1742,17 @@ CommandHandle VulkanRHI::begin_frame() {
 		}
 	}
 
-	VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, frames[current_frame].image_available_semaphore, VK_NULL_HANDLE, &current_image_index);
-	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-		swapchain_out_of_date.store(true, std::memory_order_release);
-		return nullptr;
-	} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-		throw std::runtime_error("failed to acquire swap chain image!");
+	if (headless_mode) {
+		current_image_index = current_frame;
+	}
+	else {
+		VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, frames[current_frame].image_available_semaphore, VK_NULL_HANDLE, &current_image_index);
+		if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+			swapchain_out_of_date.store(true, std::memory_order_release);
+			return nullptr;
+		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+			throw std::runtime_error("failed to acquire swap chain image!");
+		}
 	}
 
 	memory_allocator->on_frame_begin(current_frame);
@@ -1805,9 +1823,11 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	std::vector<uint64_t> wait_values;
 
 	if (is_first_graphics_submit_in_frame) {
-		wait_semaphores.push_back(frames[current_frame].image_available_semaphore);
-		wait_stages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-		wait_values.push_back(0);
+		if (!headless_mode) {
+			wait_semaphores.push_back(frames[current_frame].image_available_semaphore);
+			wait_stages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+			wait_values.push_back(0);
+		}
 		is_first_graphics_submit_in_frame = false;
 	}
 
@@ -1826,16 +1846,26 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	}
 
 	uint64_t graphics_signal_value = ++graphics_timeline_value;
-	VkSemaphore signal_semaphores[2] = {
-		render_finished_semaphores[current_image_index],
-		graphics_timeline_semaphore
-	};
-	uint64_t signal_values[2] = { 0, graphics_signal_value };
+	VkSemaphore signal_semaphores[2];
+	uint64_t signal_values[2];
+	uint32_t signal_count = 0;
+
+	if (headless_mode) {
+		signal_semaphores[0] = graphics_timeline_semaphore;
+		signal_values[0] = graphics_signal_value;
+		signal_count = 1;
+	} else {
+		signal_semaphores[0] = render_finished_semaphores[current_image_index];
+		signal_semaphores[1] = graphics_timeline_semaphore;
+		signal_values[0] = 0;
+		signal_values[1] = graphics_signal_value;
+		signal_count = 2;
+	}
 
 	VkTimelineSemaphoreSubmitInfo timeline_info{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
 	timeline_info.waitSemaphoreValueCount = static_cast<uint32_t>(wait_values.size());
 	timeline_info.pWaitSemaphoreValues = wait_values.data();
-	timeline_info.signalSemaphoreValueCount = 2;
+	timeline_info.signalSemaphoreValueCount = signal_count;
 	timeline_info.pSignalSemaphoreValues = signal_values;
 
 	VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -1845,7 +1875,7 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	submit_info.pWaitDstStageMask = wait_stages.data();
 	submit_info.commandBufferCount = 1;
 	submit_info.pCommandBuffers = &command_buffer;
-	submit_info.signalSemaphoreCount = 2;
+	submit_info.signalSemaphoreCount = signal_count;
 	submit_info.pSignalSemaphores = signal_semaphores;
 	async_compute_pending_this_frame = false;
 	current_graphics_cb = VK_NULL_HANDLE;
@@ -1867,26 +1897,28 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 #endif
 	}
 
-	VkPresentInfoKHR present_info{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
-	present_info.waitSemaphoreCount = 1;
-	present_info.pWaitSemaphores = signal_semaphores;
-	VkSwapchainKHR swap_chains[] = { swapchain };
-	present_info.swapchainCount = 1;
-	present_info.pSwapchains = swap_chains;
-	present_info.pImageIndices = &current_image_index;
+	if (!headless_mode) {
+		VkPresentInfoKHR present_info{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+		present_info.waitSemaphoreCount = 1;
+		present_info.pWaitSemaphores = signal_semaphores;
+		VkSwapchainKHR swap_chains[] = { swapchain };
+		present_info.swapchainCount = 1;
+		present_info.pSwapchains = swap_chains;
+		present_info.pImageIndices = &current_image_index;
 
-	VkResult present_result = vkQueuePresentKHR(present_queue, &present_info);
-	if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
-		swapchain_out_of_date.store(true, std::memory_order_release);
-	} else if (present_result != VK_SUCCESS) {
-		std::string err = std::format("VulkanRHI::end_frame vkQueuePresentKHR failed: {}", (int)present_result);
-		bud::eprint("{}", err);
+		VkResult present_result = vkQueuePresentKHR(present_queue, &present_info);
+		if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
+			swapchain_out_of_date.store(true, std::memory_order_release);
+		} else if (present_result != VK_SUCCESS) {
+			std::string err = std::format("VulkanRHI::end_frame vkQueuePresentKHR failed: {}", (int)present_result);
+			bud::eprint("{}", err);
 #if defined(_DEBUG)
-		throw std::runtime_error(err);
+			throw std::runtime_error(err);
 #else
-		swapchain_out_of_date.store(true, std::memory_order_release);
-		return;
+			swapchain_out_of_date.store(true, std::memory_order_release);
+			return;
 #endif
+		}
 	}
 
 	frames[current_frame].graphics_timeline_value = graphics_signal_value;
@@ -1921,6 +1953,11 @@ void VulkanRHI::resize_swapchain(uint32_t width, uint32_t height) {
 
 	if (width == 0 || height == 0)
 		return;
+
+	if (headless_mode) {
+		swapchain_out_of_date.store(false, std::memory_order_release);
+		return;
+	}
 
 	vkDeviceWaitIdle(device);
 
@@ -2819,7 +2856,9 @@ void VulkanRHI::pick_physical_device() {
 void VulkanRHI::create_logical_device(bool enable_validation) {
 	QueueFamilyIndices indices = find_queue_families(physical_device);
 	std::vector<VkDeviceQueueCreateInfo> queue_infos;
-	std::set<uint32_t> unique_families = { indices.graphics_family.value(), indices.present_family.value() };
+	std::set<uint32_t> unique_families = { indices.graphics_family.value() };
+	if (!headless_mode && indices.present_family.has_value())
+		unique_families.insert(indices.present_family.value());
 	if (indices.copy_family.has_value())
 		unique_families.insert(indices.copy_family.value());
 	if (indices.compute_family.has_value())
@@ -2959,7 +2998,10 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 #endif
 
 	vkGetDeviceQueue(device, indices.graphics_family.value(), 0, &graphics_queue);
-	vkGetDeviceQueue(device, indices.present_family.value(), 0, &present_queue);
+	if (!headless_mode && indices.present_family.has_value())
+		vkGetDeviceQueue(device, indices.present_family.value(), 0, &present_queue);
+	else
+		present_queue = VK_NULL_HANDLE;
 
 	graphics_family_index = indices.graphics_family.value();
 	copy_family_index = indices.copy_family.has_value() ? indices.copy_family.value() : graphics_family_index;
@@ -3218,8 +3260,9 @@ void VulkanRHI::create_sync_objects() {
 
 		}
 
-		render_finished_semaphores.resize(swapchain_images.size());
-	for (size_t i = 0; i < swapchain_images.size(); ++i) {
+	uint32_t sem_count = headless_mode ? max_frames_in_flight : static_cast<uint32_t>(swapchain_images.size());
+	render_finished_semaphores.resize(sem_count);
+	for (size_t i = 0; i < sem_count; ++i) {
 		if (vkCreateSemaphore(device, &semaphore_info, nullptr, &render_finished_semaphores[i]) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create render finished semaphores!");
 		}
@@ -3454,12 +3497,20 @@ QueueFamilyIndices VulkanRHI::find_queue_families(VkPhysicalDevice device) {
 
 	int i = 0;
 	for (const auto& queue_family : queue_families) {
-		if (queue_family.queueFlags & VK_QUEUE_GRAPHICS_BIT) indices.graphics_family = i;
-		VkBool32 present_support = false;
-		vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &present_support);
-		if (present_support) indices.present_family = i;
-		if (indices.is_complete()) break;
+		if (queue_family.queueFlags & VK_QUEUE_GRAPHICS_BIT)
+			indices.graphics_family = i;
+		if (surface != VK_NULL_HANDLE) {
+			VkBool32 present_support = false;
+			vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &present_support);
+			if (present_support)
+				indices.present_family = i;
+		}
+		if (indices.is_complete())
+			break;
 		i++;
+	}
+	if (headless_mode && !indices.present_family.has_value()) {
+		indices.present_family = indices.graphics_family;
 	}
 
 	// Dedicated transfer (copy) family: a family with VK_QUEUE_TRANSFER_BIT but

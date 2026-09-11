@@ -1,4 +1,4 @@
-﻿#include <memory>
+#include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -2014,7 +2014,8 @@ namespace bud::graphics {
 			);
 		}
 
-		ui_pass->add_to_graph(render_graph, back_buffer);
+		if (!rhi->is_headless() && ui_pass)
+			ui_pass->add_to_graph(render_graph, back_buffer);
 		render_graph.compile();
 
 		if (render_config.dump_render_graph && !graphviz_exported_) {
@@ -2047,7 +2048,7 @@ namespace bud::graphics {
 
 			// Perform copy
 			rhi->cmd_copy_image_to_buffer(active_cmd, swapchain_tex, readback_buffers[current_idx]);
-			// Barrier back to Present/Undefined doesn't strictly matter for offscreen, but we leave it as TransferSrc so it's clean next frame
+			rhi->resource_barrier(active_cmd, swapchain_tex, ResourceState::TransferSrc, ResourceState::RenderTarget);
 		}
 		else {
 			rhi->resource_barrier(active_cmd, swapchain_tex, ResourceState::RenderTarget, ResourceState::Present);

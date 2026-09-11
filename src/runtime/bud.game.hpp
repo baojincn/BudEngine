@@ -47,6 +47,8 @@ namespace bud::game {
 		// Async resource load blocking
 		virtual bool is_fully_loaded() const { return true; }
 
+		const void* get_readback_pixels() const;
+
 	protected:
 		bud::engine::BudEngine* get_engine() { return engine.get(); }
 

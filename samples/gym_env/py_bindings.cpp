@@ -1,11 +1,12 @@
-﻿#include "samples/triangle/triangle.hpp"
-
+#include <pybind11/pybind11.h>
+#include "gym_env.hpp"
 
 using namespace bud::game;
+using namespace bud::application;
 namespace py = pybind11;
 
 PYBIND11_MODULE(bud_rl, m) {
-	m.doc() = "BudEngine Pybind11 RL Bridge";
+	m.doc() = "BudEngine Gym RL Bridge";
 
 	py::class_<AppConfig>(m, "AppConfig")
 		.def(py::init<>())
@@ -16,12 +17,13 @@ PYBIND11_MODULE(bud_rl, m) {
 		.def_readwrite("is_puppet_mode", &AppConfig::is_puppet_mode)
 		.def_readwrite("is_headless", &AppConfig::is_headless);
 
-	py::class_<TriangleApp, std::shared_ptr<TriangleApp>>(m, "TriangleApp")
+	py::class_<GymEnvApp, std::shared_ptr<GymEnvApp>>(m, "GymEnv")
 		.def_static("create", [](const AppConfig& cfg) {
-			auto inst = std::make_shared<TriangleApp>();
-			inst->on_init(cfg);
+			auto inst = std::make_shared<GymEnvApp>();
+			inst->init_puppet(cfg);
 			return inst;
 		}, py::arg("app_config") = AppConfig())
-		.def("step", &TriangleApp::step, py::arg("dt") = 0.016f)
-		.def("is_fully_loaded", &TriangleApp::is_fully_loaded);
+		.def("step", &GymEnvApp::step, py::arg("dt") = 0.016f)
+		.def("reset", &GymEnvApp::reset)
+		.def("is_fully_loaded", &GymEnvApp::is_fully_loaded);
 }
