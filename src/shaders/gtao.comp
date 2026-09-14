@@ -32,10 +32,11 @@ float IGN(vec2 pixel) {
 }
 
 vec3 reconstruct_normal(vec2 uv, vec3 view_pos, vec2 texel) {
+    // In Vulkan, screen UV origin (0, 0) is at TOP-LEFT.
+    // -texel.y moves UP towards the top, +texel.y moves DOWN towards the bottom.
     vec3 pos_r = get_view_pos(uv + vec2(texel.x, 0.0), texture(depth_tex, uv + vec2(texel.x, 0.0)).r);
-    vec3 pos_u = get_view_pos(uv + vec2(0.0, texel.y), texture(depth_tex, uv + vec2(0.0, texel.y)).r);
+    vec3 pos_u = get_view_pos(uv - vec2(0.0, texel.y), texture(depth_tex, uv - vec2(0.0, texel.y)).r);
     vec3 N = cross(pos_r - view_pos, pos_u - view_pos);
-    if (dot(N, -view_pos) < 0.0) N = -N;
     float N_len = length(N);
     return (N_len < 0.00001) ? vec3(0.0, 0.0, 1.0) : (N / N_len);
 }
@@ -107,11 +108,25 @@ void main() {
                 vec3 horizon_vec = sample_pos - view_pos;
                 float dist_sq = dot(horizon_vec, horizon_vec);
 
-                // Only samples within the AO range can raise the horizon
-                if (dist_sq < pc.radius * pc.radius * 4.0) {
-                    float cos_h = dot(normalize(horizon_vec), V);
-                    uint side_idx = (side == -1) ? 0u : 1u;
-                    cos_horizons[side_idx] = max(cos_horizons[side_idx], cos_h);
+                // Distance falloff & normal-aligned thickness heuristic:
+                // Only samples within pc.radius and within the physical contact thickness threshold
+                // of the surface normal can raise the horizon. This aggressively eliminates large floating
+                // shadow slabs under character bodies/limbs while preserving tight, grounded contact shadows.
+                if (dist_sq < pc.radius * pc.radius) {
+                    float falloff = clamp(1.0 - (dist_sq / (pc.radius * pc.radius)), 0.0, 1.0);
+                    falloff *= falloff; // Smooth C1 quadratic distance falloff
+
+                    float dist_along_normal = dot(horizon_vec, N);
+                    float thickness = 0.20 * pc.radius; // ~24 cm physical contact threshold (tightened from 0.35)
+                    if (dist_along_normal > thickness)
+                        falloff *= clamp(1.0 - (dist_along_normal - thickness) / (thickness * 0.8), 0.0, 1.0);
+
+                    if (falloff > 0.001) {
+                        float cos_h = dot(normalize(horizon_vec), V);
+                        float eff_cos_h = mix(-1.0, cos_h, falloff);
+                        uint side_idx = (side == -1) ? 0u : 1u;
+                        cos_horizons[side_idx] = max(cos_horizons[side_idx], eff_cos_h);
+                    }
                 }
             }
         }

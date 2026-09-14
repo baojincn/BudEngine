@@ -150,6 +150,7 @@ namespace bud::graphics {
 		BGRA8_SRGB,
 		BC7_UNORM,
 		BC5_UNORM,
+		RG16_FLOAT,
 		RGBA16_FLOAT,
 		R32G32B32_FLOAT,
 		R32G32_UINT,
@@ -287,8 +288,8 @@ namespace bud::graphics {
 		//     Units = vkCmdSetDepthBias factors (device depth units, NOT
 		//     normalized [0,1] fractions). Only used by CSMShadowPass.
 		// -----------------------------------------------------------------
-		float shadow_bias_constant = 2.0f;  // constantFactor (integer part is what counts)
-		float shadow_bias_slope = 1.75f;    // slopeFactor
+		float shadow_bias_constant = 1.5f;  // constantFactor (integer part is what counts)
+		float shadow_bias_slope = 1.5f;    // slopeFactor
 		float shadow_bias_clamp = 0.0f;     // 0 == no clamping (Vulkan convention)
 
 		// (2) Receiver stage bias, applied when sampling the shadow map in
@@ -296,7 +297,7 @@ namespace bud::graphics {
 		//     cascade size / map resolution / camera pitch:
 		//         world_offset = cascade_texel_size * <these factors>
 		float shadow_normal_offset_texels = 1.0f; // world-space offset along N
-		float shadow_receiver_bias_texels = 1.5f; // residual light-depth offset
+		float shadow_receiver_bias_texels = 0.85f; // residual light-depth offset
 
 		float shadow_ortho_size = 35.0f;
 		// ^ Legacy: only a fallback for the shadow caster LOD metric when a cascade has
@@ -541,7 +542,8 @@ namespace bud::graphics {
 			TAA,
 			ClothIntegrate,
 			ClothSolver,
-			ClothSkinning
+			ClothSkinning,
+			RobotSkinning
 		};
 
 		ShaderStage cs;

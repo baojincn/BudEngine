@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <vector>
 #include <string>
@@ -31,6 +31,7 @@ namespace bud::physics {
 		std::string asset_path;
 		uint32_t mesh_id = 0;
 		int32_t vertex_offset = -1;              // destination vertex offset in mega_vertex_buffer (-1 = unresolved)
+		uint32_t global_binding_offset = 0;      // start index in global SimWorld bindings
 		bud::math::vec3 center{ 0.0f };
 		bud::math::vec3 min_p{ 0.0f };
 		bud::math::vec3 max_p{ 0.0f };
@@ -64,6 +65,7 @@ namespace bud::physics {
 		bud::graphics::BufferHandle gpu_bending_constraints;  // bending-only distance constraints
 		bud::graphics::BufferHandle gpu_bending_lambdas;      // bending-only accumulated XPBD lambdas
 		bud::graphics::BufferHandle gpu_bindings;             // global sim tri indices + global destination vertex index
+		bud::graphics::BufferHandle gpu_prev_vertex_positions; // dedicated vec4 buffer for previous vertex positions
 		bud::graphics::BufferHandle gpu_colliders;            // vetted scene boxes for cloth-vs-rigidbody collision
 		uint32_t collider_count = 0;
 		bud::graphics::BufferHandle gpu_cell_heads;           // spatial hash table heads (self-collision)
@@ -97,10 +99,6 @@ namespace bud::physics {
 		// Update static scene box colliders (from Jolt physics scene). Thread-safe; triggers rebuild.
 		void set_scene_colliders(std::vector<BoxCollider> colliders);
 
-		// Camera sphere that pushes hanging cloth aside (FP eye / TP orbit camera).
-		// radius = 0 disables it. Thread-safe.
-		void set_camera_sphere(const bud::math::vec3& center, float radius);
-
 		// Update simulation configuration (preset, compliances, damping, wind). Thread-safe.
 		void set_config(const ClothConfig& config);
 		ClothConfig get_config() const;
@@ -111,6 +109,10 @@ namespace bud::physics {
 			float dt, const bud::graphics::RenderConfig& config, float current_time,
 			const bud::math::vec3& camera_position,
 			const bud::graphics::GPUScene* gpu_scene = nullptr);
+
+		// Accessors for velocity pass
+		uint32_t get_mesh_binding_offset(uint32_t mesh_id) const;
+		bud::graphics::BufferHandle get_gpu_prev_vertex_positions() const;
 
 	private:
 		bud::graphics::RHI* stored_rhi = nullptr;
@@ -130,7 +132,6 @@ namespace bud::physics {
 
 		CapsuleCollider current_capsule{};
 		bool capsule_enabled = false;
-		bud::math::vec4 camera_sphere_state{ 0.0f }; // xyz: center, w: radius (0 = disabled)
 		std::vector<BoxCollider> scene_colliders;
 
 		std::atomic<bool> has_world{ false };

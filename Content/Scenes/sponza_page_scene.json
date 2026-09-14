@@ -1426,7 +1426,7 @@
             "is_static": true,
             "is_cast_shadow": true,
             "is_receive_shadow": true,
-            "enable_physics": true,
+            "enable_physics": false,
             "material_index": 0,
             "mesh_index": 0,
             "name": "sponza_116",

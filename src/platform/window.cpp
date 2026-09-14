@@ -30,6 +30,7 @@ namespace bud::platform {
 		case SDLK_E:      return bud::input::Key::E;
 		case SDLK_LSHIFT: return bud::input::Key::LShift;
 		case SDLK_V:      return bud::input::Key::V;
+		case SDLK_B:      return bud::input::Key::B;
 		case SDLK_TAB:    return bud::input::Key::Tab;
 		case SDLK_F1:     return bud::input::Key::F1;
 		case SDLK_F2:     return bud::input::Key::F2;

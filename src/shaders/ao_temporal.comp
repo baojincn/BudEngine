@@ -135,19 +135,11 @@ void main() {
 	}
 	history_ao = clamp(history_ao, lo, hi);
 
-	// Motion-adaptive exponential moving average: keep a strong history even
-	// while moving (reprojection is accurate for static geometry), so the
-	// per-frame noise stays averaged instead of flickering. The floor is kept
-	// at 0.95 -- the neighborhood clamp above already prevents smearing
-	// outliers, so we don't need to gut the feedback for fast motion.
+	// Motion-adaptive exponential moving average (UE5 / Frostbite style):
+	// Responsive feedback (0.88 static down to 0.75 on motion) clears dynamic
+	// disocclusion quickly without ghosting, while neighborhood clamping prevents flicker.
 	float motion_px = length((prev_uv - uv) * pc.screen_size);
-	float feedback = mix(0.97, 0.95, 1.0 - exp(-motion_px * 0.15));
-
-	// Dark AO (shadowed areas) makes any residual noise far more visible:
-	// the pixel color there is almost purely ambient * ao. Bias the blend
-	// toward history for dark AO values so shadows hold steady while moving.
-	float dark_boost = mix(1.18, 1.0, smoothstep(0.0, 0.5, current_ao));
-	feedback = min(feedback * dark_boost, 0.98);
+	float feedback = mix(0.88, 0.75, clamp(motion_px * 0.1, 0.0, 1.0));
 
 	float ao = mix(current_ao, history_ao, feedback);
 

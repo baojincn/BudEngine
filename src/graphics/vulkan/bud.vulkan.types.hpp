@@ -71,6 +71,7 @@ namespace bud::graphics::vulkan {
 		alignas(16) bud::math::mat4 unjittered_inv_view_proj;
 		alignas(16) bud::math::mat4 prev_unjittered_view_proj;
 		alignas(16) bud::math::vec4 jitter_offset;       // xy: pixel offset [-0.5, 0.5], zw: NDC offset
+		alignas(16) bud::math::mat4 unjittered_view_proj;
 	};
 
 	// Lock the std140 contract with the GLSL UBO copies (vg_common.glsl / forward_main.frag).
@@ -82,7 +83,8 @@ namespace bud::graphics::vulkan {
 	static_assert(offsetof(UniformBufferObject, unjittered_inv_view_proj) == 592, "UBO: unjittered_inv_view_proj must stay at 592");
 	static_assert(offsetof(UniformBufferObject, prev_unjittered_view_proj) == 656, "UBO: prev_unjittered_view_proj must stay at 656");
 	static_assert(offsetof(UniformBufferObject, jitter_offset) == 720, "UBO: jitter_offset must stay at 720");
-	static_assert(sizeof(UniformBufferObject) == 736, "UBO: std140 block size must be 736");
+	static_assert(offsetof(UniformBufferObject, unjittered_view_proj) == 736, "UBO: unjittered_view_proj must stay at 736");
+	static_assert(sizeof(UniformBufferObject) == 800, "UBO: std140 block size must be 800");
 
 	struct Vertex {
 		float pos[3];

@@ -44,23 +44,18 @@ namespace bud::scene {
         float get_capsule_height() const { return capsule_height; }
         bud::math::vec3 get_linear_velocity() const;
 
-        // Place the capsule's FEET on the highest static surface under the spawn XZ.
-        // Spawning from a fixed camera height embeds the capsule bottom into thin
-        // slabs/steps whenever the capsule dimensions change (Jolt then blocks every
-        // movement cast -> "WASD dead"). Call at load, before unstick_from.
-        void snap_to_ground(const std::vector<bud::math::vec3>& body_positions,
-                            const std::vector<bud::math::vec3>& body_half_extents);
-
-        // If the capsule currently overlaps any of the given AABBs, lift it straight up
-        // until it is free and teleport there. Returns the overlap count at the original
-        // spot: 0 = spawn was already free, negative = still stuck after rising max_rise.
-        // Guards against starting a run welded inside a static volume, from which a
-        // CharacterVirtual cannot recover (it would be unable to move at all).
-        int unstick_from(const std::vector<bud::math::vec3>& body_positions,
-                         const std::vector<bud::math::vec3>& body_half_extents,
-                         float max_rise = 8.0f);
+        // Place the capsule's feet flush onto the static ground surface using downward raycast.
+        bool snap_to_ground();
 
         bud::physics::PhysicsScene* get_physics_scene() const { return physics_scene; }
+
+        void add_ignored_body(uint32_t body_id) {
+            ignored_bodies.push_back(body_id);
+        }
+
+        void clear_ignored_bodies() {
+            ignored_bodies.clear();
+        }
 
     private:
         JPH::CharacterVirtual* character = nullptr;
@@ -75,6 +70,7 @@ namespace bud::scene {
         bud::math::vec3 last_pos{ 0.0f };
         int stuck_frames = 0;
         bud::math::vec3 gravity = bud::math::vec3(0.0f, -9.80665f, 0.0f);
+        std::vector<uint32_t> ignored_bodies;
     };
 
 } // namespace bud::scene

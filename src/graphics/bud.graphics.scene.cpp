@@ -12,6 +12,7 @@ namespace bud::graphics {
 	RenderScene& RenderScene::operator=(RenderScene&& other) noexcept {
 		if (this != &other) {
 			world_matrices = std::move(other.world_matrices);
+			prev_world_matrices = std::move(other.prev_world_matrices);
 			world_aabbs = std::move(other.world_aabbs);
 			mesh_indices = std::move(other.mesh_indices);
 			submesh_indices = std::move(other.submesh_indices);

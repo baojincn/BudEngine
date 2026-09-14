@@ -1,4 +1,4 @@
-#include "cloth_baker.hpp"
+#include "cloth_builder.hpp"
 #include "src/tools/asset_pipeline/core/support.hpp"
 #include <meshoptimizer.h>
 
@@ -293,7 +293,7 @@ std::vector<bud::physics::ClothSkinBinding> compute_barycentric_bindings(
 
 } // namespace
 
-bool ClothBaker::is_cloth_material(std::string_view name) {
+bool ClothBuilder::is_cloth_material(std::string_view name) {
     std::string lower(name);
     for (char& c : lower)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -317,12 +317,12 @@ bool ClothBaker::is_cloth_material(std::string_view name) {
     return false;
 }
 
-std::vector<uint8_t> ClothBaker::build(const RawMesh& raw_mesh) {
+std::vector<uint8_t> ClothBuilder::build(const RawMesh& raw_mesh) {
     if (raw_mesh.vertices.empty() || raw_mesh.indices.empty())
         return {};
 
-    support::log_info("[ClothBaker] Starting dual-mesh baking for: " + raw_mesh.source_path);
-    support::log_info("[ClothBaker] Fine RenderMesh vertices: " + std::to_string(raw_mesh.vertices.size()) +
+    support::log_info("[ClothBuilder] Starting dual-mesh baking for: " + raw_mesh.source_path);
+    support::log_info("[ClothBuilder] Fine RenderMesh vertices: " + std::to_string(raw_mesh.vertices.size()) +
                       ", indices: " + std::to_string(raw_mesh.indices.size()));
 
     // 1. Weld coincident 3D points to build single-manifold Coarse SimMesh Base (LOD0)
@@ -365,7 +365,7 @@ std::vector<uint8_t> ClothBaker::build(const RawMesh& raw_mesh) {
         }
     }
 
-    support::log_info("[ClothBaker] SimMesh LOD0 welded: " + std::to_string(sim_positions_lod0.size()) +
+    support::log_info("[ClothBuilder] SimMesh LOD0 welded: " + std::to_string(sim_positions_lod0.size()) +
                       " particles, " + std::to_string(sim_indices_lod0.size() / 3) + " triangles.");
 
     GeneratedSimMesh sim_mesh_lod0 = build_sim_mesh(sim_positions_lod0, sim_indices_lod0);
@@ -408,7 +408,7 @@ std::vector<uint8_t> ClothBaker::build(const RawMesh& raw_mesh) {
         sim_indices_lod1 = sim_indices_lod0;
     }
 
-    support::log_info("[ClothBaker] SimMesh LOD1 simplified: " + std::to_string(sim_positions_lod1.size()) +
+    support::log_info("[ClothBuilder] SimMesh LOD1 simplified: " + std::to_string(sim_positions_lod1.size()) +
                       " particles, " + std::to_string(sim_indices_lod1.size() / 3) + " triangles.");
 
     GeneratedSimMesh sim_mesh_lod1 = build_sim_mesh(sim_positions_lod1, sim_indices_lod1);
@@ -451,7 +451,7 @@ std::vector<uint8_t> ClothBaker::build(const RawMesh& raw_mesh) {
     // Overwrite header at the beginning of payload
     std::memcpy(payload.data(), &chunk_header, sizeof(bud::asset::ClothPhysicsChunkHeader));
 
-    support::log_info("[ClothBaker] Successfully generated ClothPhysics chunk, total payload: " + std::to_string(payload.size()) + " bytes.");
+    support::log_info("[ClothBuilder] Successfully generated ClothPhysics chunk, total payload: " + std::to_string(payload.size()) + " bytes.");
     return payload;
 }
 

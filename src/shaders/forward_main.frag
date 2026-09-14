@@ -88,22 +88,23 @@ void main() {
     if (mat.alpha_mode == 1u && albedo_sample.a < mat.alpha_cutoff)
         discard;
 
-    if (frag_blend_factor > 0.0 && frag_blend_factor < 1.0 && mat.alpha_mode != 2u) {
-        float noise = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-        if (noise < frag_blend_factor)
-            discard;
-    }
-
     vec3 albedo = albedo_sample.rgb; 
     float metallic = mat.metallic_factor; 
     float roughness = mat.roughness_factor;
+    if (isnan(metallic) || isinf(metallic) || metallic < 0.0 || metallic > 1.0)
+        metallic = 0.0;
+    if (isnan(roughness) || isinf(roughness) || roughness < 0.05 || roughness > 1.0)
+        roughness = 0.75;
 
     if (mat.metallic_roughness_id > 0u && mat.metallic_roughness_id < 1000u) {
         vec4 mr_sample = texture(tex_samplers[nonuniformEXT(mat.metallic_roughness_id)], frag_tex_coord);
         roughness *= mr_sample.g;
         metallic *= mr_sample.b;
     }
-    roughness = clamp(roughness, 0.02, 1.0);
+    if (metallic < 0.2)
+        roughness = max(roughness, 0.65);
+
+    roughness = clamp(roughness, 0.04, 1.0);
     metallic = clamp(metallic, 0.0, 1.0);
 
     // Stable Screen UV computation

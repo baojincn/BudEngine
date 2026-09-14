@@ -178,27 +178,39 @@ namespace {
         return (flags & bud::physics::PhysicsScene::BODY_FLAG_STATIC) ? LAYER_STATIC : LAYER_DYNAMIC;
     }
 
-    JPH::Shape* create_jolt_shape(const bud::physics::ShapeDesc& desc) {
+    JPH::Ref<JPH::Shape> create_jolt_shape(const bud::physics::ShapeDesc& desc) {
         switch (desc.type) {
             case bud::physics::ShapeType::Sphere:
                 return new JPH::SphereShape(desc.radius);
-            case bud::physics::ShapeType::Box:
-                return new JPH::BoxShape(JPH::Vec3(desc.half_extent.x, desc.half_extent.y, desc.half_extent.z));
+            case bud::physics::ShapeType::Box: {
+                constexpr float cMinHalfExtent = 0.005f;
+                auto clamp_extent = [](float v) {
+                    return (v > cMinHalfExtent && v == v) ? v : cMinHalfExtent;
+                };
+                return new JPH::BoxShape(JPH::Vec3(clamp_extent(desc.half_extent.x),
+                                                   clamp_extent(desc.half_extent.y),
+                                                   clamp_extent(desc.half_extent.z)));
+            }
             case bud::physics::ShapeType::Capsule:
                 return new JPH::CapsuleShape(desc.capsule_half_height, desc.capsule_radius);
             case bud::physics::ShapeType::ConvexHull: {
+                if (desc.vertices.empty())
+                    return nullptr;
                 JPH::Array<JPH::Vec3> pts;
                 pts.reserve(desc.vertices.size());
                 for (const auto& v : desc.vertices)
                     pts.push_back(JPH::Vec3(v.x, v.y, v.z));
                 JPH::ConvexHullShapeSettings settings(pts, JPH::cDefaultConvexRadius);
-                JPH::Shape::ShapeResult result;
-                auto* shape = new JPH::ConvexHullShape(settings, result);
-                if (result.HasError())
+                auto result = settings.Create();
+                if (result.HasError()) {
                     bud::eprint("[PhysicsScene] ConvexHullShape creation error: {}", result.GetError());
-                return shape;
+                    return nullptr;
+                }
+                return result.Get();
             }
             case bud::physics::ShapeType::Mesh: {
+                if (desc.vertices.empty())
+                    return nullptr;
                 if (!desc.indices.empty()) {
                     JPH::VertexList verts;
                     verts.reserve(desc.vertices.size());
@@ -209,11 +221,12 @@ namespace {
                     for (size_t i = 0; i + 2 < desc.indices.size(); i += 3)
                         tris.push_back({desc.indices[i], desc.indices[i + 1], desc.indices[i + 2], 0});
                     JPH::MeshShapeSettings settings(verts, tris);
-                    JPH::Shape::ShapeResult result;
-                    auto* shape = new JPH::MeshShape(settings, result);
-                    if (result.HasError())
+                    auto result = settings.Create();
+                    if (result.HasError()) {
                         bud::eprint("[PhysicsScene] MeshShape creation error: {}", result.GetError());
-                    return shape;
+                        return nullptr;
+                    }
+                    return result.Get();
                 }
                 JPH::TriangleList tris;
                 tris.reserve(desc.vertices.size() / 3);
@@ -223,11 +236,12 @@ namespace {
                                     JPH::Float3(desc.vertices[i + 2].x, desc.vertices[i + 2].y, desc.vertices[i + 2].z),
                                     0});
                 JPH::MeshShapeSettings settings(tris);
-                JPH::Shape::ShapeResult result;
-                auto* shape = new JPH::MeshShape(settings, result);
-                if (result.HasError())
+                auto result = settings.Create();
+                if (result.HasError()) {
                     bud::eprint("[PhysicsScene] MeshShape creation error: {}", result.GetError());
-                return shape;
+                    return nullptr;
+                }
+                return result.Get();
             }
             default:
                 return nullptr;
@@ -236,6 +250,38 @@ namespace {
 }
 
 namespace bud::physics {
+
+    RigidBodyHandle PhysicsScene::add_rigid_body(const RigidBodyDesc& desc) {
+        size_t idx = body_count.fetch_add(1, std::memory_order_relaxed);
+        if (idx >= body_positions.size()) [[unlikely]] {
+            body_count.fetch_sub(1, std::memory_order_relaxed);
+            dropped_bodies.fetch_add(1, std::memory_order_relaxed);
+            return {};
+        }
+
+        body_positions[idx] = desc.position;
+        body_rotations[idx] = desc.rotation;
+        body_linear_velocities[idx] = bud::math::vec3(0.0f);
+        if (desc.shape.type == ShapeType::Box)
+            body_half_extents[idx] = desc.shape.half_extent;
+        else
+            body_half_extents[idx] = bud::math::vec3(0.0f);
+        body_frictions[idx] = desc.material.friction;
+        body_restitutions[idx] = desc.material.restitution;
+        body_user_data[idx] = nullptr;
+
+        body_flags[idx] = static_cast<uint8_t>(
+            (desc.motion_type == MotionType::Static    ? BODY_FLAG_STATIC    : 0) |
+            (desc.motion_type == MotionType::Kinematic ? BODY_FLAG_KINEMATIC : 0) |
+            (desc.is_sensor    ? BODY_FLAG_SENSOR      : 0) |
+            (desc.is_ccd       ? BODY_FLAG_CCD         : 0) |
+            (desc.allow_sleep  ? BODY_FLAG_ALLOW_SLEEP : 0));
+
+        if (idx < body_shapes.size())
+            body_shapes[idx] = create_jolt_shape(desc.shape);
+
+        return {static_cast<uint32_t>(idx)};
+    }
 
     PhysicsScene::PhysicsScene() = default;
 
@@ -323,34 +369,40 @@ namespace bud::physics {
 
         jolt_body_ids.resize(n, JPH::BodyID::cInvalidBodyID);
 
+        bool new_bodies = false;
         const size_t count = std::min({n, body_positions.size(), body_rotations.size(), body_flags.size(), body_half_extents.size()});
         for (size_t i = 0; i < count; ++i) {
             JPH::BodyID id(jolt_body_ids[i]);
             if (id.IsInvalid()) {
-                auto he = body_half_extents[i];
-                // Meshes that are planar (floors, walls) produce a world AABB with a
-                // zero-width axis. Jolt can reject such a box and, worse, penetration
-                // recovery cannot resolve a zero-thickness surface, so clamp to a thin slab.
-                constexpr float cMinHalfExtent = 0.005f;
-                auto clamp_extent = [](float v) {
-                    return (v > cMinHalfExtent && v == v) ? v : cMinHalfExtent;
-                };
-                auto* shape = new JPH::BoxShape(JPH::Vec3(clamp_extent(he.x),
-                                                          clamp_extent(he.y),
-                                                          clamp_extent(he.z)));
+                JPH::Ref<JPH::Shape> shape = (i < body_shapes.size()) ? body_shapes[i] : nullptr;
+                if (!shape) {
+                    auto he = body_half_extents[i];
+                    // Meshes that are planar (floors, walls) produce a world AABB with a
+                    // zero-width axis. Jolt can reject such a box and, worse, penetration
+                    // recovery cannot resolve a zero-thickness surface, so clamp to a thin slab.
+                    constexpr float cMinHalfExtent = 0.005f;
+                    auto clamp_extent = [](float v) {
+                        return (v > cMinHalfExtent && v == v) ? v : cMinHalfExtent;
+                    };
+                    shape = new JPH::BoxShape(JPH::Vec3(clamp_extent(he.x),
+                                                        clamp_extent(he.y),
+                                                        clamp_extent(he.z)));
+                }
                 auto motion = to_jolt_motion(body_flags[i]);
                 JPH::BodyCreationSettings bcs(shape, to_jolt(body_positions[i]),
                                               to_jolt(body_rotations[i]),
                                               motion, to_jolt_layer(body_flags[i]));
-                bcs.mFriction = 0.5f;
-                bcs.mRestitution = 0.3f;
+                bcs.mFriction = (i < body_frictions.size()) ? body_frictions[i] : 0.5f;
+                bcs.mRestitution = (i < body_restitutions.size()) ? body_restitutions[i] : 0.1f;
                 bcs.mAllowSleeping = (body_flags[i] & BODY_FLAG_ALLOW_SLEEP) != 0;
                 bcs.mIsSensor = (body_flags[i] & BODY_FLAG_SENSOR) != 0;
                 if (body_flags[i] & BODY_FLAG_CCD)
                     bcs.mMotionQuality = JPH::EMotionQuality::LinearCast;
 
                 if (motion == JPH::EMotionType::Static) {
-                    bcs.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateMassAndInertia;
+                    bcs.mOverrideMassProperties = JPH::EOverrideMassProperties::MassAndInertiaProvided;
+                    bcs.mMassPropertiesOverride.mMass = 0.0f;
+                    bcs.mMassPropertiesOverride.mInertia = JPH::Mat44::sZero();
                 } else {
                     bcs.mMassPropertiesOverride.mMass = body_masses[i];
                     bcs.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
@@ -361,6 +413,7 @@ namespace bud::physics {
                     body->SetUserData(reinterpret_cast<uint64_t>(body_user_data[i]));
                     bi.AddBody(body->GetID(), JPH::EActivation::Activate);
                     jolt_body_ids[i] = body->GetID().GetIndexAndSequenceNumber();
+                    new_bodies = true;
                 }
             } else {
                 // BodyInterface locks the body internally. Never wrap these calls in a
@@ -383,6 +436,9 @@ namespace bud::physics {
                 }
             }
         }
+
+        if (new_bodies)
+            physics_system->OptimizeBroadPhase();
     }
 
     void PhysicsScene::sync_from_jolt() {
@@ -421,7 +477,11 @@ namespace bud::physics {
     }
 
     void PhysicsScene::remove_rigid_body(RigidBodyHandle handle) {
-        if (!handle.is_valid() || handle.id >= jolt_body_ids.size()) return;
+        if (!handle.is_valid() || handle.id >= jolt_body_ids.size())
+            return;
+
+        if (handle.id < body_shapes.size())
+            body_shapes[handle.id] = nullptr;
 
         JPH::BodyID id(jolt_body_ids[handle.id]);
         if (!id.IsInvalid()) {

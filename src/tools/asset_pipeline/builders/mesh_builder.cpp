@@ -1,7 +1,8 @@
 #include "mesh_builder.hpp"
 #include "virtual_geometry_builder.hpp"
 #include "material_builder.hpp"
-#include "cloth_baker.hpp"
+#include "cloth_builder.hpp"
+#include "collision_builder.hpp"
 #include "../cache/asset_cache.hpp"
 #include "../core/serializer.hpp"
 #include "../core/support.hpp"
@@ -141,18 +142,18 @@ bool MeshBuilder::build(const std::string& input_path, const std::string& output
     // 3. Build ClothPhysics chunk (if cloth) or Virtual Geometry chunk (if static)
     bool is_cloth = false;
     for (const auto& mat : internal_mesh.materials) {
-        if (ClothBaker::is_cloth_material(mat.name)) {
+        if (ClothBuilder::is_cloth_material(mat.name)) {
             is_cloth = true;
             break;
         }
     }
-    if (!is_cloth && (ClothBaker::is_cloth_material(input_path) || ClothBaker::is_cloth_material(output_path))) {
+    if (!is_cloth && (ClothBuilder::is_cloth_material(input_path) || ClothBuilder::is_cloth_material(output_path))) {
         is_cloth = true;
     }
 
     if (is_cloth) {
         support::log_info("[BudAssetPipeline] Identified cloth asset (" + input_path + "). Generating dual-mesh ClothPhysics chunk (skipping Virtual Geometry)...");
-        std::vector<uint8_t> cloth_bytes = ClothBaker::build(*raw_mesh_opt);
+        std::vector<uint8_t> cloth_bytes = ClothBuilder::build(*raw_mesh_opt);
         if (!cloth_bytes.empty()) {
             writer.add_chunk(AssetChunkType::ClothPhysics, cloth_bytes.data(), cloth_bytes.size());
         }
@@ -298,6 +299,45 @@ bool MeshBuilder::build(const std::string& input_path, const std::string& output
                           std::to_string(vg_result.pages.size()) + " pages (Metadata: " +
                           std::to_string(total_vg_size / 1024) + " KB, Bulk: " +
                           std::to_string(bulk_pages_data.size() / 1024) + " KB).");
+    }
+
+    // 4. Build and Embed CollisionLOD Chunk
+    if (options.enable_collision && !is_cloth) {
+        std::vector<bud::math::vec3> mesh_verts;
+        std::vector<uint32_t> mesh_indices;
+        size_t total_v = 0;
+        for (const auto& sm : internal_mesh.submeshes) {
+            total_v += sm.vertices.size();
+        }
+        mesh_verts.reserve(total_v);
+
+        for (const auto& sm : internal_mesh.submeshes) {
+            uint32_t base_idx = static_cast<uint32_t>(mesh_verts.size());
+            for (const auto& v : sm.vertices) {
+                mesh_verts.push_back(bud::math::vec3(v.position[0], v.position[1], v.position[2]));
+            }
+            for (uint32_t idx : sm.indices) {
+                mesh_indices.push_back(base_idx + idx);
+            }
+        }
+
+        if (!mesh_verts.empty() && !mesh_indices.empty()) {
+            CollisionBuildOptions col_opts;
+            col_opts.simplification_ratio = options.collision_simplification_ratio;
+            col_opts.max_convex_vertices = options.max_convex_vertices;
+
+            CollisionBuildResult col_res = CollisionBuilder::build_collision_lod(mesh_verts, mesh_indices, col_opts);
+            if (col_res.is_valid()) {
+                std::vector<uint8_t> col_data = CollisionBuilder::serialize_chunk(col_res);
+                if (!col_data.empty()) {
+                    writer.add_chunk(AssetChunkType::Collision, col_data.data(), col_data.size());
+                    support::log_info("[BudAssetPipeline] Generated CollisionLOD chunk: " +
+                                      std::to_string(col_res.vertices.size()) + " verts, " +
+                                      std::to_string(col_res.indices.size() / 3) + " tris (" +
+                                      std::to_string(col_data.size() / 1024) + " KB).");
+                }
+            }
+        }
     }
 
     // Save to output file

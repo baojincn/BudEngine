@@ -11,6 +11,10 @@
 #include "src/core/bud.math.hpp"
 #include "src/physics/bud.physics.types.hpp"
 
+#include <Jolt/Jolt.h>
+#include <Jolt/Core/Reference.h>
+#include <Jolt/Physics/Collision/Shape/Shape.h>
+
 namespace JPH {
     class PhysicsSystem;
     class BodyInterface;
@@ -20,7 +24,6 @@ namespace JPH {
     class TempAllocator;
     class JobSystem;
     class Body;
-    class Shape;
     class ContactListener;
     class BodyActivationListener;
 }
@@ -61,6 +64,8 @@ namespace bud::physics {
         std::vector<bud::math::vec3>       body_angular_velocities;
         std::vector<bud::math::vec3>       body_half_extents;
         std::vector<float>                 body_masses;
+        std::vector<float>                 body_frictions;
+        std::vector<float>                 body_restitutions;
         std::vector<void*>                 body_user_data;
 
         enum BodyFlags : uint8_t {
@@ -72,6 +77,8 @@ namespace bud::physics {
             BODY_FLAG_ALLOW_SLEEP = 1 << 4,
         };
         std::vector<uint8_t> body_flags;
+
+        std::vector<JPH::Ref<JPH::Shape>> body_shapes;
 
         // Soft body SoA columns (placeholder)
         std::vector<bud::math::vec3> soft_body_positions;
@@ -88,7 +95,10 @@ namespace bud::physics {
             body_linear_velocities.assign(capacity, bud::math::vec3(0.0f));
             body_angular_velocities.assign(capacity, bud::math::vec3(0.0f));
             body_half_extents.assign(capacity, bud::math::vec3(0.5f));
+            body_shapes.assign(capacity, nullptr);
             body_masses.assign(capacity, 0.0f);
+            body_frictions.assign(capacity, 0.5f);
+            body_restitutions.assign(capacity, 0.1f);
             body_user_data.assign(capacity, nullptr);
             body_flags.assign(capacity, 0);
             body_count.store(0);
@@ -100,31 +110,7 @@ namespace bud::physics {
             return std::min(count, body_positions.size());
         }
 
-        inline RigidBodyHandle add_rigid_body(const RigidBodyDesc& desc) {
-            size_t idx = body_count.fetch_add(1, std::memory_order_relaxed);
-            if (idx >= body_positions.size()) [[unlikely]] {
-                body_count.fetch_sub(1, std::memory_order_relaxed);
-                dropped_bodies.fetch_add(1, std::memory_order_relaxed);
-                return {};
-            }
-
-            body_positions[idx] = desc.position;
-            body_rotations[idx] = desc.rotation;
-            body_linear_velocities[idx] = bud::math::vec3(0.0f);
-            body_angular_velocities[idx] = bud::math::vec3(0.0f);
-            body_half_extents[idx] = desc.shape.half_extent;
-            body_masses[idx] = desc.mass;
-            body_user_data[idx] = nullptr;
-
-            body_flags[idx] = static_cast<uint8_t>(
-                (desc.motion_type == MotionType::Static    ? BODY_FLAG_STATIC    : 0) |
-                (desc.motion_type == MotionType::Kinematic ? BODY_FLAG_KINEMATIC : 0) |
-                (desc.is_sensor    ? BODY_FLAG_SENSOR      : 0) |
-                (desc.is_ccd       ? BODY_FLAG_CCD         : 0) |
-                (desc.allow_sleep  ? BODY_FLAG_ALLOW_SLEEP : 0));
-
-            return {static_cast<uint32_t>(idx)};
-        }
+        RigidBodyHandle add_rigid_body(const RigidBodyDesc& desc);
 
         // ------------------------------------------------------------------
         // Jolt body sync (called at step boundaries)

@@ -134,6 +134,7 @@ namespace bud::graphics {
 		virtual void update_global_page_table(bud::graphics::BufferHandle buffer) = 0;
 		virtual void update_global_page_pool(bud::graphics::BufferHandle buffer) = 0;
 		virtual void update_global_materials_buffer(bud::graphics::BufferHandle buffer) = 0;
+		virtual void update_global_cloth_prev_pos(bud::graphics::BufferHandle buffer) = 0;
 		virtual void cmd_copy_image(CommandHandle cmd, TextureHandle src, TextureHandle dst) = 0; // Shadow Caching
 		virtual void cmd_blit_image(CommandHandle cmd, TextureHandle src, TextureHandle dst) = 0;
 		virtual void cmd_set_scissor(CommandHandle cmd, uint32_t width, uint32_t height) = 0;

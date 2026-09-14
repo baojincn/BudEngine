@@ -1,4 +1,4 @@
-#include "src/physics/bud.cloth.hpp"
+﻿#include "src/physics/bud.cloth.hpp"
 
 #include <cmath>
 #include <algorithm>
@@ -75,6 +75,10 @@ namespace bud::physics {
 			if (world.gpu_bindings.is_valid()) {
 				rhi->destroy_buffer(world.gpu_bindings);
 				world.gpu_bindings.reset();
+			}
+			if (world.gpu_prev_vertex_positions.is_valid()) {
+				rhi->destroy_buffer(world.gpu_prev_vertex_positions);
+				world.gpu_prev_vertex_positions.reset();
 			}
 			if (world.gpu_colliders.is_valid()) {
 				rhi->destroy_buffer(world.gpu_colliders);
@@ -388,11 +392,6 @@ namespace bud::physics {
 		return active_world;
 	}
 
-	void ClothSystem::set_camera_sphere(const bud::math::vec3& center, float radius) {
-		std::lock_guard lock(state_mutex);
-		camera_sphere_state = bud::math::vec4(center, radius);
-	}
-
 	void ClothSystem::set_capsule_collider(const CapsuleCollider& collider, bool enabled) {		std::lock_guard lock(state_mutex);
 		current_capsule = collider;
 		capsule_enabled = enabled;
@@ -554,7 +553,7 @@ namespace bud::physics {
 		bindings.reserve(world->binding_count);
 
 		uint32_t pbase = 0;
-		for (const auto& inst : instances) {
+		for (auto& inst : instances) {
 			if (inst.vertex_offset < 0)
 				continue;
 
@@ -562,6 +561,7 @@ namespace bud::physics {
 			// and binding indices are local to the instance and must be offset by
 			// this base (captured BEFORE the particle loop advances pbase).
 			const uint32_t inst_base = pbase;
+			inst.global_binding_offset = static_cast<uint32_t>(bindings.size());
 
 			for (const auto& p : inst.particles) {
 				particles[pbase] = p;
@@ -1003,6 +1003,9 @@ namespace bud::physics {
 		}
 		if (world->binding_count > 0) {
 			upload_buffer(stored_rhi, bindings, world->gpu_bindings);
+			world->gpu_prev_vertex_positions = stored_rhi->create_gpu_buffer(
+				static_cast<uint64_t>(world->binding_count) * sizeof(bud::math::vec4),
+				bud::graphics::ResourceState::ShaderResource);
 		}
 		if (world->triangle_count > 0) {
 			world->gpu_triangle_constraints = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->triangle_count) * sizeof(TriangleConstraint), bud::graphics::ResourceState::UnorderedAccess);
@@ -1094,13 +1097,11 @@ namespace bud::physics {
 		std::shared_ptr<ClothSimWorld> world;
 		CapsuleCollider capsule{};
 		bool capsule_on = false;
-		bud::math::vec4 camera_sphere{ 0.0f };
 		{
 			std::lock_guard lock(state_mutex);
 			world = active_world;
 			capsule = current_capsule;
 			capsule_on = capsule_enabled;
-			camera_sphere = camera_sphere_state;
 		}
 		if (!world || world->particle_count == 0)
 			return;
@@ -1108,8 +1109,7 @@ namespace bud::physics {
 		sweep_retired_worlds(rhi->get_current_frame_index());
 
 		// Interaction debug: throttled dump of the collider inputs the simulation
-		// actually received this frame (capsule enable state, geometry, camera
-		// sphere). If walking into cloth prints capsule_on=0 or stale coordinates,
+		// actually received this frame. If walking into cloth prints capsule_on=0 or stale coordinates,
 		// the break is in the feeding chain; if the values look right, it is in the
 		// solver.
 		static uint32_t s_dbg_frame = 0;
@@ -1266,7 +1266,7 @@ namespace bud::physics {
 				}
 			}
 
-			// 2c. Collision every substep (scene rigid bodies + columns + ground + character capsule + camera sphere).
+			// 2c. Collision every substep (scene rigid bodies + columns + ground + character capsule).
 			if (config.cloth_config.enable_scene_collision) {
 				rhi->cmd_bind_pipeline(cmd, pipeline_solver);
 				rhi->cmd_bind_storage_buffer(cmd, pipeline_solver, 0, world->gpu_particles);
@@ -1284,7 +1284,6 @@ namespace bud::physics {
 				pc_solve.capsule_top_friction = bud::math::vec4(capsule.p_top, capsule.friction);
 				pc_solve.capsule_velocity = bud::math::vec4(capsule.velocity, 0.0f);
 				pc_solve.misc = bud::math::vec4(0.0f, sub_dt, static_cast<float>(world->collider_count), 0.0f);
-				pc_solve.sphere_center_radius = camera_sphere;
 				for (uint32_t b = 0; b < world->column_count && b < 4u; ++b) {
 					pc_solve.box_center[b] = bud::math::vec4(world->columns[b].center, 0.0f);
 					pc_solve.box_extent[b] = bud::math::vec4(world->columns[b].half_extents, 0.0f);
@@ -1330,22 +1329,44 @@ namespace bud::physics {
 		//    (pos + normal) directly into the GPUScene mega vertex buffer.
 		if (world->binding_count > 0) {
 			rhi->resource_barrier(cmd, mega_vertex_buffer, bud::graphics::ResourceState::VertexBuffer, bud::graphics::ResourceState::UnorderedAccess);
+			if (world->gpu_prev_vertex_positions.is_valid())
+				rhi->resource_barrier(cmd, world->gpu_prev_vertex_positions, bud::graphics::ResourceState::ShaderResource, bud::graphics::ResourceState::UnorderedAccess);
+
 			rhi->cmd_bind_pipeline(cmd, pipeline_skinning);
 			rhi->cmd_bind_storage_buffer(cmd, pipeline_skinning, 0, world->gpu_particles);
 			rhi->cmd_bind_storage_buffer(cmd, pipeline_skinning, 1, world->gpu_bindings);
 			rhi->cmd_bind_storage_buffer(cmd, pipeline_skinning, 2, mega_vertex_buffer);
+			if (world->gpu_prev_vertex_positions.is_valid())
+				rhi->cmd_bind_storage_buffer(cmd, pipeline_skinning, 3, world->gpu_prev_vertex_positions);
 
 			ClothPushConstantsSkinning pc_skin{};
 			pc_skin.render_vertex_count = world->binding_count;
 			pc_skin.vertex_base_offset = 0u; // destination vertex index is baked into each binding
 			rhi->cmd_push_constants(cmd, pipeline_skinning, sizeof(ClothPushConstantsSkinning), &pc_skin);
 			rhi->cmd_dispatch(cmd, (world->binding_count + 63u) / 64u, 1, 1);
+
+			rhi->resource_barrier(cmd, mega_vertex_buffer, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::VertexBuffer);
+			if (world->gpu_prev_vertex_positions.is_valid())
+				rhi->resource_barrier(cmd, world->gpu_prev_vertex_positions, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::ShaderResource);
 		}
 
-		// Barrier from compute storage write back to vertex input read.
-		rhi->resource_barrier(cmd, mega_vertex_buffer, bud::graphics::ResourceState::UnorderedAccess, bud::graphics::ResourceState::VertexBuffer);
-
 		rhi->cmd_end_debug_label(cmd);
+	}
+
+	uint32_t ClothSystem::get_mesh_binding_offset(uint32_t mesh_id) const {
+		std::lock_guard lock(const_cast<std::mutex&>(state_mutex));
+		for (const auto& inst : instances) {
+			if (inst.mesh_id == mesh_id)
+				return inst.global_binding_offset;
+		}
+		return 0;
+	}
+
+	bud::graphics::BufferHandle ClothSystem::get_gpu_prev_vertex_positions() const {
+		std::lock_guard lock(const_cast<std::mutex&>(state_mutex));
+		if (active_world)
+			return active_world->gpu_prev_vertex_positions;
+		return {};
 	}
 
 } // namespace bud::physics

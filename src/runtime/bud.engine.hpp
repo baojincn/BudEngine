@@ -5,6 +5,7 @@
 #include <functional>
 #include <atomic>
 #include <limits>
+#include <mutex>
 
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.core.hpp"
@@ -23,7 +24,11 @@
 #include "src/input/bud.input.manager.hpp"
 #include "src/physics/bud.physics.hpp"
 #include "src/runtime/bud.character_controller.hpp"
+#include "src/graphics/bud.graphics.passes.hpp"
 
+namespace bud::robots {
+	class RobotAvatarController;
+}
 
 namespace bud::engine {
 
@@ -51,6 +56,13 @@ namespace bud::engine {
 		bud::physics::PhysicsScene* get_physics_scene() { return physics_scene.get(); }
 		bud::scene::CharacterController* get_character_controller() { return character_controller.get(); }
 
+		void set_robot_avatar(bud::robots::RobotAvatarController* avatar) {
+			robot_avatar = avatar;
+		}
+		bud::robots::RobotAvatarController* get_robot_avatar() const {
+			return robot_avatar;
+		}
+
 		// Data-Driven Scene & Asset Loader
 		bool load_scene_async(const std::string& scene_path, std::function<void()> on_finished = nullptr);
 		void load_scene_resources_async(std::function<void()> on_finished = nullptr);
@@ -71,6 +83,8 @@ namespace bud::engine {
 		// Rebuilds the wireframe overlay handed to PhysicsDebugPass from the current
 		// physics SoA state (no-op unless RenderConfig::debug_physics is set).
 		void update_physics_debug_overlay();
+
+		void register_collision_asset(const std::string& path, const std::vector<char>& data);
 
 		void extract_render_scene_data(bud::graphics::RenderScene& render_scene);
 
@@ -108,6 +122,10 @@ namespace bud::engine {
 		// 物理
 		std::unique_ptr<bud::physics::PhysicsScene> physics_scene;
 		std::unique_ptr<bud::scene::CharacterController> character_controller;
+		std::unordered_set<std::string> collision_loaded_assets;
+		std::mutex collision_mutex;
+		bud::robots::RobotAvatarController* robot_avatar = nullptr;
+		std::vector<bud::graphics::PhysicsDebugVertex> static_collision_debug_vertices;
 
 		// 场景数据
 		bud::scene::Scene scene;

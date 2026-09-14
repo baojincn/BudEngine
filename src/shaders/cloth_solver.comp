@@ -56,7 +56,6 @@ layout(std430, push_constant) uniform PushConstants {
     vec4  capsule_top_friction;      // xyz: B, w: friction mu_k
     vec4  capsule_velocity;          // xyz: character linear velocity, w: unused
     vec4  misc;                      // x: floor_y, y: dt
-    vec4  sphere_center_radius;      // xyz: camera sphere center, w: radius (0 = disabled)
 } pc;
 
 const float kSelfCollisionRadius     = 0.018; // 1.8cm realistic thin contact thickness (no artificial buckling)
@@ -438,12 +437,7 @@ void main() {
             }
         }
 
-        // 2. Ground plane collision (Sponza floor at Y = 0, 3cm skin).
-        float floor_y = pc.misc.x;
-        if (pos.y < floor_y + 0.03) {
-            pos.y = floor_y + 0.03;
-            modified = true;
-        }
+
 
         // 3. Character capsule SDF push-out.
         if (pc.flags.y == 1u) {
@@ -468,23 +462,8 @@ void main() {
             }
         }
 
-        // 4. Camera sphere push-out (first-person eye / third-person orbit camera).
-        float sphere_r = pc.sphere_center_radius.w;
-        if (sphere_r > 0.0) {
-            vec3  to_p = pos - pc.sphere_center_radius.xyz;
-            float d2 = dot(to_p, to_p);
-            float sr = sphere_r + 0.03; // 3cm safety margin
-            if (d2 < sr * sr) {
-                float dlen = sqrt(d2);
-                if (dlen > 1e-5) {
-                    pos = pc.sphere_center_radius.xyz + (to_p / dlen) * sr;
-                    modified = true;
-                }
-            }
-        }
-
-        // Kick-cancel for the analytic colliders above (columns / ground / capsule /
-        // camera sphere): the push is positional, remove its velocity contribution.
+        // Kick-cancel for the analytic colliders above (columns / ground / capsule):
+        // the push is positional, remove its velocity contribution.
         const vec3 pos_after_other = pos;
         if (modified)
             particles[id].prev_position.xyz += (pos_after_other - pos_before_push);

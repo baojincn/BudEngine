@@ -1,0 +1,618 @@
+#include "src/robots/bud.robot.avatar.hpp"
+#include "src/runtime/bud.engine.hpp"
+#include "src/physics/bud.physics.scene.hpp"
+#include "src/graphics/bud.graphics.passes.hpp"
+
+#include <Jolt/Jolt.h>
+#include <Jolt/Physics/PhysicsSystem.h>
+#include <Jolt/Physics/Ragdoll/Ragdoll.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+
+#include <iostream>
+#include <cmath>
+#include <algorithm>
+#include <queue>
+#include <unordered_set>
+
+namespace bud::robots {
+
+namespace {
+
+constexpr float k_gait_frequency = 6.2831853f * 1.6f; // ~1.6 Hz humanoid stride
+constexpr float k_max_gait_phase = 6.2831853f * 100.0f;
+constexpr float k_hip_amplitude = 0.45f;              // ~25 degrees
+constexpr float k_knee_amplitude = 0.55f;             // ~31 degrees
+constexpr float k_arm_amplitude = 0.35f;              // ~20 degrees
+constexpr float k_walk_speed = 2.0f;
+constexpr float k_idle_knee_angle = 0.05f;
+constexpr float k_idle_elbow_angle = 0.35f;
+
+// G1 Humanoid Dimensions (exact from cooked g1.budasset: AABB min_y = -0.792f, max_y = 0.530573m)
+constexpr float k_mesh_foot_sole_offset_y = -0.792f;
+constexpr float k_torso_relative_y = 0.20f;
+constexpr float k_head_relative_y = 0.42f;
+constexpr float k_head_fwd_offset = 0.12f;
+constexpr float k_default_orbit_dist = 1.8f;
+constexpr float k_default_orbit_pitch = -10.0f;
+constexpr float k_default_orbit_yaw = 180.0f;
+
+} // namespace
+
+RobotAvatarController::RobotAvatarController() {
+    // Basis mapping URDF standard (+X fwd, +Y left, +Z up) to BudEngine (+Y up, -Z fwd, -X left)
+    glm::mat3 urdf_basis(
+        glm::vec3(0.0f, 0.0f, -1.0f),
+        glm::vec3(-1.0f, 0.0f, 0.0f),
+        glm::vec3(0.0f, 1.0f, 0.0f)
+    );
+    m_urdf_to_world_rot = glm::quat_cast(urdf_basis);
+}
+
+RobotAvatarController::~RobotAvatarController() {
+    if (m_engine && m_engine->get_robot_avatar() == this)
+        m_engine->set_robot_avatar(nullptr);
+}
+
+bool RobotAvatarController::get_ground_height(const bud::math::vec3& test_pos, float& out_height) const {
+    if (!m_engine)
+        return false;
+
+    auto* physics_scene = m_engine->get_physics_scene();
+    if (!physics_scene)
+        return false;
+
+    auto* system = physics_scene->get_jolt_system();
+    if (!system)
+        return false;
+
+    auto* controller = m_engine->get_character_controller();
+    float capsule_offset = controller ? (controller->get_capsule_height() * 0.5f + controller->get_capsule_radius()) : 0.80f;
+    float feet_est_y = test_pos.y - capsule_offset;
+
+    // Raycast strictly downwards starting from just above the feet to avoid overhead arches/ceilings
+    JPH::RRayCast ray(
+        JPH::RVec3(test_pos.x, feet_est_y + 0.25f, test_pos.z),
+        JPH::Vec3(0.0f, -0.60f, 0.0f)
+    );
+    JPH::RayCastResult hit;
+
+    class GroundFilter : public JPH::BodyFilter {
+    public:
+        const std::vector<uint32_t>* ignored = nullptr;
+        bool ShouldCollide(const JPH::BodyID& id) const override {
+            if (ignored && !ignored->empty()) {
+                uint32_t raw_id = id.GetIndexAndSequenceNumber();
+                for (uint32_t ign : *ignored) {
+                    if (ign == raw_id)
+                        return false;
+                }
+            }
+            return true;
+        }
+    };
+
+    GroundFilter filter;
+    filter.ignored = &m_ignored_body_ids;
+
+    if (system->GetNarrowPhaseQuery().CastRay(ray, hit, {}, {}, filter)) {
+        out_height = static_cast<float>(ray.mOrigin.GetY() + hit.mFraction * ray.mDirection.GetY());
+        return true;
+    }
+
+    return false;
+}
+
+float RobotAvatarController::get_ground_height(const bud::math::vec3& test_pos) const {
+    float h = 0.0f;
+    if (get_ground_height(test_pos, h))
+        return h;
+    return 0.0f;
+}
+
+bool RobotAvatarController::init(bud::engine::BudEngine* engine,
+                                 const std::string& robot_file,
+                                 const std::string& package_root) {
+    if (!engine)
+        return false;
+
+    m_engine = engine;
+    if (m_engine)
+        m_engine->set_robot_avatar(this);
+
+    auto* physics_scene = engine->get_physics_scene();
+    if (!physics_scene) {
+        std::cerr << "[RobotAvatarController] PhysicsScene is null in BudEngine." << std::endl;
+        return false;
+    }
+
+    auto* controller = engine->get_character_controller();
+    bud::math::vec3 spawn_pos{ 0.0f, 1.8f, 0.0f };
+    if (controller)
+        spawn_pos = controller->get_position();
+
+    float capsule_ground_offset = controller ? (controller->get_capsule_height() * 0.5f + controller->get_capsule_radius()) : 0.80f;
+
+    float ground_y = spawn_pos.y - capsule_ground_offset;
+    get_ground_height(spawn_pos, ground_y);
+
+    // Pelvis position relative to ground: soles align strictly with ground surface
+    m_current_pelvis_pos = spawn_pos;
+    m_current_pelvis_pos.y = ground_y - k_mesh_foot_sole_offset_y;
+
+    RobotSpawnParams params{};
+    params.position = m_current_pelvis_pos;
+    params.rotation = m_urdf_to_world_rot;
+    params.activate = true;
+    params.enable_motors = true;
+    params.default_motor_stiffness = 800.0f;
+    params.default_motor_damping = 80.0f;
+    params.default_motor_max_torque = 150.0f;
+
+    m_robot = RobotLoader::spawn_robot_from_file(*physics_scene, robot_file, params);
+    if (m_robot) {
+        reset_to_idle_stance();
+        m_current_joint_angles = m_target_joint_angles;
+        if (m_robot->get_ragdoll()) {
+            m_ignored_body_ids.clear();
+            for (int i = 0; i < m_robot->get_ragdoll()->GetBodyCount(); ++i) {
+                m_ignored_body_ids.push_back(m_robot->get_ragdoll()->GetBodyID(i).GetIndexAndSequenceNumber());
+            }
+            if (controller) {
+                for (uint32_t id : m_ignored_body_ids) {
+                    controller->add_ignored_body(id);
+                }
+            }
+        }
+    }
+
+    auto& scene = engine->get_scene();
+    m_visual_bridge = std::make_unique<RobotVisualBridge>();
+    if (m_robot)
+        m_visual_bridge->init(engine, scene, m_robot->get_definition(), package_root);
+
+    std::cout << "[RobotAvatarController] Initialized Unitree G1 Avatar (Pelvis Y: "
+              << m_current_pelvis_pos.y << ", Spawn Y: " << spawn_pos.y << ")." << std::endl;
+    return true;
+}
+
+void RobotAvatarController::toggle_camera_mode(bud::scene::Camera& camera) {
+    if (m_view_mode == AvatarCameraView::ThirdPerson)
+        set_camera_view(AvatarCameraView::FirstPerson, camera);
+    else
+        set_camera_view(AvatarCameraView::ThirdPerson, camera);
+}
+
+void RobotAvatarController::set_camera_view(AvatarCameraView view, bud::scene::Camera& camera) {
+    m_view_mode = view;
+    if (view == AvatarCameraView::ThirdPerson) {
+        camera.set_mode(bud::scene::CameraMode::ThirdPerson);
+        camera.orbit_distance = 2.4f;
+        camera.orbit_pitch = -15.0f;
+        camera.orbit_yaw = 0.0f;
+        camera.target_position = get_torso_position();
+        camera.update(0.0f);
+        std::cout << "[RobotAvatarController] Switched to Third-Person View (Bound directly to G1 relative pose)" << std::endl;
+    }
+    else {
+        camera.set_mode(bud::scene::CameraMode::FirstPerson);
+        camera.position = get_head_camera_position();
+        camera.pitch = 0.0f;
+        camera.yaw = -90.0f - bud::math::degrees(m_current_yaw);
+        camera.rebuild_camera_vectors();
+        std::cout << "[RobotAvatarController] Switched to First-Person View (G1 Visor relative pose)" << std::endl;
+    }
+}
+
+void RobotAvatarController::update(float dt, const bud::input::Input& input, bud::scene::Camera& camera) {
+    if (!m_engine)
+        return;
+
+    auto* controller = m_engine->get_character_controller();
+    if (controller) {
+        bud::math::vec3 move_dir(0.0f);
+        if (input.is_key_down(bud::input::Key::W))
+            move_dir += camera.front;
+        if (input.is_key_down(bud::input::Key::S))
+            move_dir -= camera.front;
+        if (input.is_key_down(bud::input::Key::A))
+            move_dir -= camera.right;
+        if (input.is_key_down(bud::input::Key::D))
+            move_dir += camera.right;
+
+        if (input.is_gamepad_connected()) {
+            float lx = input.get_gamepad_axis(bud::input::GamepadAxis::LeftX);
+            float ly = input.get_gamepad_axis(bud::input::GamepadAxis::LeftY);
+            move_dir += camera.right * lx;
+            move_dir += camera.front * (-ly);
+        }
+
+        move_dir.y = 0.0f;
+        float move_len = glm::length(move_dir);
+        if (move_len > 0.001f)
+            move_dir = glm::normalize(move_dir);
+
+        controller->set_velocity(move_dir * k_walk_speed);
+        controller->update(dt);
+
+        // Determine pelvis world height directly from physics controller and ground raycast
+        bud::math::vec3 char_pos = controller->get_position();
+        float capsule_ground_offset = controller->get_capsule_height() * 0.5f + controller->get_capsule_radius();
+        float capsule_base_y = char_pos.y - capsule_ground_offset;
+
+        float ground_y = capsule_base_y;
+        bool has_ground = get_ground_height(char_pos, ground_y);
+
+        const bool grounded = controller->is_grounded();
+        // When grounded, stick directly to the exact raycast ground surface for 100% flush fit
+        float base_y = (grounded && has_ground) ? ground_y : capsule_base_y;
+        float pelvis_y = base_y - k_mesh_foot_sole_offset_y;
+
+        m_is_moving = (move_len > 0.01f) && grounded;
+        if (m_is_moving) {
+            float target_yaw = std::atan2(-move_dir.x, -move_dir.z);
+            m_current_yaw = target_yaw;
+            apply_walking_gait(dt, k_walk_speed);
+
+            // Natural pelvis vertical bounce during walking
+            float bob_offset = 0.022f * (std::cos(2.0f * m_gait_phase) - 1.0f) * 0.5f;
+            pelvis_y += bob_offset;
+        }
+        else {
+            reset_to_idle_stance();
+        }
+
+        m_current_pelvis_pos = bud::math::vec3(char_pos.x, pelvis_y, char_pos.z);
+
+        static bool s_was_grounded = false;
+        if (grounded && !s_was_grounded)
+            std::cout << "[G1 Avatar] Touchdown on ground: sole_y = " << (pelvis_y + k_mesh_foot_sole_offset_y) << " m." << std::endl;
+        s_was_grounded = grounded;
+
+        // Kinematic anchoring of robot root body to pelvis world position
+        bud::math::quaternion yaw_rot = glm::angleAxis(m_current_yaw, bud::math::vec3(0.0f, 1.0f, 0.0f));
+        bud::math::quaternion world_rot = yaw_rot * m_urdf_to_world_rot;
+
+        if (m_robot && m_robot->get_ragdoll()) {
+            auto* system = m_engine->get_physics_scene()->get_jolt_system();
+            if (system) {
+                JPH::BodyID pelvis_bid = m_robot->get_ragdoll()->GetBodyID(0);
+                JPH::RVec3 j_pos(m_current_pelvis_pos.x, m_current_pelvis_pos.y, m_current_pelvis_pos.z);
+                JPH::Quat j_rot(world_rot.x, world_rot.y, world_rot.z, world_rot.w);
+                system->GetBodyInterface().MoveKinematic(pelvis_bid, j_pos, j_rot, std::max(dt, 1.0f / 120.0f));
+            }
+        }
+    }
+
+    // Smoothly interpolate joint angles toward targets
+    for (const auto& [name, target_val] : m_target_joint_angles) {
+        float& cur = m_current_joint_angles[name];
+        cur += (target_val - cur) * std::min(1.0f, dt * 15.0f);
+    }
+
+    // Drive Jolt physics motorized joints with smoothed angles
+    if (m_robot) {
+        for (const auto& [name, cur_val] : m_current_joint_angles) {
+            m_robot->set_joint_target_angle(name, cur_val);
+        }
+    }
+
+    // Calculate full-body forward kinematics for rigid link transforms
+    update_forward_kinematics();
+
+    bud::math::quaternion yaw_rot = glm::angleAxis(m_current_yaw, bud::math::vec3(0.0f, 1.0f, 0.0f));
+    bud::math::mat4 root_world_mat = glm::translate(bud::math::mat4(1.0f), m_current_pelvis_pos) * glm::mat4_cast(yaw_rot * m_urdf_to_world_rot);
+
+    auto& scene = m_engine->get_scene();
+
+    // Articulated Multi-Link Rigid Hierarchy: 100% rigid, zero joint slop/separation
+    if (m_visual_bridge) {
+        std::unordered_map<std::string, glm::mat4> world_link_transforms;
+        world_link_transforms.reserve(m_current_link_xforms.size());
+        for (const auto& [name, local_mat] : m_current_link_xforms) {
+            world_link_transforms[name] = root_world_mat * local_mat;
+        }
+        m_visual_bridge->sync_transforms(world_link_transforms, scene);
+    }
+
+    // Keep Jolt physics rigid bodies strictly aligned with the rigid hierarchy
+    if (m_robot && m_robot->get_ragdoll()) {
+        auto* system = m_engine->get_physics_scene()->get_jolt_system();
+        if (system) {
+            for (const auto& [name, local_mat] : m_current_link_xforms) {
+                int part_idx = m_robot->get_part_index(name);
+                if (part_idx >= 0 && static_cast<size_t>(part_idx) < m_robot->get_ragdoll()->GetBodyCount()) {
+                    JPH::BodyID bid = m_robot->get_ragdoll()->GetBodyID(part_idx);
+                    glm::mat4 wm = root_world_mat * local_mat;
+                    glm::vec3 pos = glm::vec3(wm[3]);
+                    glm::quat rot = glm::quat_cast(wm);
+                    system->GetBodyInterface().SetPositionAndRotation(bid,
+                        JPH::RVec3(pos.x, pos.y, pos.z),
+                        JPH::Quat(rot.x, rot.y, rot.z, rot.w),
+                        JPH::EActivation::Activate);
+                }
+            }
+        }
+    }
+
+    // Update Camera based on view mode (directly bound to G1 relative geometry)
+    if (m_view_mode == AvatarCameraView::ThirdPerson) {
+        camera.target_position = get_torso_position();
+        camera.update(dt);
+    }
+    else {
+        camera.position = get_head_camera_position();
+    }
+}
+
+void RobotAvatarController::apply_walking_gait(float dt, float speed) {
+    if (!m_robot)
+        return;
+
+    float speed_factor = std::clamp(speed / 1.6f, 0.5f, 1.5f);
+    m_gait_phase += dt * (k_gait_frequency * speed_factor);
+    if (m_gait_phase > 6.2831853f)
+        m_gait_phase -= 6.2831853f;
+
+    float sin_p = std::sin(m_gait_phase);
+    float cos_p = std::cos(m_gait_phase);
+
+    // Left leg gait
+    m_target_joint_angles["left_hip_pitch_joint"] = -sin_p * k_hip_amplitude;
+    float l_knee = (sin_p > 0.0f) ? (sin_p * k_knee_amplitude + k_idle_knee_angle) : k_idle_knee_angle;
+    m_target_joint_angles["left_knee_joint"] = l_knee;
+    m_target_joint_angles["left_ankle_pitch_joint"] = (sin_p > 0.0f) ? (-k_idle_knee_angle - sin_p * 0.20f) : -k_idle_knee_angle;
+
+    // Right leg gait (anti-phase)
+    m_target_joint_angles["right_hip_pitch_joint"] = sin_p * k_hip_amplitude;
+    float r_knee = (sin_p < 0.0f) ? (-sin_p * k_knee_amplitude + k_idle_knee_angle) : k_idle_knee_angle;
+    m_target_joint_angles["right_knee_joint"] = r_knee;
+    m_target_joint_angles["right_ankle_pitch_joint"] = (sin_p < 0.0f) ? (-k_idle_knee_angle + sin_p * 0.20f) : -k_idle_knee_angle;
+
+    // Torso gentle counter-rotation
+    m_target_joint_angles["waist_yaw_joint"] = -sin_p * 0.05f;
+
+    // Arm swing
+    m_target_joint_angles["left_shoulder_pitch_joint"] = sin_p * k_arm_amplitude;
+    m_target_joint_angles["left_elbow_joint"] = k_idle_elbow_angle + std::max(0.0f, sin_p) * 0.2f;
+
+    m_target_joint_angles["right_shoulder_pitch_joint"] = -sin_p * k_arm_amplitude;
+    m_target_joint_angles["right_elbow_joint"] = k_idle_elbow_angle + std::max(0.0f, -sin_p) * 0.2f;
+}
+
+void RobotAvatarController::reset_to_idle_stance() {
+    m_gait_phase = 0.0f;
+
+    // Neutral upright standing pose
+    m_target_joint_angles["left_hip_pitch_joint"] = 0.0f;
+    m_target_joint_angles["left_hip_roll_joint"] = 0.0f;
+    m_target_joint_angles["left_hip_yaw_joint"] = 0.0f;
+    m_target_joint_angles["left_knee_joint"] = k_idle_knee_angle;
+    m_target_joint_angles["left_ankle_pitch_joint"] = -k_idle_knee_angle;
+    m_target_joint_angles["left_ankle_roll_joint"] = 0.0f;
+
+    m_target_joint_angles["right_hip_pitch_joint"] = 0.0f;
+    m_target_joint_angles["right_hip_roll_joint"] = 0.0f;
+    m_target_joint_angles["right_hip_yaw_joint"] = 0.0f;
+    m_target_joint_angles["right_knee_joint"] = k_idle_knee_angle;
+    m_target_joint_angles["right_ankle_pitch_joint"] = -k_idle_knee_angle;
+    m_target_joint_angles["right_ankle_roll_joint"] = 0.0f;
+
+    m_target_joint_angles["waist_yaw_joint"] = 0.0f;
+    m_target_joint_angles["waist_roll_joint"] = 0.0f;
+    m_target_joint_angles["waist_pitch_joint"] = 0.0f;
+
+    m_target_joint_angles["left_shoulder_pitch_joint"] = 0.15f;
+    m_target_joint_angles["left_shoulder_roll_joint"] = 0.10f;
+    m_target_joint_angles["left_shoulder_yaw_joint"] = 0.0f;
+    m_target_joint_angles["left_elbow_joint"] = k_idle_elbow_angle;
+
+    m_target_joint_angles["right_shoulder_pitch_joint"] = 0.15f;
+    m_target_joint_angles["right_shoulder_roll_joint"] = -0.10f;
+    m_target_joint_angles["right_shoulder_yaw_joint"] = 0.0f;
+    m_target_joint_angles["right_elbow_joint"] = k_idle_elbow_angle;
+}
+
+void RobotAvatarController::update_forward_kinematics() {
+    if (!m_robot)
+        return;
+
+    const auto& def = m_robot->get_definition();
+    if (def.root_link.empty())
+        return;
+
+    m_current_link_xforms.clear();
+    m_current_link_xforms[def.root_link] = glm::mat4(1.0f);
+
+    std::queue<std::string> q;
+    q.push(def.root_link);
+
+    std::unordered_set<std::string> visited;
+    visited.insert(def.root_link);
+
+    while (!q.empty()) {
+        std::string parent_name = q.front();
+        q.pop();
+
+        glm::mat4 parent_mat = m_current_link_xforms[parent_name];
+        auto child_joints = def.get_child_joints(parent_name);
+
+        for (const auto* joint : child_joints) {
+            if (!joint || joint->child_link.empty())
+                continue;
+            if (visited.find(joint->child_link) != visited.end())
+                continue;
+
+            glm::vec3 j_pos(joint->origin_xyz[0], joint->origin_xyz[1], joint->origin_xyz[2]);
+            float roll = joint->origin_rpy[0];
+            float pitch = joint->origin_rpy[1];
+            float yaw = joint->origin_rpy[2];
+
+            glm::quat j_rot = glm::angleAxis(yaw, glm::vec3(0.0f, 0.0f, 1.0f))
+                            * glm::angleAxis(pitch, glm::vec3(0.0f, 1.0f, 0.0f))
+                            * glm::angleAxis(roll, glm::vec3(1.0f, 0.0f, 0.0f));
+
+            float angle = 0.0f;
+            auto it = m_current_joint_angles.find(joint->name);
+            if (it != m_current_joint_angles.end())
+                angle = it->second;
+
+            glm::vec3 axis(joint->axis[0], joint->axis[1], joint->axis[2]);
+            float axis_len = glm::length(axis);
+            glm::mat4 rot = glm::mat4(1.0f);
+            if (axis_len > 1e-4f && std::abs(angle) > 1e-6f) {
+                rot = glm::rotate(glm::mat4(1.0f), angle, axis / axis_len);
+            }
+
+            glm::mat4 joint_local = glm::translate(glm::mat4(1.0f), j_pos) * glm::mat4_cast(j_rot) * rot;
+            glm::mat4 child_mat = parent_mat * joint_local;
+
+            m_current_link_xforms[joint->child_link] = child_mat;
+            visited.insert(joint->child_link);
+            q.push(joint->child_link);
+        }
+    }
+}
+
+bud::math::vec3 RobotAvatarController::get_pelvis_position() const {
+    return m_current_pelvis_pos;
+}
+
+bud::math::vec3 RobotAvatarController::get_torso_position() const {
+    return m_current_pelvis_pos + bud::math::vec3(0.0f, k_torso_relative_y, 0.0f);
+}
+
+bud::math::vec3 RobotAvatarController::get_head_camera_position() const {
+    bud::math::quaternion yaw_rot = glm::angleAxis(m_current_yaw, bud::math::vec3(0.0f, 1.0f, 0.0f));
+    bud::math::vec3 fwd = yaw_rot * bud::math::vec3(0.0f, 0.0f, -1.0f);
+    return m_current_pelvis_pos + bud::math::vec3(0.0f, k_head_relative_y, 0.0f) + fwd * k_head_fwd_offset;
+}
+
+void RobotAvatarController::get_debug_collision_vertices(std::vector<bud::graphics::PhysicsDebugVertex>& out_verts) const {
+    if (!m_robot)
+        return;
+
+    const auto& def = m_robot->get_definition();
+    bud::math::quaternion yaw_rot = glm::angleAxis(m_current_yaw, bud::math::vec3(0.0f, 1.0f, 0.0f));
+    bud::math::mat4 root_world_mat = glm::translate(bud::math::mat4(1.0f), m_current_pelvis_pos) * glm::mat4_cast(yaw_rot * m_urdf_to_world_rot);
+
+    // Warm amber / orange color for robot collision wireframe
+    const bud::math::vec3 col_color(1.0f, 0.70f, 0.15f);
+
+    for (const auto& link : def.links) {
+        auto it = m_current_link_xforms.find(link.name);
+        if (it == m_current_link_xforms.end())
+            continue;
+
+        glm::mat4 link_world = root_world_mat * it->second;
+
+        for (const auto& col : link.collisions) {
+            glm::vec3 c_pos(col.origin_xyz[0], col.origin_xyz[1], col.origin_xyz[2]);
+            glm::quat c_rot = glm::angleAxis(col.origin_rpy[2], glm::vec3(0.0f, 0.0f, 1.0f))
+                            * glm::angleAxis(col.origin_rpy[1], glm::vec3(0.0f, 1.0f, 0.0f))
+                            * glm::angleAxis(col.origin_rpy[0], glm::vec3(1.0f, 0.0f, 0.0f));
+            glm::mat4 col_local = glm::translate(glm::mat4(1.0f), c_pos) * glm::mat4_cast(c_rot);
+            glm::mat4 col_world = link_world * col_local;
+
+            if (col.geometry.type == GeometryType::Mesh && !col.convex_hull.points.empty()) {
+                const auto& pts = col.convex_hull.points;
+                const auto& idxs = col.convex_hull.indices;
+                if (!idxs.empty()) {
+                    for (size_t i = 0; i + 2 < idxs.size(); i += 3) {
+                        uint32_t a = idxs[i];
+                        uint32_t b = idxs[i + 1];
+                        uint32_t c = idxs[i + 2];
+                        if (a * 3 + 2 < pts.size() && b * 3 + 2 < pts.size() && c * 3 + 2 < pts.size()) {
+                            glm::vec3 p0 = glm::vec3(col_world * glm::vec4(pts[a * 3], pts[a * 3 + 1], pts[a * 3 + 2], 1.0f));
+                            glm::vec3 p1 = glm::vec3(col_world * glm::vec4(pts[b * 3], pts[b * 3 + 1], pts[b * 3 + 2], 1.0f));
+                            glm::vec3 p2 = glm::vec3(col_world * glm::vec4(pts[c * 3], pts[c * 3 + 1], pts[c * 3 + 2], 1.0f));
+                            out_verts.push_back({{p0.x, p0.y, p0.z}, {col_color.x, col_color.y, col_color.z}});
+                            out_verts.push_back({{p1.x, p1.y, p1.z}, {col_color.x, col_color.y, col_color.z}});
+                            out_verts.push_back({{p1.x, p1.y, p1.z}, {col_color.x, col_color.y, col_color.z}});
+                            out_verts.push_back({{p2.x, p2.y, p2.z}, {col_color.x, col_color.y, col_color.z}});
+                            out_verts.push_back({{p2.x, p2.y, p2.z}, {col_color.x, col_color.y, col_color.z}});
+                            out_verts.push_back({{p0.x, p0.y, p0.z}, {col_color.x, col_color.y, col_color.z}});
+                        }
+                    }
+                }
+            } else if (col.geometry.type == GeometryType::Box) {
+                float hx = col.geometry.box_size[0] * 0.5f;
+                float hy = col.geometry.box_size[1] * 0.5f;
+                float hz = col.geometry.box_size[2] * 0.5f;
+                glm::vec3 corners[8] = {
+                    glm::vec3(col_world * glm::vec4(-hx, -hy, -hz, 1.0f)),
+                    glm::vec3(col_world * glm::vec4( hx, -hy, -hz, 1.0f)),
+                    glm::vec3(col_world * glm::vec4( hx,  hy, -hz, 1.0f)),
+                    glm::vec3(col_world * glm::vec4(-hx,  hy, -hz, 1.0f)),
+                    glm::vec3(col_world * glm::vec4(-hx, -hy,  hz, 1.0f)),
+                    glm::vec3(col_world * glm::vec4( hx, -hy,  hz, 1.0f)),
+                    glm::vec3(col_world * glm::vec4( hx,  hy,  hz, 1.0f)),
+                    glm::vec3(col_world * glm::vec4(-hx,  hy,  hz, 1.0f)),
+                };
+                static const int box_edges[24] = {
+                    0, 1, 1, 2, 2, 3, 3, 0, 4, 5, 5, 6, 6, 7, 7, 4,
+                    0, 4, 1, 5, 2, 6, 3, 7
+                };
+                for (int e = 0; e < 24; ++e) {
+                    const auto& p = corners[box_edges[e]];
+                    out_verts.push_back({{p.x, p.y, p.z}, {col_color.x, col_color.y, col_color.z}});
+                }
+            } else if (col.geometry.type == GeometryType::Cylinder || col.geometry.type == GeometryType::Capsule) {
+                float r = (col.geometry.type == GeometryType::Cylinder) ? col.geometry.cylinder_radius : col.geometry.capsule_radius;
+                float len = (col.geometry.type == GeometryType::Cylinder) ? col.geometry.cylinder_length : col.geometry.capsule_length;
+                float hz = len * 0.5f;
+                constexpr int k_seg = 12;
+                constexpr float k_two_pi = 6.2831853f;
+                for (int i = 0; i < k_seg; ++i) {
+                    float a0 = k_two_pi * float(i) / float(k_seg);
+                    float a1 = k_two_pi * float(i + 1) / float(k_seg);
+                    float c0 = std::cos(a0) * r, s0 = std::sin(a0) * r;
+                    float c1 = std::cos(a1) * r, s1 = std::sin(a1) * r;
+                    glm::vec3 t0 = glm::vec3(col_world * glm::vec4(c0, s0, hz, 1.0f));
+                    glm::vec3 t1 = glm::vec3(col_world * glm::vec4(c1, s1, hz, 1.0f));
+                    out_verts.push_back({{t0.x, t0.y, t0.z}, {col_color.x, col_color.y, col_color.z}});
+                    out_verts.push_back({{t1.x, t1.y, t1.z}, {col_color.x, col_color.y, col_color.z}});
+
+                    glm::vec3 b0 = glm::vec3(col_world * glm::vec4(c0, s0, -hz, 1.0f));
+                    glm::vec3 b1 = glm::vec3(col_world * glm::vec4(c1, s1, -hz, 1.0f));
+                    out_verts.push_back({{b0.x, b0.y, b0.z}, {col_color.x, col_color.y, col_color.z}});
+                    out_verts.push_back({{b1.x, b1.y, b1.z}, {col_color.x, col_color.y, col_color.z}});
+                }
+                for (int i = 0; i < 4; ++i) {
+                    float a = k_two_pi * float(i) / 4.0f;
+                    float c = std::cos(a) * r, s = std::sin(a) * r;
+                    glm::vec3 p0 = glm::vec3(col_world * glm::vec4(c, s, -hz, 1.0f));
+                    glm::vec3 p1 = glm::vec3(col_world * glm::vec4(c, s,  hz, 1.0f));
+                    out_verts.push_back({{p0.x, p0.y, p0.z}, {col_color.x, col_color.y, col_color.z}});
+                    out_verts.push_back({{p1.x, p1.y, p1.z}, {col_color.x, col_color.y, col_color.z}});
+                }
+            } else if (col.geometry.type == GeometryType::Sphere) {
+                float r = col.geometry.sphere_radius;
+                constexpr int k_seg = 12;
+                constexpr float k_two_pi = 6.2831853f;
+                for (int i = 0; i < k_seg; ++i) {
+                    float a0 = k_two_pi * float(i) / float(k_seg);
+                    float a1 = k_two_pi * float(i + 1) / float(k_seg);
+                    float c0 = std::cos(a0) * r, s0 = std::sin(a0) * r;
+                    float c1 = std::cos(a1) * r, s1 = std::sin(a1) * r;
+                    glm::vec3 xy0 = glm::vec3(col_world * glm::vec4(c0, s0, 0.0f, 1.0f));
+                    glm::vec3 xy1 = glm::vec3(col_world * glm::vec4(c1, s1, 0.0f, 1.0f));
+                    out_verts.push_back({{xy0.x, xy0.y, xy0.z}, {col_color.x, col_color.y, col_color.z}});
+                    out_verts.push_back({{xy1.x, xy1.y, xy1.z}, {col_color.x, col_color.y, col_color.z}});
+
+                    glm::vec3 yz0 = glm::vec3(col_world * glm::vec4(0.0f, c0, s0, 1.0f));
+                    glm::vec3 yz1 = glm::vec3(col_world * glm::vec4(0.0f, c1, s1, 1.0f));
+                    out_verts.push_back({{yz0.x, yz0.y, yz0.z}, {col_color.x, col_color.y, col_color.z}});
+                    out_verts.push_back({{yz1.x, yz1.y, yz1.z}, {col_color.x, col_color.y, col_color.z}});
+
+                    glm::vec3 zx0 = glm::vec3(col_world * glm::vec4(s0, 0.0f, c0, 1.0f));
+                    glm::vec3 zx1 = glm::vec3(col_world * glm::vec4(s1, 0.0f, c1, 1.0f));
+                    out_verts.push_back({{zx0.x, zx0.y, zx0.z}, {col_color.x, col_color.y, col_color.z}});
+                    out_verts.push_back({{zx1.x, zx1.y, zx1.z}, {col_color.x, col_color.y, col_color.z}});
+                }
+            }
+        }
+    }
+}
+
+} // namespace bud::robots

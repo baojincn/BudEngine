@@ -118,6 +118,7 @@ namespace bud::graphics::vulkan {
 		void update_global_page_table(bud::graphics::BufferHandle buffer) override;
 		void update_global_page_pool(bud::graphics::BufferHandle buffer) override;
 		void update_global_materials_buffer(bud::graphics::BufferHandle buffer) override;
+		void update_global_cloth_prev_pos(bud::graphics::BufferHandle buffer) override;
 		void cmd_copy_image(CommandHandle cmd, TextureHandle src, TextureHandle dst) override;
 		void cmd_blit_image(CommandHandle cmd, TextureHandle src, TextureHandle dst) override;
 
@@ -429,6 +430,7 @@ namespace bud::graphics::vulkan {
 		VkDescriptorSetLayout compute_cloth_integrate_set_layout = VK_NULL_HANDLE;
 		VkDescriptorSetLayout compute_cloth_solver_set_layout = VK_NULL_HANDLE;
 		VkDescriptorSetLayout compute_cloth_skinning_set_layout = VK_NULL_HANDLE;
+		VkDescriptorSetLayout compute_robot_skinning_set_layout = VK_NULL_HANDLE;
 		VkDescriptorPool global_descriptor_pool = VK_NULL_HANDLE;
 		VkSampler default_sampler = VK_NULL_HANDLE;
 		VkSampler point_sampler = VK_NULL_HANDLE;
@@ -444,6 +446,7 @@ namespace bud::graphics::vulkan {
 
 		TextureHandle fallback_texture_handle;
 		TextureHandle dummy_depth_texture_handle;
+		BufferHandle dummy_storage_buffer_handle;
 		std::atomic<bool> swapchain_out_of_date{false};
 
 		RenderStats current_stats;

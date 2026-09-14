@@ -46,7 +46,7 @@ namespace bud::graphics {
 	}
 
 	RGHandle TAAPass::add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle scene_color, RGHandle depth_buffer,
-		const SceneView& view, const RenderConfig& config) {
+		RGHandle velocity_buffer, const SceneView& view, const RenderConfig& config) {
 		if (!pipeline.is_valid() || !scene_color.is_valid() || !depth_buffer.is_valid())
 			return backbuffer;
 
@@ -99,6 +99,8 @@ namespace bud::graphics {
 				if (has_valid_history)
 					builder.read(rg_history, ResourceState::ShaderResource);
 				builder.read(depth_buffer, ResourceState::ShaderResource);
+				if (velocity_buffer.is_valid())
+					builder.read(velocity_buffer, ResourceState::ShaderResource);
 				builder.write(rg_current, ResourceState::UnorderedAccess);
 				return rg_current;
 			},
@@ -107,6 +109,7 @@ namespace bud::graphics {
 				TextureHandle depth_tex = rg.get_texture(depth_buffer);
 				TextureHandle out_col_tex = rg.get_texture(rg_current);
 				TextureHandle hist_col_tex = has_valid_history ? rg.get_texture(rg_history) : TextureHandle{};
+				TextureHandle vel_tex = velocity_buffer.is_valid() ? rg.get_texture(velocity_buffer) : TextureHandle{};
 
 				if (!scene_col_tex.is_valid() || !depth_tex.is_valid() || !out_col_tex.is_valid())
 					return;
@@ -117,6 +120,7 @@ namespace bud::graphics {
 				rhi->cmd_bind_compute_texture(cmd, pipeline, 2, depth_tex);
 				rhi->cmd_bind_compute_texture(cmd, pipeline, 3, out_col_tex, 0, true);
 				rhi->cmd_bind_compute_ubo(cmd, pipeline, 4);
+				rhi->cmd_bind_compute_texture(cmd, pipeline, 5, vel_tex.is_valid() ? vel_tex : rhi->get_fallback_texture());
 
 				struct TAAPushConstants {
 					bud::math::vec2 screen_size;

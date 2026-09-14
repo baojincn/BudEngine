@@ -38,6 +38,8 @@ layout(std140, set = 0, binding = 4) uniform UniformBufferObject {
 	vec4 jitter_offset; // xy: pixel offset [-0.5, 0.5], zw: NDC offset
 } ubo;
 
+layout(set = 0, binding = 5) uniform sampler2D velocity_sampler;
+
 layout(push_constant) uniform TAAPushConstants {
 	vec2 screen_size;
 	vec2 inv_screen_size;
@@ -141,17 +143,25 @@ void main() {
 
 	vec2 velocity_uv = uv + vec2(closest_offset) * push_constants.inv_screen_size;
 
-	// 2. Analytical World-Space Motion Vector Reconstruction
-	vec4 clip_curr = vec4(velocity_uv * 2.0 - 1.0, closest_depth, 1.0);
-	vec4 world_pos = ubo.unjittered_inv_view_proj * clip_curr;
-	if (abs(world_pos.w) > 1e-6)
-		world_pos /= world_pos.w;
+	// 2. Dynamic Motion Vector Sampling & Static Analytical Fallback
+	vec2 dynamic_vel = textureLod(velocity_sampler, velocity_uv, 0.0).xy;
+	vec2 motion_vector;
+	if (dot(dynamic_vel, dynamic_vel) > 1e-10) {
+		motion_vector = dynamic_vel;
+	} else {
+		// Analytical World-Space Motion Vector Reconstruction for static geometry
+		vec4 clip_curr = vec4(velocity_uv * 2.0 - 1.0, closest_depth, 1.0);
+		vec4 world_pos = ubo.unjittered_inv_view_proj * clip_curr;
+		if (abs(world_pos.w) > 1e-6)
+			world_pos /= world_pos.w;
 
-	vec4 clip_prev = ubo.prev_unjittered_view_proj * world_pos;
-	vec2 prev_ndc = clip_prev.xy / (abs(clip_prev.w) > 1e-6 ? clip_prev.w : 1.0);
-	vec2 prev_uv = prev_ndc * 0.5 + 0.5;
+		vec4 clip_prev = ubo.prev_unjittered_view_proj * world_pos;
+		vec2 prev_ndc = clip_prev.xy / (abs(clip_prev.w) > 1e-6 ? clip_prev.w : 1.0);
+		vec2 prev_uv = prev_ndc * 0.5 + 0.5;
 
-	vec2 motion_vector = velocity_uv - prev_uv;
+		motion_vector = velocity_uv - prev_uv;
+	}
+
 	vec2 history_uv = uv - motion_vector;
 
 	// 3. Sample Current 3x3 Neighborhood and Compute YCoCg Variance Bounding Box

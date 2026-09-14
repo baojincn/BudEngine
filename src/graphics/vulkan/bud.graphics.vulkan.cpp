@@ -269,6 +269,9 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 	// Binding 7: GPU Materials Buffer (std430 GPUMaterialData)
 	layout_builder.add_binding(7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT, 1,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+	// Binding 8: Dedicated Cloth Previous Vertex Positions Buffer (vec4 per vertex)
+	layout_builder.add_binding(8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1,
+		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 
 	global_set_layout = layout_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
 
@@ -416,6 +419,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
 		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
 	};
 	compute_ssr_set_layout = build_ssr_compute_layout();
@@ -455,6 +459,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
 		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
 	};
 	compute_taa_set_layout = build_taa_compute_layout();
@@ -484,9 +489,19 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
 		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
 	};
 	compute_cloth_skinning_set_layout = build_cloth_skinning_compute_layout();
+
+	auto build_robot_skinning_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+	compute_robot_skinning_set_layout = build_robot_skinning_compute_layout();
 
 	// 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
@@ -524,8 +539,8 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, (uint32_t)frames.size() },
 			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (uint32_t)frames.size() * 1001 }, // 1000 bindless + 1 shadow
 			// Binding 3 (instance) / 4 (page table) / 5 (page pool) / 6 (CSM
-			// instance models) are all STORAGE_BUFFER per frame.
-			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)frames.size() * 8 }
+			// instance models) / 7 (materials) / 8 (cloth prev pos) are STORAGE_BUFFER per frame.
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)frames.size() * 10 }
 		};
 
 		VkDescriptorPoolCreateInfo pool_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -613,6 +628,9 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		}
 	}
 
+	dummy_storage_buffer_handle = create_gpu_buffer(256, ResourceState::ShaderResource);
+	auto* dummy_vk_buf = get_vulkan_buffer(dummy_storage_buffer_handle);
+
 	// 分配并初始化全局 Descriptor Sets
 	for (auto& frame : frames) {
 		VkDescriptorSetAllocateInfo alloc_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
@@ -627,6 +645,14 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		DescriptorWriter writer;
 		writer.write_buffer(0, frame.uniform_buffer, ubo_size, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
 		writer.write_image(2, 0, dummy_depth_texture.view, shadow_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+		if (dummy_vk_buf && dummy_vk_buf->buffer) {
+			writer.write_buffer(3, dummy_vk_buf->buffer, 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+			writer.write_buffer(4, dummy_vk_buf->buffer, 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+			writer.write_buffer(5, dummy_vk_buf->buffer, 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+			writer.write_buffer(6, dummy_vk_buf->buffer, 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+			writer.write_buffer(7, dummy_vk_buf->buffer, 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+			writer.write_buffer(8, dummy_vk_buf->buffer, 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+		}
 
 		writer.update_set(device, frame.global_descriptor_set);
 	}
@@ -670,6 +696,11 @@ void VulkanRHI::cleanup() {
         resource_pool->release_texture(fallback_texture_handle);
         fallback_texture_handle.reset();
     }
+
+	if (dummy_storage_buffer_handle.is_valid()) {
+		destroy_buffer(dummy_storage_buffer_handle);
+		dummy_storage_buffer_handle.reset();
+	}
 
     // Destroy any VulkanTexture instances stored in the RHI maps/containers.
     // These may hold VMA allocations that must be freed before destroying the allocator.
@@ -903,6 +934,7 @@ void VulkanRHI::cleanup() {
 	if (compute_cloth_integrate_set_layout) vkDestroyDescriptorSetLayout(device, compute_cloth_integrate_set_layout, nullptr);
 	if (compute_cloth_solver_set_layout) vkDestroyDescriptorSetLayout(device, compute_cloth_solver_set_layout, nullptr);
 	if (compute_cloth_skinning_set_layout) vkDestroyDescriptorSetLayout(device, compute_cloth_skinning_set_layout, nullptr);
+	if (compute_robot_skinning_set_layout) vkDestroyDescriptorSetLayout(device, compute_robot_skinning_set_layout, nullptr);
 	compute_hierarchy_traversal_set_layout = VK_NULL_HANDLE;
 	compute_page_emit_set_layout = VK_NULL_HANDLE;
 	compute_cluster_cull_set_layout = VK_NULL_HANDLE;
@@ -916,6 +948,7 @@ void VulkanRHI::cleanup() {
 	compute_cloth_integrate_set_layout = VK_NULL_HANDLE;
 	compute_cloth_solver_set_layout = VK_NULL_HANDLE;
 	compute_cloth_skinning_set_layout = VK_NULL_HANDLE;
+	compute_robot_skinning_set_layout = VK_NULL_HANDLE;
 
 	// Device & Instance
 	if (shadow_sampler)
@@ -1392,6 +1425,9 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 	case ComputePipelineDesc::LayoutKind::ClothSkinning:
 		chosen_layout = compute_cloth_skinning_set_layout;
 		break;
+	case ComputePipelineDesc::LayoutKind::RobotSkinning:
+		chosen_layout = compute_robot_skinning_set_layout;
+		break;
 	default:
 		chosen_layout = compute_hiz_cull_set_layout;
 		break;
@@ -1444,6 +1480,7 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 			case ComputePipelineDesc::LayoutKind::ClothIntegrate: return "ClothIntegrate";
 			case ComputePipelineDesc::LayoutKind::ClothSolver: return "ClothSolver";
 			case ComputePipelineDesc::LayoutKind::ClothSkinning: return "ClothSkinning";
+			case ComputePipelineDesc::LayoutKind::RobotSkinning: return "RobotSkinning";
 			default: return "Compute";
 			}
 		};
@@ -4450,6 +4487,7 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 		scene_view.jitter_ndc.x,
 		scene_view.jitter_ndc.y
 	);
+	ubo.unjittered_view_proj = scene_view.unjittered_view_proj_matrix;
 
 	if (frames[current_frame].uniform_mapped) {
 		std::memcpy(frames[current_frame].uniform_mapped, &ubo, sizeof(UniformBufferObject));
@@ -4515,12 +4553,26 @@ void VulkanRHI::update_global_csm_instance_data(bud::graphics::BufferHandle buff
 }
 
 void VulkanRHI::update_global_materials_buffer(bud::graphics::BufferHandle buffer) {
-	if (!buffer.is_valid()) return;
+	if (!buffer.is_valid())
+		return;
 	auto* vk_buf = get_vulkan_buffer(buffer);
-	if (!vk_buf || !vk_buf->buffer) return;
+	if (!vk_buf || !vk_buf->buffer)
+		return;
 
 	DescriptorWriter writer;
 	writer.write_buffer(7, vk_buf->buffer, vk_buf->size > 0 ? vk_buf->size : VK_WHOLE_SIZE, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+	writer.update_set(device, frames[current_frame].global_descriptor_set);
+}
+
+void VulkanRHI::update_global_cloth_prev_pos(bud::graphics::BufferHandle buffer) {
+	if (!buffer.is_valid())
+		return;
+	auto* vk_buf = get_vulkan_buffer(buffer);
+	if (!vk_buf || !vk_buf->buffer)
+		return;
+
+	DescriptorWriter writer;
+	writer.write_buffer(8, vk_buf->buffer, vk_buf->size > 0 ? vk_buf->size : VK_WHOLE_SIZE, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 	writer.update_set(device, frames[current_frame].global_descriptor_set);
 }
 

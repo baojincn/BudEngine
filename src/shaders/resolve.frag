@@ -158,20 +158,37 @@ void main() {
             vec3 perturbed_N = TBN * normal_sample;
             float n_len_sq = dot(perturbed_N, perturbed_N);
             if (n_len_sq > 1e-12) {
-                N = perturbed_N * inversesqrt(n_len_sq);
+                vec3 cand_N = perturbed_N * inversesqrt(n_len_sq);
+                if (dot(cand_N, geom_N) > 0.0)
+                    N = cand_N;
             }
         }
     }
-    if (dot(N, V) < 0.0)
-        N = -N;
+    if (dot(N, V) < 0.0) {
+        N = normalize(N + geom_N * (max(-dot(N, geom_N), 0.0) + 0.15));
+        if (dot(N, V) < 0.0)
+            N = geom_N;
+    }
 
     float metallic = mat.metallic_factor;
     float roughness = mat.roughness_factor;
+    if (isnan(metallic) || isinf(metallic) || metallic < 0.0 || metallic > 1.0)
+        metallic = 0.0;
+    if (isnan(roughness) || isinf(roughness) || roughness < 0.05 || roughness > 1.0)
+        roughness = 0.75;
+
     if (mat.metallic_roughness_id > 0u && mat.metallic_roughness_id < 1000u) {
         vec4 mr_sample = textureGrad(tex_samplers[nonuniformEXT(mat.metallic_roughness_id)], uv, uv_dx, uv_dy);
         roughness *= mr_sample.g;
         metallic *= mr_sample.b;
     }
+
+    // Architectural dielectrics (stone, plaster, brick, wood, cloth) in legacy non-PBR assets (e.g. Sponza)
+    // have a converted 0.04 specular map in the G channel, producing false ultra-low roughness (0.07-0.15).
+    // Physical dielectrics are matte diffuse surfaces (roughness >= 0.65) and must not produce mirror highlights.
+    if (metallic < 0.2)
+        roughness = max(roughness, 0.65);
+
     roughness = clamp(roughness, 0.04, 1.0);
     metallic = clamp(metallic, 0.0, 1.0);
 
@@ -196,9 +213,18 @@ void main() {
         ssr_sample = texture(tex_samplers[997], screen_uv);
     }
 
-    vec3 F0 = mix(vec3(0.04), albedo_sample.rgb, metallic);
-    vec3 F_ssr = FresnelSchlick(max(dot(N, V), 0.0), F0);
-    vec3 ssr_reflection = eval_ssr_reflection(ssr_sample, F_ssr, roughness, albedo_sample.rgb, metallic);
+    vec3 ssr_reflection = vec3(0.0);
+    // Only smooth metallic surfaces (metallic >= 0.20) or dedicated mirror dielectrics (roughness < 0.05) receive SSR.
+    // Matte dielectrics (stone arches, columns, brick walls, fabric, foliage) never receive mirror reflections.
+    bool receives_ssr = (mat.alpha_mode == 0u) && (
+        (metallic >= 0.20 && roughness < 0.25) ||
+        (metallic < 0.20 && roughness < 0.05)
+    );
+    if (receives_ssr) {
+        vec3 F0 = mix(vec3(0.04), albedo_sample.rgb, metallic);
+        vec3 F_ssr = FresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
+        ssr_reflection = eval_ssr_reflection(ssr_sample, F_ssr, roughness, albedo_sample.rgb, metallic);
+    }
 
     vec3 albedo = albedo_sample.rgb;
     vec3 color = calculate_lighting(world_pos, N, geom_N, uv, mat, albedo, ao, metallic, roughness, receive_shadow);

@@ -19,6 +19,7 @@
 
 namespace bud::streaming { class StreamingManager; }
 namespace bud::physics { class ClothSystem; }
+namespace bud::robots { class RobotSkinningSystem; }
 
 namespace bud::graphics {
 	struct MeshAssetHandle {
@@ -67,12 +68,15 @@ namespace bud::graphics {
 		// Update bounds WITHOUT touching is_page_based (used by simulated cloth meshes
 		// which must stay on the traditional Range-B draw path).
 		void update_mesh_bounds(uint32_t mesh_id, const bud::math::AABB& aabb);
+		int32_t get_mesh_vertex_offset(uint32_t mesh_id) const;
 
 		void update_physics_debug_vertices(const std::vector<PhysicsDebugVertex>& verts);
 
 		GPUScene& get_gpu_scene() { return gpu_scene; }
 		RHI* get_rhi() { return rhi; }
 		bud::physics::ClothSystem* get_cloth_system() { return cloth_system.get(); }
+		void set_robot_skinning_system(bud::robots::RobotSkinningSystem* skinning) { robot_skinning_system = skinning; }
+		bud::robots::RobotSkinningSystem* get_robot_skinning_system() const { return robot_skinning_system; }
 		uint32_t register_page_based_mesh(uint32_t page_index, uint32_t cluster_count,
 			uint32_t index_count, const bud::math::AABB& aabb, const bud::math::AABB& global_aabb,
 			uint32_t vertex_data_offset, uint32_t index_data_offset,
@@ -133,10 +137,12 @@ namespace bud::graphics {
 		std::unique_ptr<ScreenSpaceReflectionPass> ssr_pass;
 		std::unique_ptr<ScreenSpaceGlobalIlluminationPass> ssgi_pass;
 		std::unique_ptr<ResolvePass> resolve_pass;
+		std::unique_ptr<VelocityPass> velocity_pass;
 		std::unique_ptr<TAAPass> taa_pass;
 		std::unique_ptr<PhysicsDebugPass> physics_debug_pass;
 		std::unique_ptr<ClothDebugPass> cloth_debug_pass;
 		std::unique_ptr<bud::physics::ClothSystem> cloth_system;
+		bud::robots::RobotSkinningSystem* robot_skinning_system = nullptr;
 
 		bool has_mesh_shader = false;
 
@@ -146,6 +152,7 @@ namespace bud::graphics {
 
 		std::vector<RenderMesh> meshes;
 		std::vector<bud::math::AABB> mesh_bounds;
+		std::vector<int32_t> mesh_vertex_offsets;
 		mutable std::mutex mesh_bounds_mutex;
 		mutable std::mutex mesh_mutex;
 

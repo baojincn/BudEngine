@@ -288,7 +288,7 @@ void traverse_hierarchy(uint instance_id) {
             (err <= inst.error_threshold && push_constants.enable_lod != 0);
 
         if (should_render) {
-            float blend = is_leaf ? 0.0 : 1.0;
+            float blend = 0.0;
             for (uint i = 0; i < group.page_index_num; ++i)
                 emit_page(instance_id, group.page_index_start + i, blend);
         } else {
@@ -329,7 +329,7 @@ void traverse_hierarchy(uint instance_id) {
             } else {
                 // Streaming in progress: fallback to render current coarse LOD group!
                 for (uint i = 0; i < group.page_index_num; ++i)
-                    emit_page(instance_id, group.page_index_start + i, 1.0);
+                    emit_page(instance_id, group.page_index_start + i, 0.0);
             }
         }
 

@@ -255,6 +255,7 @@ target_sources(bud_engine_core
 		"src/graphics/passes/bud.pass.ssr.cpp"
 		"src/graphics/passes/bud.pass.ssgi.cpp"
 		"src/graphics/passes/bud.pass.resolve.cpp"
+		"src/graphics/passes/bud.pass.velocity.cpp"
 		"src/graphics/passes/bud.pass.taa.cpp"
 		"src/graphics/passes/bud.pass.ui.cpp"
 		"src/graphics/bud.graphics.graph.cpp"
@@ -276,7 +277,8 @@ target_sources(bud_engine_core
 		"src/graphics/vulkan/bud.vulkan.transient_heap.cpp"
 
 		"src/io/bud.io.cpp"
-		"src/tools/asset_pipeline/core/raw_mesh.cpp"
+		"src/core/bud.raw_mesh.cpp"
+		"src/robots/bud.robot.types.cpp"
 		"src/threading/bud.threading.cpp"
         "src/third_party/bud_third_party.cpp"
 
@@ -290,11 +292,21 @@ target_sources(bud_engine_core
 		"src/graphics/passes/bud.pass.cloth_debug.cpp"
 		"src/physics/bud.physics.scene.cpp"
 		"src/physics/bud.cloth.cpp"
+		"src/robots/bud.robot.loader.cpp"
+		"src/robots/bud.robot.visual_bridge.cpp"
+		"src/robots/bud.robot.avatar.cpp"
+		"src/robots/bud.robot.skinning.cpp"
 
     PUBLIC
 		"src/core/bud.core.hpp"
 		"src/core/bud.math.hpp"
 		"src/core/bud.logger.hpp"
+		"src/core/bud.raw_mesh.hpp"
+		"src/robots/bud.robot.types.hpp"
+		"src/robots/bud.robot.loader.hpp"
+		"src/robots/bud.robot.visual_bridge.hpp"
+		"src/robots/bud.robot.avatar.hpp"
+		"src/robots/bud.robot.skinning.hpp"
 		"src/io/bud.io.hpp"
 		"src/runtime/bud.engine.hpp"
 		"src/platform/bud.platform.hpp"
@@ -445,6 +457,10 @@ endif()"
     )
 endif()
 # End, triangle_sample
+
+add_executable(robot_sim_sample samples/robot_sim_sample/main.cpp)
+target_link_libraries(robot_sim_sample PRIVATE bud_engine_core)
+target_include_directories(robot_sim_sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Begin, tools
 add_subdirectory(src/tools/asset_pipeline)

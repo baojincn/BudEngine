@@ -15,7 +15,7 @@
 #include <tiny_obj_loader.h>
 #include <stb_image.h>
 #include "src/core/bud.logger.hpp"
-#include "src/tools/asset_pipeline/core/raw_mesh.hpp"
+#include "src/core/bud.raw_mesh.hpp"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -446,7 +446,7 @@ namespace bud::io {
 			return std::nullopt;
 		}
 
-		auto raw_mesh_opt = bud::asset_pipeline::RawMesh::deserialize_binary(
+		auto raw_mesh_opt = bud::asset::RawMesh::deserialize_binary(
 			reinterpret_cast<const uint8_t*>(ptr + raw_chunk->offset), raw_chunk->size);
 		if (!raw_mesh_opt) {
 			bud::eprint("[IO] Failed to deserialize RawMesh chunk: {}", display_path);
@@ -536,12 +536,14 @@ namespace bud::io {
 			}
 			else {
 				auto resolved = this->virtual_file_system->resolve_path(path);
-				if (resolved) {
+				if (resolved)
 					bud::eprint("[Asset] Failed to load mesh: {} (resolved: {})", path, resolved->string());
-				}
-				else {
+				else
 					bud::eprint("[Asset] Failed to load mesh: {} (could not resolve)", path);
-				}
+
+				task_scheduler->submit_main_thread_task([on_loaded]() mutable {
+					on_loaded(MeshData{});
+				});
 			}
 		});
 	}

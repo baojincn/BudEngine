@@ -1,0 +1,51 @@
+#version 460
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct RestVertex {
+    vec4 pos_bone;   // xyz: position, w: bone_id
+    vec4 normal_pad; // xyz: normal, w: unused
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer RestVertexBuffer {
+    RestVertex rest_vertices[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer BoneMatrixBuffer {
+    mat4 bone_matrices[];
+};
+
+// MegaVertexBuffer layout: 48 bytes (12 floats) per vertex:
+// [0..2] pos, [3..5] color, [6..8] normal, [9..10] uv, [11] texture_index
+layout(std430, set = 0, binding = 2) buffer MegaVertexBuffer {
+    float mega_floats[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint vertex_count;
+    uint base_vertex_offset; // in vertices
+} pc;
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= pc.vertex_count)
+        return;
+
+    RestVertex rv = rest_vertices[id];
+    uint bone_id = uint(rv.pos_bone.w + 0.5);
+    mat4 M = bone_matrices[bone_id];
+
+    vec3 def_pos = (M * vec4(rv.pos_bone.xyz, 1.0)).xyz;
+    vec3 def_norm = mat3(M) * rv.normal_pad.xyz;
+    float len = length(def_norm);
+    def_norm = (len > 1e-4) ? (def_norm / len) : vec3(0.0, 1.0, 0.0);
+
+    uint out_idx = (pc.base_vertex_offset + id) * 12;
+    mega_floats[out_idx + 0] = def_pos.x;
+    mega_floats[out_idx + 1] = def_pos.y;
+    mega_floats[out_idx + 2] = def_pos.z;
+
+    mega_floats[out_idx + 6] = def_norm.x;
+    mega_floats[out_idx + 7] = def_norm.y;
+    mega_floats[out_idx + 8] = def_norm.z;
+}

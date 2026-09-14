@@ -17,6 +17,10 @@
 #include "src/graphics/bud.graphics.scene.hpp"
 #include "src/graphics/bud.graphics.sortkey.hpp"
 
+namespace bud::physics {
+	class ClothSystem;
+}
+
 namespace bud::graphics {
 	class GPUScene;
 	class RenderPassBase {
@@ -370,7 +374,7 @@ namespace bud::graphics {
 		void shutdown(RHI* rhi) override;
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		RGHandle add_to_graph(RenderGraph& rg, RGHandle depth_buffer, RGHandle scene_color,
-			const SceneView& view, const RenderConfig& config);
+			RGHandle velocity_buffer, const SceneView& view, const RenderConfig& config);
 	};
 
 	class ScreenSpaceGlobalIlluminationPass : public RenderPass {
@@ -460,6 +464,17 @@ class ResolvePass : public RenderPass {
 			BufferHandle gpu_particles, BufferHandle gpu_constraints, uint32_t constraint_count);
 	};
 
+	class VelocityPass : public RenderPass {
+	public:
+		~VelocityPass() = default;
+		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		RGHandle add_to_graph(RenderGraph& rg, RGHandle depth_buffer,
+			const RenderScene& render_scene, const SceneView& view, const RenderConfig& config,
+			const std::vector<RenderMesh>& meshes, const GPUScene& gpu_scene,
+			BufferHandle mega_vertex_buffer, BufferHandle mega_index_buffer,
+			const bud::physics::ClothSystem* cloth_system = nullptr);
+	};
+
 	class TAAPass : public RenderPass {
 		TextureHandle history_textures[2];
 		uint32_t history_read_index = 0;
@@ -474,7 +489,7 @@ class ResolvePass : public RenderPass {
 		void shutdown(RHI* rhi) override;
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle scene_color, RGHandle depth_buffer,
-			const SceneView& view, const RenderConfig& config);
+			RGHandle velocity_buffer, const SceneView& view, const RenderConfig& config);
 	};
 
 }

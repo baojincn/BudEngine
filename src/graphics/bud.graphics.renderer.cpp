@@ -20,6 +20,7 @@
 #include "src/graphics/bud.graphics.sortkey.hpp"
 #include "src/graphics/vulkan/bud.vulkan.memory.hpp"
 #include "src/physics/bud.cloth.hpp"
+#include "src/robots/bud.robot.skinning.hpp"
 
 namespace bud::graphics {
 namespace {
@@ -70,6 +71,7 @@ namespace bud::graphics {
 		ssr_pass = std::make_unique<ScreenSpaceReflectionPass>();
 		ssgi_pass = std::make_unique<ScreenSpaceGlobalIlluminationPass>();
 		resolve_pass = std::make_unique<ResolvePass>();
+		velocity_pass = std::make_unique<VelocityPass>();
 		taa_pass = std::make_unique<TAAPass>();
 
 		csm_pass->init(rhi, render_config, asset_manager);
@@ -89,6 +91,7 @@ namespace bud::graphics {
 		ssr_pass->init(rhi, render_config, asset_manager);
 		ssgi_pass->init(rhi, render_config, asset_manager);
 		resolve_pass->init(rhi, render_config, asset_manager);
+		velocity_pass->init(rhi, render_config, asset_manager);
 		taa_pass->init(rhi, render_config, asset_manager);
 		physics_debug_pass = std::make_unique<PhysicsDebugPass>();
 		physics_debug_pass->init(rhi, render_config, asset_manager);
@@ -149,6 +152,7 @@ namespace bud::graphics {
 		if (ssr_pass) ssr_pass->shutdown(rhi);
 		if (ssgi_pass) ssgi_pass->shutdown(rhi);
 		if (resolve_pass) resolve_pass->shutdown(rhi);
+		if (velocity_pass) velocity_pass->shutdown(rhi);
 		if (taa_pass) taa_pass->shutdown(rhi);
 		if (physics_debug_pass) physics_debug_pass->shutdown(rhi);
 		if (cloth_debug_pass) cloth_debug_pass->shutdown(rhi);
@@ -221,6 +225,13 @@ namespace bud::graphics {
 		meshes[mesh_id].aabb = aabb;
 		meshes[mesh_id].sphere.center = (aabb.min + aabb.max) * 0.5f;
 		meshes[mesh_id].sphere.radius = bud::math::distance(aabb.max, meshes[mesh_id].sphere.center);
+	}
+
+	int32_t Renderer::get_mesh_vertex_offset(uint32_t mesh_id) const {
+		std::lock_guard lock(mesh_bounds_mutex);
+		if (mesh_id < mesh_vertex_offsets.size())
+			return mesh_vertex_offsets[mesh_id];
+		return -1;
 	}
 
 	uint32_t Renderer::register_page_based_mesh(uint32_t page_index, uint32_t cluster_count,
@@ -408,6 +419,17 @@ namespace bud::graphics {
 				}
 			}
 		}
+		else if (!mesh_data.materials.empty()) {
+			const auto& mat_data = mesh_data.materials[0];
+			bud::graphics::GPUMaterialData gpu_mat{};
+			gpu_mat.alpha_mode = static_cast<uint32_t>(mat_data.alpha_mode);
+			gpu_mat.alpha_cutoff = (mat_data.alpha_cutoff > 0.0f) ? mat_data.alpha_cutoff : 0.5f;
+			gpu_mat.base_color_factor = mat_data.base_color_factor;
+			gpu_mat.metallic_factor = mat_data.metallic_factor;
+			gpu_mat.roughness_factor = (mat_data.roughness_factor > 0.0f) ? mat_data.roughness_factor : 0.5f;
+			gpu_mat.albedo_texture_id = 0u;
+			base_material_id = gpu_scene.register_material(gpu_mat);
+		}
 
 		auto mesh_data_copy = std::make_shared<bud::io::MeshData>(mesh_data);
 		uint32_t assigned_mesh_id = 0;
@@ -417,14 +439,6 @@ namespace bud::graphics {
 			std::lock_guard lock(queue->mutex);
 
 			assigned_mesh_id = next_mesh_id.fetch_add(1, std::memory_order_relaxed);
-
-			{
-				std::lock_guard bounds_lock(mesh_bounds_mutex);
-				if (mesh_bounds.size() <= assigned_mesh_id)
-					mesh_bounds.resize(assigned_mesh_id + 1);
-
-				mesh_bounds[assigned_mesh_id] = cpu_aabb;
-			}
 
 			// Reserve the mega-buffer region at enqueue time so callers (cloth
 			// registration) get the vertex offset immediately, before the queued
@@ -437,7 +451,20 @@ namespace bud::graphics {
 			const uint32_t reserved_index_base = geometry_pool_for_reserve.next_index.fetch_add(reserve_index_count, std::memory_order_relaxed);
 			reserved_vertex_offset = static_cast<int32_t>(reserved_vertex_base);
 
-			queue->commands.push_back([this, mesh_data_copy, texture_slot_map, assigned_mesh_id, cpu_aabb, reserved_vertex_base, reserved_index_base]() {
+			{
+				std::lock_guard bounds_lock(mesh_bounds_mutex);
+				if (mesh_bounds.size() <= assigned_mesh_id)
+					mesh_bounds.resize(assigned_mesh_id + 1);
+
+				mesh_bounds[assigned_mesh_id] = cpu_aabb;
+
+				if (mesh_vertex_offsets.size() <= assigned_mesh_id)
+					mesh_vertex_offsets.resize(assigned_mesh_id + 1, -1);
+
+				mesh_vertex_offsets[assigned_mesh_id] = reserved_vertex_offset;
+			}
+
+			queue->commands.push_back([this, mesh_data_copy, texture_slot_map, assigned_mesh_id, cpu_aabb, reserved_vertex_base, reserved_index_base, base_material_id]() {
 				RenderMesh new_mesh;
 
 				new_mesh.aabb = cpu_aabb;
@@ -559,6 +586,10 @@ namespace bud::graphics {
 								gpu_mat.base_color_factor = glm::vec4(0.92f, 0.96f, 1.0f, 0.08f);
 								gpu_mat.roughness_factor = 0.04f;
 							}
+						}
+						if (mi == 0 && base_material_id != 0 && texture_slot_map.empty()) {
+							material_to_id[0] = base_material_id;
+							continue;
 						}
 						material_to_id[mi] = gpu_scene.register_material(gpu_mat);
 					}
@@ -1656,6 +1687,20 @@ namespace bud::graphics {
 					}
 				}
 
+				if (robot_skinning_system && robot_skinning_system->is_registered()) {
+					bud::graphics::BufferHandle mega_vb = gpu_scene.get_geometry_pool().vertex_buffer;
+					if (mega_vb.is_valid()) {
+						render_graph.add_pass("Robot Skinning",
+							[](RGBuilder& builder) {
+								builder.set_side_effect(true);
+							},
+							[this, mega_vb](RHI* rhi, CommandHandle cmd) {
+								robot_skinning_system->dispatch_skinning(rhi, cmd, mega_vb);
+							}
+						);
+					}
+				}
+
 				RGHandle rg_csm_indirect;
 				// GPU-driven CSM culling for traditional dynamic meshes (only when dynamic instances exist)
 				if (csm_cull_pipeline.is_valid() && frame.csm_indirect_draw.is_valid()) {
@@ -1797,6 +1842,14 @@ namespace bud::graphics {
 								pyramid_mip_debug_pass->add_to_graph(render_graph, back_buffer, rg_current_hiz, render_config.debug_hiz_mip);
 						}
 
+						RGHandle rg_velocity{};
+						if (velocity_pass && velocity_pass->is_ready() && rg_depth.is_valid()) {
+							rg_velocity = velocity_pass->add_to_graph(render_graph, rg_depth,
+								render_scene, scene_view, render_config, meshes, gpu_scene,
+								gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(),
+								cloth_system.get());
+						}
+
 						RGHandle rg_ao{};
 						if (rg_depth.is_valid() && ao_pass && render_config.ao_mode != AOMode::Disabled) {
 							RGHandle raw_ao = ao_pass->add_to_graph(render_graph, rg_depth, scene_view, render_config);
@@ -1810,7 +1863,7 @@ namespace bud::graphics {
 
 						RGHandle rg_ssr{};
 						if (rg_depth.is_valid() && ssr_pass && render_config.enable_ssr) {
-							rg_ssr = ssr_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
+							rg_ssr = ssr_pass->add_to_graph(render_graph, rg_depth, rg_history_color, rg_velocity, scene_view, render_config);
 						}
 
 						RGHandle rg_ssgi{};
@@ -1835,7 +1888,7 @@ namespace bud::graphics {
 
 							if (use_taa) {
 								taa_pass->add_to_graph(render_graph, back_buffer, rg_resolved_color, rg_depth,
-									scene_view, render_config);
+									rg_velocity, scene_view, render_config);
 								taa_resolved = true;
 							}
 
@@ -1918,6 +1971,14 @@ namespace bud::graphics {
 							}
 						}
 
+						RGHandle rg_velocity{};
+						if (velocity_pass && velocity_pass->is_ready() && rg_depth.is_valid()) {
+							rg_velocity = velocity_pass->add_to_graph(render_graph, rg_depth,
+								render_scene, scene_view, render_config, meshes, gpu_scene,
+								gpu_scene.get_vertex_buffer(), gpu_scene.get_index_buffer(),
+								cloth_system.get());
+						}
+
 						RGHandle rg_ao{};
 						if (rg_depth.is_valid() && ao_pass && render_config.ao_mode != AOMode::Disabled) {
 							RGHandle raw_ao = ao_pass->add_to_graph(render_graph, rg_depth, scene_view, render_config);
@@ -1932,7 +1993,7 @@ namespace bud::graphics {
 
 						RGHandle rg_ssr{};
 						if (rg_depth.is_valid() && ssr_pass && render_config.enable_ssr)
-							rg_ssr = ssr_pass->add_to_graph(render_graph, rg_depth, rg_history_color, scene_view, render_config);
+							rg_ssr = ssr_pass->add_to_graph(render_graph, rg_depth, rg_history_color, rg_velocity, scene_view, render_config);
 
 						RGHandle rg_ssgi{};
 						if (rg_depth.is_valid() && ssgi_pass && render_config.enable_ssgi)
@@ -1954,7 +2015,7 @@ namespace bud::graphics {
 
 							if (use_taa) {
 								taa_pass->add_to_graph(render_graph, back_buffer, rg_resolved_color, rg_depth,
-									scene_view, render_config);
+									rg_velocity, scene_view, render_config);
 								taa_resolved = true;
 							}
 

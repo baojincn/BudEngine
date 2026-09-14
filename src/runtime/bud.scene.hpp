@@ -50,7 +50,7 @@ namespace bud::scene {
 
 		// Third-person target (the entity/point the camera orbits around)
 		bud::math::vec3 target_position = bud::math::vec3(0.0f);
-		float orbit_distance = 1.0f; // UE5 third-person template: TargetArmLength = 500cm
+		float orbit_distance = 3.0f; // UE5 third-person template: TargetArmLength = 500cm
 		float orbit_pitch = -20.0f;
 		float orbit_yaw = 0.0f;
 		float spring_stiffness = 8.0f;
@@ -71,12 +71,31 @@ namespace bud::scene {
 		bud::math::vec3 spring_velocity = bud::math::vec3(0.0f);
 	};
 
+	enum class ColliderType : uint8_t {
+		None = 0,
+		Auto = 1,
+		ConvexHull = 2,
+		Mesh = 3,
+		Box = 4
+	};
+
+	struct EntityColliderDesc {
+		ColliderType type = ColliderType::Auto;
+		float friction = 0.85f;
+		float restitution = 0.05f;
+		float simplification_ratio = 0.15f;
+		uint32_t max_convex_vertices = 32;
+		bud::math::vec3 box_half_extent{ 0.0f };
+	};
+
 	struct Entity {
 		std::string name = "";
 		std::string asset_path = "";
 		uint32_t mesh_index = 0xFFFFFFFF;
 		uint32_t material_index = 0;
 		bud::math::mat4 transform = bud::math::mat4(1.0f);
+		bud::math::mat4 prev_transform = bud::math::mat4(1.0f);
+		bool has_prev_transform = false;
 		bool is_static = true;
 		bool is_active = true;
 		bool is_cast_shadow = true;
@@ -86,6 +105,8 @@ namespace bud::scene {
 		uint32_t root_group_index = 0xFFFFFFFF;
 		uint32_t base_virtual_page = 0xFFFFFFFF;
 		float lod_bias = 1.0f;
+
+		EntityColliderDesc collider;
 	};
 
 	struct DirectionalLight {

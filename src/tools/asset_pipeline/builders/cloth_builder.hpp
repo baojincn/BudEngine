@@ -8,10 +8,13 @@
 
 namespace bud::asset_pipeline {
 
-class ClothBaker {
+class ClothBuilder {
 public:
     static bool is_cloth_material(std::string_view name);
     static std::vector<uint8_t> build(const RawMesh& raw_mesh);
 };
+
+// Backward-compatible alias
+using ClothBaker = ClothBuilder;
 
 } // namespace bud::asset_pipeline

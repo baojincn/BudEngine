@@ -32,6 +32,10 @@ layout(std430, set = 0, binding = 2) buffer MegaVertexBuffer {
     float mega_floats[];
 };
 
+layout(std430, set = 0, binding = 3) buffer ClothPrevPositionBuffer {
+    vec4 cloth_prev_positions[];
+};
+
 layout(std430, push_constant) uniform PushConstants {
     uint render_vertex_count;
     uint vertex_base_offset; // base vertex offset in mega_vertex_buffer
@@ -63,15 +67,26 @@ void main() {
     float safe_norm_offset = clamp(normal_offset, -0.02, 0.02);
     vec3 final_pos = uvw.x * p0 + uvw.y * p1 + uvw.z * p2 + face_normal * safe_norm_offset;
 
+    // Interpolate previous frame world position for motion vector reprojection
+    vec3 prev_p0 = sim_particles[b.sim_tri_idx0].prev_position.xyz;
+    vec3 prev_p1 = sim_particles[b.sim_tri_idx1].prev_position.xyz;
+    vec3 prev_p2 = sim_particles[b.sim_tri_idx2].prev_position.xyz;
+    vec3 final_prev_pos = uvw.x * prev_p0 + uvw.y * prev_p1 + uvw.z * prev_p2 + face_normal * safe_norm_offset;
+
     // Write back to GPUScene Mega-Vertex-Buffer (12 floats per vertex)
     uint target_v_idx = pc.vertex_base_offset + b.render_vertex_idx;
     uint base = target_v_idx * 12u;
 
+    // Current position
     mega_floats[base + 0u] = final_pos.x;
     mega_floats[base + 1u] = final_pos.y;
     mega_floats[base + 2u] = final_pos.z;
 
-    mega_floats[base + 6u] = face_normal.x;
-    mega_floats[base + 7u] = face_normal.y;
-    mega_floats[base + 8u] = face_normal.z;
+    // Vertex color [base + 3u..5u] is deliberately left untouched for debug / materials!
+
+    // Preserve original artist-authored smooth vertex normals [base + 6u..8u] to avoid
+    // flat facet shading and harsh normal-bias shadow acne tearing.
+
+    // Dedicated standard previous position buffer for velocity pass reprojection
+    cloth_prev_positions[id] = vec4(final_prev_pos, 1.0);
 }

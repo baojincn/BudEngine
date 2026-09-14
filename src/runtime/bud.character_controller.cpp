@@ -59,8 +59,21 @@ namespace bud::scene {
         // horizontal component; Y keeps the character's own accumulated velocity plus
         // this step's gravity.
         JPH::Vec3 v = character->GetLinearVelocity();
-        v.SetX(desired_velocity.x);
-        v.SetZ(desired_velocity.z);
+
+        // Realistic ground friction and inertia simulation
+        constexpr float kGroundFriction = 14.0f; // Responsive deceleration on floor
+        constexpr float kAirControl = 3.0f;
+
+        if (character->IsSupported()) {
+            float factor = std::clamp(kGroundFriction * dt, 0.0f, 1.0f);
+            v.SetX(std::lerp(v.GetX(), desired_velocity.x, factor));
+            v.SetZ(std::lerp(v.GetZ(), desired_velocity.z, factor));
+        } else {
+            float factor = std::clamp(kAirControl * dt, 0.0f, 1.0f);
+            v.SetX(std::lerp(v.GetX(), desired_velocity.x, factor));
+            v.SetZ(std::lerp(v.GetZ(), desired_velocity.z, factor));
+        }
+
         v.SetY(v.GetY() + gravity.y * dt);
 
         constexpr float kMaxFallSpeed = 60.0f;
@@ -75,13 +88,24 @@ namespace bud::scene {
 
         class AllFilter : public JPH::BroadPhaseLayerFilter, public JPH::ObjectLayerFilter, public JPH::BodyFilter, public JPH::ShapeFilter {
         public:
+            const std::vector<uint32_t>* ignored = nullptr;
             bool ShouldCollide(JPH::BroadPhaseLayer) const override { return true; }
             bool ShouldCollide(JPH::ObjectLayer) const override { return true; }
-            bool ShouldCollide(const JPH::BodyID&) const override { return true; }
+            bool ShouldCollide(const JPH::BodyID& id) const override {
+                if (ignored && !ignored->empty()) {
+                    uint32_t raw_id = id.GetIndexAndSequenceNumber();
+                    for (uint32_t ign : *ignored) {
+                        if (ign == raw_id)
+                            return false;
+                    }
+                }
+                return true;
+            }
             bool ShouldCollide(const JPH::Shape*, const JPH::SubShapeID&) const override { return true; }
             bool ShouldCollide(const JPH::Shape*, const JPH::SubShapeID&, const JPH::Shape*, const JPH::SubShapeID&) const override { return true; }
         };
         AllFilter all_filter;
+        all_filter.ignored = &ignored_bodies;
 
         character->ExtendedUpdate(dt, JPH::Vec3(gravity.x, gravity.y, gravity.z),
                                   update_settings, all_filter, all_filter,
@@ -141,111 +165,27 @@ namespace bud::scene {
             character->SetPosition(JPH::RVec3(pos.x, pos.y, pos.z));
     }
 
-    void CharacterController::snap_to_ground(const std::vector<bud::math::vec3>& body_positions,
-                                             const std::vector<bud::math::vec3>& body_half_extents) {
-        if (!character) return;
-        const size_t count = std::min(body_positions.size(), body_half_extents.size());
-        if (count == 0) return;
+    bool CharacterController::snap_to_ground() {
+        if (!character || !physics_scene)
+            return false;
 
         const float r = capsule_radius;
         const float feet_offset = capsule_height * 0.5f + r;
-        const bud::math::vec3 start = get_position();
-        const float head_y = start.y + feet_offset; // capsule top at the spawn point
+        const bud::math::vec3 pos = get_position();
 
-        // ALL support surfaces at the ORIGINAL spawn XZ below the head, highest first.
-        std::vector<float> tops;
-        for (size_t i = 0; i < count; ++i) {
-            const auto& p = body_positions[i];
-            const auto& h = body_half_extents[i];
-            if (std::fabs(start.x - p.x) > h.x || std::fabs(start.z - p.z) > h.z)
-                continue;
-            const float top = p.y + h.y;
-            if (top <= head_y)
-                tops.push_back(top);
-        }
-        std::sort(tops.begin(), tops.end(), std::greater<float>());
+        // Raycast downwards from slightly above the capsule to find the real floor surface
+        bud::math::vec3 ray_start(pos.x, pos.y + 0.5f, pos.z);
+        bud::math::vec3 ray_end(pos.x, pos.y - 15.0f, pos.z);
 
-        auto overlap_count = [&](float feet_y) {
-            const float cy = feet_y + feet_offset;
-            int hits = 0;
-            for (size_t i = 0; i < count; ++i) {
-                const auto& p = body_positions[i];
-                const auto& h = body_half_extents[i];
-                if (std::fabs(start.x - p.x) > h.x + r) continue;
-                if (std::fabs(start.z - p.z) > h.z + r) continue;
-                if (std::fabs(cy - p.y) > h.y + feet_offset) continue;
-                ++hits;
-            }
-            return hits;
-        };
-
-        // Keep the original XZ; adjust ONLY the height. Try the support surfaces from
-        // the highest down: the first one with a fully clear capsule wins (a ledge
-        // just below head height fails its own headroom check, the real floor below
-        // passes). The character is never moved sideways.
-        for (float top : tops) {
-            const float feet_y = top + 0.05f;
-            if (overlap_count(feet_y) == 0) {
-                teleport(bud::math::vec3(start.x, feet_y + feet_offset, start.z));
-                return;
-            }
+        auto hit = physics_scene->raycast(ray_start, ray_end);
+        if (hit.has_value() && hit->hit) {
+            float ground_y = hit->hit_point.y;
+            constexpr float k_ground_margin = 0.002f;
+            teleport(bud::math::vec3(pos.x, ground_y + k_ground_margin + feet_offset, pos.z));
+            return true;
         }
 
-        // Tight shaft: keep the original XZ and take the LEAST-overlapping height so
-        // Jolt's own penetration recovery has the best chance.
-        int best_hits = static_cast<int>(count) + 1;
-        float best_feet = start.y - feet_offset;
-        for (float top : tops) {
-            const float feet_y = top + 0.05f;
-            const int hits = overlap_count(feet_y);
-            if (hits < best_hits) {
-                best_hits = hits;
-                best_feet = feet_y;
-            }
-        }
-        teleport(bud::math::vec3(start.x, best_feet + feet_offset, start.z));
-    }
-
-    int CharacterController::unstick_from(const std::vector<bud::math::vec3>& body_positions,
-                                          const std::vector<bud::math::vec3>& body_half_extents,
-                                          float max_rise) {
-        if (!character) return 0;
-
-        // Jolt's CharacterVirtual blocks ALL movement casts when the shape starts
-        // overlapping a static body ("WASD stopped working"), and its penetration
-        // recovery only copes with shallow pokes. Lift until the WHOLE capsule
-        // bounding box (radius x total height) is clear of every static AABB - a
-        // center-only check misses the common case where the feet are embedded in
-        // a thin floor slab / stair step while the centre is still free.
-        const size_t count = std::min(body_positions.size(), body_half_extents.size());
-        const float r = capsule_radius;
-        const float half_h = capsule_height * 0.5f + r; // total capsule half height
-        auto overlapping = [&](const bud::math::vec3& center) {
-            int hits = 0;
-            for (size_t i = 0; i < count; ++i) {
-                const auto d = body_positions[i] - center;
-                const auto h = body_half_extents[i];
-                if (std::fabs(d.x) <= h.x + r &&
-                    std::fabs(d.y) <= h.y + half_h &&
-                    std::fabs(d.z) <= h.z + r)
-                    ++hits;
-            }
-            return hits;
-        };
-
-        const bud::math::vec3 start = get_position();
-        const int stuck = overlapping(start);
-        if (stuck == 0) return 0;
-
-        constexpr float step = 0.1f;
-        for (float rise = step; rise <= max_rise; rise += step) {
-            const bud::math::vec3 lifted(start.x, start.y + rise, start.z);
-            if (overlapping(lifted) == 0) {
-                teleport(lifted);
-                return stuck;
-            }
-        }
-        return -stuck; // no free space found below max_rise
+        return false;
     }
 
 } // namespace bud::scene

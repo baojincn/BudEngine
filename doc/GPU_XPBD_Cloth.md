@@ -24,7 +24,7 @@
 系统贯彻物理仿真流形拓扑（SimMesh）与材质渲染拓扑（RenderMesh）解耦的工业标准，并在 Vulkan 1.4 运行时执行全场景池化与图着色并行优化：
 
 - **1.1 离线双网格解耦与流形焊合 (LOD0 & LOD1)**：
-  在 [src/tools/asset_pipeline/builders/cloth_baker.cpp](file:///d:/PersonalProjects/BudEngine/src/tools/asset_pipeline/builders/cloth_baker.cpp) 中，以 1mm 空间网格焊合接缝顶点生成单连通流形 SimMesh LOD0，并基于 `meshoptimizer` 离线减面生成 40% 三角形的 LOD1。
+  在 [src/tools/asset_pipeline/builders/cloth_builder.cpp](file:///d:/PersonalProjects/BudEngine/src/tools/asset_pipeline/builders/cloth_builder.cpp) 中，以 1mm 空间网格焊合接缝顶点生成单连通流形 SimMesh LOD0，并基于 `meshoptimizer` 离线减面生成 40% 三角形的 LOD1。
 - **1.2 全局池化连接 (SimWorld Concatenation)**：
   全场景所有布料实例打平拼接为一个全局粒子、约束与蒙皮绑定连续缓冲池，单帧布料模拟开销被压制为极少次数的全局 Dispatch。
 - **1.3 贪心图着色并行 Gauss-Seidel**：
@@ -46,7 +46,7 @@
 
 ```mermaid
 flowchart TD
-    subgraph Asset_Pipeline["1. 资产离线预处理 (Asset Pipeline / ClothBaker)"]
+    subgraph Asset_Pipeline["1. 资产离线预处理 (Asset Pipeline / ClothBuilder)"]
         A["Sponza 场景资产 (.obj / .gltf)"] --> B["材质特征识别: fabric_*, curtain, cloth"]
         B --> C1["空间网格焊合: 1mm 阈值<br/>生成单连通流形 SimMesh LOD0"]
         C1 --> C2["meshoptimizer 简化: 40% 三角形<br/>生成远景 SimMesh LOD1"]
@@ -1724,7 +1724,7 @@ void ClothSystem::simulate_and_skin(..., float dt, ...) {
 - `[COMPLETED]` **Task 1: 双网格物理数据结构落盘**  
   在 [src/physics/bud.cloth.types.hpp](file:///d:/PersonalProjects/BudEngine/src/physics/bud.cloth.types.hpp) 中全面实现了 `SimParticle`、`DistanceConstraint`、`ClothSkinBinding`、`CapsuleCollider` 以及三种 PushConstants，严格通过 `static_assert` 32B/16B/32B/48B/240B 校验。
 - `[COMPLETED]` **Task 2: Sponza 材质识别与双网格离线烘焙生成**  
-  在 [src/tools/asset_pipeline/builders/cloth_baker.cpp](file:///d:/PersonalProjects/BudEngine/src/tools/asset_pipeline/builders/cloth_baker.cpp) 中实现了 1mm 空间网格焊合生成流形 SimMesh LOD0，结合 `meshoptimizer` 自动生成 40% 减面的 LOD1，并精确计算重心坐标投影，导出 ClothPhysicsChunk 规范块。
+  在 [src/tools/asset_pipeline/builders/cloth_builder.cpp](file:///d:/PersonalProjects/BudEngine/src/tools/asset_pipeline/builders/cloth_builder.cpp) 中实现了 1mm 空间网格焊合生成流形 SimMesh LOD0，结合 `meshoptimizer` 自动生成 40% 减面的 LOD1，并精确计算重心坐标投影，导出 ClothPhysicsChunk 规范块。
 - `[COMPLETED]` **Task 3: Vulkan 1.4 Compute Shader 生产级编译配置**  
   在 [src/shaders/cloth_integrate.comp](file:///d:/PersonalProjects/BudEngine/src/shaders/cloth_integrate.comp)、[src/shaders/cloth_solver.comp](file:///d:/PersonalProjects/BudEngine/src/shaders/cloth_solver.comp) 与 [src/shaders/cloth_skinning.comp](file:///d:/PersonalProjects/BudEngine/src/shaders/cloth_skinning.comp) 中交付了生产级 GPU 源码，CMakeLists.txt 配置自动化 SPIR-V 编译。
 - `[COMPLETED]` **Task 4: 布料子系统全局池化与图着色 Gauss-Seidel**  

@@ -16,6 +16,7 @@ namespace bud::graphics {
 	// SoA (Structure of Arrays) accelerate Cache effeciency and multi-threading processing
 	struct RenderScene {
 		std::vector<bud::math::mat4> world_matrices;
+		std::vector<bud::math::mat4> prev_world_matrices;
 		std::vector<bud::math::AABB> world_aabbs;
 
 		std::vector<uint32_t> mesh_indices;
@@ -74,6 +75,7 @@ namespace bud::graphics {
 
 		void reset(size_t estimated_capacity) {
 			world_matrices.assign(estimated_capacity, bud::math::mat4(1.0f));
+			prev_world_matrices.assign(estimated_capacity, bud::math::mat4(1.0f));
 			world_aabbs.assign(estimated_capacity, bud::math::AABB());
 			mesh_indices.assign(estimated_capacity, 0);
 			submesh_indices.assign(estimated_capacity, 0);
@@ -90,7 +92,7 @@ namespace bud::graphics {
 		void cull_frustum(const bud::math::Frustum& frustum, std::vector<uint32_t>& out_indices) const;
 		bool intersect_scene(const bud::math::AABB& aabb) const;
 
-		inline void add_instance(const bud::math::mat4& transform, const bud::math::AABB& aabb, uint32_t mesh_index, uint32_t submesh_index, uint32_t material_index, bool is_static, uint32_t root_group_index = 0xFFFFFFFF, uint32_t base_virtual_page = 0xFFFFFFFF, bool cast_shadow = true, bool receive_shadow = true, bool is_cloth = false) {
+		inline void add_instance(const bud::math::mat4& transform, const bud::math::AABB& aabb, uint32_t mesh_index, uint32_t submesh_index, uint32_t material_index, bool is_static, uint32_t root_group_index = 0xFFFFFFFF, uint32_t base_virtual_page = 0xFFFFFFFF, bool cast_shadow = true, bool receive_shadow = true, bool is_cloth = false, const bud::math::mat4& prev_transform = bud::math::mat4(1.0f)) {
 			size_t idx = instance_count.fetch_add(1, std::memory_order_relaxed);
 
 			if (idx >= world_matrices.size()) [[unlikely]] {
@@ -99,6 +101,7 @@ namespace bud::graphics {
 			}
 
 			world_matrices[idx] = transform;
+			prev_world_matrices[idx] = prev_transform;
 			world_aabbs[idx] = aabb;
 			mesh_indices[idx] = mesh_index;
 			submesh_indices[idx] = submesh_index;

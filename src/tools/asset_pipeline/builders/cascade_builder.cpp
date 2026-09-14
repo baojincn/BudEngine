@@ -2,7 +2,7 @@
 #include "texture_builder.hpp"
 #include "material_asset_builder.hpp"
 #include "mesh_builder.hpp"
-#include "cloth_baker.hpp"
+#include "cloth_builder.hpp"
 #include "../cache/asset_cache.hpp"
 #include "../cache/asset_registry.hpp"
 #include "../core/support.hpp"
@@ -306,10 +306,10 @@ bool CascadeBuilder::build_package_from_raw(
 
                 bool is_cloth_ent = false;
                 if (sub.material_index < cooked_mesh.materials.size()) {
-                    if (ClothBaker::is_cloth_material(cooked_mesh.materials[sub.material_index].name))
+                    if (ClothBuilder::is_cloth_material(cooked_mesh.materials[sub.material_index].name))
                         is_cloth_ent = true;
                 }
-                if (!is_cloth_ent && (ClothBaker::is_cloth_material(sname_readable) || ClothBaker::is_cloth_material(out_mesh_path)))
+                if (!is_cloth_ent && (ClothBuilder::is_cloth_material(sname_readable) || ClothBuilder::is_cloth_material(out_mesh_path)))
                     is_cloth_ent = true;
 
                 ent.is_static = !is_cloth_ent;
@@ -372,15 +372,17 @@ bool CascadeBuilder::build_package_from_raw(
 
             bool is_cloth_ent = false;
             for (const auto& mat : cooked_mesh.materials) {
-                if (ClothBaker::is_cloth_material(mat.name)) {
+                if (ClothBuilder::is_cloth_material(mat.name)) {
                     is_cloth_ent = true;
                     break;
                 }
             }
-            if (!is_cloth_ent && (ClothBaker::is_cloth_material(stem) || ClothBaker::is_cloth_material(out_mesh_path)))
+            if (!is_cloth_ent && (ClothBuilder::is_cloth_material(stem) || ClothBuilder::is_cloth_material(out_mesh_path)))
                 is_cloth_ent = true;
 
             ent.is_static = !is_cloth_ent;
+            ent.enable_physics = !is_cloth_ent;
+            ent.collider.type = is_cloth_ent ? bud::scene::ColliderType::None : bud::scene::ColliderType::Auto;
             ent.mesh_index = 0;
             ent.material_index = 0;
             ent.transform = glm::mat4(1.0f);
@@ -658,6 +660,8 @@ bool CascadeBuilder::build_scene_package(
             ent.asset_path = mesh_cooked_paths[inst.mesh_index];
             ent.is_active = true;
             ent.is_static = true;
+            ent.enable_physics = true;
+            ent.collider.type = bud::scene::ColliderType::Auto;
             ent.material_index = 0;
             ent.mesh_index = 0;
 

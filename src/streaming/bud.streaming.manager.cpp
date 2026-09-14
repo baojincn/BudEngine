@@ -134,8 +134,16 @@ void StreamingManager::register_virtual_geometry_async(const std::string& path) 
 			gpu_mat.alpha_mode = static_cast<uint32_t>(mat_desc.alpha_mode);
 			gpu_mat.alpha_cutoff = (mat_desc.alpha_cutoff > 0.0f) ? mat_desc.alpha_cutoff : 0.5f;
 			gpu_mat.base_color_factor = glm::vec4(1.0f);
-			gpu_mat.metallic_factor = mat_desc.metallic_factor;
-			gpu_mat.roughness_factor = mat_desc.roughness_factor;
+			float safe_metallic = mat_desc.metallic_factor;
+			if (!std::isfinite(safe_metallic) || safe_metallic < 0.0f || safe_metallic > 1.0f) {
+				safe_metallic = 0.0f;
+			}
+			float safe_roughness = mat_desc.roughness_factor;
+			if (!std::isfinite(safe_roughness) || safe_roughness < 0.05f || safe_roughness > 1.0f) {
+				safe_roughness = 0.75f;
+			}
+			gpu_mat.metallic_factor = safe_metallic;
+			gpu_mat.roughness_factor = safe_roughness;
 
 			auto resolve_and_bind_texture = [&](uint32_t tex_idx) -> uint32_t {
 				if (tex_idx >= asset.textures.size() || !renderer) return 0;

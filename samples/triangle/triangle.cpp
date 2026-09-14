@@ -29,13 +29,13 @@ void TriangleApp::on_init(const AppConfig& config) {
 	bud::graphics::RenderConfig render_config;
 	// Raster-stage bias: applied while rendering INTO the shadow map.
 	// Units are vkCmdSetDepthBias factors (device depth units), NOT [0,1] fractions.
-	render_config.shadow_bias_constant = 2.0f;
-	render_config.shadow_bias_slope = 1.75f;
+	render_config.shadow_bias_constant = 1.5f;
+	render_config.shadow_bias_slope = 1.5f;
 	render_config.shadow_bias_clamp = 0.0f; // 0 == no clamping (Vulkan convention)
 	// Receiver-stage bias: applied when sampling the shadow map (lighting.glsl).
 	// Expressed in shadow texels, so it is invariant to cascade size and map resolution.
 	render_config.shadow_normal_offset_texels = 1.0f;
-	render_config.shadow_receiver_bias_texels = 1.5f;
+	render_config.shadow_receiver_bias_texels = 0.85f;
 	render_config.cascade_count = 4;
 	render_config.cascade_split_lambda = 0.5;
 	render_config.debug_cascades = false;
@@ -55,6 +55,20 @@ void TriangleApp::on_init(const AppConfig& config) {
 			renderer->set_config(cur_cfg);
 
 			pending_mesh_loads->store(0);
+
+			// Initialize Unitree G1 Robot Avatar
+			m_robot_avatar = std::make_unique<bud::robots::RobotAvatarController>();
+			bool avatar_ok = m_robot_avatar->init(engine,
+				"Content/Robots/g1_description/g1_29dof.budasset",
+				"Content/Robots/g1_description");
+			if (avatar_ok) {
+				bud::print("[TriangleApp] Unitree G1 Avatar initialized and bound to Sponza scene!");
+				m_robot_avatar->set_camera_view(bud::robots::AvatarCameraView::ThirdPerson, scene.main_camera);
+			}
+			else {
+				bud::eprint("[TriangleApp] Failed to initialize Unitree G1 Avatar controller!");
+			}
+
 			bud::print("[TriangleApp] init finished");
 		});
 	}
@@ -67,63 +81,43 @@ void TriangleApp::on_init(const AppConfig& config) {
 void TriangleApp::on_update(float delta_time) {
 	auto engine = get_engine();
 
-	if (engine->is_replay_active()) return;
+	if (engine->is_replay_active())
+		return;
 
 	auto& input = bud::input::Input::get();
 	auto& scene = engine->get_scene();
 	auto& cam = scene.main_camera;
-	auto* controller = engine->get_character_controller();
-	auto* physics = engine->get_physics_scene();
 
 	static bool prev_v = false;
 	bool curr_v = input.is_key_down(bud::input::Key::V);
 	if (curr_v && !prev_v) {
-		const bool first_person = (cam.get_mode() == bud::scene::CameraMode::FirstPerson);
-		cam.set_mode(first_person ? bud::scene::CameraMode::FirstPerson
-		                          : bud::scene::CameraMode::ThirdPerson);
-		bud::print("[Camera] mode: {}", first_person ? "FirstPerson" : "ThirdPerson");
+		if (m_robot_avatar) {
+			m_robot_avatar->toggle_camera_mode(cam);
+		}
+		else {
+			const bool first_person = (cam.get_mode() == bud::scene::CameraMode::FirstPerson);
+			cam.set_mode(first_person ? bud::scene::CameraMode::FirstPerson
+			                          : bud::scene::CameraMode::ThirdPerson);
+		}
+		bud::print("[Camera] mode: {}", cam.get_mode() == bud::scene::CameraMode::FirstPerson ? "FirstPerson" : "ThirdPerson");
 	}
 	prev_v = curr_v;
 
-	if (auto* sm = engine->get_streaming_manager()) {
-		sm->update(bud::math::vec3(cam.position.x, cam.position.y, cam.position.z));
+	static bool prev_b = false;
+	bool curr_b = input.is_key_down(bud::input::Key::B);
+	if (curr_b && !prev_b) {
+		if (m_robot_avatar) {
+			m_robot_avatar->toggle_render_mode();
+		}
 	}
+	prev_b = curr_b;
 
-	// Character movement via CharacterController
-	if (controller && physics) {
-		bud::math::vec3 move_dir(0.0f);
-		if (input.is_key_down(bud::input::Key::W)) move_dir += cam.front;
-		if (input.is_key_down(bud::input::Key::S)) move_dir -= cam.front;
-		if (input.is_key_down(bud::input::Key::A)) move_dir -= cam.right;
-		if (input.is_key_down(bud::input::Key::D)) move_dir += cam.right;
-
-		if (input.is_gamepad_connected()) {
-			float lx = input.get_gamepad_axis(bud::input::GamepadAxis::LeftX);
-			float ly = input.get_gamepad_axis(bud::input::GamepadAxis::LeftY);
-			move_dir += cam.right * lx;
-			move_dir += cam.front * (-ly);
-		}
-
-		if (glm::length(move_dir) > 0.0f)
-			move_dir = glm::normalize(move_dir);
-
-		controller->set_velocity(move_dir * cam.movement_speed);
-		controller->update(delta_time);
-
-		// Sync camera from controller
-		if (cam.get_mode() == bud::scene::CameraMode::ThirdPerson) {
-			cam.target_position = controller->get_position();
-		} else {
-			cam.position = controller->get_eye_position();
-		}
-
-		// Gamepad right stick for camera rotation
-		if (input.is_gamepad_connected()) {
-			float rx = input.get_gamepad_axis(bud::input::GamepadAxis::RightX);
-			float ry = input.get_gamepad_axis(bud::input::GamepadAxis::RightY);
-			if (rx != 0.0f || ry != 0.0f)
-				cam.process_mouse_movement(rx * 600.0f * delta_time, ry * 600.0f * delta_time, true);
-		}
+	// Process camera rotation input (gamepad and mouse) prior to avatar update
+	if (input.is_gamepad_connected()) {
+		float rx = input.get_gamepad_axis(bud::input::GamepadAxis::RightX);
+		float ry = input.get_gamepad_axis(bud::input::GamepadAxis::RightY);
+		if (rx != 0.0f || ry != 0.0f)
+			cam.process_mouse_movement(rx * 600.0f * delta_time, ry * 600.0f * delta_time, true);
 	}
 
 	float dx, dy;
@@ -135,8 +129,50 @@ void TriangleApp::on_update(float delta_time) {
 		if (dx != 0.0f || dy != 0.0f)
 			cam.process_mouse_movement(dx, dy);
 	}
+
+	if (m_robot_avatar) {
+		m_robot_avatar->update(delta_time, input, cam);
+	}
+	else {
+		auto* controller = engine->get_character_controller();
+		auto* physics = engine->get_physics_scene();
+		if (controller && physics) {
+			bud::math::vec3 move_dir(0.0f);
+			if (input.is_key_down(bud::input::Key::W))
+				move_dir += cam.front;
+			if (input.is_key_down(bud::input::Key::S))
+				move_dir -= cam.front;
+			if (input.is_key_down(bud::input::Key::A))
+				move_dir -= cam.right;
+			if (input.is_key_down(bud::input::Key::D))
+				move_dir += cam.right;
+
+			if (input.is_gamepad_connected()) {
+				float lx = input.get_gamepad_axis(bud::input::GamepadAxis::LeftX);
+				float ly = input.get_gamepad_axis(bud::input::GamepadAxis::LeftY);
+				move_dir += cam.right * lx;
+				move_dir += cam.front * (-ly);
+			}
+
+			if (glm::length(move_dir) > 0.0f)
+				move_dir = glm::normalize(move_dir);
+
+			controller->set_velocity(move_dir * cam.movement_speed);
+			controller->update(delta_time);
+
+			if (cam.get_mode() == bud::scene::CameraMode::ThirdPerson)
+				cam.target_position = controller->get_position();
+			else
+				cam.position = controller->get_eye_position();
+		}
+	}
+
+	if (auto* sm = engine->get_streaming_manager()) {
+		sm->update(bud::math::vec3(cam.position.x, cam.position.y, cam.position.z));
+	}
 }
 
 void TriangleApp::on_shutdown() {
+	m_robot_avatar.reset();
 	bud::print("[TriangleApp] Shutting down.");
 }

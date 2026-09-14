@@ -4,10 +4,12 @@
 #include <atomic>
 #include "src/runtime/bud.game.hpp"
 #include "src/streaming/bud.streaming.manager.hpp"
+#include "src/robots/bud.robot.avatar.hpp"
 
 class TriangleApp : public bud::game::GameFramework {
 private:
 	std::shared_ptr<std::atomic<int>> pending_mesh_loads = std::make_shared<std::atomic<int>>(1);
+	std::unique_ptr<bud::robots::RobotAvatarController> m_robot_avatar;
 public:
 	bool is_fully_loaded() const override;
 
