@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <vector>
@@ -7,6 +7,7 @@
 #include <functional>
 #include <atomic>
 #include <algorithm>
+#include <mutex>
 
 #include "src/core/bud.math.hpp"
 #include "src/physics/bud.physics.types.hpp"
@@ -88,6 +89,8 @@ namespace bud::physics {
         std::atomic<size_t> body_count{0};
         std::atomic<size_t> dropped_bodies{0};
         std::atomic<size_t> soft_body_count{0};
+
+        std::mutex body_mutex;
 
         void reset(size_t capacity) {
             body_positions.assign(capacity, bud::math::vec3(0.0f));

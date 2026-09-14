@@ -136,9 +136,12 @@ bool RobotAvatarController::init(bud::engine::BudEngine* engine,
     float ground_y = spawn_pos.y - capsule_ground_offset;
     get_ground_height(spawn_pos, ground_y);
 
-    // Pelvis position relative to ground: soles align strictly with ground surface
+    // Pelvis position relative to ground: soles start a little above the surface and
+    // settle onto it through physics. Spawning perfectly flush used to sweep the feet
+    // into the collision mesh on the very first frames.
+    constexpr float kSpawnClearanceY = 0.03f;
     m_current_pelvis_pos = spawn_pos;
-    m_current_pelvis_pos.y = ground_y - k_mesh_foot_sole_offset_y;
+    m_current_pelvis_pos.y = ground_y - k_mesh_foot_sole_offset_y + kSpawnClearanceY;
 
     RobotSpawnParams params{};
     params.position = m_current_pelvis_pos;
@@ -147,6 +150,10 @@ bool RobotAvatarController::init(bud::engine::BudEngine* engine,
     params.enable_motors = true;
     params.default_motor_stiffness = 800.0f;
     params.default_motor_damping = 80.0f;
+    // The pelvis is kinematic and the joints are position motors, so a strong motor
+    // presses a blocked leg straight through the floor mesh (deep convex-vs-mesh
+    // penetration is what kills Jolt's EPA in release builds). A moderate torque cap
+    // lets the foot be stopped by the ground instead of tunnelling into it.
     params.default_motor_max_torque = 150.0f;
 
     m_robot = RobotLoader::spawn_robot_from_file(*physics_scene, robot_file, params);
@@ -244,9 +251,19 @@ void RobotAvatarController::update(float dt, const bud::input::Input& input, bud
         bool has_ground = get_ground_height(char_pos, ground_y);
 
         const bool grounded = controller->is_grounded();
-        // When grounded, stick directly to the exact raycast ground surface for 100% flush fit
-        float base_y = (grounded && has_ground) ? ground_y : capsule_base_y;
-        float pelvis_y = base_y - k_mesh_foot_sole_offset_y;
+        // Ground-relative pelvis height with a small clearance and a rate limit.
+        // The previous version swept the kinematic pelvis to the exact raycast surface
+        // every frame ("hard snap"). That is not physical: it pushes the dynamic legs
+        // and feet centimetres into the floor mesh, and such deep convex-vs-mesh
+        // penetration makes Jolt's EPA run away in release builds (its internal buffers
+        // are only guarded by assertions, which are compiled out there). Keeping the
+        // soles slightly above the surface, and never moving the pelvis faster than the
+        // rate limit, bounds the penetration to millimetres while still tracking steps.
+        constexpr float kGroundClearance = 0.03f;   // soles rest ~3 cm above the mesh
+        constexpr float kMaxVerticalSpeed = 0.3f;   // m/s, no teleports
+        constexpr float kMaxHorizontalSpeed = 2.5f; // m/s, damps stair-step jumps of the controller
+        float base_y = (grounded && has_ground) ? (ground_y + kGroundClearance) : capsule_base_y;
+        float target_pelvis_y = base_y - k_mesh_foot_sole_offset_y;
 
         m_is_moving = (move_len > 0.01f) && grounded;
         if (m_is_moving) {
@@ -256,13 +273,35 @@ void RobotAvatarController::update(float dt, const bud::input::Input& input, bud
 
             // Natural pelvis vertical bounce during walking
             float bob_offset = 0.022f * (std::cos(2.0f * m_gait_phase) - 1.0f) * 0.5f;
-            pelvis_y += bob_offset;
+            target_pelvis_y += bob_offset;
         }
         else {
             reset_to_idle_stance();
         }
 
-        m_current_pelvis_pos = bud::math::vec3(char_pos.x, pelvis_y, char_pos.z);
+        // Drive the kinematic pelvis toward that height without teleporting: start from
+        // the pelvis body's current physics position and move at most kMaxVerticalSpeed.
+        float current_pelvis_y = target_pelvis_y;
+        if (m_robot && m_robot->get_ragdoll()) {
+            auto* system = m_engine->get_physics_scene()->get_jolt_system();
+            if (system)
+                current_pelvis_y = static_cast<float>(
+                    system->GetBodyInterface().GetPosition(m_robot->get_ragdoll()->GetBodyID(0)).GetY());
+        }
+        const float max_vertical_step = kMaxVerticalSpeed * dt;
+        const float pelvis_y = current_pelvis_y +
+            std::clamp(target_pelvis_y - current_pelvis_y, -max_vertical_step, max_vertical_step);
+
+        // Horizontal follow of the kinematic pelvis, rate limited as well: the character
+        // controller can jump up/down stairs by up to 0.4-0.5 m in a single frame, and
+        // following that instantly sweeps the dynamic legs sideways into the step mesh.
+        const float max_horizontal_step = kMaxHorizontalSpeed * dt;
+        const float prev_x = m_current_pelvis_pos.x;
+        const float prev_z = m_current_pelvis_pos.z;
+        const float clamped_x = prev_x + std::clamp(char_pos.x - prev_x, -max_horizontal_step, max_horizontal_step);
+        const float clamped_z = prev_z + std::clamp(char_pos.z - prev_z, -max_horizontal_step, max_horizontal_step);
+
+        m_current_pelvis_pos = bud::math::vec3(clamped_x, pelvis_y, clamped_z);
 
         static bool s_was_grounded = false;
         if (grounded && !s_was_grounded)

@@ -1,4 +1,4 @@
-#include <string>
+﻿#include <string>
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -1033,11 +1033,23 @@ namespace bud::engine {
 		std::memcpy(&header, data.data(), sizeof(header));
 		if (header.magic != bud::asset::COLLISION_CHUNK_MAGIC)
 			return;
-
-		const size_t vert_bytes = header.vertex_count * sizeof(bud::math::vec3);
-		const size_t idx_bytes = header.index_count * sizeof(uint32_t);
-		if (sizeof(header) + vert_bytes + idx_bytes > data.size())
+		if (header.version != bud::asset::COLLISION_CHUNK_VERSION) {
+			bud::eprint("[Physics] Unsupported collision chunk version {} for '{}'", header.version, path);
 			return;
+		}
+		if (header.index_count == 0 || header.index_count % 3 != 0 || header.vertex_count == 0) {
+			bud::eprint("[Physics] Invalid collision counts for '{}': vertices={}, indices={}",
+						path, header.vertex_count, header.index_count);
+			return;
+		}
+
+		const size_t vert_bytes = static_cast<size_t>(header.vertex_count) * sizeof(bud::math::vec3);
+		const size_t idx_bytes = static_cast<size_t>(header.index_count) * sizeof(uint32_t);
+		if (vert_bytes > data.size() - sizeof(header) ||
+			idx_bytes > data.size() - sizeof(header) - vert_bytes) {
+			bud::eprint("[Physics] Truncated collision chunk for '{}'", path);
+			return;
+		}
 
 		std::vector<bud::math::vec3> local_vertices(header.vertex_count);
 		const char* src = data.data() + sizeof(header);
@@ -1048,6 +1060,19 @@ namespace bud::engine {
 		std::vector<uint32_t> local_indices(header.index_count);
 		if (idx_bytes > 0)
 			std::memcpy(local_indices.data(), src, idx_bytes);
+
+		for (const auto& vertex : local_vertices) {
+			if (!std::isfinite(vertex.x) || !std::isfinite(vertex.y) || !std::isfinite(vertex.z)) {
+				bud::eprint("[Physics] Non-finite vertex in collision chunk '{}'", path);
+				return;
+			}
+		}
+		for (uint32_t index : local_indices) {
+			if (index >= local_vertices.size()) {
+				bud::eprint("[Physics] Out-of-range index {} in collision chunk '{}'", index, path);
+				return;
+			}
+		}
 
 		bud::asset::CollisionShapeType baked_shape = static_cast<bud::asset::CollisionShapeType>(header.shape_type);
 		{
@@ -1071,11 +1096,72 @@ namespace bud::engine {
 
 				std::vector<bud::math::vec3> world_vertices;
 				world_vertices.reserve(local_vertices.size());
+				bool non_finite_transform = false;
 				for (const auto& lv : local_vertices) {
 					bud::math::vec4 wv = entity.transform * bud::math::vec4(lv, 1.0f);
+					if (!std::isfinite(wv.x) || !std::isfinite(wv.y) || !std::isfinite(wv.z)) {
+						non_finite_transform = true;
+						break;
+					}
 					world_vertices.push_back(bud::math::vec3(wv.x, wv.y, wv.z));
 				}
+				if (non_finite_transform) {
+					bud::eprint("[Physics] Non-finite world vertex from transform of '{}' - collision skipped", entity.name);
+					continue;
+				}
 
+				// Sliver/degenerate triangles MUST NOT reach Jolt's MeshShape: its EPA
+				// expansion overruns a fixed-size pool on them (Jolt documents this in
+				// EPAPenetrationDepth.h) and the failure only shows up in release builds,
+				// where the guarding assertions are compiled out. Meshopt simplification
+				// produces slivers routinely, so keep triangles that are:
+				//   - not collapsed (distinct indices),
+				//   - flat enough in both absolute area and minimum height
+				//     (min height = 2 * area / longest edge),
+				//   - not extreme slivers (longest edge / min height bounded).
+				std::vector<uint32_t> valid_indices;
+				valid_indices.reserve(local_indices.size());
+				uint32_t dropped_degenerate = 0;
+				for (size_t i = 0; i + 2 < local_indices.size(); i += 3) {
+					const uint32_t i0 = local_indices[i];
+					const uint32_t i1 = local_indices[i + 1];
+					const uint32_t i2 = local_indices[i + 2];
+					if (i0 == i1 || i1 == i2 || i0 == i2) {
+						++dropped_degenerate;
+						continue;
+					}
+					const auto& a = world_vertices[i0];
+					const auto& b = world_vertices[i1];
+					const auto& c = world_vertices[i2];
+					const auto ab = b - a;
+					const auto ac = c - a;
+					const auto bc = c - b;
+					const float area2 = glm::length(glm::cross(ab, ac)); // 2 * area
+					const float longest = std::sqrt(std::max(glm::dot(ab, ab),
+						std::max(glm::dot(ac, ac), glm::dot(bc, bc))));
+					const float min_height = (longest > 1e-8f) ? (area2 / longest) : 0.0f;
+					constexpr float kMinArea2 = 1.0e-6f;   // 2 * 0.5 mm^2
+					constexpr float kMinHeight = 5.0e-3f;  // 5 mm
+					constexpr float kMaxAspect = 40.0f;    // longest edge / min height
+					if (area2 < kMinArea2 || min_height < kMinHeight ||
+						(min_height > 0.0f && longest / min_height > kMaxAspect)) {
+						++dropped_degenerate;
+						continue;
+					}
+					valid_indices.insert(valid_indices.end(), { i0, i1, i2 });
+				}
+				if (dropped_degenerate > 0) {
+					bud::print("[Physics] '{}' dropped {} degenerate/sliver collision triangles",
+							   entity.name, dropped_degenerate);
+				}
+
+				if (valid_indices.empty()) {
+					bud::eprint("[Physics] Skipping collision asset '{}' for entity '{}': no non-degenerate triangles",
+								path, entity.name);
+					continue;
+				}
+
+				// Static colliders keep using the baked CollisionLOD triangle meshes.
 				bool use_mesh = (entity.is_static && (entity.collider.type == bud::scene::ColliderType::Mesh ||
 								(entity.collider.type == bud::scene::ColliderType::Auto && baked_shape == bud::asset::CollisionShapeType::Mesh)));
 
@@ -1114,7 +1200,7 @@ namespace bud::engine {
 				}
 
 				desc.shape.vertices = std::move(world_vertices);
-				desc.shape.indices = local_indices;
+				desc.shape.indices = std::move(valid_indices);
 				desc.position = bud::math::vec3(0.0f);
 				desc.rotation = bud::math::quaternion(1.0f, 0.0f, 0.0f, 0.0f);
 

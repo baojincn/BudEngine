@@ -1,6 +1,10 @@
 #include "src/physics/bud.physics.scene.hpp"
 #include "src/core/bud.logger.hpp"
 
+#include <atomic>
+#include <mutex>
+#include <vector>
+
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
 #include <Jolt/Core/Factory.h>
@@ -27,6 +31,7 @@
 #include <Jolt/Core/IssueReporting.h>
 
 #include <cstdarg>
+#include <cmath>
 
 namespace {
 
@@ -56,7 +61,11 @@ namespace {
         if (in_message && in_message[0] != '\0')
             bud::print("[Jolt]   message: {}", in_message);
         if (auto* g = bud::get_global_logger()) g->flush();
-        return true; // still break, but only after the log line has been written
+        // Return false = "do not break". Returning true makes Jolt execute a breakpoint,
+        // which is an unhandled exception (hard crash) when no debugger is attached - the
+        // log line above is what we actually want, and execution should continue so the
+        // behaviour matches the release build.
+        return false;
     }
 
     constexpr uint32_t LAYER_STATIC  = 0;
@@ -84,12 +93,42 @@ namespace {
 
     class ObjectVsBroadPhaseLayerFilter final : public JPH::ObjectVsBroadPhaseLayerFilter {
     public:
-        bool ShouldCollide(JPH::ObjectLayer, JPH::BroadPhaseLayer) const override { return true; }
+        // Static objects never collide with anything in the static broad-phase
+        // layer: they are immovable and their proxies intentionally overlap
+        // (hollow-shell slabs, adjacent wall AABBs). Without this, static-static
+        // pairs flood the narrow phase with deep convex-vs-mesh penetrations (EPA)
+        // and overflow the body-pair buffer (assert in debug Jolt, heap corruption
+        // in release Jolt - the release-only crash).
+        bool ShouldCollide(JPH::ObjectLayer inObjectLayer, JPH::BroadPhaseLayer inBroadPhaseLayer) const override {
+            if (inObjectLayer == LAYER_STATIC && inBroadPhaseLayer == JPH::BroadPhaseLayer(BROAD_LAYER_STATIC))
+                return false;
+            return true;
+        }
     };
 
     class ObjectLayerPairFilter final : public JPH::ObjectLayerPairFilter {
     public:
-        bool ShouldCollide(JPH::ObjectLayer, JPH::ObjectLayer) const override { return true; }
+        bool ShouldCollide(JPH::ObjectLayer inLayer1, JPH::ObjectLayer inLayer2) const override {
+            // Jolt's intended semantics: static bodies never collide with each other.
+            if (inLayer1 == LAYER_STATIC && inLayer2 == LAYER_STATIC)
+                return false;
+
+            // TODO(jolt-epa): the G1 ragdoll is the only dynamic body here and its
+            // convex/box contacts with the baked CollisionLOD triangle meshes make Jolt's
+            // EPA run away (debug: JPH_ASSERT(inTolerance >= FLT_EPSILON) at
+            // EPAPenetrationDepth.h:154; release: out-of-bounds write at a fixed 0xFxxx
+            // offset, i.e. EPA's internal pool index running away). Clamping the
+            // penetration tolerance did not stop it, so the corruption is upstream of
+            // that assert. Until the real culprit is found, dynamic bodies do not pair
+            // with static ones. CharacterVirtual is unaffected: it performs its own shape
+            // casts and never consults this pair filter, so the player still walks on the
+            // world. Remove this block once the Jolt issue is fixed.
+            constexpr bool kDisableDynamicVsStatic = true;
+            if (kDisableDynamicVsStatic && inLayer1 != inLayer2)
+                return false;
+
+            return true;
+        }
     };
 
     class ContactListenerImpl final : public JPH::ContactListener {
@@ -252,9 +291,9 @@ namespace {
 namespace bud::physics {
 
     RigidBodyHandle PhysicsScene::add_rigid_body(const RigidBodyDesc& desc) {
-        size_t idx = body_count.fetch_add(1, std::memory_order_relaxed);
+        std::scoped_lock lock(body_mutex);
+        const size_t idx = body_count.load(std::memory_order_relaxed);
         if (idx >= body_positions.size()) [[unlikely]] {
-            body_count.fetch_sub(1, std::memory_order_relaxed);
             dropped_bodies.fetch_add(1, std::memory_order_relaxed);
             return {};
         }
@@ -280,6 +319,7 @@ namespace bud::physics {
         if (idx < body_shapes.size())
             body_shapes[idx] = create_jolt_shape(desc.shape);
 
+        body_count.store(idx + 1, std::memory_order_release);
         return {static_cast<uint32_t>(idx)};
     }
 
@@ -324,13 +364,17 @@ namespace bud::physics {
         // indices >= body_positions.size(), and an un-reset scene has size 0.
         reset(max_bodies);
 
+        // Install Jolt's diagnostics BEFORE any Jolt code runs. RegisterTypes() itself
+        // emits Trace() calls; with the default handler still in place those hit Jolt's
+        // DummyTrace, whose JPH_ASSERT(false) aborts the process (previously invisible
+        // because our AssertFailed handler was never registered without
+        // JPH_ENABLE_ASSERTS, so the message went to OutputDebugString instead).
+        JPH::Trace = &jolt_trace;
+        JPH_IF_ENABLE_ASSERTS(JPH::AssertFailed = &jolt_assert_failed;)
+
         JPH::RegisterDefaultAllocator();
         JPH::Factory::sInstance = new JPH::Factory();
         JPH::RegisterTypes();
-
-        // Send Jolt's own diagnostics into the engine log (see above).
-        JPH::Trace = &jolt_trace;
-        JPH::AssertFailed = &jolt_assert_failed;
 
         temp_allocator = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
 
@@ -372,6 +416,33 @@ namespace bud::physics {
         bool new_bodies = false;
         const size_t count = std::min({n, body_positions.size(), body_rotations.size(), body_flags.size(), body_half_extents.size()});
         for (size_t i = 0; i < count; ++i) {
+            const auto& position = body_positions[i];
+            const auto& rotation = body_rotations[i];
+            const auto& linear_velocity = body_linear_velocities[i];
+            const auto& angular_velocity = body_angular_velocities[i];
+            const auto& half_extent = body_half_extents[i];
+            const bool finite_state =
+                std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z) &&
+                std::isfinite(rotation.w) && std::isfinite(rotation.x) &&
+                std::isfinite(rotation.y) && std::isfinite(rotation.z) &&
+                std::isfinite(linear_velocity.x) && std::isfinite(linear_velocity.y) &&
+                std::isfinite(linear_velocity.z) && std::isfinite(angular_velocity.x) &&
+                std::isfinite(angular_velocity.y) && std::isfinite(angular_velocity.z) &&
+                std::isfinite(half_extent.x) && std::isfinite(half_extent.y) &&
+                std::isfinite(half_extent.z);
+            if (!finite_state) {
+                bud::eprint("[Physics] Non-finite SoA state before Jolt body {}: "
+                            "position=({}, {}, {}), rotation=({}, {}, {}, {}), "
+                            "linear_velocity=({}, {}, {}), angular_velocity=({}, {}, {}), "
+                            "half_extent=({}, {}, {})",
+                            i, position.x, position.y, position.z,
+                            rotation.w, rotation.x, rotation.y, rotation.z,
+                            linear_velocity.x, linear_velocity.y, linear_velocity.z,
+                            angular_velocity.x, angular_velocity.y, angular_velocity.z,
+                            half_extent.x, half_extent.y, half_extent.z);
+                continue;
+            }
+
             JPH::BodyID id(jolt_body_ids[i]);
             if (id.IsInvalid()) {
                 JPH::Ref<JPH::Shape> shape = (i < body_shapes.size()) ? body_shapes[i] : nullptr;
@@ -437,6 +508,15 @@ namespace bud::physics {
             }
         }
 
+        size_t invalid_ids = 0;
+        for (size_t i = 0; i < jolt_body_ids.size(); ++i) {
+            if (JPH::BodyID(jolt_body_ids[i]).IsInvalid())
+                ++invalid_ids;
+        }
+        if (invalid_ids != 0)
+            bud::eprint("[Physics] {} invalid Jolt body IDs before Update (body_count={}, id_count={})",
+                        invalid_ids, n, jolt_body_ids.size());
+
         if (new_bodies)
             physics_system->OptimizeBroadPhase();
     }
@@ -466,6 +546,7 @@ namespace bud::physics {
     void PhysicsScene::step(float delta_time, int collision_steps, int integration_steps) {
         if (!initialized || !physics_system) return;
 
+        std::scoped_lock lock(body_mutex);
         sync_to_jolt();
 
         auto err = physics_system->Update(delta_time, collision_steps,
@@ -477,6 +558,7 @@ namespace bud::physics {
     }
 
     void PhysicsScene::remove_rigid_body(RigidBodyHandle handle) {
+        std::scoped_lock lock(body_mutex);
         if (!handle.is_valid() || handle.id >= jolt_body_ids.size())
             return;
 

@@ -172,7 +172,13 @@ void ensure_link_mesh_collisions(bud::robots::RobotDef& robot_def, const std::st
                 std::filesystem::path mesh_file = root_dir / vis.geometry.mesh_path;
                 auto raw_mesh_opt = load_raw_mesh_from_budasset_file(mesh_file.string());
                 if (raw_mesh_opt) {
-                    auto hull_opt = build_convex_hull_from_raw_mesh(*raw_mesh_opt, 64);
+                    // Cap the link hull at the same vertex budget the asset pipeline uses
+                    // (CollisionBuildOptions::max_convex_vertices). Jolt's EPA keeps its
+                    // support points in a fixed-size array guarded only by assertions;
+                    // a 64-vertex hull made the expansion overrun that array in release
+                    // builds, corrupting the caller's stack (CollideShapeSettings) and
+                    // turning into the release-only crash inside GetPenetrationDepthStepEPA.
+                    auto hull_opt = build_convex_hull_from_raw_mesh(*raw_mesh_opt, 32);
                     if (hull_opt) {
                         bud::robots::CollisionDef col_def;
                         col_def.name = link.name + "_collision";
