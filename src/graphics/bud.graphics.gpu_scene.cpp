@@ -126,6 +126,7 @@ namespace bud::graphics {
 				if (frame_resource.csm_instance_data.is_valid()) rhi->destroy_buffer(frame_resource.csm_instance_data);
 				if (frame_resource.csm_instance_models.is_valid()) rhi->destroy_buffer(frame_resource.csm_instance_models);
 				if (frame_resource.csm_hierarchy_instances.is_valid()) rhi->destroy_buffer(frame_resource.csm_hierarchy_instances);
+				if (frame_resource.traditional_indirect_draw.is_valid()) rhi->destroy_buffer(frame_resource.traditional_indirect_draw);
 				if (frame_resource.visible_pages.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages);
 				if (frame_resource.visible_pages_readback.is_valid()) rhi->destroy_buffer(frame_resource.visible_pages_readback);
 				for (auto& csm_vp : frame_resource.csm_visible_pages) {
@@ -276,6 +277,13 @@ namespace bud::graphics {
 			if (frame_resource.indirect_draw.is_valid())
 				rhi->destroy_buffer(frame_resource.indirect_draw);
 			frame_resource.indirect_draw = rhi->create_gpu_buffer(static_cast<uint64_t>(desired_indirect_capacity) * indirect_draw_stride, ResourceState::IndirectArgument);
+		}
+
+		if (frame_resource.traditional_indirect_capacity < desired_instance_capacity || !frame_resource.traditional_indirect_draw.is_valid()) {
+			if (frame_resource.traditional_indirect_draw.is_valid())
+				rhi->destroy_buffer(frame_resource.traditional_indirect_draw);
+			frame_resource.traditional_indirect_draw = rhi->create_upload_buffer(static_cast<uint64_t>(desired_instance_capacity) * sizeof(IndirectCommand));
+			frame_resource.traditional_indirect_capacity = desired_instance_capacity;
 		}
 
 		// Full-scene CSM indirect draw buffer for GPU-driven shadow culling.

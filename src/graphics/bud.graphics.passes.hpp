@@ -194,6 +194,9 @@ namespace bud::graphics {
 	};
 
 	class ForwardTranslucentPass : public RenderPass {
+		std::vector<BufferHandle> indirect_buffers;
+		std::vector<uint32_t> buffer_capacities;
+
 	public:
 		PipelineHandle pipeline_wireframe;
 		bool is_ready() const { return pipeline.is_valid() && pipeline_wireframe.is_valid(); }
@@ -429,10 +432,15 @@ class ResolvePass : public RenderPass {
 		uint64_t set_layout = 0;
 		uint64_t descriptor_set = 0;
 		BufferHandle vertex_buffer;
+		BufferHandle static_vertex_buffer;
 		BufferHandle ubo_buffer;
 		uint64_t vertex_capacity = 0;
+		uint64_t static_vertex_capacity = 0;
+		uint32_t static_vertex_count = 0;
 		RGHandle ubo_handle;
 		std::vector<PhysicsDebugVertex> cpu_vertices;
+		std::vector<PhysicsDebugVertex> pending_static_vertices;
+		bool static_vertices_dirty = false;
 		// cpu_vertices is written by the logic thread (Renderer::update_physics_debug_vertices)
 		// and consumed by the render thread (add_to_graph), so the handoff must be locked.
 		std::mutex vertices_mutex;
@@ -442,6 +450,7 @@ class ResolvePass : public RenderPass {
 		~PhysicsDebugPass() = default;
 		void shutdown(RHI* rhi) override;
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
+		void set_static_vertices(const std::vector<PhysicsDebugVertex>& verts);
 		void update_vertices(const std::vector<PhysicsDebugVertex>& verts);
 		RGHandle add_to_graph(RenderGraph& rg, RGHandle backbuffer, RGHandle depth_buffer,
 			const SceneView& view, const RenderConfig& config);
@@ -465,8 +474,14 @@ class ResolvePass : public RenderPass {
 	};
 
 	class VelocityPass : public RenderPass {
+		uint64_t set_layout = 0;
+		std::vector<BufferHandle> instance_buffers;
+		std::vector<BufferHandle> indirect_buffers;
+		std::vector<uint32_t> buffer_capacities;
+
 	public:
 		~VelocityPass() = default;
+		void shutdown(RHI* rhi) override;
 		void init(RHI* rhi, const RenderConfig& config, bud::io::AssetManager* asset_manager) override;
 		RGHandle add_to_graph(RenderGraph& rg, RGHandle depth_buffer,
 			const RenderScene& render_scene, const SceneView& view, const RenderConfig& config,

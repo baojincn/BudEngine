@@ -5,7 +5,8 @@ layout(location = 0) in vec3 in_position;
 layout(location = 0) out vec4 out_curr_clip;
 layout(location = 1) out vec4 out_prev_clip;
 
-layout(std140, set = 0, binding = 0) uniform UniformBufferObject {
+// Set 1 is the global descriptor set
+layout(std140, set = 1, binding = 0) uniform UniformBufferObject {
 	mat4 view;
 	mat4 proj;
 	mat4 prev_view_proj;
@@ -35,33 +36,39 @@ layout(std140, set = 0, binding = 0) uniform UniformBufferObject {
 	mat4 unjittered_view_proj;
 } ubo;
 
-layout(std430, set = 0, binding = 8) readonly buffer ClothPrevPositionBuffer {
+layout(std430, set = 1, binding = 8) readonly buffer ClothPrevPositionBuffer {
 	vec4 cloth_prev_positions[];
 };
 
-layout(std430, push_constant) uniform PushConstants {
+// Set 0 is the pass-specific dynamic instance buffer
+struct VelocityInstanceData {
 	mat4 model;
 	mat4 prev_model;
 	uint is_cloth;
 	uint cloth_binding_offset;
 	uint cloth_vertex_offset;
-	uint padding;
-} pc;
+	uint pad;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer DynamicVelocityBuffer {
+	VelocityInstanceData instances[];
+};
 
 void main() {
+	VelocityInstanceData inst = instances[gl_InstanceIndex];
 	vec4 curr_world;
 	vec4 prev_world;
 
-	if (pc.is_cloth != 0u) {
+	if (inst.is_cloth != 0u) {
 		// XPBD Cloth vertices are simulated and stored in world space.
 		// in_position = current world pos, previous world pos is read from ClothPrevPositionBuffer
 		curr_world = vec4(in_position, 1.0);
-		uint local_idx = uint(gl_VertexIndex) >= pc.cloth_vertex_offset ? (uint(gl_VertexIndex) - pc.cloth_vertex_offset) : 0u;
-		prev_world = cloth_prev_positions[pc.cloth_binding_offset + local_idx];
+		uint local_idx = uint(gl_VertexIndex) >= inst.cloth_vertex_offset ? (uint(gl_VertexIndex) - inst.cloth_vertex_offset) : 0u;
+		prev_world = cloth_prev_positions[inst.cloth_binding_offset + local_idx];
 		prev_world.w = 1.0;
 	} else {
-		curr_world = pc.model * vec4(in_position, 1.0);
-		prev_world = pc.prev_model * vec4(in_position, 1.0);
+		curr_world = inst.model * vec4(in_position, 1.0);
+		prev_world = inst.prev_model * vec4(in_position, 1.0);
 	}
 
 	// Raster clip position uses jittered view-projection to test against the depth buffer

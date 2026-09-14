@@ -220,32 +220,90 @@ namespace bud::graphics {
 				ImVec2 clip_off = draw_data.display_pos;
 				ImVec2 clip_scale = draw_data.framebuffer_scale;
 
+				int32_t cur_sci_x = -1;
+				int32_t cur_sci_y = -1;
+				uint32_t cur_sci_w = 0;
+				uint32_t cur_sci_h = 0;
+				uint32_t cur_tex_id = UINT32_MAX;
+
+				struct PendingDraw {
+					uint32_t elem_count = 0;
+					uint32_t idx_offset = 0;
+					uint32_t vtx_offset = 0;
+					bool valid = false;
+				} pending;
+
+				auto flush_pending = [&]() {
+					if (!pending.valid || pending.elem_count == 0)
+						return;
+					rhi->cmd_draw_indexed(cmd, pending.elem_count, 1, pending.idx_offset, pending.vtx_offset, 0);
+					pending.valid = false;
+				};
+
 				for (const auto& cmd_list : draw_data.lists) {
 					for (const auto& pcmd : cmd_list.commands) {
+						if (pcmd.elem_count == 0)
+							continue;
 
-						// Setup clip rectangle
 						ImVec2 clip_min((pcmd.clip_rect.x - clip_off.x) * clip_scale.x, (pcmd.clip_rect.y - clip_off.y) * clip_scale.y);
 						ImVec2 clip_max((pcmd.clip_rect.z - clip_off.x) * clip_scale.x, (pcmd.clip_rect.w - clip_off.y) * clip_scale.y);
 
-						if (clip_min.x < 0.0f) { clip_min.x = 0.0f; }
-						if (clip_min.y < 0.0f) { clip_min.y = 0.0f; }
-						if (clip_max.x > fb_width) { clip_max.x = fb_width; }
-						if (clip_max.y > fb_height) { clip_max.y = fb_height; }
+						if (clip_min.x < 0.0f)
+							clip_min.x = 0.0f;
+						if (clip_min.y < 0.0f)
+							clip_min.y = 0.0f;
+						if (clip_max.x > fb_width)
+							clip_max.x = fb_width;
+						if (clip_max.y > fb_height)
+							clip_max.y = fb_height;
 						if (clip_max.x <= clip_min.x || clip_max.y <= clip_min.y)
 							continue;
 
-						// Scissor setup
-						rhi->cmd_set_scissor(cmd, (int32_t)clip_min.x, (int32_t)clip_min.y, (uint32_t)(clip_max.x - clip_min.x), (uint32_t)(clip_max.y - clip_min.y));
+						int32_t sci_x = static_cast<int32_t>(clip_min.x);
+						int32_t sci_y = static_cast<int32_t>(clip_min.y);
+						uint32_t sci_w = static_cast<uint32_t>(clip_max.x - clip_min.x);
+						uint32_t sci_h = static_cast<uint32_t>(clip_max.y - clip_min.y);
 
-						push_const.texture_id = pcmd.texture_id;
-						rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConst), &push_const);
+						uint32_t this_idx_offset = pcmd.idx_offset + global_idx_offset;
+						uint32_t this_vtx_offset = pcmd.vtx_offset + global_vtx_offset;
 
-						// Draw
-						rhi->cmd_draw_indexed(cmd, pcmd.elem_count, 1, pcmd.idx_offset + global_idx_offset, pcmd.vtx_offset + global_vtx_offset, 0);
+						bool can_merge = pending.valid &&
+							(sci_x == cur_sci_x) && (sci_y == cur_sci_y) &&
+							(sci_w == cur_sci_w) && (sci_h == cur_sci_h) &&
+							(pcmd.texture_id == cur_tex_id) &&
+							(this_vtx_offset == pending.vtx_offset) &&
+							(this_idx_offset == pending.idx_offset + pending.elem_count);
+
+						if (can_merge) {
+							pending.elem_count += pcmd.elem_count;
+						}
+						else {
+							flush_pending();
+
+							if (sci_x != cur_sci_x || sci_y != cur_sci_y || sci_w != cur_sci_w || sci_h != cur_sci_h) {
+								cur_sci_x = sci_x;
+								cur_sci_y = sci_y;
+								cur_sci_w = sci_w;
+								cur_sci_h = sci_h;
+								rhi->cmd_set_scissor(cmd, cur_sci_x, cur_sci_y, cur_sci_w, cur_sci_h);
+							}
+
+							if (pcmd.texture_id != cur_tex_id) {
+								cur_tex_id = pcmd.texture_id;
+								push_const.texture_id = cur_tex_id;
+								rhi->cmd_push_constants(cmd, pipeline, sizeof(PushConst), &push_const);
+							}
+
+							pending.elem_count = pcmd.elem_count;
+							pending.idx_offset = this_idx_offset;
+							pending.vtx_offset = this_vtx_offset;
+							pending.valid = true;
+						}
 					}
 					global_idx_offset += static_cast<int>(cmd_list.indices.size());
 					global_vtx_offset += static_cast<int>(cmd_list.vertices.size());
 				}
+				flush_pending();
 
 				rhi->cmd_end_render_pass(cmd);
 			}

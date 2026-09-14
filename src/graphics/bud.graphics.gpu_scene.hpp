@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <atomic>
 #include <cstdint>
@@ -116,6 +116,8 @@ namespace bud::graphics {
 			// shadows disappeared. Cascade frustum culling happens inside the traversal, so
 			// walking the whole scene stays cheap.
 			BufferHandle csm_hierarchy_instances;
+			BufferHandle traditional_indirect_draw;
+			uint32_t traditional_indirect_capacity = 0;
 			uint32_t csm_hierarchy_capacity = 0;
 			uint32_t instance_capacity = 0;
 			uint32_t csm_indirect_capacity = 0;

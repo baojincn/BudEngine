@@ -70,6 +70,7 @@ namespace bud::graphics {
 		void update_mesh_bounds(uint32_t mesh_id, const bud::math::AABB& aabb);
 		int32_t get_mesh_vertex_offset(uint32_t mesh_id) const;
 
+		void set_static_physics_debug_vertices(const std::vector<PhysicsDebugVertex>& verts);
 		void update_physics_debug_vertices(const std::vector<PhysicsDebugVertex>& verts);
 
 		GPUScene& get_gpu_scene() { return gpu_scene; }

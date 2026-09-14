@@ -1,4 +1,4 @@
-﻿#include <string>
+#include <string>
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -302,10 +302,6 @@ namespace bud::engine {
 			return;
 
 		std::vector<bud::graphics::PhysicsDebugVertex> dbg_verts;
-		{
-			std::scoped_lock lock(collision_mutex);
-			dbg_verts.insert(dbg_verts.end(), static_collision_debug_vertices.begin(), static_collision_debug_vertices.end());
-		}
 
 		if (robot_avatar)
 			robot_avatar->get_debug_collision_vertices(dbg_verts);
@@ -1015,6 +1011,12 @@ namespace bud::engine {
 				           character_controller->get_position().z);
 			}
 
+			{
+				std::scoped_lock lock(collision_mutex);
+				if (renderer)
+					renderer->set_static_physics_debug_vertices(static_collision_debug_vertices);
+			}
+
 			if (cb)
 				cb();
 		};
@@ -1131,6 +1133,8 @@ namespace bud::engine {
 			std::scoped_lock lock(collision_mutex);
 			collision_loaded_assets.clear();
 			static_collision_debug_vertices.clear();
+			if (renderer)
+				renderer->set_static_physics_debug_vertices({});
 		}
 
 		// Shared cloth registration: expand culling bounds (traditional draw path must

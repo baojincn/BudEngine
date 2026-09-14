@@ -175,26 +175,43 @@ namespace bud::graphics {
 					const size_t b_start = ranges.range_a_count;
 					const size_t b_end = ranges.range_a_count + ranges.range_b_count;
 
-					for (size_t i = b_start; i < b_end && i < sort_list.size(); ++i) {
-						const auto& item = sort_list[i];
-						uint32_t idx = item.entity_index;
-						if (idx >= render_scene.mesh_indices.size())
-							continue;
+					auto* buf = rhi->get_buffer(frame_res.traditional_indirect_draw);
+					if (buf && buf->mapped_ptr) {
+						auto* mapped_cmds = static_cast<IndirectCommand*>(buf->mapped_ptr);
+						size_t cmd_count = 0;
 
-						uint32_t mesh_id = render_scene.mesh_indices[idx];
-						if (mesh_id >= meshes.size())
-							continue;
-						const auto& mesh = meshes[mesh_id];
-						if (!mesh.is_valid())
-							continue;
-						const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
+						for (size_t i = b_start; i < b_end && i < sort_list.size(); ++i) {
+							const auto& item = sort_list[i];
+							uint32_t idx = item.entity_index;
+							if (idx >= render_scene.mesh_indices.size())
+								continue;
 
-						if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
-							const auto& sub = mesh.submeshes[item.submesh_index];
-							rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, static_cast<uint32_t>(i));
+							uint32_t mesh_id = render_scene.mesh_indices[idx];
+							if (mesh_id >= meshes.size())
+								continue;
+							const auto& mesh = meshes[mesh_id];
+							if (!mesh.is_valid())
+								continue;
+							const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
+
+							auto& out_cmd = mapped_cmds[cmd_count++];
+							out_cmd.instance_count = 1;
+							out_cmd.vertex_offset = mesh_geometry.vertex_offset;
+							out_cmd.first_instance = static_cast<uint32_t>(i);
+
+							if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+								const auto& sub = mesh.submeshes[item.submesh_index];
+								out_cmd.index_count = sub.index_count;
+								out_cmd.first_index = mesh_geometry.first_index + sub.index_start;
+							}
+							else {
+								out_cmd.index_count = mesh.index_count;
+								out_cmd.first_index = mesh_geometry.first_index;
+							}
 						}
-						else {
-							rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, static_cast<uint32_t>(i));
+
+						if (cmd_count > 0) {
+							rhi->cmd_draw_indexed_indirect(cmd, frame_res.traditional_indirect_draw, 0, static_cast<uint32_t>(cmd_count), sizeof(IndirectCommand));
 						}
 					}
 				}
@@ -375,26 +392,44 @@ namespace bud::graphics {
 						rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 						const size_t b_start = ranges.range_a_count;
 						const size_t b_end = ranges.range_a_count + ranges.range_b_count;
-						for (size_t i = b_start; i < b_end && i < sort_list.size(); ++i) {
-							const auto& item = sort_list[i];
-							uint32_t idx = item.entity_index;
-							if (idx >= render_scene.mesh_indices.size())
-								continue;
 
-							uint32_t mesh_id = render_scene.mesh_indices[idx];
-							if (mesh_id >= meshes.size())
-								continue;
-							const auto& mesh = meshes[mesh_id];
-							if (!mesh.is_valid())
-								continue;
-							const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
+						auto* buf = rhi->get_buffer(frame_res.traditional_indirect_draw);
+						if (buf && buf->mapped_ptr) {
+							auto* mapped_cmds = static_cast<IndirectCommand*>(buf->mapped_ptr);
+							size_t cmd_count = 0;
 
-							if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
-								const auto& sub = mesh.submeshes[item.submesh_index];
-								rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, static_cast<uint32_t>(i));
+							for (size_t i = b_start; i < b_end && i < sort_list.size(); ++i) {
+								const auto& item = sort_list[i];
+								uint32_t idx = item.entity_index;
+								if (idx >= render_scene.mesh_indices.size())
+									continue;
+
+								uint32_t mesh_id = render_scene.mesh_indices[idx];
+								if (mesh_id >= meshes.size())
+									continue;
+								const auto& mesh = meshes[mesh_id];
+								if (!mesh.is_valid())
+									continue;
+								const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
+
+								auto& out_cmd = mapped_cmds[cmd_count++];
+								out_cmd.instance_count = 1;
+								out_cmd.vertex_offset = mesh_geometry.vertex_offset;
+								out_cmd.first_instance = static_cast<uint32_t>(i);
+
+								if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+									const auto& sub = mesh.submeshes[item.submesh_index];
+									out_cmd.index_count = sub.index_count;
+									out_cmd.first_index = mesh_geometry.first_index + sub.index_start;
+								}
+								else {
+									out_cmd.index_count = mesh.index_count;
+									out_cmd.first_index = mesh_geometry.first_index;
+								}
 							}
-							else {
-								rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, static_cast<uint32_t>(i));
+
+							if (cmd_count > 0) {
+								rhi->cmd_draw_indexed_indirect(cmd, frame_res.traditional_indirect_draw, 0, static_cast<uint32_t>(cmd_count), sizeof(IndirectCommand));
 							}
 						}
 					}

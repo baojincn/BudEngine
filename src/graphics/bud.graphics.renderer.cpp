@@ -2129,6 +2129,11 @@ namespace bud::graphics {
 		render_config = config;
 	}
 
+	void Renderer::set_static_physics_debug_vertices(const std::vector<PhysicsDebugVertex>& verts) {
+		if (physics_debug_pass)
+			physics_debug_pass->set_static_vertices(verts);
+	}
+
 	void Renderer::update_physics_debug_vertices(const std::vector<PhysicsDebugVertex>& verts) {
 		if (physics_debug_pass)
 			physics_debug_pass->update_vertices(verts);
