@@ -468,6 +468,11 @@ add_executable(robot_sim_sample samples/robot_sim_sample/main.cpp)
 target_link_libraries(robot_sim_sample PRIVATE bud_engine_core)
 target_include_directories(robot_sim_sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# MuJoCo feasibility spike: standalone, no engine, no Jolt. Compiles the G1 URDF from memory (VFS)
+# and checks whether position actuators (kp/kv) hold the robot up.
+add_executable(mujoco_spike samples/mujoco_spike/main.cpp)
+target_link_libraries(mujoco_spike PRIVATE mujoco::mujoco)
+
 # Begin, tools
 add_subdirectory(src/tools/asset_pipeline)
 add_subdirectory(src/tools/applications/bud_asset_importer)

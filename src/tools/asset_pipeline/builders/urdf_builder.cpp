@@ -6,6 +6,7 @@
 #include "../importers/gltf_importer.hpp"
 #include "../core/serializer.hpp"
 #include "../core/support.hpp"
+#include "mujoco_model_builder.hpp"
 #include "../cache/asset_registry.hpp"
 
 #include <iostream>
@@ -216,7 +217,10 @@ bool UrdfBuilder::cook_urdf(const std::string& urdf_path, const std::string& out
         return false;
     }
 
-    return cook_robot(std::move(*robot_def_opt), output_robot_dir, options);
+    // Remember the source so cook_robot can cook the MuJoCo physics model from it.
+    UrdfBuildOptions robot_options = options;
+    robot_options.source_urdf_path = urdf_path;
+    return cook_robot(std::move(*robot_def_opt), output_robot_dir, robot_options);
 }
 
 bool UrdfBuilder::cook_robot(bud::robot::RobotDef robot_def, const std::string& output_robot_dir, const UrdfBuildOptions& options) {
@@ -456,6 +460,33 @@ bool UrdfBuilder::cook_robot(bud::robot::RobotDef robot_def, const std::string& 
     // Add Articulation Chunk with full robot kinematics & dynamics definition
     std::vector<uint8_t> robot_bin = robot_def.serialize_binary();
     master_writer.add_chunk(AssetChunkType::Articulation, robot_bin.data(), robot_bin.size());
+
+    // Add the cooked MuJoCo model: robots are simulated by MuJoCo, so the physics payload ships in
+    // the standard container as a normalized MJCF (free base joint, actuator gains, armature) plus
+    // the mesh -> asset mapping and the render-only metadata (e.g. limit.velocity for TAA). The
+    // runtime compiles this; it never parses the URDF.
+    {
+        MujocoCookOptions mujoco_options;
+        // Joint groups: gains and armature are not in the URDF (armature is a motor property, the
+        // gains a controller choice). These should become per-robot configuration.
+        mujoco_options.joint_groups = {
+            { "knee",     300.0, 15.0, 0.0, 0.0 },
+            { "ankle",     40.0,  2.0, 0.0, 0.0 },
+            { "hip",      200.0, 10.0, 0.0, 0.0 },
+            { "waist",    200.0, 10.0, 0.0, 0.0 },
+            { "shoulder",  60.0,  3.0, 0.0, 0.0 },
+            { "elbow",     40.0,  2.0, 0.0, 0.0 },
+            { "wrist",     40.0,  2.0, 0.0, 0.0 },
+        };
+        auto mujoco_data = cook_mujoco_model(options.source_urdf_path, options.package_root, robot_def, mujoco_options);
+        if (mujoco_data) {
+            const std::vector<uint8_t> mujoco_blob = mujoco_data->serialize_binary();
+            master_writer.add_chunk(AssetChunkType::PhysicsModel, mujoco_blob.data(), mujoco_blob.size());
+        } else {
+            support::log_warn("[UrdfBuilder] No MuJoCo physics model cooked: the robot asset will "
+                              "not be simulatable by the MuJoCo backend.");
+        }
+    }
 
     if (!master_writer.save_to_file(master_asset_path)) {
         support::log_error("[UrdfBuilder] Failed to write master .budasset file: " + master_asset_path);

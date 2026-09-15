@@ -1,4 +1,4 @@
-﻿# .gitignore
+# .gitignore
 # Build directories
 build/
 cmake-build-*/
@@ -84,3 +84,6 @@ Content/**
 !Content/Textures/default.png
 !Content/**/default.png
 !Content/**/.gitkeep
+
+# MuJoCo writes its own log next to the working directory
+MUJOCO_LOG.TXT

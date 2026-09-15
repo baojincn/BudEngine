@@ -11,6 +11,10 @@ struct UrdfBuildOptions {
     float scale = 0.0f;                  // Scale factor override (0.0f = auto-detect CAD millimeters to meters)
     bool dump_json = true;               // Output human-readable JSON definition alongside .budasset
     bool use_cache = true;
+    // Source URDF, set by cook_urdf. The MuJoCo physics model is cooked from it (MuJoCo is the only
+    // handler of robot physics data); cooking from an already built RobotDef alone leaves the robot
+    // asset without a PhysicsModel chunk.
+    std::string source_urdf_path = "";
 };
 
 class UrdfBuilder {

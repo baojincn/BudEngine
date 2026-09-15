@@ -44,7 +44,10 @@ namespace bud::asset {
 		RawTexture = 7,
 		ClothPhysics = 8,
 		Articulation = 9,
-		Skinning = 10
+		Skinning = 10,
+		// Cooked MuJoCo model for a robot (normalized MJCF + mesh references + metadata). MuJoCo is
+		// the only handler of robot physics data, so this chunk is what the runtime backend loads.
+		PhysicsModel = 11
 	};
 
 	enum class AssetChunkFlags : uint32_t {
