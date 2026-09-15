@@ -89,6 +89,7 @@ find_package(pybind11 CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
 find_package(Jolt CONFIG REQUIRED)
+find_package(mujoco CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
 find_package(unofficial-spirv-reflect CONFIG REQUIRED)
 # End, find dependencies
@@ -291,6 +292,8 @@ target_sources(bud_engine_core
 		"src/graphics/passes/bud.pass.physics_debug.cpp"
 		"src/graphics/passes/bud.pass.cloth_debug.cpp"
 		"src/physics/bud.physics.scene.cpp"
+	"src/physics/bud.physics.world.cpp"
+	"src/physics/bud.physics.world.jolt.cpp"
 		"src/physics/bud.cloth.cpp"
 		"src/robots/bud.robot.loader.cpp"
 		"src/robots/bud.robot.visual_bridge.cpp"
@@ -319,9 +322,11 @@ target_sources(bud_engine_core
 
 		"src/runtime/bud.character_controller.hpp"
 
-		"src/physics/bud.physics.hpp"
-		"src/physics/bud.physics.types.hpp"
-		"src/physics/bud.physics.scene.hpp"
+	"src/physics/bud.physics.hpp"
+	"src/physics/bud.physics.types.hpp"
+	"src/physics/bud.physics.world.hpp"
+	"src/physics/bud.physics.world.jolt.hpp"
+	"src/physics/bud.physics.scene.hpp"
 		"src/physics/bud.cloth.hpp"
 		"src/physics/bud.cloth.types.hpp"
 
@@ -362,6 +367,7 @@ target_link_libraries(bud_engine_core
 		nlohmann_json::nlohmann_json
 		meshoptimizer::meshoptimizer
 		Jolt::Jolt
+		mujoco::mujoco
 )
 
 if (WIN32)

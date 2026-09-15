@@ -307,9 +307,10 @@ namespace bud::engine {
 			robot_avatar->get_debug_collision_vertices(dbg_verts);
 
 		const size_t n = physics_scene->size();
-		auto& pos = physics_scene->body_positions;
-		auto& he = physics_scene->body_half_extents;
-		auto& rot = physics_scene->body_rotations;
+		const auto& body_states = physics_scene->get_body_states();
+		const auto& pos = body_states.body_positions;
+		const auto& he = body_states.body_half_extents;
+		const auto& rot = body_states.body_rotations;
 
 		// 12 box edges as a 24 vertex line list.
 		static const int box_edges[24] = {
@@ -990,10 +991,11 @@ namespace bud::engine {
 			if (renderer && renderer->get_cloth_system()) {
 				std::vector<bud::physics::BoxCollider> cloth_boxes;
 				size_t num_bodies = physics_scene->size();
+				const auto& body_states = physics_scene->get_body_states();
 				cloth_boxes.reserve(num_bodies);
 				for (size_t i = 0; i < num_bodies; ++i) {
-					if (physics_scene->body_flags[i] & bud::physics::PhysicsScene::BODY_FLAG_STATIC)
-						cloth_boxes.push_back({ physics_scene->body_positions[i], physics_scene->body_half_extents[i] });
+					if (body_states.body_flags[i] & bud::physics::BODY_FLAG_STATIC)
+						cloth_boxes.push_back({ body_states.body_positions[i], body_states.body_half_extents[i] });
 				}
 				renderer->get_cloth_system()->set_scene_colliders(std::move(cloth_boxes));
 			}
