@@ -280,6 +280,7 @@ target_sources(bud_engine_core
 		"src/io/bud.io.cpp"
 		"src/core/bud.raw_mesh.cpp"
 		"src/robots/bud.robot.types.cpp"
+	"src/robots/bud.robot.mujoco.cpp"
 		"src/threading/bud.threading.cpp"
         "src/third_party/bud_third_party.cpp"
 
@@ -294,6 +295,7 @@ target_sources(bud_engine_core
 		"src/physics/bud.physics.scene.cpp"
 	"src/physics/bud.physics.world.cpp"
 	"src/physics/bud.physics.world.jolt.cpp"
+	"src/physics/bud.physics.world.mujoco.cpp"
 		"src/physics/bud.cloth.cpp"
 		"src/robots/bud.robot.loader.cpp"
 		"src/robots/bud.robot.visual_bridge.cpp"
@@ -326,6 +328,7 @@ target_sources(bud_engine_core
 	"src/physics/bud.physics.types.hpp"
 	"src/physics/bud.physics.world.hpp"
 	"src/physics/bud.physics.world.jolt.hpp"
+	"src/physics/bud.physics.world.mujoco.hpp"
 	"src/physics/bud.physics.scene.hpp"
 		"src/physics/bud.cloth.hpp"
 		"src/physics/bud.cloth.types.hpp"
@@ -472,6 +475,12 @@ target_include_directories(robot_sim_sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} 
 # and checks whether position actuators (kp/kv) hold the robot up.
 add_executable(mujoco_spike samples/mujoco_spike/main.cpp)
 target_link_libraries(mujoco_spike PRIVATE mujoco::mujoco)
+
+# End to end check of the MuJoCo backend: loads the cooked robot asset (no URDF, no loose files) and
+# steps the world through PhysicsWorldBase.
+add_executable(mujoco_backend_test samples/mujoco_backend_test/main.cpp)
+target_link_libraries(mujoco_backend_test PRIVATE bud_engine_core)
+target_include_directories(mujoco_backend_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Begin, tools
 add_subdirectory(src/tools/asset_pipeline)

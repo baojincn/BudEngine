@@ -264,11 +264,10 @@ namespace bud::asset_pipeline {
             data.model_payload = std::move(patched);
         }
 
-        // Mesh references: built from our own robot definition, not from MuJoCo's name tables (their
-        // address arithmetic produced garbage fragments like 'rld'/'h_link'). The MJCF names each
-        // mesh with the path the URDF used, so every mesh our definition references maps to the
-        // cooked visual asset with the same stem - the runtime then serves MuJoCo those bytes out of
-        // the RawMesh chunk already in the package.
+        // Mesh references: the model asks for meshes by "meshdir + file", so the keys are taken from
+        // the MJCF text itself (our asset paths use a different layout, e.g. meshes/visual/x.budasset)
+        // and each is mapped to the cooked asset with the same stem. Meshes stay logical references:
+        // the runtime rebuilds the STL bytes from the RawMesh chunk already in the package.
         {
             std::unordered_map<std::string, std::string> stem_to_asset;
             for (const auto& link : robot_def.links) {
@@ -280,26 +279,47 @@ namespace bud::asset_pipeline {
                 }
             }
 
-            std::unordered_set<std::string> seen;
-            for (const auto& link : robot_def.links) {
-                const auto add_mesh = [&](const bud::robots::GeometryDef& geometry) {
-                    if (geometry.type != bud::robots::GeometryType::Mesh || geometry.mesh_path.empty())
-                        return;
-                    if (!seen.insert(geometry.mesh_path).second)
-                        return;
-                    bud::robots::MujocoMeshRef ref{};
-                    ref.mjcf_name = geometry.mesh_path;
-                    const auto it = stem_to_asset.find(file_stem_lower(fs::path(geometry.mesh_path)));
-                    ref.asset_path = (it != stem_to_asset.end()) ? it->second : geometry.mesh_path;
-                    if (it == stem_to_asset.end())
-                        support::log_warn("[MujocoCook] No cooked visual asset for mesh '" + geometry.mesh_path + "'");
-                    data.meshes.push_back(std::move(ref));
-                };
-                for (const auto& visual : link.visuals)
-                    add_mesh(visual.geometry);
-                for (const auto& collision : link.collisions)
-                    add_mesh(collision.geometry);
+            std::string mesh_dir = "meshes/";
+            const std::string compiler_tag = "<compiler ";
+            const size_t compiler_at = data.model_payload.find(compiler_tag);
+            if (compiler_at != std::string::npos) {
+                const size_t meshdir_at = data.model_payload.find("meshdir=\"", compiler_at);
+                if (meshdir_at != std::string::npos) {
+                    const size_t value_at = meshdir_at + 9;
+                    const size_t value_end = data.model_payload.find('"', value_at);
+                    if (value_end != std::string::npos)
+                        mesh_dir = data.model_payload.substr(value_at, value_end - value_at);
+                }
             }
+
+            const std::string mesh_tag = "<mesh ";
+            size_t cursor = 0;
+            while (true) {
+                const size_t at = data.model_payload.find(mesh_tag, cursor);
+                if (at == std::string::npos)
+                    break;
+                const size_t file_at = data.model_payload.find("file=\"", at);
+                if (file_at == std::string::npos || file_at > data.model_payload.find('>', at))
+                    break;
+                const size_t value_at = file_at + 6;
+                const size_t value_end = data.model_payload.find('"', value_at);
+                if (value_end == std::string::npos)
+                    break;
+                cursor = value_end + 1;
+
+                bud::robots::MujocoMeshRef ref{};
+                const std::string file_name = data.model_payload.substr(value_at, value_end - value_at);
+                ref.mjcf_name = mesh_dir + file_name;
+                const auto it = stem_to_asset.find(file_stem_lower(fs::path(file_name)));
+                if (it == stem_to_asset.end()) {
+                    support::log_warn("[MujocoCook] No cooked visual asset for mesh '" + file_name + "'");
+                    continue;
+                }
+                ref.asset_path = it->second;
+                data.meshes.push_back(std::move(ref));
+            }
+            support::log_info("[MujocoCook] mesh references: " + std::to_string(data.meshes.size()) +
+                              " (meshdir='" + mesh_dir + "')");
         }
 
         // Render-only metadata: things the MuJoCo importer drops on purpose but the renderer needs

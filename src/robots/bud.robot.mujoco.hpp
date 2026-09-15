@@ -55,6 +55,8 @@ namespace bud::robots {
 
         std::vector<uint8_t> serialize_binary() const;
         static std::optional<MujocoModelData> deserialize_binary(const uint8_t* data, size_t size);
+        // Reads the PhysicsModel chunk out of a robot .budasset (same container walk as RobotDef).
+        static std::optional<MujocoModelData> load_from_budasset(const std::string& path);
     };
 
 } // namespace bud::robots

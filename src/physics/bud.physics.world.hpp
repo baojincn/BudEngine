@@ -46,6 +46,9 @@ namespace bud::physics {
         uint32_t max_body_pairs = 65536;
         uint32_t max_contact_constraints = 10240;
         bud::math::vec3 gravity{ 0.0f, -9.80665f, 0.0f };
+        // Root used to resolve content-relative asset paths referenced by cooked models (e.g. the
+        // meshes a cooked MuJoCo model asks for). Backends that need no assets ignore it.
+        std::string asset_root;
     };
 
     // ------------------------------------------------------------------
@@ -71,6 +74,10 @@ namespace bud::physics {
         std::vector<float>                 body_restitutions;
         std::vector<uint8_t>               body_flags;
         std::vector<void*>                 body_user_data;
+
+        // Number of populated entries. Backends that manage their own counter (Jolt keeps an atomic
+        // one) simply leave this alone.
+        size_t body_count = 0;
 
         void resize(size_t capacity) {
             body_positions.assign(capacity, bud::math::vec3(0.0f));
@@ -99,6 +106,36 @@ namespace bud::physics {
         Continuous, // 1 DOF hinge without limits
         Prismatic,  // 1 DOF slider
         Fixed,      // welded
+    };
+
+    // ------------------------------------------------------------------
+    // Cooked backend model (produced offline, shipped inside .budasset)
+    // ------------------------------------------------------------------
+    // Format tag is backend neutral on purpose: a future GPU XPBD world would add its own case
+    // rather than adopting MuJoCo's.
+    enum class CookedModelFormat : uint32_t {
+        MjcfText = 0,  // MuJoCo MJCF XML
+        MjbBinary = 1, // MuJoCo compiled binary model
+    };
+
+    // One mesh the cooked model names, and the asset that provides its bytes. Meshes stay logical
+    // references so a mesh used for rendering and collision exists once in the package.
+    struct CookedModelMeshRef {
+        std::string model_name; // name the model uses, e.g. "meshes/pelvis.STL"
+        std::string asset_path; // content-relative asset providing it
+    };
+
+    struct CookedPhysicsModel {
+        CookedModelFormat format = CookedModelFormat::MjcfText;
+        std::vector<uint8_t> payload;
+        std::vector<CookedModelMeshRef> meshes;
+        // Read-only metadata baked by the cook: render/animation data the model format drops (e.g.
+        // URDF joint velocity limits) and physics parameters it cannot express (actuator gains,
+        // armature, solver/contact settings).
+        std::string render_metadata_json;
+        std::string physics_metadata_json;
+
+        bool is_valid() const { return !payload.empty(); }
     };
 
     struct ArticulationLinkDesc {
@@ -141,6 +178,11 @@ namespace bud::physics {
         // first frames (a robot created in its bind pose and then commanded into a stance gets
         // shoved off its feet by its own motors).
         std::unordered_map<std::string, float> initial_joint_angles;
+        // Cooked backend-specific model, straight out of the robot's .budasset (see
+        // CookedPhysicsModel). A backend that compiles its own model format (MuJoCo) loads this
+        // instead of rebuilding anything from the neutral description above, which keeps the asset
+        // the single source of truth for robot physics data.
+        CookedPhysicsModel cooked_model;
     };
 
     struct ArticulationStateSoA {

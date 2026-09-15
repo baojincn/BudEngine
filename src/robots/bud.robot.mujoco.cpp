@@ -1,6 +1,9 @@
 #include "src/robots/bud.robot.mujoco.hpp"
 
+#include "src/core/bud.asset.types.hpp"
+
 #include <cstring>
+#include <fstream>
 
 namespace bud::robots {
 
@@ -84,6 +87,38 @@ namespace bud::robots {
             result.meshes.push_back(std::move(mesh));
         }
         return result;
+    }
+
+    std::optional<MujocoModelData> MujocoModelData::load_from_budasset(const std::string& path) {
+        // Same container walk as RobotDef::load_from_budasset: the physics model is one chunk in the
+        // robot's own asset, so the runtime gets it without any URDF or loose files.
+        std::ifstream in(path, std::ios::binary | std::ios::ate);
+        if (!in.is_open())
+            return std::nullopt;
+
+        const size_t size = static_cast<size_t>(in.tellg());
+        in.seekg(0);
+        if (size < sizeof(bud::asset::BudAssetHeader))
+            return std::nullopt;
+
+        std::vector<uint8_t> buffer(size);
+        in.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(size));
+
+        const auto* header = reinterpret_cast<const bud::asset::BudAssetHeader*>(buffer.data());
+        if (header->magic != bud::asset::BUD_ASSET_MAGIC)
+            return std::nullopt;
+        if (header->chunk_table_offset + header->chunk_count * sizeof(bud::asset::AssetChunkEntry) > size)
+            return std::nullopt;
+
+        const auto* chunks =
+            reinterpret_cast<const bud::asset::AssetChunkEntry*>(buffer.data() + header->chunk_table_offset);
+        for (uint32_t i = 0; i < header->chunk_count; ++i) {
+            if (chunks[i].chunk_type != static_cast<uint32_t>(bud::asset::AssetChunkType::PhysicsModel))
+                continue;
+            if (chunks[i].offset + chunks[i].size <= size)
+                return deserialize_binary(buffer.data() + chunks[i].offset, chunks[i].size);
+        }
+        return std::nullopt;
     }
 
 } // namespace bud::robots

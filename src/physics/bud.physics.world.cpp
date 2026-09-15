@@ -1,5 +1,6 @@
 #include "src/physics/bud.physics.world.hpp"
 #include "src/physics/bud.physics.world.jolt.hpp"
+#include "src/physics/bud.physics.world.mujoco.hpp"
 
 namespace bud::physics {
 
@@ -11,8 +12,7 @@ namespace bud::physics {
         case PhysicsBackend::Jolt:
             return std::make_unique<JoltPhysicsWorld>();
         case PhysicsBackend::Mujoco:
-            // TODO(physics abstraction): MujocoPhysicsWorld.
-            return nullptr;
+            return std::make_unique<MujocoPhysicsWorld>();
         case PhysicsBackend::GpuXpbd:
             // TODO(physics abstraction): unified rigid + soft XPBD world.
             return nullptr;
