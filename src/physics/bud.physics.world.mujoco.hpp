@@ -13,6 +13,7 @@
 // a URDF, and the mesh bytes MuJoCo asks for are served straight out of our own mesh assets.
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -55,6 +56,8 @@ namespace bud::physics {
         ArticulationHandle create_articulation(const ArticulationDesc& desc) override;
         void remove_articulation(ArticulationHandle handle) override;
         bool get_articulation_state(ArticulationHandle handle, ArticulationStateSoA& out) const override;
+        void set_articulation_joint_commands(ArticulationHandle handle,
+                                             std::span<const JointCommand> commands) override;
         void set_articulation_target_angle(ArticulationHandle handle,
                                            const std::string& joint_name, float angle) override;
         void set_articulation_target_velocity(ArticulationHandle handle,
@@ -85,6 +88,7 @@ namespace bud::physics {
         // --- settings ---
         void set_gravity(const bud::math::vec3& gravity) override;
         bud::math::vec3 get_gravity() const override;
+        float get_ground_plane_height() const override { return world_config.ground_plane_height; }
 
         // --- debug ---
         void collect_debug_lines(std::vector<DebugLine>& out_lines) const override;
@@ -97,6 +101,10 @@ namespace bud::physics {
             std::vector<int> body_ids;             // index -> MuJoCo body id
             std::vector<int> joint_ids;            // index -> MuJoCo joint id
             std::vector<int> actuator_ids;         // index -> MuJoCo actuator id (-1 if free)
+            // Per-joint controller configuration from the caller (kp/kv). The motor physics itself
+            // (armature, friction loss, torque limit) lives in the cooked model, not here.
+            std::vector<ArticulationJointDesc> joint_descs;
+            std::vector<JointCommand> joint_commands;
         };
 
         // Spawn pose of an articulation, applied once at compile time so nothing has to move on the
@@ -144,6 +152,7 @@ namespace bud::physics {
         ContactCallback contact_persist_cb;
         ContactCallback contact_end_cb;
         std::vector<std::pair<int, int>> previous_contact_pairs;
+        mutable std::recursive_mutex m_mutex;
     };
 
 } // namespace bud::physics

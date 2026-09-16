@@ -1,4 +1,4 @@
-﻿#include <string>
+#include <string>
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -924,9 +924,15 @@ namespace bud::engine {
 		character_controller.reset();
 		physics_scene.reset();
 		physics_scene = std::make_unique<bud::physics::PhysicsScene>();
-		physics_scene->init();
+		bud::physics::PhysicsWorldConfig phys_config{};
+		phys_config.backend = engine_config.physics_backend;
+		phys_config.enable_ground_plane = engine_config.enable_ground_plane;
+		phys_config.ground_plane_height = engine_config.ground_plane_height;
+		phys_config.asset_root = "Content";
+		physics_scene->init(phys_config);
 
-		bud::print("[BudEngine] Physics scene initialized, ready for bodies.");
+		bud::print("[BudEngine] Physics scene initialized ({}), ready for bodies.",
+		           engine_config.physics_backend == bud::physics::PhysicsBackend::Mujoco ? "MuJoCo" : "Jolt");
 
 		// Create character controller
 		character_controller = std::make_unique<bud::scene::CharacterController>();

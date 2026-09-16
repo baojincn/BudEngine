@@ -87,6 +87,8 @@ private:
     float m_current_yaw = 0.0f;
     float m_gait_phase = 0.0f;
     bool m_is_moving = false;
+    float m_prev_pitch = 0.0f;
+    float m_prev_roll = 0.0f;
 
     bud::math::vec3 m_current_pelvis_pos{ 0.0f, 0.85f, 0.0f };
     std::vector<uint32_t> m_ignored_body_ids;

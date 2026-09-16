@@ -316,6 +316,31 @@ void RobotVisualBridge::sync_transforms(const bud::robots::RobotInstance& robot,
 
     auto transforms = robot.get_all_link_transforms();
 
+    // In MuJoCo simulation mode the link world positions/rotations returned by
+    // get_all_link_transforms() have been converted from MuJoCo Z-up to engine Y-up via
+    // from_mujoco().  The visual local offsets (origin_xyz/origin_rpy from the URDF) are
+    // still in URDF/MuJoCo Z-up space.  We must express local_offset in engine Y-up space
+    // before composing it with the (already engine-space) world link matrix.
+    //
+    // Basis change B from URDF Z-up to engine Y-up: from_mujoco(v) = (v.x, v.z, -v.y).
+    // As a 4x4 column-major matrix (GLM convention):
+    //   col0 = (1, 0, 0, 0)   - X unchanged
+    //   col1 = (0, 0,-1, 0)   - URDF Y  →  -engine Z
+    //   col2 = (0, 1, 0, 0)   - URDF Z  →   engine Y
+    //   col3 = (0, 0, 0, 1)
+    // local_offset_engine = B * local_offset_urdf * B^{-1}
+    // Since B is orthonormal, B^{-1} = B^T.
+    static const bud::math::mat4 k_B(
+        bud::math::vec4(1.f, 0.f,  0.f, 0.f),
+        bud::math::vec4(0.f, 0.f, -1.f, 0.f),
+        bud::math::vec4(0.f, 1.f,  0.f, 0.f),
+        bud::math::vec4(0.f, 0.f,  0.f, 1.f));
+    static const bud::math::mat4 k_Binv = glm::transpose(bud::math::mat4(
+        bud::math::vec4(1.f, 0.f,  0.f, 0.f),
+        bud::math::vec4(0.f, 0.f, -1.f, 0.f),
+        bud::math::vec4(0.f, 1.f,  0.f, 0.f),
+        bud::math::vec4(0.f, 0.f,  0.f, 1.f)));
+
     for (const auto& lt : transforms) {
         auto it = m_link_to_part_indices.find(lt.link_name);
         if (it == m_link_to_part_indices.end())
@@ -332,13 +357,18 @@ void RobotVisualBridge::sync_transforms(const bud::robots::RobotInstance& robot,
             const auto& part = m_parts[p_idx];
             if (part.entity_index < scene.entities.size()) {
                 auto& ent = scene.entities[part.entity_index];
+
+                bud::math::mat4 final_offset = part.local_offset;
+                if (m_is_simulation)
+                    final_offset = k_B * part.local_offset * k_Binv;
+
                 if (!ent.has_prev_transform) {
-                    ent.prev_transform = world_link_mat * part.local_offset;
+                    ent.prev_transform = world_link_mat * final_offset;
                     ent.has_prev_transform = true;
                 } else {
                     ent.prev_transform = ent.transform;
                 }
-                ent.transform = world_link_mat * part.local_offset;
+                ent.transform = world_link_mat * final_offset;
             }
         }
     }

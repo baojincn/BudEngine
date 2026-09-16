@@ -68,6 +68,8 @@ namespace bud::physics {
         ArticulationHandle create_articulation(const ArticulationDesc& desc) override;
         void remove_articulation(ArticulationHandle handle) override;
         bool get_articulation_state(ArticulationHandle handle, ArticulationStateSoA& out) const override;
+        void set_articulation_joint_commands(ArticulationHandle handle,
+                                             std::span<const JointCommand> commands) override;
         void set_articulation_target_angle(ArticulationHandle handle,
                                            const std::string& joint_name, float angle) override;
         void set_articulation_target_velocity(ArticulationHandle handle,

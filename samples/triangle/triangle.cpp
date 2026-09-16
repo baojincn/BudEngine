@@ -10,6 +10,7 @@
 #include "src/io/bud.io.hpp"
 #include "src/runtime/bud.engine.hpp"
 #include "src/runtime/bud.scene.io.hpp"
+#include "src/robots/bud.robot.lowcmd.hpp"
 #include <imgui.h>
 
 using namespace bud::game;
@@ -57,13 +58,14 @@ void TriangleApp::on_init(const AppConfig& config) {
 			pending_mesh_loads->store(0);
 
 			// Initialize Unitree G1 Robot Avatar
-			m_robot_avatar = std::make_unique<bud::robots::RobotAvatarController>();
-			bool avatar_ok = m_robot_avatar->init(engine,
+			auto avatar = std::make_unique<bud::robots::RobotAvatarController>();
+			bool avatar_ok = avatar->init(engine,
 				"Content/Robots/g1_description/g1_29dof.budasset",
 				"Content/Robots/g1_description");
 			if (avatar_ok) {
 				bud::print("[TriangleApp] Unitree G1 Avatar initialized and bound to Sponza scene!");
-				m_robot_avatar->set_camera_view(bud::robots::AvatarCameraView::ThirdPerson, scene.main_camera);
+				avatar->set_camera_view(bud::robots::AvatarCameraView::ThirdPerson, scene.main_camera);
+				m_robot_avatar = std::move(avatar);
 			}
 			else {
 				bud::eprint("[TriangleApp] Failed to initialize Unitree G1 Avatar controller!");
@@ -87,6 +89,7 @@ void TriangleApp::on_update(float delta_time) {
 	auto& input = bud::input::Input::get();
 	auto& scene = engine->get_scene();
 	auto& cam = scene.main_camera;
+
 
 	static bool prev_v = false;
 	bool curr_v = input.is_key_down(bud::input::Key::V);
@@ -169,6 +172,48 @@ void TriangleApp::on_update(float delta_time) {
 
 	if (auto* sm = engine->get_streaming_manager()) {
 		sm->update(bud::math::vec3(cam.position.x, cam.position.y, cam.position.z));
+	}
+
+	if (m_test_duration > 0.0f && m_robot_avatar && m_robot_avatar->get_robot() && m_robot_avatar->get_robot()->is_simulation()) {
+		m_elapsed_time += delta_time;
+		const auto pelvis_pos = m_robot_avatar->get_pelvis_position();
+		m_min_pelvis_y = std::min(m_min_pelvis_y, pelvis_pos.y);
+		m_max_pelvis_y = std::max(m_max_pelvis_y, pelvis_pos.y);
+
+		const auto pelvis_rot = m_robot_avatar->get_robot()->get_link_rotation("pelvis");
+		float pitch = 0.0f;
+		float roll = 0.0f;
+		float tilt = 0.0f;
+		bud::robots::compute_body_orientation(pelvis_rot, pitch, roll, tilt);
+		m_max_tilt_deg = std::max(m_max_tilt_deg, tilt);
+
+		if (m_elapsed_time - m_last_log_time >= 5.0f || m_elapsed_time >= m_test_duration) {
+			m_last_log_time = m_elapsed_time;
+			bud::print("[TriangleApp][StandingTest] Time: {:.1f}/{:.1f}s, Pelvis Y: {:.4f}m (range: [{:.4f}, {:.4f}]), Tilt: {:.2f} deg (max: {:.2f} deg)",
+			           m_elapsed_time, m_test_duration, pelvis_pos.y, m_min_pelvis_y, m_max_pelvis_y, tilt, m_max_tilt_deg);
+		}
+
+		if (m_elapsed_time >= 0.5f) {
+			m_min_pelvis_y = std::min(m_min_pelvis_y, pelvis_pos.y);
+			m_max_pelvis_y = std::max(m_max_pelvis_y, pelvis_pos.y);
+			m_max_tilt_deg = std::max(m_max_tilt_deg, tilt);
+
+			if (pelvis_pos.y < 0.60f || tilt > 20.0f) {
+				static float last_fail_log = -1.0f;
+				if (m_elapsed_time - last_fail_log >= 1.0f) {
+					last_fail_log = m_elapsed_time;
+					bud::eprint("[TriangleApp][StandingTest] FAILED: Robot lost balance! Pelvis Y: {:.4f}m, Tilt: {:.2f} deg",
+					            pelvis_pos.y, tilt);
+				}
+				m_test_failed = true;
+			}
+		}
+
+		if (m_elapsed_time >= m_test_duration) {
+			bud::print("[TriangleApp][StandingTest] Finished test duration {:.1f}s. Final Result: {}",
+			           m_test_duration, m_test_failed ? "FAILED" : "PASSED");
+			engine->request_close();
+		}
 	}
 }
 

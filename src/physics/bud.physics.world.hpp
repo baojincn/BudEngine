@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 #include <optional>
@@ -34,12 +35,6 @@
 
 namespace bud::physics {
 
-    enum class PhysicsBackend : uint8_t {
-        Jolt,      // game world
-        Mujoco,    // robot world
-        GpuXpbd,   // future: unified rigid + soft XPBD world on the GPU
-    };
-
     struct PhysicsWorldConfig {
         PhysicsBackend backend = PhysicsBackend::Jolt;
         uint32_t max_bodies = 65536;
@@ -49,6 +44,10 @@ namespace bud::physics {
         // Root used to resolve content-relative asset paths referenced by cooked models (e.g. the
         // meshes a cooked MuJoCo model asks for). Backends that need no assets ignore it.
         std::string asset_root;
+        // Ground plane support (essential for robot simulation backends like MuJoCo).
+        bool enable_ground_plane = false;
+        float ground_plane_height = 0.0f; // engine space Y coordinate
+        float ground_friction = 0.8f;
     };
 
     // ------------------------------------------------------------------
@@ -228,6 +227,15 @@ namespace bud::physics {
         bud::math::vec3 color{ 1.0f, 1.0f, 1.0f };
     };
 
+    struct JointCommand {
+        std::string joint_name;
+        float q = 0.0f;       // target position (rad)
+        float dq = 0.0f;      // target velocity (rad/s)
+        float kp = 0.0f;      // position stiffness (N*m/rad)
+        float kd = 0.0f;      // velocity damping (N*m/(rad/s))
+        float tau_ff = 0.0f;  // feed-forward torque (N*m)
+    };
+
     // ------------------------------------------------------------------
     // The world
     // ------------------------------------------------------------------
@@ -257,6 +265,8 @@ namespace bud::physics {
         virtual ArticulationHandle create_articulation(const ArticulationDesc& desc) = 0;
         virtual void remove_articulation(ArticulationHandle handle) = 0;
         virtual bool get_articulation_state(ArticulationHandle handle, ArticulationStateSoA& out) const = 0;
+        virtual void set_articulation_joint_commands(ArticulationHandle handle,
+                                                     std::span<const JointCommand> commands) = 0;
         virtual void set_articulation_target_angle(ArticulationHandle handle,
                                                    const std::string& joint_name, float angle) = 0;
         virtual void set_articulation_target_velocity(ArticulationHandle handle,
@@ -289,6 +299,7 @@ namespace bud::physics {
         // --- settings ---
         virtual void set_gravity(const bud::math::vec3& gravity) = 0;
         virtual bud::math::vec3 get_gravity() const = 0;
+        virtual float get_ground_plane_height() const { return 0.0f; }
 
         // --- debug draw ---
         virtual void collect_debug_lines(std::vector<DebugLine>& out_lines) const = 0;

@@ -1,4 +1,5 @@
 #include "src/robots/bud.robot.avatar.hpp"
+#include "src/robots/bud.robot.lowcmd.hpp"
 #include "src/runtime/bud.engine.hpp"
 #include "src/physics/bud.physics.scene.hpp"
 #include "src/graphics/bud.graphics.passes.hpp"
@@ -25,8 +26,10 @@ constexpr float k_hip_amplitude = 0.45f;              // ~25 degrees
 constexpr float k_knee_amplitude = 0.55f;             // ~31 degrees
 constexpr float k_arm_amplitude = 0.35f;              // ~20 degrees
 constexpr float k_walk_speed = 2.0f;
-constexpr float k_idle_knee_angle = 0.05f;
-constexpr float k_idle_elbow_angle = 0.35f;
+constexpr float k_idle_hip_pitch = -0.15f;
+constexpr float k_idle_knee_angle = 0.30f;
+constexpr float k_idle_ankle_pitch = -0.15f;
+constexpr float k_idle_elbow_angle = 0.6f;
 
 // G1 Humanoid Dimensions (exact from cooked g1.budasset: AABB min_y = -0.792f, max_y = 0.530573m)
 constexpr float k_mesh_foot_sole_offset_y = -0.792f;
@@ -62,13 +65,25 @@ bool RobotAvatarController::get_ground_height(const bud::math::vec3& test_pos, f
     if (!physics_scene)
         return false;
 
+    auto* controller = m_engine->get_character_controller();
+    const float capsule_offset = controller ? (controller->get_capsule_height() * 0.5f + controller->get_capsule_radius()) : 0.80f;
+    const float feet_est_y = test_pos.y - capsule_offset;
+
+    if (physics_scene->get_backend() == physics::PhysicsBackend::Mujoco) {
+        const bud::math::vec3 ray_start(test_pos.x, std::max(test_pos.y + 1.0f, 2.0f), test_pos.z);
+        const bud::math::vec3 ray_end(test_pos.x, -10.0f, test_pos.z);
+        const auto hit = physics_scene->raycast(ray_start, ray_end);
+        if (hit.has_value() && hit->hit) {
+            out_height = hit->hit_point.y;
+            return true;
+        }
+        out_height = physics_scene->get_ground_plane_height();
+        return true;
+    }
+
     auto* system = physics_scene->get_jolt_system();
     if (!system)
         return false;
-
-    auto* controller = m_engine->get_character_controller();
-    float capsule_offset = controller ? (controller->get_capsule_height() * 0.5f + controller->get_capsule_radius()) : 0.80f;
-    float feet_est_y = test_pos.y - capsule_offset;
 
     // Raycast strictly downwards starting from just above the feet to avoid overhead arches/ceilings
     JPH::RRayCast ray(
@@ -128,7 +143,7 @@ bool RobotAvatarController::init(bud::engine::BudEngine* engine,
 
     auto* controller = engine->get_character_controller();
     bud::math::vec3 spawn_pos{ 0.0f, 1.8f, 0.0f };
-    if (controller)
+    if (controller && physics_scene->get_backend() != physics::PhysicsBackend::Mujoco)
         spawn_pos = controller->get_position();
 
     float capsule_ground_offset = controller ? (controller->get_capsule_height() * 0.5f + controller->get_capsule_radius()) : 0.80f;
@@ -141,11 +156,21 @@ bool RobotAvatarController::init(bud::engine::BudEngine* engine,
     // into the collision mesh on the very first frames.
     constexpr float kSpawnClearanceY = 0.03f;
     m_current_pelvis_pos = spawn_pos;
-    m_current_pelvis_pos.y = ground_y - k_mesh_foot_sole_offset_y + kSpawnClearanceY;
+    if (physics_scene->get_backend() == physics::PhysicsBackend::Mujoco) {
+        m_current_pelvis_pos.x = 0.0f;
+        m_current_pelvis_pos.z = 0.0f;
+        m_current_pelvis_pos.y = ground_y + 0.785f;
+    }
+    else {
+        m_current_pelvis_pos.y = ground_y - k_mesh_foot_sole_offset_y + kSpawnClearanceY;
+    }
 
     RobotSpawnParams params{};
     params.position = m_current_pelvis_pos;
-    params.rotation = m_urdf_to_world_rot;
+    if (physics_scene->get_backend() == physics::PhysicsBackend::Mujoco)
+        params.rotation = bud::math::quaternion(1.0f, 0.0f, 0.0f, 0.0f);
+    else
+        params.rotation = m_urdf_to_world_rot;
     params.activate = true;
     params.enable_motors = true;
     params.default_motor_stiffness = 800.0f;
@@ -155,12 +180,17 @@ bool RobotAvatarController::init(bud::engine::BudEngine* engine,
     // penetration is what kills Jolt's EPA in release builds). A moderate torque cap
     // lets the foot be stopped by the ground instead of tunnelling into it.
     params.default_motor_max_torque = 150.0f;
+    params.asset_path = robot_file;
+    if (physics_scene->get_backend() == physics::PhysicsBackend::Mujoco)
+        params.initial_joint_angles = get_g1_standing_joint_angles();
 
     m_robot = RobotLoader::spawn_robot_from_file(*physics_scene, robot_file, params);
     if (m_robot) {
         reset_to_idle_stance();
         m_current_joint_angles = m_target_joint_angles;
-        if (m_robot->get_ragdoll()) {
+        if (m_robot->is_simulation()) {
+            m_robot->set_low_cmd(make_g1_standing_cmd());
+        } else if (m_robot->get_ragdoll()) {
             m_ignored_body_ids.clear();
             for (int i = 0; i < m_robot->get_ragdoll()->GetBodyCount(); ++i) {
                 m_ignored_body_ids.push_back(m_robot->get_ragdoll()->GetBodyID(i).GetIndexAndSequenceNumber());
@@ -175,8 +205,9 @@ bool RobotAvatarController::init(bud::engine::BudEngine* engine,
 
     auto& scene = engine->get_scene();
     m_visual_bridge = std::make_unique<RobotVisualBridge>();
-    if (m_robot)
+    if (m_robot) {
         m_visual_bridge->init(engine, scene, m_robot->get_definition(), package_root);
+    }
 
     std::cout << "[RobotAvatarController] Initialized Unitree G1 Avatar (Pelvis Y: "
               << m_current_pelvis_pos.y << ", Spawn Y: " << spawn_pos.y << ")." << std::endl;
@@ -214,6 +245,104 @@ void RobotAvatarController::set_camera_view(AvatarCameraView view, bud::scene::C
 void RobotAvatarController::update(float dt, const bud::input::Input& input, bud::scene::Camera& camera) {
     if (!m_engine)
         return;
+
+    // Simulation mode: driven purely by MuJoCo physical articulation
+    if (m_robot && m_robot->is_simulation()) {
+        const std::string& root_name = !m_robot->get_definition().root_link.empty()
+                                           ? m_robot->get_definition().root_link
+                                           : "pelvis";
+        const auto real_pelvis_pos = m_robot->get_link_position(root_name);
+        if (glm::length(real_pelvis_pos) > 1.0e-4f)
+            m_current_pelvis_pos = real_pelvis_pos;
+
+        // Process movement input to update gait / target angles
+        bud::math::vec3 move_dir(0.0f);
+        if (input.is_key_down(bud::input::Key::W))
+            move_dir += camera.front;
+        if (input.is_key_down(bud::input::Key::S))
+            move_dir -= camera.front;
+        if (input.is_key_down(bud::input::Key::A))
+            move_dir -= camera.right;
+        if (input.is_key_down(bud::input::Key::D))
+            move_dir += camera.right;
+
+        move_dir.y = 0.0f;
+        const float move_len = glm::length(move_dir);
+        if (move_len > 0.001f) {
+            move_dir /= move_len;
+            m_is_moving = true;
+            m_current_yaw = std::atan2(-move_dir.x, -move_dir.z);
+            apply_walking_gait(dt, move_len);
+
+            std::vector<physics::JointCommand> commands;
+            commands.reserve(m_target_joint_angles.size());
+            for (const auto& [name, target_q] : m_target_joint_angles) {
+                physics::JointCommand jc;
+                jc.joint_name = name;
+                jc.q = target_q;
+                jc.dq = 0.0f;
+                get_default_g1_gains(name, jc.kp, jc.kd);
+                jc.tau_ff = 0.0f;
+                commands.push_back(std::move(jc));
+            }
+            m_robot->set_joint_commands(commands);
+        } else {
+            m_is_moving = false;
+            reset_to_idle_stance();
+
+            const bud::math::quaternion pelvis_rot = m_robot->get_link_rotation(root_name);
+            float pitch_rad = 0.0f;
+            float roll_rad = 0.0f;
+            float tilt_deg = 0.0f;
+            compute_body_orientation(pelvis_rot, pitch_rad, roll_rad, tilt_deg);
+            const float pitch_vel = (dt > 1.0e-5f) ? (pitch_rad - m_prev_pitch) / dt : 0.0f;
+            const float roll_vel = (dt > 1.0e-5f) ? (roll_rad - m_prev_roll) / dt : 0.0f;
+            m_prev_pitch = pitch_rad;
+            m_prev_roll = roll_rad;
+
+            LowCmd cmd = make_g1_standing_cmd();
+            apply_standing_balance(cmd, pitch_rad, pitch_vel, roll_rad, roll_vel);
+            m_robot->set_low_cmd(cmd);
+        }
+
+        // Sync joint angles from physical simulation to forward kinematics state
+        for (const auto& joint : m_robot->get_definition().joints) {
+            if (!joint.name.empty())
+                m_current_joint_angles[joint.name] = m_robot->get_joint_angle(joint.name);
+        }
+
+        // Calculate full-body forward kinematics for 100% rigid visual assembly
+        update_forward_kinematics();
+
+        const bud::math::quaternion pelvis_rot = m_robot->get_link_rotation(root_name);
+        bud::math::quaternion root_rot;
+        if (m_robot->is_simulation())
+            root_rot = pelvis_rot * m_urdf_to_world_rot;
+        else {
+            bud::math::quaternion yaw_rot = glm::angleAxis(m_current_yaw, bud::math::vec3(0.0f, 1.0f, 0.0f));
+            root_rot = yaw_rot * pelvis_rot * m_urdf_to_world_rot;
+        }
+
+        bud::math::mat4 root_world_mat = glm::translate(bud::math::mat4(1.0f), m_current_pelvis_pos)
+                                       * glm::mat4_cast(root_rot);
+
+        auto& scene = m_engine->get_scene();
+        if (m_visual_bridge) {
+            std::unordered_map<std::string, glm::mat4> world_link_transforms;
+            world_link_transforms.reserve(m_current_link_xforms.size());
+            for (const auto& [name, local_mat] : m_current_link_xforms)
+                world_link_transforms[name] = root_world_mat * local_mat;
+            m_visual_bridge->sync_transforms(world_link_transforms, scene);
+        }
+
+        if (m_view_mode == AvatarCameraView::ThirdPerson) {
+            camera.target_position = get_torso_position();
+            camera.update(dt);
+        } else {
+            camera.position = get_head_camera_position();
+        }
+        return;
+    }
 
     auto* controller = m_engine->get_character_controller();
     if (controller) {
@@ -397,25 +526,25 @@ void RobotAvatarController::apply_walking_gait(float dt, float speed) {
     float cos_p = std::cos(m_gait_phase);
 
     // Left leg gait
-    m_target_joint_angles["left_hip_pitch_joint"] = -sin_p * k_hip_amplitude;
+    m_target_joint_angles["left_hip_pitch_joint"] = k_idle_hip_pitch - sin_p * k_hip_amplitude;
     float l_knee = (sin_p > 0.0f) ? (sin_p * k_knee_amplitude + k_idle_knee_angle) : k_idle_knee_angle;
     m_target_joint_angles["left_knee_joint"] = l_knee;
-    m_target_joint_angles["left_ankle_pitch_joint"] = (sin_p > 0.0f) ? (-k_idle_knee_angle - sin_p * 0.20f) : -k_idle_knee_angle;
+    m_target_joint_angles["left_ankle_pitch_joint"] = (sin_p > 0.0f) ? (k_idle_ankle_pitch - sin_p * 0.20f) : k_idle_ankle_pitch;
 
     // Right leg gait (anti-phase)
-    m_target_joint_angles["right_hip_pitch_joint"] = sin_p * k_hip_amplitude;
+    m_target_joint_angles["right_hip_pitch_joint"] = k_idle_hip_pitch + sin_p * k_hip_amplitude;
     float r_knee = (sin_p < 0.0f) ? (-sin_p * k_knee_amplitude + k_idle_knee_angle) : k_idle_knee_angle;
     m_target_joint_angles["right_knee_joint"] = r_knee;
-    m_target_joint_angles["right_ankle_pitch_joint"] = (sin_p < 0.0f) ? (-k_idle_knee_angle + sin_p * 0.20f) : -k_idle_knee_angle;
+    m_target_joint_angles["right_ankle_pitch_joint"] = (sin_p < 0.0f) ? (k_idle_ankle_pitch + sin_p * 0.20f) : k_idle_ankle_pitch;
 
     // Torso gentle counter-rotation
     m_target_joint_angles["waist_yaw_joint"] = -sin_p * 0.05f;
 
     // Arm swing
-    m_target_joint_angles["left_shoulder_pitch_joint"] = sin_p * k_arm_amplitude;
+    m_target_joint_angles["left_shoulder_pitch_joint"] = 0.2f + sin_p * k_arm_amplitude;
     m_target_joint_angles["left_elbow_joint"] = k_idle_elbow_angle + std::max(0.0f, sin_p) * 0.2f;
 
-    m_target_joint_angles["right_shoulder_pitch_joint"] = -sin_p * k_arm_amplitude;
+    m_target_joint_angles["right_shoulder_pitch_joint"] = 0.2f - sin_p * k_arm_amplitude;
     m_target_joint_angles["right_elbow_joint"] = k_idle_elbow_angle + std::max(0.0f, -sin_p) * 0.2f;
 }
 
@@ -423,31 +552,31 @@ void RobotAvatarController::reset_to_idle_stance() {
     m_gait_phase = 0.0f;
 
     // Neutral upright standing pose
-    m_target_joint_angles["left_hip_pitch_joint"] = 0.0f;
+    m_target_joint_angles["left_hip_pitch_joint"] = k_idle_hip_pitch;
     m_target_joint_angles["left_hip_roll_joint"] = 0.0f;
     m_target_joint_angles["left_hip_yaw_joint"] = 0.0f;
     m_target_joint_angles["left_knee_joint"] = k_idle_knee_angle;
-    m_target_joint_angles["left_ankle_pitch_joint"] = -k_idle_knee_angle;
+    m_target_joint_angles["left_ankle_pitch_joint"] = k_idle_ankle_pitch;
     m_target_joint_angles["left_ankle_roll_joint"] = 0.0f;
 
-    m_target_joint_angles["right_hip_pitch_joint"] = 0.0f;
+    m_target_joint_angles["right_hip_pitch_joint"] = k_idle_hip_pitch;
     m_target_joint_angles["right_hip_roll_joint"] = 0.0f;
     m_target_joint_angles["right_hip_yaw_joint"] = 0.0f;
     m_target_joint_angles["right_knee_joint"] = k_idle_knee_angle;
-    m_target_joint_angles["right_ankle_pitch_joint"] = -k_idle_knee_angle;
+    m_target_joint_angles["right_ankle_pitch_joint"] = k_idle_ankle_pitch;
     m_target_joint_angles["right_ankle_roll_joint"] = 0.0f;
 
     m_target_joint_angles["waist_yaw_joint"] = 0.0f;
     m_target_joint_angles["waist_roll_joint"] = 0.0f;
     m_target_joint_angles["waist_pitch_joint"] = 0.0f;
 
-    m_target_joint_angles["left_shoulder_pitch_joint"] = 0.15f;
-    m_target_joint_angles["left_shoulder_roll_joint"] = 0.10f;
+    m_target_joint_angles["left_shoulder_pitch_joint"] = 0.2f;
+    m_target_joint_angles["left_shoulder_roll_joint"] = 0.2f;
     m_target_joint_angles["left_shoulder_yaw_joint"] = 0.0f;
     m_target_joint_angles["left_elbow_joint"] = k_idle_elbow_angle;
 
-    m_target_joint_angles["right_shoulder_pitch_joint"] = 0.15f;
-    m_target_joint_angles["right_shoulder_roll_joint"] = -0.10f;
+    m_target_joint_angles["right_shoulder_pitch_joint"] = 0.2f;
+    m_target_joint_angles["right_shoulder_roll_joint"] = -0.2f;
     m_target_joint_angles["right_shoulder_yaw_joint"] = 0.0f;
     m_target_joint_angles["right_elbow_joint"] = k_idle_elbow_angle;
 }
@@ -518,10 +647,23 @@ bud::math::vec3 RobotAvatarController::get_pelvis_position() const {
 }
 
 bud::math::vec3 RobotAvatarController::get_torso_position() const {
+    if (m_robot && m_robot->is_simulation()) {
+        const auto torso_pos = m_robot->get_link_position("torso_link");
+        if (glm::length(torso_pos) > 1.0e-4f)
+            return torso_pos;
+    }
     return m_current_pelvis_pos + bud::math::vec3(0.0f, k_torso_relative_y, 0.0f);
 }
 
 bud::math::vec3 RobotAvatarController::get_head_camera_position() const {
+    if (m_robot && m_robot->is_simulation()) {
+        const auto head_pos = m_robot->get_link_position("head_link");
+        if (glm::length(head_pos) > 1.0e-4f) {
+            const auto head_rot = m_robot->get_link_rotation("head_link");
+            const auto fwd = head_rot * bud::math::vec3(0.0f, 0.0f, -1.0f);
+            return head_pos + fwd * k_head_fwd_offset;
+        }
+    }
     bud::math::quaternion yaw_rot = glm::angleAxis(m_current_yaw, bud::math::vec3(0.0f, 1.0f, 0.0f));
     bud::math::vec3 fwd = yaw_rot * bud::math::vec3(0.0f, 0.0f, -1.0f);
     return m_current_pelvis_pos + bud::math::vec3(0.0f, k_head_relative_y, 0.0f) + fwd * k_head_fwd_offset;

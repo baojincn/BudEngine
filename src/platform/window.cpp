@@ -217,6 +217,10 @@ namespace bud::platform {
 			return close_requested;
 		}
 
+		void request_close() override {
+			close_requested = true;
+		}
+
 		void set_mouse_relative_mode(bool enabled) override {
 			if (window)
 				SDL_SetWindowRelativeMouseMode(window, enabled);

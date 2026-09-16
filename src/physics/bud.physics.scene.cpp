@@ -9,15 +9,8 @@ namespace bud::physics {
 
     PhysicsScene::~PhysicsScene() = default;
 
-    void PhysicsScene::init(uint32_t max_bodies, uint32_t max_body_pairs,
-                            uint32_t max_contact_constraints, PhysicsBackend in_backend) {
-        backend = in_backend;
-
-        PhysicsWorldConfig config;
-        config.backend = backend;
-        config.max_bodies = max_bodies;
-        config.max_body_pairs = max_body_pairs;
-        config.max_contact_constraints = max_contact_constraints;
+    void PhysicsScene::init(const PhysicsWorldConfig& config) {
+        backend = config.backend;
 
         world = create_physics_world(backend);
         if (!world) {
@@ -30,6 +23,16 @@ namespace bud::physics {
             bud::eprint("[PhysicsScene] Backend '{}' failed to initialise.", world->backend_name());
 
         body_count = 0;
+    }
+
+    void PhysicsScene::init(uint32_t max_bodies, uint32_t max_body_pairs,
+                            uint32_t max_contact_constraints, PhysicsBackend in_backend) {
+        PhysicsWorldConfig config;
+        config.backend = in_backend;
+        config.max_bodies = max_bodies;
+        config.max_body_pairs = max_body_pairs;
+        config.max_contact_constraints = max_contact_constraints;
+        init(config);
     }
 
     void PhysicsScene::step(float delta_time, int collision_steps, int integration_steps) {

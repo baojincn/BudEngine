@@ -462,22 +462,14 @@ bool UrdfBuilder::cook_robot(bud::robot::RobotDef robot_def, const std::string& 
     master_writer.add_chunk(AssetChunkType::Articulation, robot_bin.data(), robot_bin.size());
 
     // Add the cooked MuJoCo model: robots are simulated by MuJoCo, so the physics payload ships in
-    // the standard container as a normalized MJCF (free base joint, actuator gains, armature) plus
-    // the mesh -> asset mapping and the render-only metadata (e.g. limit.velocity for TAA). The
-    // runtime compiles this; it never parses the URDF.
+    // the standard container as a normalized MJCF (free base joint, per-joint armature/damping/
+    // friction loss, one torque motor per actuated joint) plus the mesh -> asset mapping and the
+    // render-only metadata (e.g. limit.velocity for TAA). The runtime compiles this; it never parses
+    // the URDF.
     {
+        // The robot asset carries Unitree's data only: no controller gains, no solver settings.
         MujocoCookOptions mujoco_options;
-        // Joint groups: gains and armature are not in the URDF (armature is a motor property, the
-        // gains a controller choice). These should become per-robot configuration.
-        mujoco_options.joint_groups = {
-            { "knee",     300.0, 15.0, 0.0, 0.0 },
-            { "ankle",     40.0,  2.0, 0.0, 0.0 },
-            { "hip",      200.0, 10.0, 0.0, 0.0 },
-            { "waist",    200.0, 10.0, 0.0, 0.0 },
-            { "shoulder",  60.0,  3.0, 0.0, 0.0 },
-            { "elbow",     40.0,  2.0, 0.0, 0.0 },
-            { "wrist",     40.0,  2.0, 0.0, 0.0 },
-        };
+
         auto mujoco_data = cook_mujoco_model(options.source_urdf_path, options.package_root, robot_def, mujoco_options);
         if (mujoco_data) {
             const std::vector<uint8_t> mujoco_blob = mujoco_data->serialize_binary();

@@ -301,6 +301,7 @@ target_sources(bud_engine_core
 		"src/robots/bud.robot.visual_bridge.cpp"
 		"src/robots/bud.robot.avatar.cpp"
 		"src/robots/bud.robot.skinning.cpp"
+		"src/robots/bud.robot.lowcmd.cpp"
 
     PUBLIC
 		"src/core/bud.core.hpp"
@@ -312,6 +313,7 @@ target_sources(bud_engine_core
 		"src/robots/bud.robot.visual_bridge.hpp"
 		"src/robots/bud.robot.avatar.hpp"
 		"src/robots/bud.robot.skinning.hpp"
+		"src/robots/bud.robot.lowcmd.hpp"
 		"src/io/bud.io.hpp"
 		"src/runtime/bud.engine.hpp"
 		"src/platform/bud.platform.hpp"

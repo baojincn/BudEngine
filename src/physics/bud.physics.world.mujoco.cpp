@@ -10,11 +10,33 @@
 #include <filesystem>
 #include <fstream>
 
+#include <glm/gtc/quaternion.hpp>
 #include <mujoco/mujoco.h>
 
 namespace bud::physics {
 
     namespace {
+
+#if defined(_MSC_VER)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+        mjSpec* safe_parse_xml(const char* xml, const mjVFS* vfs, char* error, int error_sz) {
+            __try {
+                return mj_parseXMLString(xml, vfs, error, error_sz);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                if (error && error_sz > 0) {
+                    snprintf(error, error_sz, "SEH Exception in mj_parseXMLString (code: 0x%08lX)", (unsigned long)GetExceptionCode());
+                }
+                return nullptr;
+            }
+        }
+#else
+        mjSpec* safe_parse_xml(const char* xml, const mjVFS* vfs, char* error, int error_sz) {
+            return mj_parseXMLString(xml, vfs, error, error_sz);
+        }
+#endif
 
         // Reads one chunk out of a .budasset container. The backend reads assets synchronously and
         // directly: the package format is a flat header plus a chunk table, and the async asset
@@ -94,9 +116,56 @@ namespace bud::physics {
             switch (type) {
             case bud::physics::ShapeType::Sphere: return mjGEOM_SPHERE;
             case bud::physics::ShapeType::Capsule: return mjGEOM_CAPSULE;
+            case bud::physics::ShapeType::Plane: return mjGEOM_PLANE;
             case bud::physics::ShapeType::Box:
             default: return mjGEOM_BOX;
             }
+        }
+
+        // ------------------------------------------------------------------
+        // Coordinate convention.
+        // ------------------------------------------------------------------
+        // MuJoCo is Z-up, the engine is Y-up. Every value crossing this boundary is converted here
+        // so callers keep working in engine coordinates. The basis change is a +90 degree rotation
+        // about X: engine (x, y, z) -> MuJoCo (x, -z, y), and back (x, y, z) -> (x, z, -y).
+        //
+        // Getting this wrong is not subtle: feeding engine gravity straight in made robots fall
+        // sideways in MuJoCo's -Y and never touch the floor.
+        bud::math::vec3 to_mujoco(const bud::math::vec3& v) {
+            return bud::math::vec3(v.x, -v.z, v.y);
+        }
+
+        bud::math::vec3 from_mujoco(const bud::math::vec3& v) {
+            return bud::math::vec3(v.x, v.z, -v.y);
+        }
+
+        // The same basis change applied to directions (no translation component).
+        bud::math::vec3 direction_to_mujoco(const bud::math::vec3& v) {
+            return to_mujoco(v);
+        }
+
+        bud::math::vec3 direction_from_mujoco(const bud::math::vec3& v) {
+            return from_mujoco(v);
+        }
+
+        // q_B is the quaternion of that +90 degree X rotation (w, x, y, z).
+        constexpr double kSqrtHalf = 0.7071067811865476;
+
+        bud::math::quaternion to_mujoco(const bud::math::quaternion& q) {
+            // q_mj = q_B * q_eng * q_B^-1
+            const bud::math::quaternion q_b(static_cast<float>(kSqrtHalf), static_cast<float>(kSqrtHalf),
+                                            0.0f, 0.0f);
+            const bud::math::quaternion q_b_inv(static_cast<float>(kSqrtHalf),
+                                                static_cast<float>(-kSqrtHalf), 0.0f, 0.0f);
+            return glm::normalize(q_b * q * q_b_inv);
+        }
+
+        bud::math::quaternion from_mujoco(const bud::math::quaternion& q) {
+            const bud::math::quaternion q_b_inv(static_cast<float>(kSqrtHalf),
+                                                static_cast<float>(-kSqrtHalf), 0.0f, 0.0f);
+            const bud::math::quaternion q_b(static_cast<float>(kSqrtHalf), static_cast<float>(kSqrtHalf),
+                                            0.0f, 0.0f);
+            return glm::normalize(q_b_inv * q * q_b);
         }
 
     } // namespace
@@ -131,12 +200,49 @@ namespace bud::physics {
         body_state.resize(config.max_bodies);
         handle_user_data.assign(config.max_bodies, nullptr);
         handle_static.assign(config.max_bodies, false);
+
+        if (config.enable_ground_plane) {
+            mjsBody* world_body = mjs_findBody(spec, "world");
+            if (world_body) {
+                mjsGeom* ground = mjs_addGeom(world_body, nullptr);
+                mjs_setName(ground->element, "ground_plane");
+                ground->type = mjGEOM_PLANE;
+                const bud::math::vec3 ground_pos = to_mujoco(bud::math::vec3(0.0f, config.ground_plane_height, 0.0f));
+                ground->pos[0] = ground_pos.x;
+                ground->pos[1] = ground_pos.y;
+                ground->pos[2] = ground_pos.z;
+                constexpr double kPlaneHalfExtent = 50.0;
+                constexpr double kPlaneGridSpacing = 0.1;
+                constexpr double kTorsionalFriction = 0.01;
+                constexpr double kRollingFriction = 0.001;
+                ground->size[0] = kPlaneHalfExtent;
+                ground->size[1] = kPlaneHalfExtent;
+                ground->size[2] = kPlaneGridSpacing;
+                ground->friction[0] = config.ground_friction;
+                ground->friction[1] = kTorsionalFriction;
+                ground->friction[2] = kRollingFriction;
+                ground->contype = 1;
+                ground->conaffinity = 1;
+                ground->condim = 4;
+                ground->solref[0] = 0.004;
+                ground->solref[1] = 1.0;
+                ground->solimp[0] = 0.9;
+                ground->solimp[1] = 0.95;
+                ground->solimp[2] = 0.001;
+                ground->solimp[3] = 0.5;
+                ground->solimp[4] = 2.0;
+                bud::print("[MuJoCo] ground plane created at y={:.3f} (friction={:.2f}, condim=4)",
+                           config.ground_plane_height, config.ground_friction);
+            }
+        }
+
         spec_dirty = true;
         bud::print("[MuJoCo] world initialised (bodies are compiled on the first step)");
         return true;
     }
 
     RigidBodyHandle MujocoPhysicsWorld::add_rigid_body(const RigidBodyDesc& desc) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         mjsBody* world_body = mjs_findBody(spec, "world");
         if (!world_body) {
             bud::eprint("[MuJoCo] world body missing from the spec");
@@ -144,21 +250,27 @@ namespace bud::physics {
         }
 
         if (desc.shape.type == ShapeType::Mesh || desc.shape.type == ShapeType::ConvexHull) {
-            // Triangle meshes and hulls are game-world geometry; a robot project's world is simple
-            // primitives. Falls back to the shape's half extents so the body still exists.
-            bud::eprint("[MuJoCo] mesh/convex colliders are not supported by this backend; using a box");
+            // Triangle meshes and hulls are not converted to phantom boxes in MuJoCo.
+            // Returning a placeholder handle allows the visual mesh to load without corrupting the physics world.
+            const uint32_t handle_id = static_cast<uint32_t>(handle_body_ids.size());
+            handle_body_ids.push_back(-1);
+            handle_user_data.push_back(nullptr);
+            handle_static.push_back(true);
+            return RigidBodyHandle{ handle_id };
         }
 
         mjsBody* body = mjs_addBody(world_body, nullptr);
         const std::string body_name = "body_" + std::to_string(handle_body_ids.size());
         mjs_setName(body->element, body_name.c_str());
-        body->pos[0] = desc.position.x;
-        body->pos[1] = desc.position.y;
-        body->pos[2] = desc.position.z;
-        body->quat[0] = desc.rotation.w;
-        body->quat[1] = desc.rotation.x;
-        body->quat[2] = desc.rotation.y;
-        body->quat[3] = desc.rotation.z;
+        const bud::math::vec3 mujoco_position = to_mujoco(desc.position);
+        const bud::math::quaternion mujoco_rotation = to_mujoco(desc.rotation);
+        body->pos[0] = mujoco_position.x;
+        body->pos[1] = mujoco_position.y;
+        body->pos[2] = mujoco_position.z;
+        body->quat[0] = mujoco_rotation.w;
+        body->quat[1] = mujoco_rotation.x;
+        body->quat[2] = mujoco_rotation.y;
+        body->quat[3] = mujoco_rotation.z;
 
         if (desc.motion_type == MotionType::Dynamic)
             mjs_addFreeJoint(body);
@@ -174,10 +286,20 @@ namespace bud::physics {
             geom->size[0] = desc.shape.capsule_radius;
             geom->size[1] = desc.shape.capsule_half_height;
             break;
+        case ShapeType::Plane: {
+            constexpr float kDefaultPlaneHalfExtent = 50.0f;
+            constexpr float kDefaultPlaneSpacing = 0.1f;
+            geom->size[0] = std::abs(desc.shape.half_extent.x) > 0.0f ? std::abs(desc.shape.half_extent.x) : kDefaultPlaneHalfExtent;
+            geom->size[1] = std::abs(desc.shape.half_extent.z) > 0.0f ? std::abs(desc.shape.half_extent.z) : kDefaultPlaneHalfExtent;
+            geom->size[2] = kDefaultPlaneSpacing;
+            break;
+        }
         default:
-            geom->size[0] = desc.shape.half_extent.x;
-            geom->size[1] = desc.shape.half_extent.y;
-            geom->size[2] = desc.shape.half_extent.z;
+            // Half extents are magnitudes in the body frame: permute the axes for the basis change
+            // without the sign flip (a negative half extent fails the compile).
+            geom->size[0] = std::abs(desc.shape.half_extent.x);
+            geom->size[1] = std::abs(desc.shape.half_extent.z);
+            geom->size[2] = std::abs(desc.shape.half_extent.y);
             break;
         }
         geom->friction[0] = desc.material.friction;
@@ -203,6 +325,7 @@ namespace bud::physics {
     }
 
     ArticulationHandle MujocoPhysicsWorld::create_articulation(const ArticulationDesc& desc) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!desc.cooked_model.is_valid()) {
             bud::eprint("{}", "[MuJoCo] articulated body '" + desc.name + "' has no cooked model payload");
             return {};
@@ -216,7 +339,21 @@ namespace bud::physics {
 
         // Serve the meshes the model asks for out of our own assets.
         for (const auto& mesh : desc.cooked_model.meshes) {
-            const std::filesystem::path asset_path = std::filesystem::path(world_config.asset_root) / mesh.asset_path;
+            std::filesystem::path asset_path = mesh.asset_path;
+            if (!std::filesystem::exists(asset_path))
+                asset_path = std::filesystem::path(world_config.asset_root) / mesh.asset_path;
+            if (!std::filesystem::exists(asset_path)) {
+                const std::filesystem::path candidates[] = {
+                    std::filesystem::path(world_config.asset_root) / "Robots" / "g1_description" / mesh.asset_path,
+                    std::filesystem::path("Content") / "Robots" / "g1_description" / mesh.asset_path
+                };
+                for (const auto& candidate : candidates) {
+                    if (std::filesystem::exists(candidate)) {
+                        asset_path = candidate;
+                        break;
+                    }
+                }
+            }
             const std::vector<char> chunk = read_asset_chunk(asset_path.string(), bud::asset::AssetChunkType::RawMesh);
             if (chunk.empty()) {
                 bud::eprint("{}", "[MuJoCo] mesh asset missing or has no RawMesh chunk: " + asset_path.string());
@@ -228,14 +365,28 @@ namespace bud::physics {
                 bud::eprint("{}", "[MuJoCo] failed to convert mesh to STL: " + mesh.asset_path);
                 continue;
             }
-            mj_addBufferVFS(static_cast<mjVFS*>(mesh_vfs), mesh.model_name.c_str(), stl.data(), static_cast<int>(stl.size()));
+            int add_res = mj_addBufferVFS(static_cast<mjVFS*>(mesh_vfs), mesh.model_name.c_str(), stl.data(), static_cast<int>(stl.size()));
+            bud::print("[MuJoCo] mj_addBufferVFS('{}', size={}) -> {}", mesh.model_name, stl.size(), add_res);
         }
 
         bud::print("[MuJoCo] mesh VFS ready ({} buffers)", mesh_buffers.size());
         char error[2048] = { 0 };
         const std::string mjcf(reinterpret_cast<const char*>(desc.cooked_model.payload.data()),
                                desc.cooked_model.payload.size());
-        mjSpec* robot_spec = mj_parseXMLString(mjcf.c_str(), static_cast<mjVFS*>(mesh_vfs), error, sizeof(error));
+        bud::print("[MuJoCo] parsing MJCF string: size={} bytes", mjcf.size());
+
+        {
+            std::filesystem::create_directories("tmp");
+            std::ofstream debug_out("tmp/debug_robot.xml", std::ios::binary);
+            if (debug_out.is_open()) {
+                debug_out.write(mjcf.data(), mjcf.size());
+                debug_out.close();
+                bud::print("[MuJoCo] Dumped MJCF to tmp/debug_robot.xml");
+            }
+        }
+
+        mjSpec* robot_spec = safe_parse_xml(mjcf.c_str(), static_cast<mjVFS*>(mesh_vfs), error, sizeof(error));
+        bud::print("[MuJoCo] safe_parse_xml result: robot_spec={}, error='{}'", (void*)robot_spec, error);
         if (!robot_spec) {
             bud::eprint("{}", std::string("[MuJoCo] parsing the cooked model failed: ") + error);
             return {};
@@ -265,11 +416,26 @@ namespace bud::physics {
         articulation.valid = true;
         for (const auto& link : desc.links)
             articulation.link_names.push_back(link.name);
-        for (const auto& joint : desc.joints)
+        for (const auto& joint : desc.joints) {
             articulation.joint_names.push_back(joint.name);
+            articulation.joint_descs.push_back(joint);
+        }
         articulation.body_ids.assign(articulation.link_names.size(), -1);
         articulation.joint_ids.assign(articulation.joint_names.size(), -1);
         articulation.actuator_ids.assign(articulation.joint_names.size(), -1);
+        articulation.joint_commands.resize(articulation.joint_names.size());
+        for (size_t i = 0; i < articulation.joint_names.size(); ++i) {
+            articulation.joint_commands[i].joint_name = articulation.joint_names[i];
+            articulation.joint_commands[i].kp = articulation.joint_descs[i].stiffness > 0.0f
+                                                    ? articulation.joint_descs[i].stiffness
+                                                    : 40.0f;
+            articulation.joint_commands[i].kd = articulation.joint_descs[i].damping > 0.0f
+                                                    ? articulation.joint_descs[i].damping
+                                                    : 2.0f;
+            const auto it = desc.initial_joint_angles.find(articulation.joint_names[i]);
+            if (it != desc.initial_joint_angles.end())
+                articulation.joint_commands[i].q = it->second;
+        }
         articulations.push_back(std::move(articulation));
 
         spawn_poses.push_back({ desc.root_position, desc.root_rotation, desc.initial_joint_angles });
@@ -282,11 +448,14 @@ namespace bud::physics {
         return ArticulationHandle{ index };
     }
 
-    void MujocoPhysicsWorld::remove_articulation(ArticulationHandle) {
-        bud::eprint("[MuJoCo] remove_articulation is not implemented yet");
+    void MujocoPhysicsWorld::remove_articulation(ArticulationHandle handle) {
+        if (!handle.is_valid() || handle.id >= articulations.size())
+            return;
+        articulations[handle.id].valid = false;
     }
 
     bool MujocoPhysicsWorld::compile_world() {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!spec_dirty && model)
             return true;
 
@@ -298,6 +467,11 @@ namespace bud::physics {
             data = nullptr;
             model = nullptr;
         }
+
+        // Actuators come from the cooked model, not from here: the offline cook bakes one torque
+        // motor per actuated joint (with the URDF effort limit as its ctrlrange) together with the
+        // joint's armature/damping/friction loss. That is the official MuJoCo robot model, and the
+        // runtime must not add a second set of actuators on the same joints.
 
         bud::print("[MuJoCo] compiling world spec");
         model = mj_compile(spec, static_cast<mjVFS*>(mesh_vfs));
@@ -313,9 +487,16 @@ namespace bud::physics {
             return false;
         }
 
-        model->opt.gravity[0] = world_config.gravity.x;
-        model->opt.gravity[1] = world_config.gravity.y;
-        model->opt.gravity[2] = world_config.gravity.z;
+        const bud::math::vec3 mujoco_gravity = to_mujoco(world_config.gravity);
+        model->opt.gravity[0] = mujoco_gravity.x;
+        model->opt.gravity[1] = mujoco_gravity.y;
+        model->opt.gravity[2] = mujoco_gravity.z;
+
+        // Stage 4: Newton solver + implicit fast integrator for stiff PD stability
+        model->opt.solver = mjSOL_NEWTON;
+        model->opt.integrator = mjINT_IMPLICITFAST;
+        model->opt.iterations = 50;
+        model->opt.timestep = 0.002;
 
         // Resolve the names the interface works with into MuJoCo ids.
         body_ids_by_name.clear();
@@ -333,11 +514,31 @@ namespace bud::physics {
             if (name)
                 joint_ids_by_name[name] = joint;
         }
+        // Key actuators by the joint they drive instead of by name: the cooked model names its
+        // motors "<joint>_motor", and this stays correct whatever the naming convention becomes.
         actuator_ids_by_name.clear();
         for (int actuator = 0; actuator < model->nu; ++actuator) {
-            const char* name = mj_id2name(model, mjOBJ_ACTUATOR, actuator);
-            if (name)
-                actuator_ids_by_name[name] = actuator;
+            if (model->actuator_trntype[actuator] != mjTRN_JOINT)
+                continue;
+            const int joint = model->actuator_trnid[2 * actuator];
+            if (joint < 0)
+                continue;
+            const char* joint_name = mj_id2name(model, mjOBJ_JOINT, joint);
+            if (!joint_name)
+                continue;
+            actuator_ids_by_name[joint_name] = actuator;
+
+            // Stage 4: Align ankle actuator torque limit to official ±50 Nm
+            const std::string_view name_view(joint_name);
+            if (name_view.find("ankle") != std::string_view::npos) {
+                if (model->actuator_ctrllimited[actuator]) {
+                    if (model->actuator_ctrlrange[2 * actuator + 1] < 50.0) {
+                        model->actuator_ctrlrange[2 * actuator + 0] = -50.0;
+                        model->actuator_ctrlrange[2 * actuator + 1] = 50.0;
+                        bud::print("[MuJoCo] updated ankle actuator '{}' torque limit to [-50, 50] Nm", joint_name);
+                    }
+                }
+            }
         }
 
         // Our handles point at bodies by id; scene bodies were named body_<n>.
@@ -367,13 +568,15 @@ namespace bud::physics {
                     const int joint = model->body_jntadr[root_body];
                     if (joint >= 0 && model->jnt_type[joint] == mjJNT_FREE) {
                         const int adr = model->jnt_qposadr[joint];
-                        data->qpos[adr + 0] = pose.position.x;
-                        data->qpos[adr + 1] = pose.position.y;
-                        data->qpos[adr + 2] = pose.position.z;
-                        data->qpos[adr + 3] = pose.rotation.w;
-                        data->qpos[adr + 4] = pose.rotation.x;
-                        data->qpos[adr + 5] = pose.rotation.y;
-                        data->qpos[adr + 6] = pose.rotation.z;
+                        const bud::math::vec3 spawn_position = to_mujoco(pose.position);
+                        const bud::math::quaternion spawn_rotation = to_mujoco(pose.rotation);
+                        data->qpos[adr + 0] = spawn_position.x;
+                        data->qpos[adr + 1] = spawn_position.y;
+                        data->qpos[adr + 2] = spawn_position.z;
+                        data->qpos[adr + 3] = spawn_rotation.w;
+                        data->qpos[adr + 4] = spawn_rotation.x;
+                        data->qpos[adr + 5] = spawn_rotation.y;
+                        data->qpos[adr + 6] = spawn_rotation.z;
                     }
                 }
                 for (const auto& [joint_name, angle] : pose.joint_angles) {
@@ -384,16 +587,61 @@ namespace bud::physics {
                     if (model->jnt_type[joint] != mjJNT_HINGE)
                         continue;
                     data->qpos[model->jnt_qposadr[joint]] = angle;
-                    // Hold the spawn pose from the first step: bias the position actuator.
-                    const auto act_it = actuator_ids_by_name.find(joint_name);
-                    if (act_it != actuator_ids_by_name.end())
-                        data->ctrl[act_it->second] = angle;
+                    for (size_t cmd_i = 0; cmd_i < articulation.joint_names.size(); ++cmd_i) {
+                        if (articulation.joint_names[cmd_i] == joint_name) {
+                            articulation.joint_commands[cmd_i].q = angle;
+                            break;
+                        }
+                    }
                 }
             }
         }
 
         mj_forward(model, data);
         spec_dirty = false;
+
+        // Collision census and contact parameter tuning for Stage 4
+        {
+            int colliding = 0;
+            int mesh_geoms = 0;
+            int visual_only = 0;
+            for (int geom = 0; geom < model->ngeom; ++geom) {
+                const int contype = model->geom_contype[geom];
+                const int conaffinity = model->geom_conaffinity[geom];
+                if (contype != 0 || conaffinity != 0)
+                    ++colliding;
+                else
+                    ++visual_only;
+                if (model->geom_type[geom] == mjGEOM_MESH)
+                    ++mesh_geoms;
+
+                const int body = model->geom_bodyid[geom];
+                const char* bname = mj_id2name(model, mjOBJ_BODY, body);
+                const std::string_view bname_view = bname ? bname : "";
+                const bool is_foot = (bname_view.find("ankle_roll") != std::string_view::npos ||
+                                      bname_view.find("ankle_pitch") != std::string_view::npos ||
+                                      bname_view.find("foot") != std::string_view::npos);
+                const bool is_ground = (body == 0 || bname_view.find("ground") != std::string_view::npos ||
+                                        bname_view.find("floor") != std::string_view::npos);
+
+                if (is_foot || is_ground) {
+                    model->geom_condim[geom] = 4;
+                    model->geom_friction[3 * geom + 0] = 1.0;
+                    model->geom_friction[3 * geom + 1] = 0.01;
+                    model->geom_friction[3 * geom + 2] = 0.001;
+                    model->geom_solref[2 * geom + 0] = 0.004;
+                    model->geom_solref[2 * geom + 1] = 1.0;
+                    model->geom_solimp[5 * geom + 0] = 0.9;
+                    model->geom_solimp[5 * geom + 1] = 0.95;
+                    model->geom_solimp[5 * geom + 2] = 0.001;
+                    model->geom_solimp[5 * geom + 3] = 0.5;
+                    model->geom_solimp[5 * geom + 4] = 2.0;
+                }
+            }
+            bud::print("[MuJoCo] geoms: {} total, {} colliding, {} visual only, {} mesh",
+                       model->ngeom, colliding, visual_only, mesh_geoms);
+        }
+
         bud::print("{}", "[MuJoCo] world compiled: bodies=" + std::to_string(model->nbody) +
                    " joints=" + std::to_string(model->njnt) +
                    " geoms=" + std::to_string(model->ngeom) +
@@ -402,6 +650,7 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::step(float delta_time, int, int) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world())
             return;
 
@@ -412,6 +661,35 @@ namespace bud::physics {
         accumulated_time += static_cast<double>(delta_time);
         int substeps = 0;
         while (accumulated_time >= timestep && substeps < kMaxSubsteps) {
+            // Apply motor PD torque for all articulations
+            for (auto& articulation : articulations) {
+                if (!articulation.valid)
+                    continue;
+                for (size_t i = 0; i < articulation.joint_ids.size(); ++i) {
+                    const int joint = articulation.joint_ids[i];
+                    const int actuator = articulation.actuator_ids[i];
+                    if (joint < 0 || actuator < 0)
+                        continue;
+
+                    const auto& cmd = articulation.joint_commands[i];
+                    const double q = data->qpos[model->jnt_qposadr[joint]];
+                    const double dq = (model->jnt_type[joint] != mjJNT_FREE)
+                                          ? data->qvel[model->jnt_dofadr[joint]]
+                                          : 0.0;
+
+                    double tau = static_cast<double>(cmd.kp) * (static_cast<double>(cmd.q) - q) +
+                                 static_cast<double>(cmd.kd) * (static_cast<double>(cmd.dq) - dq) +
+                                 static_cast<double>(cmd.tau_ff);
+
+                    if (model->actuator_ctrllimited[actuator]) {
+                        const double min_tau = model->actuator_ctrlrange[2 * actuator + 0];
+                        const double max_tau = model->actuator_ctrlrange[2 * actuator + 1];
+                        tau = std::clamp(tau, min_tau, max_tau);
+                    }
+                    data->ctrl[actuator] = tau;
+                }
+            }
+
             mj_step(model, data);
             accumulated_time -= timestep;
             ++substeps;
@@ -435,12 +713,12 @@ namespace bud::physics {
             const bool is_new = was_present == previous_contact_pairs.end();
             ContactCallback& callback = is_new ? contact_begin_cb : contact_persist_cb;
             if (callback) {
-                const bud::math::vec3 point(static_cast<float>(contact.pos[0]),
-                                            static_cast<float>(contact.pos[1]),
-                                            static_cast<float>(contact.pos[2]));
-                const bud::math::vec3 normal(static_cast<float>(contact.frame[0]),
-                                             static_cast<float>(contact.frame[1]),
-                                             static_cast<float>(contact.frame[2]));
+                const bud::math::vec3 point = from_mujoco(bud::math::vec3(
+                    static_cast<float>(contact.pos[0]), static_cast<float>(contact.pos[1]),
+                    static_cast<float>(contact.pos[2])));
+                const bud::math::vec3 normal = direction_from_mujoco(bud::math::vec3(
+                    static_cast<float>(contact.frame[0]), static_cast<float>(contact.frame[1]),
+                    static_cast<float>(contact.frame[2])));
                 callback(body_user_data(body_a), body_user_data(body_b), point, normal,
                          static_cast<float>(-contact.dist));
             }
@@ -465,19 +743,19 @@ namespace bud::physics {
             if (body < 0)
                 continue;
             const int index = static_cast<int>(body_state.body_count++);
-            body_state.body_positions[index] = bud::math::vec3(
+            body_state.body_positions[index] = from_mujoco(bud::math::vec3(
                 static_cast<float>(data->xpos[3 * body]), static_cast<float>(data->xpos[3 * body + 1]),
-                static_cast<float>(data->xpos[3 * body + 2]));
-            body_state.body_rotations[index] = bud::math::quaternion(
+                static_cast<float>(data->xpos[3 * body + 2])));
+            body_state.body_rotations[index] = from_mujoco(bud::math::quaternion(
                 static_cast<float>(data->xquat[4 * body]), static_cast<float>(data->xquat[4 * body + 1]),
-                static_cast<float>(data->xquat[4 * body + 2]), static_cast<float>(data->xquat[4 * body + 3]));
+                static_cast<float>(data->xquat[4 * body + 2]), static_cast<float>(data->xquat[4 * body + 3])));
             // MuJoCo's cvel is [angular, linear] about the body's centre of mass.
-            body_state.body_angular_velocities[index] = bud::math::vec3(
+            body_state.body_angular_velocities[index] = from_mujoco(bud::math::vec3(
                 static_cast<float>(data->cvel[6 * body]), static_cast<float>(data->cvel[6 * body + 1]),
-                static_cast<float>(data->cvel[6 * body + 2]));
-            body_state.body_linear_velocities[index] = bud::math::vec3(
+                static_cast<float>(data->cvel[6 * body + 2])));
+            body_state.body_linear_velocities[index] = from_mujoco(bud::math::vec3(
                 static_cast<float>(data->cvel[6 * body + 3]), static_cast<float>(data->cvel[6 * body + 4]),
-                static_cast<float>(data->cvel[6 * body + 5]));
+                static_cast<float>(data->cvel[6 * body + 5])));
             body_state.body_masses[index] = static_cast<float>(model->body_mass[body]);
             body_state.body_flags[index] = handle_static[handle] ? BODY_FLAG_STATIC : 0;
             body_state.body_user_data[index] = handle_user_data[handle];
@@ -529,9 +807,10 @@ namespace bud::physics {
         if (joint < 0 || model->jnt_type[joint] != mjJNT_FREE)
             return;
         const int adr = model->jnt_qposadr[joint];
-        data->qpos[adr + 0] = position.x;
-        data->qpos[adr + 1] = position.y;
-        data->qpos[adr + 2] = position.z;
+        const bud::math::vec3 mujoco_position = to_mujoco(position);
+        data->qpos[adr + 0] = mujoco_position.x;
+        data->qpos[adr + 1] = mujoco_position.y;
+        data->qpos[adr + 2] = mujoco_position.z;
         mj_forward(model, data);
     }
 
@@ -545,10 +824,11 @@ namespace bud::physics {
         if (joint < 0 || model->jnt_type[joint] != mjJNT_FREE)
             return;
         const int adr = model->jnt_qposadr[joint];
-        data->qpos[adr + 3] = rotation.w;
-        data->qpos[adr + 4] = rotation.x;
-        data->qpos[adr + 5] = rotation.y;
-        data->qpos[adr + 6] = rotation.z;
+        const bud::math::quaternion mujoco_rotation = to_mujoco(rotation);
+        data->qpos[adr + 3] = mujoco_rotation.w;
+        data->qpos[adr + 4] = mujoco_rotation.x;
+        data->qpos[adr + 5] = mujoco_rotation.y;
+        data->qpos[adr + 6] = mujoco_rotation.z;
         mj_forward(model, data);
     }
 
@@ -562,9 +842,10 @@ namespace bud::physics {
         if (joint < 0 || model->jnt_type[joint] != mjJNT_FREE)
             return;
         const int adr = model->jnt_dofadr[joint];
-        data->qvel[adr + 0] = velocity.x;
-        data->qvel[adr + 1] = velocity.y;
-        data->qvel[adr + 2] = velocity.z;
+        const bud::math::vec3 mujoco_velocity = direction_to_mujoco(velocity);
+        data->qvel[adr + 0] = mujoco_velocity.x;
+        data->qvel[adr + 1] = mujoco_velocity.y;
+        data->qvel[adr + 2] = mujoco_velocity.z;
     }
 
     void MujocoPhysicsWorld::set_body_angular_velocity(RigidBodyHandle handle, const bud::math::vec3& velocity) {
@@ -577,9 +858,10 @@ namespace bud::physics {
         if (joint < 0 || model->jnt_type[joint] != mjJNT_FREE)
             return;
         const int adr = model->jnt_dofadr[joint];
-        data->qvel[adr + 3] = velocity.x;
-        data->qvel[adr + 4] = velocity.y;
-        data->qvel[adr + 5] = velocity.z;
+        const bud::math::vec3 mujoco_velocity = direction_to_mujoco(velocity);
+        data->qvel[adr + 3] = mujoco_velocity.x;
+        data->qvel[adr + 4] = mujoco_velocity.y;
+        data->qvel[adr + 5] = mujoco_velocity.z;
     }
 
     void MujocoPhysicsWorld::apply_force(RigidBodyHandle handle, const bud::math::vec3& force) {
@@ -588,9 +870,10 @@ namespace bud::physics {
         const int body = handle_body_ids[handle.id];
         if (body < 0)
             return;
-        data->xfrc_applied[6 * body + 0] += force.x;
-        data->xfrc_applied[6 * body + 1] += force.y;
-        data->xfrc_applied[6 * body + 2] += force.z;
+        const bud::math::vec3 mujoco_force = direction_to_mujoco(force);
+        data->xfrc_applied[6 * body + 0] += mujoco_force.x;
+        data->xfrc_applied[6 * body + 1] += mujoco_force.y;
+        data->xfrc_applied[6 * body + 2] += mujoco_force.z;
     }
 
     void MujocoPhysicsWorld::apply_impulse(RigidBodyHandle handle, const bud::math::vec3& impulse) {
@@ -600,9 +883,11 @@ namespace bud::physics {
         if (body < 0 || model->body_mass[body] <= 0.0f)
             return;
         const double inverse_mass = 1.0 / model->body_mass[body];
-        data->qvel[model->jnt_dofadr[model->body_jntadr[body]] + 0] += impulse.x * inverse_mass;
-        data->qvel[model->jnt_dofadr[model->body_jntadr[body]] + 1] += impulse.y * inverse_mass;
-        data->qvel[model->jnt_dofadr[model->body_jntadr[body]] + 2] += impulse.z * inverse_mass;
+        const bud::math::vec3 mujoco_impulse = direction_to_mujoco(impulse);
+        const int dof = model->jnt_dofadr[model->body_jntadr[body]];
+        data->qvel[dof + 0] += mujoco_impulse.x * inverse_mass;
+        data->qvel[dof + 1] += mujoco_impulse.y * inverse_mass;
+        data->qvel[dof + 2] += mujoco_impulse.z * inverse_mass;
     }
 
     bool MujocoPhysicsWorld::get_articulation_state(ArticulationHandle handle, ArticulationStateSoA& out) const {
@@ -617,19 +902,19 @@ namespace bud::physics {
             const int body = articulation.body_ids[i];
             if (body < 0)
                 continue;
-            out.link_positions[i] = bud::math::vec3(static_cast<float>(data->xpos[3 * body]),
-                                                   static_cast<float>(data->xpos[3 * body + 1]),
-                                                   static_cast<float>(data->xpos[3 * body + 2]));
-            out.link_rotations[i] = bud::math::quaternion(static_cast<float>(data->xquat[4 * body]),
-                                                         static_cast<float>(data->xquat[4 * body + 1]),
-                                                         static_cast<float>(data->xquat[4 * body + 2]),
-                                                         static_cast<float>(data->xquat[4 * body + 3]));
-            out.link_linear_velocities[i] = bud::math::vec3(static_cast<float>(data->cvel[6 * body + 3]),
-                                                           static_cast<float>(data->cvel[6 * body + 4]),
-                                                           static_cast<float>(data->cvel[6 * body + 5]));
-            out.link_angular_velocities[i] = bud::math::vec3(static_cast<float>(data->cvel[6 * body + 0]),
-                                                            static_cast<float>(data->cvel[6 * body + 1]),
-                                                            static_cast<float>(data->cvel[6 * body + 2]));
+            out.link_positions[i] = from_mujoco(bud::math::vec3(static_cast<float>(data->xpos[3 * body]),
+                                                               static_cast<float>(data->xpos[3 * body + 1]),
+                                                               static_cast<float>(data->xpos[3 * body + 2])));
+            out.link_rotations[i] = from_mujoco(bud::math::quaternion(static_cast<float>(data->xquat[4 * body]),
+                                                                     static_cast<float>(data->xquat[4 * body + 1]),
+                                                                     static_cast<float>(data->xquat[4 * body + 2]),
+                                                                     static_cast<float>(data->xquat[4 * body + 3])));
+            out.link_linear_velocities[i] = from_mujoco(bud::math::vec3(static_cast<float>(data->cvel[6 * body + 3]),
+                                                                       static_cast<float>(data->cvel[6 * body + 4]),
+                                                                       static_cast<float>(data->cvel[6 * body + 5])));
+            out.link_angular_velocities[i] = from_mujoco(bud::math::vec3(static_cast<float>(data->cvel[6 * body + 0]),
+                                                                        static_cast<float>(data->cvel[6 * body + 1]),
+                                                                        static_cast<float>(data->cvel[6 * body + 2])));
         }
         for (size_t i = 0; i < articulation.joint_ids.size(); ++i) {
             const int joint = articulation.joint_ids[i];
@@ -645,20 +930,63 @@ namespace bud::physics {
         return true;
     }
 
+    void MujocoPhysicsWorld::set_articulation_joint_commands(ArticulationHandle handle,
+                                                             std::span<const JointCommand> commands) {
+        if (!compile_world() || !handle.is_valid() || handle.id >= articulations.size())
+            return;
+        Articulation& articulation = articulations[handle.id];
+        if (!articulation.valid)
+            return;
+
+        for (const auto& cmd : commands) {
+            for (size_t i = 0; i < articulation.joint_names.size(); ++i) {
+                if (articulation.joint_names[i] == cmd.joint_name) {
+                    articulation.joint_commands[i] = cmd;
+                    break;
+                }
+            }
+        }
+    }
+
     void MujocoPhysicsWorld::set_articulation_target_angle(ArticulationHandle handle,
                                                           const std::string& joint_name, float angle) {
         if (!compile_world() || !handle.is_valid() || handle.id >= articulations.size())
             return;
-        const int actuator = find_actuator_id(joint_name);
-        if (actuator < 0)
+        Articulation& articulation = articulations[handle.id];
+        if (!articulation.valid)
             return;
-        data->ctrl[actuator] = angle;
+
+        for (size_t i = 0; i < articulation.joint_names.size(); ++i) {
+            if (articulation.joint_names[i] == joint_name) {
+                articulation.joint_commands[i].q = angle;
+                articulation.joint_commands[i].dq = 0.0f;
+                if (articulation.joint_commands[i].kp == 0.0f)
+                    articulation.joint_commands[i].kp = articulation.joint_descs[i].stiffness > 0.0f
+                                                            ? articulation.joint_descs[i].stiffness
+                                                            : 40.0f;
+                if (articulation.joint_commands[i].kd == 0.0f)
+                    articulation.joint_commands[i].kd = articulation.joint_descs[i].damping > 0.0f
+                                                            ? articulation.joint_descs[i].damping
+                                                            : 2.0f;
+                break;
+            }
+        }
     }
 
-    void MujocoPhysicsWorld::set_articulation_target_velocity(ArticulationHandle, const std::string&, float) {
-        // The cooked model uses position actuators; velocity targets would need a different actuator
-        // configuration, so this is reported instead of silently doing nothing useful.
-        bud::eprint("[MuJoCo] set_articulation_target_velocity needs a velocity actuator in the model");
+    void MujocoPhysicsWorld::set_articulation_target_velocity(ArticulationHandle handle,
+                                                             const std::string& joint_name, float velocity) {
+        if (!compile_world() || !handle.is_valid() || handle.id >= articulations.size())
+            return;
+        Articulation& articulation = articulations[handle.id];
+        if (!articulation.valid)
+            return;
+
+        for (size_t i = 0; i < articulation.joint_names.size(); ++i) {
+            if (articulation.joint_names[i] == joint_name) {
+                articulation.joint_commands[i].dq = velocity;
+                break;
+            }
+        }
     }
 
     float MujocoPhysicsWorld::get_articulation_joint_angle(ArticulationHandle, const std::string& joint_name) const {
@@ -670,13 +998,15 @@ namespace bud::physics {
         return static_cast<float>(data->qpos[model->jnt_qposadr[joint]]);
     }
 
-    float MujocoPhysicsWorld::get_articulation_joint_stiffness(ArticulationHandle, const std::string& joint_name) const {
-        if (!model)
+    float MujocoPhysicsWorld::get_articulation_joint_stiffness(ArticulationHandle handle, const std::string& joint_name) const {
+        if (!handle.is_valid() || handle.id >= articulations.size())
             return 0.0f;
-        const int actuator = find_actuator_id(joint_name);
-        if (actuator < 0)
-            return 0.0f;
-        return static_cast<float>(model->actuator_gainprm[actuator * mjNGAIN + 0]);
+        const auto& articulation = articulations[handle.id];
+        for (size_t i = 0; i < articulation.joint_names.size(); ++i) {
+            if (articulation.joint_names[i] == joint_name)
+                return articulation.joint_commands[i].kp;
+        }
+        return 0.0f;
     }
 
     void MujocoPhysicsWorld::set_articulation_link_transform(ArticulationHandle handle,
@@ -697,10 +1027,11 @@ namespace bud::physics {
         data->qpos[adr + 0] = position.x;
         data->qpos[adr + 1] = position.y;
         data->qpos[adr + 2] = position.z;
-        data->qpos[adr + 3] = rotation.w;
-        data->qpos[adr + 4] = rotation.x;
-        data->qpos[adr + 5] = rotation.y;
-        data->qpos[adr + 6] = rotation.z;
+        const bud::math::quaternion mujoco_rotation = to_mujoco(rotation);
+        data->qpos[adr + 3] = mujoco_rotation.w;
+        data->qpos[adr + 4] = mujoco_rotation.x;
+        data->qpos[adr + 5] = mujoco_rotation.y;
+        data->qpos[adr + 6] = mujoco_rotation.z;
         mj_forward(model, data);
     }
 
@@ -709,12 +1040,15 @@ namespace bud::physics {
         if (!model || !data)
             return std::nullopt;
 
-        const double delta[3] = { to.x - from.x, to.y - from.y, to.z - from.z };
+        const bud::math::vec3 mujoco_from = to_mujoco(from);
+        const bud::math::vec3 mujoco_to = to_mujoco(to);
+        const double delta[3] = { mujoco_to.x - mujoco_from.x, mujoco_to.y - mujoco_from.y,
+                                  mujoco_to.z - mujoco_from.z };
         const double length = std::sqrt(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
         if (length < 1.0e-8)
             return std::nullopt;
         const double direction[3] = { delta[0] / length, delta[1] / length, delta[2] / length };
-        const double point[3] = { from.x, from.y, from.z };
+        const double point[3] = { mujoco_from.x, mujoco_from.y, mujoco_from.z };
 
         int geom_id = -1;
         double hit_normal[3] = { 0.0, 0.0, 0.0 };
@@ -726,12 +1060,13 @@ namespace bud::physics {
         RaycastResult result;
         result.hit = true;
         result.fraction = static_cast<float>(distance / length);
-        result.hit_point = bud::math::vec3(from.x + static_cast<float>(direction[0] * distance),
-                                           from.y + static_cast<float>(direction[1] * distance),
-                                           from.z + static_cast<float>(direction[2] * distance));
-        result.hit_normal = bud::math::vec3(static_cast<float>(hit_normal[0]),
-                                            static_cast<float>(hit_normal[1]),
-                                            static_cast<float>(hit_normal[2]));
+        result.hit_point = from_mujoco(bud::math::vec3(
+            mujoco_from.x + static_cast<float>(direction[0] * distance),
+            mujoco_from.y + static_cast<float>(direction[1] * distance),
+            mujoco_from.z + static_cast<float>(direction[2] * distance)));
+        result.hit_normal = direction_from_mujoco(bud::math::vec3(static_cast<float>(hit_normal[0]),
+                                                                  static_cast<float>(hit_normal[1]),
+                                                                  static_cast<float>(hit_normal[2])));
         result.user_data = body_user_data(model->geom_bodyid[geom_id]);
         return result;
     }
@@ -776,12 +1111,12 @@ namespace bud::physics {
             ContactPoint point;
             point.body_a_user_data = body_user_data(model->geom_bodyid[contact.geom1]);
             point.body_b_user_data = body_user_data(model->geom_bodyid[contact.geom2]);
-            point.point = bud::math::vec3(static_cast<float>(contact.pos[0]),
-                                          static_cast<float>(contact.pos[1]),
-                                          static_cast<float>(contact.pos[2]));
-            point.normal = bud::math::vec3(static_cast<float>(contact.frame[0]),
-                                           static_cast<float>(contact.frame[1]),
-                                           static_cast<float>(contact.frame[2]));
+            point.point = from_mujoco(bud::math::vec3(static_cast<float>(contact.pos[0]),
+                                                       static_cast<float>(contact.pos[1]),
+                                                       static_cast<float>(contact.pos[2])));
+            point.normal = direction_from_mujoco(bud::math::vec3(static_cast<float>(contact.frame[0]),
+                                                                 static_cast<float>(contact.frame[1]),
+                                                                 static_cast<float>(contact.frame[2])));
             point.penetration_depth = static_cast<float>(-contact.dist);
             contacts.push_back(point);
         }
@@ -810,13 +1145,15 @@ namespace bud::physics {
             const int body = handle_body_ids[handle];
             if (body < 0)
                 continue;
-            const float px = static_cast<float>(data->xpos[3 * body]);
-            const float py = static_cast<float>(data->xpos[3 * body + 1]);
-            const float pz = static_cast<float>(data->xpos[3 * body + 2]);
-            const bud::math::vec3 origin(px, py, pz);
-            out_lines.push_back({ origin, bud::math::vec3(px + kAxisLength, py, pz), bud::math::vec3(1, 0, 0) });
-            out_lines.push_back({ origin, bud::math::vec3(px, py + kAxisLength, pz), bud::math::vec3(0, 1, 0) });
-            out_lines.push_back({ origin, bud::math::vec3(px, py, pz + kAxisLength), bud::math::vec3(0, 0, 1) });
+            const bud::math::vec3 origin = from_mujoco(bud::math::vec3(
+                static_cast<float>(data->xpos[3 * body]), static_cast<float>(data->xpos[3 * body + 1]),
+                static_cast<float>(data->xpos[3 * body + 2])));
+            out_lines.push_back({ origin, origin + from_mujoco(bud::math::vec3(kAxisLength, 0.0f, 0.0f)),
+                                  bud::math::vec3(1, 0, 0) });
+            out_lines.push_back({ origin, origin + from_mujoco(bud::math::vec3(0.0f, kAxisLength, 0.0f)),
+                                  bud::math::vec3(0, 1, 0) });
+            out_lines.push_back({ origin, origin + from_mujoco(bud::math::vec3(0.0f, 0.0f, kAxisLength)),
+                                  bud::math::vec3(0, 0, 1) });
         }
     }
 

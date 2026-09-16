@@ -37,6 +37,7 @@ namespace bud::physics {
 
         // Backend selection: Jolt for game worlds, MuJoCo for robot projects. The capacities are
         // ignored by backends that size themselves (MuJoCo does).
+        void init(const PhysicsWorldConfig& config);
         void init(uint32_t max_bodies = 65536,
                   uint32_t max_body_pairs = 65536,
                   uint32_t max_contact_constraints = 10240,
@@ -66,6 +67,12 @@ namespace bud::physics {
         bud::math::vec3 get_gravity() const;
         uint32_t get_active_body_count() const;
         uint32_t get_total_body_count() const;
+        float get_ground_plane_height() const {
+            if (world)
+                return world->get_ground_plane_height();
+            else
+                return 0.0f;
+        }
 
         // Kept so existing call sites stay unchanged; forwarding to the backend, which mirrors the
         // SoA into its own solver at step boundaries anyway.

@@ -728,6 +728,8 @@ namespace bud::physics {
         return false;
     }
 
+    void JoltPhysicsWorld::set_articulation_joint_commands(ArticulationHandle, std::span<const JointCommand>) {}
+
     void JoltPhysicsWorld::set_articulation_target_angle(ArticulationHandle, const std::string&, float) {}
 
     void JoltPhysicsWorld::set_articulation_target_velocity(ArticulationHandle, const std::string&, float) {}

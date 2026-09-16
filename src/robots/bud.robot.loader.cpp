@@ -1,4 +1,5 @@
 #include "src/robots/bud.robot.loader.hpp"
+#include "src/robots/bud.robot.lowcmd.hpp"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -24,7 +25,10 @@
 
 #include <Jolt/Geometry/ConvexHullBuilder.h>
 #include "src/core/bud.asset.types.hpp"
+#include "src/core/bud.logger.hpp"
 #include "src/core/bud.raw_mesh.hpp"
+#include "src/physics/bud.physics.world.hpp"
+#include "src/robots/bud.robot.mujoco.hpp"
 
 namespace bud::robots {
 
@@ -297,11 +301,29 @@ RobotInstance::RobotInstance(const bud::robots::RobotDef& def,
     }
 }
 
+RobotInstance::RobotInstance(const bud::robots::RobotDef& def,
+                             physics::PhysicsScene* scene,
+                             physics::ArticulationHandle articulation_handle,
+                             std::unordered_map<std::string, int> link_to_part)
+    : m_def(def),
+      m_physics_scene(scene),
+      m_articulation_handle(articulation_handle),
+      m_link_to_part(std::move(link_to_part)) {
+}
+
 RobotInstance::~RobotInstance() {
     remove_from_simulation();
 }
 
 void RobotInstance::remove_from_simulation() {
+    if (is_simulation()) {
+        if (m_physics_scene && m_articulation_handle.is_valid()) {
+            m_physics_scene->get_world().remove_articulation(m_articulation_handle);
+            m_articulation_handle = {};
+        }
+        return;
+    }
+
     if (m_ragdoll && m_system) {
         m_ragdoll->RemoveFromPhysicsSystem();
         m_ragdoll->Release();
@@ -310,6 +332,12 @@ void RobotInstance::remove_from_simulation() {
 }
 
 void RobotInstance::set_joint_target_angle(const std::string& joint_name, float target_angle_rad) {
+    if (is_simulation()) {
+        if (m_physics_scene)
+            m_physics_scene->get_world().set_articulation_target_angle(m_articulation_handle, joint_name, target_angle_rad);
+        return;
+    }
+
     auto it = m_joint_to_constraint.find(joint_name);
     if (it == m_joint_to_constraint.end() || !m_ragdoll)
         return;
@@ -330,6 +358,12 @@ void RobotInstance::set_joint_target_angle(const std::string& joint_name, float 
 }
 
 void RobotInstance::set_joint_target_velocity(const std::string& joint_name, float target_velocity_rad_s) {
+    if (is_simulation()) {
+        if (m_physics_scene)
+            m_physics_scene->get_world().set_articulation_target_velocity(m_articulation_handle, joint_name, target_velocity_rad_s);
+        return;
+    }
+
     auto it = m_joint_to_constraint.find(joint_name);
     if (it == m_joint_to_constraint.end() || !m_ragdoll)
         return;
@@ -349,7 +383,30 @@ void RobotInstance::set_joint_target_velocity(const std::string& joint_name, flo
     }
 }
 
+void RobotInstance::set_joint_commands(std::span<const physics::JointCommand> commands) {
+    if (is_simulation()) {
+        if (m_physics_scene)
+            m_physics_scene->get_world().set_articulation_joint_commands(m_articulation_handle, commands);
+        return;
+    }
+
+    for (const auto& cmd : commands) {
+        set_joint_target_angle(cmd.joint_name, cmd.q);
+    }
+}
+
+void RobotInstance::set_low_cmd(const LowCmd& cmd) {
+    const auto commands = cmd.to_joint_commands();
+    set_joint_commands(commands);
+}
+
 float RobotInstance::get_joint_angle(const std::string& joint_name) const {
+    if (is_simulation()) {
+        if (m_physics_scene)
+            return m_physics_scene->get_world().get_articulation_joint_angle(m_articulation_handle, joint_name);
+        return 0.0f;
+    }
+
     auto it = m_joint_to_constraint.find(joint_name);
     if (it == m_joint_to_constraint.end() || !m_ragdoll)
         return 0.0f;
@@ -371,6 +428,18 @@ float RobotInstance::get_joint_angle(const std::string& joint_name) const {
 }
 
 bud::math::vec3 RobotInstance::get_link_position(const std::string& link_name) const {
+    if (is_simulation()) {
+        if (m_physics_scene) {
+            bud::physics::ArticulationStateSoA state;
+            if (m_physics_scene->get_world().get_articulation_state(m_articulation_handle, state)) {
+                int idx = get_part_index(link_name);
+                if (idx >= 0 && static_cast<size_t>(idx) < state.link_positions.size())
+                    return state.link_positions[idx];
+            }
+        }
+        return {};
+    }
+
     auto it = m_link_to_part.find(link_name);
     if (it == m_link_to_part.end() || !m_ragdoll || !m_system)
         return {};
@@ -381,6 +450,18 @@ bud::math::vec3 RobotInstance::get_link_position(const std::string& link_name) c
 }
 
 bud::math::quaternion RobotInstance::get_link_rotation(const std::string& link_name) const {
+    if (is_simulation()) {
+        if (m_physics_scene) {
+            bud::physics::ArticulationStateSoA state;
+            if (m_physics_scene->get_world().get_articulation_state(m_articulation_handle, state)) {
+                int idx = get_part_index(link_name);
+                if (idx >= 0 && static_cast<size_t>(idx) < state.link_rotations.size())
+                    return state.link_rotations[idx];
+            }
+        }
+        return bud::math::quaternion(1.0f, 0.0f, 0.0f, 0.0f);
+    }
+
     auto it = m_link_to_part.find(link_name);
     if (it == m_link_to_part.end() || !m_ragdoll || !m_system)
         return bud::math::quaternion(1.0f, 0.0f, 0.0f, 0.0f);
@@ -391,6 +472,26 @@ bud::math::quaternion RobotInstance::get_link_rotation(const std::string& link_n
 }
 
 std::vector<RobotInstance::LinkTransform> RobotInstance::get_all_link_transforms() const {
+    if (is_simulation()) {
+        std::vector<LinkTransform> transforms;
+        if (m_physics_scene) {
+            bud::physics::ArticulationStateSoA state;
+            if (m_physics_scene->get_world().get_articulation_state(m_articulation_handle, state)) {
+                transforms.reserve(m_link_to_part.size());
+                for (const auto& [name, part_idx] : m_link_to_part) {
+                    if (part_idx >= 0 && static_cast<size_t>(part_idx) < state.link_positions.size()) {
+                        transforms.push_back({
+                            name,
+                            state.link_positions[part_idx],
+                            state.link_rotations[part_idx]
+                        });
+                    }
+                }
+            }
+        }
+        return transforms;
+    }
+
     if (!m_ragdoll || !m_system)
         return {};
 
@@ -418,6 +519,78 @@ std::vector<RobotInstance::LinkTransform> RobotInstance::get_all_link_transforms
 std::unique_ptr<RobotInstance> RobotLoader::spawn_robot(physics::PhysicsScene& scene,
                                                         const bud::robots::RobotDef& robot_def,
                                                         const RobotSpawnParams& params) {
+    if (scene.get_backend() == physics::PhysicsBackend::Mujoco) {
+        std::string asset_path = params.asset_path;
+        if (asset_path.empty())
+            asset_path = "Content/Robots/g1_description/g1_29dof.budasset";
+
+        auto cooked = bud::robots::MujocoModelData::load_from_budasset(asset_path);
+        if (!cooked) {
+            bud::eprint("[RobotLoader] Error: Could not load PhysicsModel chunk from {}", asset_path);
+            return nullptr;
+        }
+
+        bud::physics::ArticulationDesc articulation{};
+        articulation.name = robot_def.name;
+        articulation.root_link = robot_def.root_link;
+        articulation.root_position = params.position;
+        if (articulation.root_position.y == 0.0f)
+            articulation.root_position.y = 0.785f;
+        articulation.root_rotation = params.rotation;
+        if (params.initial_joint_angles.empty())
+            articulation.initial_joint_angles = get_g1_standing_joint_angles();
+        else
+            articulation.initial_joint_angles = params.initial_joint_angles;
+        for (const auto& link : robot_def.links) {
+            bud::physics::ArticulationLinkDesc link_desc{};
+            link_desc.name = link.name;
+            articulation.links.push_back(std::move(link_desc));
+        }
+
+        for (const auto& joint : robot_def.joints) {
+            bud::physics::ArticulationJointDesc joint_desc{};
+            joint_desc.name = joint.name;
+            joint_desc.parent_link = joint.parent_link;
+            joint_desc.child_link = joint.child_link;
+            bud::robots::get_default_g1_gains(joint.name, joint_desc.stiffness, joint_desc.damping);
+            joint_desc.max_torque = joint.limit.effort > 0.0f ? joint.limit.effort : params.default_motor_max_torque;
+            articulation.joints.push_back(std::move(joint_desc));
+        }
+
+        articulation.cooked_model.format =
+            cooked->format == bud::robots::MujocoModelFormat::Mjcf
+                ? bud::physics::CookedModelFormat::MjcfText
+                : bud::physics::CookedModelFormat::MjbBinary;
+        articulation.cooked_model.payload.assign(cooked->model_payload.begin(), cooked->model_payload.end());
+        articulation.cooked_model.render_metadata_json = cooked->render_metadata_json;
+        articulation.cooked_model.physics_metadata_json = cooked->physics_metadata_json;
+        const std::filesystem::path package_dir = std::filesystem::path(asset_path).parent_path();
+        for (const auto& mesh : cooked->meshes) {
+            bud::physics::CookedModelMeshRef ref{};
+            ref.model_name = mesh.mjcf_name;
+            ref.asset_path = (package_dir / mesh.asset_path).string();
+            articulation.cooked_model.meshes.push_back(std::move(ref));
+        }
+
+        const auto handle = scene.get_world().create_articulation(articulation);
+        if (!handle.is_valid()) {
+            bud::eprint("[RobotLoader] Error: create_articulation failed for robot '{}'", robot_def.name);
+            return nullptr;
+        }
+
+        auto base_standing_cmd = bud::robots::make_g1_standing_cmd();
+        scene.get_world().set_articulation_joint_commands(handle, base_standing_cmd.to_joint_commands());
+
+        std::unordered_map<std::string, int> link_to_part;
+        for (size_t i = 0; i < robot_def.links.size(); ++i) {
+            link_to_part[robot_def.links[i].name] = static_cast<int>(i);
+        }
+
+        bud::print("[RobotLoader] Successfully spawned robot '{}' in MuJoCo (Articulation Handle: {})",
+                   robot_def.name, handle.id);
+        return std::make_unique<RobotInstance>(robot_def, &scene, handle, std::move(link_to_part));
+    }
+
     JPH::PhysicsSystem* system = scene.get_jolt_system();
     if (!system) {
         std::cerr << "[RobotLoader] Error: Jolt PhysicsSystem not available from PhysicsScene." << std::endl;
@@ -657,7 +830,11 @@ std::unique_ptr<RobotInstance> RobotLoader::spawn_robot_from_file(physics::Physi
     std::string package_root = std::filesystem::path(robot_file_path).parent_path().string();
     ensure_link_mesh_collisions(*robot_def_opt, package_root);
 
-    return spawn_robot(scene, *robot_def_opt, params);
+    RobotSpawnParams updated_params = params;
+    if (updated_params.asset_path.empty())
+        updated_params.asset_path = robot_file_path;
+
+    return spawn_robot(scene, *robot_def_opt, updated_params);
 }
 
 } // namespace bud::robots

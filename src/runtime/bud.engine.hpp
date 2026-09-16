@@ -77,6 +77,11 @@ namespace bud::engine {
 
 		auto& get_engine_config() const { return engine_config; }
 
+		void request_close() {
+			if (window)
+				window->request_close();
+		}
+
 	private:
 		void handle_events();
 

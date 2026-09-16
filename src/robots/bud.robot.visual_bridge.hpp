@@ -8,6 +8,7 @@
 #include "src/robots/bud.robot.types.hpp"
 #include "src/robots/bud.robot.loader.hpp"
 #include "src/runtime/bud.scene.hpp"
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace bud::engine {
     class BudEngine;
@@ -55,11 +56,19 @@ public:
         return m_visible;
     }
 
+    // Declares that link transforms from get_all_link_transforms() are in engine Y-up space
+    // (returned by the MuJoCo backend via from_mujoco conversion), while visual local offsets
+    // are in URDF Z-up space. The basis change is applied in sync_transforms to reconcile them.
+    void set_simulation_mode(bool is_sim) { m_is_simulation = is_sim; }
+
 private:
     std::vector<VisualPartEntry> m_parts;
     std::unordered_map<std::string, std::vector<size_t>> m_link_to_part_indices;
     bool m_initialized = false;
     bool m_visible = true;
+    // True when the backend is MuJoCo: link world transforms come in engine Y-up space
+    // but visual offsets are authored in URDF Z-up space, so a basis conversion is needed.
+    bool m_is_simulation = false;
 };
 
 } // namespace bud::robots

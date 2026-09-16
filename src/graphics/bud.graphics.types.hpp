@@ -10,6 +10,7 @@
 #include "src/core/bud.core.hpp"
 #include "src/core/bud.math.hpp"
 #include "src/physics/bud.cloth.types.hpp"
+#include "src/physics/bud.physics.types.hpp"
 
 namespace math = bud::math;
 
@@ -225,11 +226,17 @@ namespace bud::graphics {
 		std::string name;
 	};
 
+	enum class EngineMode : uint8_t {
+		Game = 0,         // 游戏模式: Jolt 物理 + 运动学虚拟驱动 + 确定性手感
+		Simulation = 1    // 仿真模式: MuJoCo 物理 + Articulation 动力学 + LowCmd 官方控制
+	};
+
 	struct EngineConfig {
 		std::string name = "Bud Engine";
 		int width = 1920;
 		int height = 1080;
 		Backend backend = Backend::Vulkan;
+		EngineMode mode = EngineMode::Game;
 		uint32_t inflight_frame_count = 3;
 		bool enable_validation = true;
 		bool vsync = false;
@@ -239,6 +246,11 @@ namespace bud::graphics {
 		// Standard World Spatial & Physical Units (1.0f == 1.0 cm)
 		float world_unit_scale_cm = bud::core::units::cm;
 		float default_gravity = -bud::core::units::gravity; // -980.665 cm/s^2
+
+		// Physics Backend & Ground Plane configuration
+		bud::physics::PhysicsBackend physics_backend = bud::physics::PhysicsBackend::Jolt;
+		bool enable_ground_plane = false;
+		float ground_plane_height = 0.0f;
 	};
 
 	enum class AOMode : uint32_t {

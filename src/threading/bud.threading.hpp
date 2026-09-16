@@ -1,4 +1,4 @@
-﻿/// The Task Scheduler is the core component that powers the engine's Job System.
+/// The Task Scheduler is the core component that powers the engine's Job System.
 
 #pragma once
 
@@ -78,9 +78,9 @@ namespace bud::threading {
 #endif
 
 #ifdef _DEBUG
-		static constexpr size_t DEFAULT_STACK_SIZE = 256 * 1024; // 256KB
+		static constexpr size_t DEFAULT_STACK_SIZE = 1024 * 1024; // 1MB
 #else
-		static constexpr size_t DEFAULT_STACK_SIZE = 128 * 1024; // 128KB
+		static constexpr size_t DEFAULT_STACK_SIZE = 512 * 1024; // 512KB
 #endif
 
 		Fiber(size_t stack_size = DEFAULT_STACK_SIZE);
