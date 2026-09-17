@@ -83,6 +83,7 @@ namespace bud::physics {
                                              const bud::math::vec3& position,
                                              const bud::math::quaternion& rotation) override;
         void set_articulation_activated(ArticulationHandle handle, bool activated) override;
+        void reset_articulation(ArticulationHandle handle) override;
 
         // --- spatial queries ---
         std::optional<RaycastResult> raycast(const bud::math::vec3& from,

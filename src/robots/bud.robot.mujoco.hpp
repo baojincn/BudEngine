@@ -10,9 +10,12 @@
 //   1. The base joint. URDFs describe the base as "world --floating--> pelvis" and MuJoCo's
 //      importer drops that joint, which welds the robot to the world (free joints = 0). Every
 //      "it stands" result is then meaningless, so the pelvis gets an explicit free joint.
-//   2. What the URDF cannot express: armature (rotor inertia), actuator gains and force limits,
-//      contact impedance. These are the sim-to-real parameters and they live in
-//      physics_metadata_json / are baked into the MJCF.
+//   2. What the URDF cannot express: armature (rotor inertia), joint damping, Coulomb friction and
+//      the per-joint torque motors. The cook bakes all of these into the MJCF (values copied from
+//      Unitree's own MJCF), with the URDF effort limit as each motor's ctrlrange. Actuator gains
+//      (kp/kd) are a controller choice and are deliberately NOT baked.
+//      physics_metadata_json is a reserved slot for per-asset physics parameters the model format
+//      cannot express; it is currently empty and no backend reads it.
 //
 // Meshes are referenced, not copied: the runtime rebuilds the STL bytes MuJoCo asks for from the
 // existing visual .budasset RawMesh chunks (meshes[].asset_path), so a mesh used for both rendering
@@ -49,8 +52,9 @@ namespace bud::robots {
         // Only rendering/animation consumes these (e.g. URDF limit.velocity, which the MuJoCo
         // importer deliberately drops, plus colours and the link -> visual mesh mapping).
         std::string render_metadata_json;
-        // Physics parameters the URDF cannot express (armature, actuator gains, contact impedance,
-        // compiler options).
+        // RESERVED slot, currently always empty and not read by any backend: physics parameters the
+        // model format cannot express and that are not controller goals. Per-joint motor physics
+        // (armature, friction loss, damping, torque limits) is baked into the MJCF payload instead.
         std::string physics_metadata_json;
 
         std::vector<uint8_t> serialize_binary() const;

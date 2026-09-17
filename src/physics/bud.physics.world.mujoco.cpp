@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <unordered_set>
 
 #include <glm/gtc/quaternion.hpp>
 #include <mujoco/mujoco.h>
@@ -168,6 +169,18 @@ namespace bud::physics {
             return glm::normalize(q_b_inv * q * q_b);
         }
 
+        // MuJoCo's own defaults are: timestep 0.002 s, iterations 100, solver NEWTON, integrator
+        // IMPLICITFAST. Solver and integrator stay at those defaults, which is also what the official
+        // Unitree setup runs (their MJCF does not override them).
+        //
+        // timestep: pinned explicitly at 0.002 s (500 Hz). Unitree's own simulator runs
+        //   SIMULATE_DT = 0.003 s (333 Hz); the finer step keeps the motor PD well behaved at the leg
+        //   gains we use, and a single robot costs little, so there is no reason to coarsen it.
+        // iterations: kept at MuJoCo's default (100) rather than an arbitrary lower value, so the
+        //   solver work matches the reference setup.
+        constexpr double k_solver_timestep = 0.002;
+        constexpr int k_solver_iterations = 100;
+
     } // namespace
 
     MujocoPhysicsWorld::MujocoPhysicsWorld() = default;
@@ -250,8 +263,16 @@ namespace bud::physics {
         }
 
         if (desc.shape.type == ShapeType::Mesh || desc.shape.type == ShapeType::ConvexHull) {
-            // Triangle meshes and hulls are not converted to phantom boxes in MuJoCo.
-            // Returning a placeholder handle allows the visual mesh to load without corrupting the physics world.
+            // Triangle meshes and hulls are not converted to phantom boxes in MuJoCo: that used to
+            // corrupt the world with an invisible collider. The handle is still returned so the
+            // visual mesh can load, but it maps to no MuJoCo body (body id -1) and therefore never
+            // collides. This is not silent: the first occurrence warns, compile_world() reports the
+            // total, and the robot stands on the configured ground plane rather than on scene meshes.
+            if (uncollidable_static_meshes == 0) {
+                bud::eprint("[MuJoCo] static scene meshes/hulls are visual-only here and carry no "
+                            "collision; robots stand on the configured ground plane");
+            }
+            ++uncollidable_static_meshes;
             const uint32_t handle_id = static_cast<uint32_t>(handle_body_ids.size());
             handle_body_ids.push_back(-1);
             handle_user_data.push_back(nullptr);
@@ -337,23 +358,19 @@ namespace bud::physics {
             return {};
         }
 
-        // Serve the meshes the model asks for out of our own assets.
+        // Serve the meshes the model asks for out of our own assets. Failures are reported per mesh
+        // (they mean the robot will not compile), but the happy path stays to a single summary line.
+        size_t mesh_bytes_total = 0;
+        int mesh_buffers_added = 0;
         for (const auto& mesh : desc.cooked_model.meshes) {
+            // A second articulation of the same robot reuses the VFS entries already registered.
+            if (registered_mesh_names.count(mesh.model_name) > 0)
+                continue;
+            // Path resolution is backend-agnostic: the loader hands us a path that either exists
+            // as-is or is relative to the configured asset root. No robot-specific fallbacks.
             std::filesystem::path asset_path = mesh.asset_path;
             if (!std::filesystem::exists(asset_path))
                 asset_path = std::filesystem::path(world_config.asset_root) / mesh.asset_path;
-            if (!std::filesystem::exists(asset_path)) {
-                const std::filesystem::path candidates[] = {
-                    std::filesystem::path(world_config.asset_root) / "Robots" / "g1_description" / mesh.asset_path,
-                    std::filesystem::path("Content") / "Robots" / "g1_description" / mesh.asset_path
-                };
-                for (const auto& candidate : candidates) {
-                    if (std::filesystem::exists(candidate)) {
-                        asset_path = candidate;
-                        break;
-                    }
-                }
-            }
             const std::vector<char> chunk = read_asset_chunk(asset_path.string(), bud::asset::AssetChunkType::RawMesh);
             if (chunk.empty()) {
                 bud::eprint("{}", "[MuJoCo] mesh asset missing or has no RawMesh chunk: " + asset_path.string());
@@ -365,40 +382,53 @@ namespace bud::physics {
                 bud::eprint("{}", "[MuJoCo] failed to convert mesh to STL: " + mesh.asset_path);
                 continue;
             }
-            int add_res = mj_addBufferVFS(static_cast<mjVFS*>(mesh_vfs), mesh.model_name.c_str(), stl.data(), static_cast<int>(stl.size()));
-            bud::print("[MuJoCo] mj_addBufferVFS('{}', size={}) -> {}", mesh.model_name, stl.size(), add_res);
+            const int add_result =
+                mj_addBufferVFS(static_cast<mjVFS*>(mesh_vfs), mesh.model_name.c_str(), stl.data(),
+                                static_cast<int>(stl.size()));
+            if (add_result != 0) {
+                bud::eprint("{}", "[MuJoCo] mj_addBufferVFS failed for mesh '" + mesh.model_name + "'");
+                continue;
+            }
+            mesh_bytes_total += stl.size();
+            registered_mesh_names.insert(mesh.model_name);
+            ++mesh_buffers_added;
         }
 
-        bud::print("[MuJoCo] mesh VFS ready ({} buffers)", mesh_buffers.size());
         char error[2048] = { 0 };
         const std::string mjcf(reinterpret_cast<const char*>(desc.cooked_model.payload.data()),
                                desc.cooked_model.payload.size());
-        bud::print("[MuJoCo] parsing MJCF string: size={} bytes", mjcf.size());
-
-        {
-            std::filesystem::create_directories("tmp");
-            std::ofstream debug_out("tmp/debug_robot.xml", std::ios::binary);
-            if (debug_out.is_open()) {
-                debug_out.write(mjcf.data(), mjcf.size());
-                debug_out.close();
-                bud::print("[MuJoCo] Dumped MJCF to tmp/debug_robot.xml");
-            }
-        }
-
         mjSpec* robot_spec = safe_parse_xml(mjcf.c_str(), static_cast<mjVFS*>(mesh_vfs), error, sizeof(error));
-        bud::print("[MuJoCo] safe_parse_xml result: robot_spec={}, error='{}'", (void*)robot_spec, error);
         if (!robot_spec) {
             bud::eprint("{}", std::string("[MuJoCo] parsing the cooked model failed: ") + error);
             return {};
         }
 
-        bud::print("[MuJoCo] robot model parsed");
+        bud::print("[MuJoCo] robot '{}' model parsed: {} meshes ({} bytes), MJCF {} bytes",
+                   desc.name, mesh_buffers_added, mesh_bytes_total, mjcf.size());
         mjsBody* world_body = mjs_findBody(spec, "world");
         mjsBody* robot_root = mjs_findBody(robot_spec, desc.root_link.c_str());
         if (!world_body || !robot_root) {
             bud::eprint("{}", "[MuJoCo] could not find the world body or the robot root link '" + desc.root_link + "'");
             mj_deleteSpec(robot_spec);
             return {};
+        }
+
+        // Re-attaching a robot whose meshes are already in the world would fail with
+        // "repeated name ... in mesh": the parent spec still holds them from the previous attach.
+        // Drop the duplicates from the child spec so the attach reuses the parent's assets.
+        {
+            std::vector<mjsElement*> duplicate_meshes;
+            for (mjsElement* element = mjs_firstElement(robot_spec, mjOBJ_MESH); element != nullptr;
+                 element = mjs_nextElement(robot_spec, element)) {
+                mjString* name = mjs_getName(element);
+                if (!name)
+                    continue;
+                const char* mesh_name = mjs_getString(name);
+                if (mesh_name != nullptr && mjs_findElement(spec, mjOBJ_MESH, mesh_name) != nullptr)
+                    duplicate_meshes.push_back(element);
+            }
+            for (mjsElement* element : duplicate_meshes)
+                mjs_delete(robot_spec, element);
         }
 
         // Attach the whole robot spec into our world. Passing the spec's own element (elemtype
@@ -408,15 +438,20 @@ namespace bud::physics {
         mj_deleteSpec(robot_spec);
         bud::print("[MuJoCo] robot attach {}", attached ? "ok" : "failed");
         if (!attached) {
-            bud::eprint("[MuJoCo] attaching the robot to the world failed");
+            const char* attach_error = mjs_getError(spec);
+            bud::eprint("{}", std::string("[MuJoCo] attaching the robot to the world failed: ") +
+                                  (attach_error ? attach_error : "(no message)"));
             return {};
         }
 
         Articulation articulation;
         articulation.valid = true;
+        articulation.root_link_name = desc.root_link;
         for (const auto& link : desc.links)
             articulation.link_names.push_back(link.name);
+        articulation.joint_index_by_name.reserve(desc.joints.size());
         for (const auto& joint : desc.joints) {
+            articulation.joint_index_by_name[joint.name] = articulation.joint_names.size();
             articulation.joint_names.push_back(joint.name);
             articulation.joint_descs.push_back(joint);
         }
@@ -449,9 +484,110 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::remove_articulation(ArticulationHandle handle) {
-        if (!handle.is_valid() || handle.id >= articulations.size())
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        if (!spec || !handle.is_valid() || handle.id >= articulations.size())
             return;
-        articulations[handle.id].valid = false;
+        Articulation& articulation = articulations[handle.id];
+        if (!articulation.valid)
+            return;
+
+        // Remove the motors that drive this articulation's joints first. Matching by target joint
+        // (not by actuator name) keeps this correct whatever the cook names its motors, and it works
+        // whether or not the world has been compiled yet.
+        const std::unordered_set<std::string> joint_names(articulation.joint_names.begin(),
+                                                          articulation.joint_names.end());
+        std::vector<mjsElement*> actuators_to_delete;
+        for (mjsElement* element = mjs_firstElement(spec, mjOBJ_ACTUATOR); element != nullptr;
+             element = mjs_nextElement(spec, element)) {
+            mjsActuator* actuator = mjs_asActuator(element);
+            if (!actuator || actuator->trntype != mjTRN_JOINT || actuator->target == nullptr)
+                continue;
+            const char* target = mjs_getString(actuator->target);
+            if (target != nullptr && joint_names.count(target) > 0)
+                actuators_to_delete.push_back(element);
+        }
+        for (mjsElement* element : actuators_to_delete)
+            mjs_delete(spec, element);
+
+        // Delete the body subtree. mjs_delete cascades into the child bodies, geoms and joints of
+        // this articulation, so nothing accumulates across spawn/remove cycles.
+        const std::string& root_name = articulation.root_link_name;
+        if (!root_name.empty()) {
+            mjsElement* root_body = mjs_findElement(spec, mjOBJ_BODY, root_name.c_str());
+            if (root_body)
+                mjs_delete(spec, root_body);
+        }
+
+        articulation.valid = false;
+        articulation.body_ids.assign(articulation.body_ids.size(), -1);
+        articulation.joint_ids.assign(articulation.joint_ids.size(), -1);
+        articulation.actuator_ids.assign(articulation.actuator_ids.size(), -1);
+        // The world has to be rebuilt without this robot. This is a structural change: the next
+        // compile resets the remaining articulations' state, which is why reset_articulation()
+        // deliberately does not go through here.
+        spec_dirty = true;
+        bud::print("[MuJoCo] articulation '{}' removed", root_name.empty() ? "(unnamed)" : root_name);
+    }
+
+    void MujocoPhysicsWorld::reset_articulation(ArticulationHandle handle) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        if (!compile_world() || !model || !data || !handle.is_valid() ||
+            handle.id >= articulations.size())
+            return;
+        Articulation& articulation = articulations[handle.id];
+        if (!articulation.valid || handle.id >= spawn_poses.size())
+            return;
+        const SpawnPose& pose = spawn_poses[handle.id];
+
+        // Root transform: the articulation's root link carries the free joint.
+        if (!articulation.body_ids.empty() && articulation.body_ids[0] >= 0) {
+            const int root_body = articulation.body_ids[0];
+            const int joint = model->body_jntadr[root_body];
+            if (joint >= 0 && model->jnt_type[joint] == mjJNT_FREE) {
+                const int qpos_adr = model->jnt_qposadr[joint];
+                const int dof_adr = model->jnt_dofadr[joint];
+                const bud::math::vec3 position = to_mujoco(pose.position);
+                const bud::math::quaternion rotation = to_mujoco(pose.rotation);
+                data->qpos[qpos_adr + 0] = position.x;
+                data->qpos[qpos_adr + 1] = position.y;
+                data->qpos[qpos_adr + 2] = position.z;
+                data->qpos[qpos_adr + 3] = rotation.w;
+                data->qpos[qpos_adr + 4] = rotation.x;
+                data->qpos[qpos_adr + 5] = rotation.y;
+                data->qpos[qpos_adr + 6] = rotation.z;
+                for (int k = 0; k < 6; ++k)
+                    data->qvel[dof_adr + k] = 0.0;
+            }
+        }
+
+        // Joint angles back to the spawn pose and velocities zeroed. The commands follow, so the PD
+        // controller does not fight the reset.
+        for (size_t i = 0; i < articulation.joint_ids.size(); ++i) {
+            const int joint = articulation.joint_ids[i];
+            if (joint < 0 || model->jnt_type[joint] == mjJNT_FREE)
+                continue;
+            const auto it = pose.joint_angles.find(articulation.joint_names[i]);
+            const float angle = (it != pose.joint_angles.end()) ? it->second : 0.0f;
+            data->qpos[model->jnt_qposadr[joint]] = static_cast<double>(angle);
+            data->qvel[model->jnt_dofadr[joint]] = 0.0;
+            articulation.joint_commands[i].q = angle;
+            articulation.joint_commands[i].dq = 0.0f;
+        }
+
+        mj_forward(model, data);
+        bud::print("[MuJoCo] articulation '{}' reset to its spawn pose", articulation.link_names.empty()
+                                                                              ? std::string("(unnamed)")
+                                                                              : articulation.link_names[0]);
+    }
+
+    int MujocoPhysicsWorld::model_body_count() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        return model ? model->nbody : 0;
+    }
+
+    int MujocoPhysicsWorld::model_actuator_count() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        return model ? model->nu : 0;
     }
 
     bool MujocoPhysicsWorld::compile_world() {
@@ -495,8 +631,8 @@ namespace bud::physics {
         // Stage 4: Newton solver + implicit fast integrator for stiff PD stability
         model->opt.solver = mjSOL_NEWTON;
         model->opt.integrator = mjINT_IMPLICITFAST;
-        model->opt.iterations = 50;
-        model->opt.timestep = 0.002;
+        model->opt.iterations = k_solver_iterations;
+        model->opt.timestep = k_solver_timestep;
 
         // Resolve the names the interface works with into MuJoCo ids.
         body_ids_by_name.clear();
@@ -527,18 +663,6 @@ namespace bud::physics {
             if (!joint_name)
                 continue;
             actuator_ids_by_name[joint_name] = actuator;
-
-            // Stage 4: Align ankle actuator torque limit to official ±50 Nm
-            const std::string_view name_view(joint_name);
-            if (name_view.find("ankle") != std::string_view::npos) {
-                if (model->actuator_ctrllimited[actuator]) {
-                    if (model->actuator_ctrlrange[2 * actuator + 1] < 50.0) {
-                        model->actuator_ctrlrange[2 * actuator + 0] = -50.0;
-                        model->actuator_ctrlrange[2 * actuator + 1] = 50.0;
-                        bud::print("[MuJoCo] updated ankle actuator '{}' torque limit to [-50, 50] Nm", joint_name);
-                    }
-                }
-            }
         }
 
         // Our handles point at bodies by id; scene bodies were named body_<n>.
@@ -547,9 +671,16 @@ namespace bud::physics {
             handle_body_ids[handle] = (it != body_ids_by_name.end()) ? it->second : -1;
         }
 
-        // Articulation id maps plus the spawn pose.
+        // Articulation id maps plus the spawn pose. Removed articulations keep their slot (so handles
+        // stay stable) but hold no ids and get no spawn pose applied.
         for (size_t index = 0; index < articulations.size(); ++index) {
             Articulation& articulation = articulations[index];
+            if (!articulation.valid) {
+                articulation.body_ids.assign(articulation.body_ids.size(), -1);
+                articulation.joint_ids.assign(articulation.joint_ids.size(), -1);
+                articulation.actuator_ids.assign(articulation.actuator_ids.size(), -1);
+                continue;
+            }
             for (size_t i = 0; i < articulation.link_names.size(); ++i) {
                 const auto it = body_ids_by_name.find(articulation.link_names[i]);
                 articulation.body_ids[i] = (it != body_ids_by_name.end()) ? it->second : -1;
@@ -587,12 +718,9 @@ namespace bud::physics {
                     if (model->jnt_type[joint] != mjJNT_HINGE)
                         continue;
                     data->qpos[model->jnt_qposadr[joint]] = angle;
-                    for (size_t cmd_i = 0; cmd_i < articulation.joint_names.size(); ++cmd_i) {
-                        if (articulation.joint_names[cmd_i] == joint_name) {
-                            articulation.joint_commands[cmd_i].q = angle;
-                            break;
-                        }
-                    }
+                    const auto cmd_it = articulation.joint_index_by_name.find(joint_name);
+                    if (cmd_it != articulation.joint_index_by_name.end())
+                        articulation.joint_commands[cmd_it->second].q = angle;
                 }
             }
         }
@@ -641,6 +769,11 @@ namespace bud::physics {
             bud::print("[MuJoCo] geoms: {} total, {} colliding, {} visual only, {} mesh",
                        model->ngeom, colliding, visual_only, mesh_geoms);
         }
+        if (uncollidable_static_meshes > 0) {
+            bud::print("[MuJoCo] {} static scene meshes skipped (visual-only; standing surface is the "
+                       "configured ground plane)",
+                       uncollidable_static_meshes);
+        }
 
         bud::print("{}", "[MuJoCo] world compiled: bodies=" + std::to_string(model->nbody) +
                    " joints=" + std::to_string(model->njnt) +
@@ -657,7 +790,7 @@ namespace bud::physics {
         // MuJoCo wants a small fixed timestep; consume the frame time in substeps and cap the catch
         // up so a long frame cannot run away.
         constexpr int kMaxSubsteps = 40;
-        const double timestep = model->opt.timestep > 0.0 ? model->opt.timestep : 0.002;
+        const double timestep = model->opt.timestep > 0.0 ? model->opt.timestep : k_solver_timestep;
         accumulated_time += static_cast<double>(delta_time);
         int substeps = 0;
         while (accumulated_time >= timestep && substeps < kMaxSubsteps) {
@@ -763,14 +896,20 @@ namespace bud::physics {
     }
 
     size_t MujocoPhysicsWorld::get_body_count() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         return body_state.body_count;
     }
 
     uint32_t MujocoPhysicsWorld::get_active_body_count() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         return static_cast<uint32_t>(body_state.body_count);
     }
 
     const RigidBodyStateSoA& MujocoPhysicsWorld::get_body_states() const {
+        // The reference cannot be kept safe by a lock that is released on return: the SoA is only
+        // written inside the locked step(), so callers must not read it while a step is in flight.
+        // The scene layer's own mutex is what serialises that with the render thread.
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         return body_state;
     }
 
@@ -798,6 +937,7 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::set_body_position(RigidBodyHandle handle, const bud::math::vec3& position) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= handle_body_ids.size())
             return;
         const int body = handle_body_ids[handle.id];
@@ -815,6 +955,7 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::set_body_rotation(RigidBodyHandle handle, const bud::math::quaternion& rotation) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= handle_body_ids.size())
             return;
         const int body = handle_body_ids[handle.id];
@@ -833,6 +974,7 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::set_body_linear_velocity(RigidBodyHandle handle, const bud::math::vec3& velocity) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= handle_body_ids.size())
             return;
         const int body = handle_body_ids[handle.id];
@@ -849,6 +991,7 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::set_body_angular_velocity(RigidBodyHandle handle, const bud::math::vec3& velocity) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= handle_body_ids.size())
             return;
         const int body = handle_body_ids[handle.id];
@@ -865,6 +1008,7 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::apply_force(RigidBodyHandle handle, const bud::math::vec3& force) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= handle_body_ids.size())
             return;
         const int body = handle_body_ids[handle.id];
@@ -877,6 +1021,7 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::apply_impulse(RigidBodyHandle handle, const bud::math::vec3& impulse) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= handle_body_ids.size())
             return;
         const int body = handle_body_ids[handle.id];
@@ -891,6 +1036,7 @@ namespace bud::physics {
     }
 
     bool MujocoPhysicsWorld::get_articulation_state(ArticulationHandle handle, ArticulationStateSoA& out) const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!model || !data || !handle.is_valid() || handle.id >= articulations.size())
             return false;
         const Articulation& articulation = articulations[handle.id];
@@ -932,64 +1078,62 @@ namespace bud::physics {
 
     void MujocoPhysicsWorld::set_articulation_joint_commands(ArticulationHandle handle,
                                                              std::span<const JointCommand> commands) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= articulations.size())
             return;
         Articulation& articulation = articulations[handle.id];
         if (!articulation.valid)
             return;
 
+        // Name -> index was resolved once at spawn, so each command is one hash lookup.
         for (const auto& cmd : commands) {
-            for (size_t i = 0; i < articulation.joint_names.size(); ++i) {
-                if (articulation.joint_names[i] == cmd.joint_name) {
-                    articulation.joint_commands[i] = cmd;
-                    break;
-                }
-            }
+            const auto it = articulation.joint_index_by_name.find(cmd.joint_name);
+            if (it != articulation.joint_index_by_name.end())
+                articulation.joint_commands[it->second] = cmd;
         }
     }
 
     void MujocoPhysicsWorld::set_articulation_target_angle(ArticulationHandle handle,
                                                           const std::string& joint_name, float angle) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= articulations.size())
             return;
         Articulation& articulation = articulations[handle.id];
         if (!articulation.valid)
             return;
 
-        for (size_t i = 0; i < articulation.joint_names.size(); ++i) {
-            if (articulation.joint_names[i] == joint_name) {
-                articulation.joint_commands[i].q = angle;
-                articulation.joint_commands[i].dq = 0.0f;
-                if (articulation.joint_commands[i].kp == 0.0f)
-                    articulation.joint_commands[i].kp = articulation.joint_descs[i].stiffness > 0.0f
-                                                            ? articulation.joint_descs[i].stiffness
-                                                            : 40.0f;
-                if (articulation.joint_commands[i].kd == 0.0f)
-                    articulation.joint_commands[i].kd = articulation.joint_descs[i].damping > 0.0f
-                                                            ? articulation.joint_descs[i].damping
-                                                            : 2.0f;
-                break;
-            }
-        }
+        const auto it = articulation.joint_index_by_name.find(joint_name);
+        if (it == articulation.joint_index_by_name.end())
+            return;
+        const size_t i = it->second;
+        articulation.joint_commands[i].q = angle;
+        articulation.joint_commands[i].dq = 0.0f;
+        if (articulation.joint_commands[i].kp == 0.0f)
+            articulation.joint_commands[i].kp = articulation.joint_descs[i].stiffness > 0.0f
+                                                    ? articulation.joint_descs[i].stiffness
+                                                    : 40.0f;
+        if (articulation.joint_commands[i].kd == 0.0f)
+            articulation.joint_commands[i].kd = articulation.joint_descs[i].damping > 0.0f
+                                                    ? articulation.joint_descs[i].damping
+                                                    : 2.0f;
     }
 
     void MujocoPhysicsWorld::set_articulation_target_velocity(ArticulationHandle handle,
                                                              const std::string& joint_name, float velocity) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= articulations.size())
             return;
         Articulation& articulation = articulations[handle.id];
         if (!articulation.valid)
             return;
 
-        for (size_t i = 0; i < articulation.joint_names.size(); ++i) {
-            if (articulation.joint_names[i] == joint_name) {
-                articulation.joint_commands[i].dq = velocity;
-                break;
-            }
-        }
+        const auto it = articulation.joint_index_by_name.find(joint_name);
+        if (it != articulation.joint_index_by_name.end())
+            articulation.joint_commands[it->second].dq = velocity;
     }
 
     float MujocoPhysicsWorld::get_articulation_joint_angle(ArticulationHandle, const std::string& joint_name) const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!model || !data)
             return 0.0f;
         const int joint = find_joint_id(joint_name);
@@ -999,20 +1143,21 @@ namespace bud::physics {
     }
 
     float MujocoPhysicsWorld::get_articulation_joint_stiffness(ArticulationHandle handle, const std::string& joint_name) const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!handle.is_valid() || handle.id >= articulations.size())
             return 0.0f;
         const auto& articulation = articulations[handle.id];
-        for (size_t i = 0; i < articulation.joint_names.size(); ++i) {
-            if (articulation.joint_names[i] == joint_name)
-                return articulation.joint_commands[i].kp;
-        }
-        return 0.0f;
+        const auto it = articulation.joint_index_by_name.find(joint_name);
+        if (it == articulation.joint_index_by_name.end())
+            return 0.0f;
+        return articulation.joint_commands[it->second].kp;
     }
 
     void MujocoPhysicsWorld::set_articulation_link_transform(ArticulationHandle handle,
                                                             const std::string& link_name,
                                                             const bud::math::vec3& position,
                                                             const bud::math::quaternion& rotation) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= articulations.size())
             return;
         const int body = find_body_id(link_name);
@@ -1037,6 +1182,7 @@ namespace bud::physics {
 
     std::optional<RaycastResult> MujocoPhysicsWorld::raycast(const bud::math::vec3& from,
                                                             const bud::math::vec3& to) const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!model || !data)
             return std::nullopt;
 
@@ -1090,18 +1236,22 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::set_contact_begin_callback(ContactCallback callback) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         contact_begin_cb = std::move(callback);
     }
 
     void MujocoPhysicsWorld::set_contact_persist_callback(ContactCallback callback) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         contact_persist_cb = std::move(callback);
     }
 
     void MujocoPhysicsWorld::set_contact_end_callback(ContactCallback callback) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         contact_end_cb = std::move(callback);
     }
 
     std::vector<ContactPoint> MujocoPhysicsWorld::get_contacts() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         std::vector<ContactPoint> contacts;
         if (!model || !data)
             return contacts;
@@ -1124,6 +1274,7 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::set_gravity(const bud::math::vec3& gravity) {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         world_config.gravity = gravity;
         if (model) {
             model->opt.gravity[0] = gravity.x;
@@ -1133,10 +1284,12 @@ namespace bud::physics {
     }
 
     bud::math::vec3 MujocoPhysicsWorld::get_gravity() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         return world_config.gravity;
     }
 
     void MujocoPhysicsWorld::collect_debug_lines(std::vector<DebugLine>& out_lines) const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         // Body frames are enough to see the world; MuJoCo's own visualisation is not used.
         if (!model || !data)
             return;

@@ -39,6 +39,11 @@ namespace bud::robots {
 
     inline constexpr size_t G1_NUM_MOTORS = 29;
 
+    // Pelvis height above the standing surface for the official G1 stance (metres). This is a
+    // control/stance parameter, not robot geometry, so it lives with the G1 controller instead of
+    // being baked into the cooked asset or assumed by the generic physics backend.
+    inline constexpr float k_g1_standing_pelvis_height = 0.785f;
+
     struct LowCmd {
         std::array<MotorCmd, G1_NUM_MOTORS> motor_cmd{};
 

@@ -128,9 +128,11 @@ namespace bud::physics {
         CookedModelFormat format = CookedModelFormat::MjcfText;
         std::vector<uint8_t> payload;
         std::vector<CookedModelMeshRef> meshes;
-        // Read-only metadata baked by the cook: render/animation data the model format drops (e.g.
-        // URDF joint velocity limits) and physics parameters it cannot express (actuator gains,
-        // armature, solver/contact settings).
+        // Read-only metadata baked by the cook. render_metadata_json carries render/animation data
+        // the model format drops (e.g. URDF joint velocity limits) and is consumed by the loader.
+        // physics_metadata_json is a RESERVED extension point for physics parameters the model format
+        // cannot express and that are not controller goals; it is currently always empty and no
+        // backend reads it. Per-joint motor physics lives in the cooked MJCF instead.
         std::string render_metadata_json;
         std::string physics_metadata_json;
 
@@ -281,6 +283,11 @@ namespace bud::physics {
                                                      const bud::math::vec3& position,
                                                      const bud::math::quaternion& rotation) = 0;
         virtual void set_articulation_activated(ArticulationHandle handle, bool activated) = 0;
+        // Put an articulation back into its spawn pose: root transform plus initial joint angles,
+        // velocities zeroed, and joint commands back to their initial targets. This is the RL reset
+        // path and must not rebuild the world (a recompile would wipe every other articulation's
+        // state).
+        virtual void reset_articulation(ArticulationHandle handle) = 0;
 
         // --- spatial queries ---
         virtual std::optional<RaycastResult> raycast(const bud::math::vec3& from,

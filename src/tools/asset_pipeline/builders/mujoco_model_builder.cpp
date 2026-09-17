@@ -56,6 +56,20 @@ namespace bud::asset_pipeline {
             return params;
         }
 
+        // Torque limits where the URDF snapshot and Unitree's own MJCF disagree. The official
+        // g1_29dof.xml simulates the ankle and waist roll/pitch joints at +-50 Nm while the URDF in
+        // unitree_ros still says 35, so the official value wins here: the MJCF is what Unitree
+        // actually simulates with. Every other joint already matches (hip 88, knee 139, waist_yaw 88,
+        // shoulder/elbow/wrist_roll 25, wrist_pitch/yaw 5).
+        double joint_torque_limit_for(const std::string& joint_name, double urdf_effort) {
+            if (joint_name.find("ankle") != std::string::npos)
+                return 50.0;
+            if (joint_name.find("waist") != std::string::npos &&
+                joint_name.find("yaw") == std::string::npos)
+                return 50.0;
+            return urdf_effort;
+        }
+
     } // namespace
 
     std::optional<bud::robots::MujocoModelData> cook_mujoco_model(
@@ -114,9 +128,10 @@ namespace bud::asset_pipeline {
         // one instead of inventing numbers. Actuators are torque motors, again matching the official
         // model; the PD gains are the controller's business and stay out of the asset.
         // Passive motor physics on the joints, plus one torque motor per actuated joint. The torque
-        // limit is the joint's URDF effort value applied through ctrlrange, exactly like the official
-        // model's "<motor ctrlrange='-88 88'>": for a motor actuator force = gear * ctrl, so ctrlrange
-        // is the torque limit.
+        // limit is applied through ctrlrange, exactly like the official model's
+        // "<motor ctrlrange='-88 88'>": for a motor actuator force = gear * ctrl, so ctrlrange is the
+        // torque limit. It comes from the URDF effort value, except where the official MJCF overrides
+        // it (see joint_torque_limit_for).
         {
             int passive_joints = 0;
             int motors_created = 0;
@@ -150,10 +165,12 @@ namespace bud::asset_pipeline {
                     mjs_setString(actuator->target, joint.name.c_str());
                 mjs_setToMotor(actuator);
                 actuator->gear[0] = 1.0;
-                if (joint.limit.effort > 0.0f) {
+                const double torque_limit =
+                    joint_torque_limit_for(joint.name, static_cast<double>(joint.limit.effort));
+                if (torque_limit > 0.0) {
                     actuator->ctrllimited = 1;
-                    actuator->ctrlrange[0] = -static_cast<double>(joint.limit.effort);
-                    actuator->ctrlrange[1] = static_cast<double>(joint.limit.effort);
+                    actuator->ctrlrange[0] = -torque_limit;
+                    actuator->ctrlrange[1] = torque_limit;
                 }
                 ++motors_created;
             }

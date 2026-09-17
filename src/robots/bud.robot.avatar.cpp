@@ -159,7 +159,7 @@ bool RobotAvatarController::init(bud::engine::BudEngine* engine,
     if (physics_scene->get_backend() == physics::PhysicsBackend::Mujoco) {
         m_current_pelvis_pos.x = 0.0f;
         m_current_pelvis_pos.z = 0.0f;
-        m_current_pelvis_pos.y = ground_y + 0.785f;
+        m_current_pelvis_pos.y = ground_y + k_g1_standing_pelvis_height;
     }
     else {
         m_current_pelvis_pos.y = ground_y - k_mesh_foot_sole_offset_y + kSpawnClearanceY;

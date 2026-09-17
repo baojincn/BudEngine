@@ -27,6 +27,15 @@ namespace bud::scene {
         capsule_radius = radius;
         capsule_height = height;
 
+        // The player character is Jolt's CharacterVirtual. A non-Jolt backend (the MuJoCo robot
+        // world) runs no player character: robot simulation is the subject there. Say so once instead
+        // of letting get_jolt_system() report an error on a backend that never had a character.
+        if (physics && physics->get_backend() != bud::physics::PhysicsBackend::Jolt) {
+            bud::print("[CharacterController] player character disabled: backend is {}",
+                       physics->get_backend() == bud::physics::PhysicsBackend::Mujoco ? "MuJoCo" : "non-Jolt");
+            return;
+        }
+
         auto* system = physics ? physics->get_jolt_system() : nullptr;
         if (!system) return;
 

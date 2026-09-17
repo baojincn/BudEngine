@@ -180,12 +180,22 @@ namespace bud::robots {
         const float y = eng_rot.y;
         const float z = eng_rot.z;
 
-        const float u_x = 2.0f * (x * y - w * z);
+        // Rotation matrix columns in world space: f = body forward, u = body up, s = body right.
+        const float f_x = 1.0f - 2.0f * (y * y + z * z);
+        const float f_y = 2.0f * (x * y + w * z);
         const float u_y = 1.0f - 2.0f * (x * x + z * z);
-        const float u_z = 2.0f * (y * z + w * x);
+        const float s_y = 2.0f * (y * z - w * x);
+        const float s_z = 1.0f - 2.0f * (x * x + y * y);
 
-        out_pitch_rad = std::asin(std::clamp(u_x, -1.0f, 1.0f));
-        out_roll_rad = std::asin(std::clamp(u_z, -1.0f, 1.0f));
+        // Pitch and roll are extracted with atan2 over two axes, not asin over one. A single
+        // component folds at 90 degrees: asin(u_x) returns the supplement once a body is pitched
+        // past the horizon, and deriving roll from the up vector alone becomes ambiguous there too
+        // (a pure past-90 pitch collapsed to roll = pi). Reading the forward axis for pitch and the
+        // right axis for roll stays unambiguous over the full range, and keeps the original sign
+        // convention (+Z rotation gives -pitch, +X rotation gives +roll), so balance near upright is
+        // numerically unchanged.
+        out_pitch_rad = std::atan2(-f_y, f_x);
+        out_roll_rad = std::atan2(-s_y, s_z);
         out_tilt_deg = static_cast<float>(std::acos(std::clamp(u_y, -1.0f, 1.0f)) * 180.0 / k_pi);
     }
 

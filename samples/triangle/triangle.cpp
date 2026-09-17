@@ -177,15 +177,12 @@ void TriangleApp::on_update(float delta_time) {
 	if (m_test_duration > 0.0f && m_robot_avatar && m_robot_avatar->get_robot() && m_robot_avatar->get_robot()->is_simulation()) {
 		m_elapsed_time += delta_time;
 		const auto pelvis_pos = m_robot_avatar->get_pelvis_position();
-		m_min_pelvis_y = std::min(m_min_pelvis_y, pelvis_pos.y);
-		m_max_pelvis_y = std::max(m_max_pelvis_y, pelvis_pos.y);
 
 		const auto pelvis_rot = m_robot_avatar->get_robot()->get_link_rotation("pelvis");
 		float pitch = 0.0f;
 		float roll = 0.0f;
 		float tilt = 0.0f;
 		bud::robots::compute_body_orientation(pelvis_rot, pitch, roll, tilt);
-		m_max_tilt_deg = std::max(m_max_tilt_deg, tilt);
 
 		if (m_elapsed_time - m_last_log_time >= 5.0f || m_elapsed_time >= m_test_duration) {
 			m_last_log_time = m_elapsed_time;
@@ -193,6 +190,8 @@ void TriangleApp::on_update(float delta_time) {
 			           m_elapsed_time, m_test_duration, pelvis_pos.y, m_min_pelvis_y, m_max_pelvis_y, tilt, m_max_tilt_deg);
 		}
 
+		// Steady-state metrics start after the settling window. The drop onto the floor is a transient
+		// and must not be folded into the reported height range or maximum tilt.
 		if (m_elapsed_time >= 0.5f) {
 			m_min_pelvis_y = std::min(m_min_pelvis_y, pelvis_pos.y);
 			m_max_pelvis_y = std::max(m_max_pelvis_y, pelvis_pos.y);

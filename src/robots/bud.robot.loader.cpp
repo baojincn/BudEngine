@@ -520,9 +520,12 @@ std::unique_ptr<RobotInstance> RobotLoader::spawn_robot(physics::PhysicsScene& s
                                                         const bud::robots::RobotDef& robot_def,
                                                         const RobotSpawnParams& params) {
     if (scene.get_backend() == physics::PhysicsBackend::Mujoco) {
-        std::string asset_path = params.asset_path;
-        if (asset_path.empty())
-            asset_path = "Content/Robots/g1_description/g1_29dof.budasset";
+        // The generic loader does not know any robot: the caller supplies the cooked asset path.
+        if (params.asset_path.empty()) {
+            bud::eprint("[RobotLoader] Error: a MuJoCo spawn needs a cooked .budasset asset path");
+            return nullptr;
+        }
+        const std::string asset_path = params.asset_path;
 
         auto cooked = bud::robots::MujocoModelData::load_from_budasset(asset_path);
         if (!cooked) {
@@ -533,9 +536,8 @@ std::unique_ptr<RobotInstance> RobotLoader::spawn_robot(physics::PhysicsScene& s
         bud::physics::ArticulationDesc articulation{};
         articulation.name = robot_def.name;
         articulation.root_link = robot_def.root_link;
+        // No implicit height: the caller states where the robot spawns, in physical units.
         articulation.root_position = params.position;
-        if (articulation.root_position.y == 0.0f)
-            articulation.root_position.y = 0.785f;
         articulation.root_rotation = params.rotation;
         if (params.initial_joint_angles.empty())
             articulation.initial_joint_angles = get_g1_standing_joint_angles();
@@ -552,7 +554,12 @@ std::unique_ptr<RobotInstance> RobotLoader::spawn_robot(physics::PhysicsScene& s
             joint_desc.name = joint.name;
             joint_desc.parent_link = joint.parent_link;
             joint_desc.child_link = joint.child_link;
-            bud::robots::get_default_g1_gains(joint.name, joint_desc.stiffness, joint_desc.damping);
+            // Gains are the controller's business: use what the robot definition declares, otherwise
+            // leave it to the backend defaults and let the caller's LowCmd supply the real gains.
+            if (joint.motor.enabled) {
+                joint_desc.stiffness = joint.motor.stiffness;
+                joint_desc.damping = joint.motor.damping;
+            }
             joint_desc.max_torque = joint.limit.effort > 0.0f ? joint.limit.effort : params.default_motor_max_torque;
             articulation.joints.push_back(std::move(joint_desc));
         }

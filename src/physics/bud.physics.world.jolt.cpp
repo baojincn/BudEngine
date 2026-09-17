@@ -747,6 +747,10 @@ namespace bud::physics {
 
     void JoltPhysicsWorld::set_articulation_activated(ArticulationHandle, bool) {}
 
+    void JoltPhysicsWorld::reset_articulation(ArticulationHandle) {
+        // Jolt has no articulation solver, so there is nothing to reset here.
+    }
+
     size_t JoltPhysicsWorld::get_body_count() const {
         return size();
     }

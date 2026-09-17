@@ -13,10 +13,13 @@
 // Usage: mujoco_backend_test [robot_asset] [asset_root] [duration_sec]
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "src/physics/bud.physics.world.hpp"
@@ -24,6 +27,8 @@
 #include "src/robots/bud.robot.mujoco.hpp"
 #include "src/robots/bud.robot.types.hpp"
 #include "src/robots/bud.robot.lowcmd.hpp"
+
+#include <glm/gtc/quaternion.hpp>
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -79,11 +84,18 @@ int main(int argc, char** argv) {
     floor_desc.material.friction = 1.0f;
     world.add_rigid_body(floor_desc);
 
+    // Scene mesh geometry carries no MuJoCo collision (visual-only placeholder handle). Adding one
+    // exercises that path and must not disturb the world; the backend reports the count at compile.
+    bud::physics::RigidBodyDesc scene_mesh_desc{};
+    scene_mesh_desc.motion_type = bud::physics::MotionType::Static;
+    scene_mesh_desc.shape.type = bud::physics::ShapeType::Mesh;
+    world.add_rigid_body(scene_mesh_desc);
+
     bud::physics::ArticulationDesc articulation{};
     articulation.name = robot_def->name;
     articulation.root_link = robot_def->root_link;
-    // Standing pose equilibrium height for bent knees is Y = 0.785m in engine coordinates
-    articulation.root_position = bud::math::vec3(0.0f, 0.785f, 0.0f);
+    // Standing pose equilibrium height for bent knees, in engine coordinates (Y up).
+    articulation.root_position = bud::math::vec3(0.0f, bud::robots::k_g1_standing_pelvis_height, 0.0f);
     articulation.root_rotation = bud::math::quaternion(1.0f, 0.0f, 0.0f, 0.0f);
     // Pre-populate joint angles with official standing pose so simulation starts in equilibrium
     articulation.initial_joint_angles = bud::robots::get_g1_standing_joint_angles();
@@ -138,11 +150,13 @@ int main(int argc, char** argv) {
     float max_pelvis_y = -1.0e9f;
     float max_tilt_deg = 0.0f;
     float min_lowest_y = 1.0e9f;
+    float elapsed_s = 0.0f;
     bool fell_over = false;
 
     for (int step = 0; step <= total_steps; ++step) {
         if (step > 0)
             world.step(step_dt);
+        elapsed_s = static_cast<float>(step) * step_dt;
 
         bud::physics::ArticulationStateSoA state;
         if (!world.get_articulation_state(handle, state))
@@ -201,16 +215,126 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Raycast straight down from above the robot
-    const auto hit = world.raycast(bud::math::vec3(0.0f, 3.0f, 0.0f), bud::math::vec3(0.0f, -5.0f, 0.0f));
-    std::printf("[test] raycast down: %s",
-                hit ? "hit at " : "no hit\n");
-    if (hit)
-        std::printf("(%.3f, %.3f, %.3f)\n", hit->hit_point.x, hit->hit_point.y, hit->hit_point.z);
+    // Spatial query evidence: a ray through the robot hits the robot; an offset ray must hit the
+    // scene floor. The floor probe proves the standing surface exists and that the non-colliding
+    // scene mesh above did not disturb it.
+    const auto robot_hit = world.raycast(bud::math::vec3(0.0f, 3.0f, 0.0f), bud::math::vec3(0.0f, -5.0f, 0.0f));
+    std::printf("[test] raycast through the robot: %s", robot_hit ? "hit at " : "no hit\n");
+    if (robot_hit)
+        std::printf("(%.3f, %.3f, %.3f)\n", robot_hit->hit_point.x, robot_hit->hit_point.y, robot_hit->hit_point.z);
+
+    const auto floor_hit = world.raycast(bud::math::vec3(3.0f, 3.0f, 3.0f), bud::math::vec3(3.0f, -5.0f, 3.0f));
+    const bool floor_hit_ok = floor_hit.has_value() && std::abs(floor_hit->hit_point.y) < 0.01f;
+    std::printf("[test] raycast beside the robot (floor): %s (y=%.4f)\n",
+                floor_hit ? "hit" : "no hit", floor_hit ? floor_hit->hit_point.y : 0.0f);
+
+    // --- Articulation lifecycle (F6): reset is recompile-free, remove/respawn does not accumulate ---
+    const int bodies_with_robot = world.model_body_count();
+    const int actuators_with_robot = world.model_actuator_count();
+
+    world.reset_articulation(handle);
+    world.step(step_dt);
+    bud::physics::ArticulationStateSoA reset_state;
+    const bool reset_ok = world.get_articulation_state(handle, reset_state) &&
+                          !reset_state.link_positions.empty() &&
+                          std::abs(reset_state.link_positions[0].y -
+                                   bud::robots::k_g1_standing_pelvis_height) < 0.05f;
+
+    // Ten remove/respawn cycles must not accumulate bodies or actuators.
+    constexpr int kLifecycleCycles = 10;
+    constexpr int kExpectedEmptyBodies = 2; // world + floor box
+    auto active_handle = handle;
+    int bodies_after_remove = 0;
+    int actuators_after_remove = 0;
+    int bodies_after_respawn = 0;
+    int actuators_after_respawn = 0;
+    bool lifecycle_ok = true;
+    for (int cycle = 0; cycle < kLifecycleCycles; ++cycle) {
+        world.remove_articulation(active_handle);
+        world.step(step_dt);
+        bodies_after_remove = world.model_body_count();
+        actuators_after_remove = world.model_actuator_count();
+
+        active_handle = world.create_articulation(articulation);
+        world.set_articulation_joint_commands(active_handle, base_standing_cmd.to_joint_commands());
+        world.step(step_dt);
+        bodies_after_respawn = world.model_body_count();
+        actuators_after_respawn = world.model_actuator_count();
+
+        if (bodies_after_remove != kExpectedEmptyBodies || actuators_after_remove != 0 ||
+            bodies_after_respawn != bodies_with_robot || actuators_after_respawn != actuators_with_robot)
+            lifecycle_ok = false;
+    }
+
+    // Concurrency smoke test (F7): getters must be safe while the world steps on another thread.
+    // Without a TSan build this cannot prove the absence of races, but a lock-order or reentrancy
+    // mistake shows up here as a deadlock or crash.
+    {
+        std::atomic<bool> reader_run{ true };
+        std::atomic<int> reader_calls{ 0 };
+        std::thread reader([&]() {
+            bud::physics::ArticulationStateSoA local;
+            while (reader_run.load(std::memory_order_relaxed)) {
+                world.get_articulation_state(active_handle, local);
+                world.get_contacts();
+                world.raycast(bud::math::vec3(0.0f, 3.0f, 0.0f), bud::math::vec3(0.0f, -5.0f, 0.0f));
+                world.get_body_count();
+                reader_calls.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+        for (int i = 0; i < 60; ++i) {
+            world.step(step_dt);
+            // Give the reader a real chance to interleave instead of being starved by the lock.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        reader_run.store(false, std::memory_order_relaxed);
+        reader.join();
+        std::printf("[test] concurrent getters: %d calls while stepping (no deadlock)\n",
+                    reader_calls.load());
+    }
+
+    // Orientation decomposition self-check (F9): recover known pitch/roll, including a pitch past
+    // 90 degrees where the folded asin version returned the supplement instead of the true angle.
+    bool orientation_ok = true;
+    {
+        struct OrientationCase {
+            const char* name;
+            float pitch;
+            float roll;
+        };
+        const OrientationCase cases[] = {
+            { "upright", 0.0f, 0.0f },
+            { "pitch only", 0.35f, 0.0f },
+            { "roll only", 0.0f, -0.22f },
+            { "pitch past 90", 2.0f, 0.0f },
+        };
+        for (const auto& c : cases) {
+            const bud::math::quaternion q =
+                glm::angleAxis(c.pitch, bud::math::vec3(0.0f, 0.0f, 1.0f)) *
+                glm::angleAxis(c.roll, bud::math::vec3(1.0f, 0.0f, 0.0f));
+            float pitch = 0.0f;
+            float roll = 0.0f;
+            float tilt = 0.0f;
+            bud::robots::compute_body_orientation(q, pitch, roll, tilt);
+            if (std::abs(pitch - (-c.pitch)) > 1.0e-3f || std::abs(roll - c.roll) > 1.0e-3f) {
+                std::printf("[test] orientation '%s' mismatch: pitch=%.4f (want %.4f), roll=%.4f (want %.4f)\n",
+                            c.name, pitch, -c.pitch, roll, c.roll);
+                orientation_ok = false;
+            }
+        }
+    }
+
+    const bool remove_ok = lifecycle_ok && actuators_after_remove == 0;
+    const bool respawn_ok = lifecycle_ok && bodies_after_respawn == bodies_with_robot &&
+                            actuators_after_respawn == actuators_with_robot;
+    std::printf("[test] lifecycle: reset=%s, %d cycles, remove bodies %d->%d / actuators %d->%d, respawn bodies=%d / actuators=%d\n",
+                reset_ok ? "ok" : "FAILED", kLifecycleCycles, bodies_with_robot, bodies_after_remove,
+                actuators_with_robot, actuators_after_remove, bodies_after_respawn,
+                actuators_after_respawn);
 
     const float pelvis_fluctuation = max_pelvis_y - min_pelvis_y;
     std::printf("\n--- Stage 4 Standing Stabilization Summary ---\n");
-    std::printf("Duration:              %.1f / %.1f s\n", fell_over ? (prev_pitch) : duration_sec, duration_sec);
+    std::printf("Duration:              %.1f / %.1f s\n", elapsed_s, duration_sec);
     std::printf("Pelvis Height Range:   [%.4f, %.4f] m (fluctuation: %.4f m)\n",
                 min_pelvis_y, max_pelvis_y, pelvis_fluctuation);
     std::printf("Max Body Tilt:         %.2f deg\n", max_tilt_deg);
@@ -242,6 +366,35 @@ int main(int argc, char** argv) {
         std::printf("[PASS] No ground penetration (lowest body point: %.4f m)\n", min_lowest_y);
     else {
         std::printf("[FAIL] Ground penetration detected (lowest body point: %.4f m)\n", min_lowest_y);
+        all_passed = false;
+    }
+
+    if (floor_hit_ok)
+        std::printf("[PASS] Scene floor is queryable at y=%.4f m\n", floor_hit->hit_point.y);
+    else {
+        std::printf("[FAIL] Scene floor is not queryable beside the robot\n");
+        all_passed = false;
+    }
+
+    if (reset_ok)
+        std::printf("[PASS] Reset restored the spawn pose without a world rebuild\n");
+    else {
+        std::printf("[FAIL] Reset did not restore the spawn pose\n");
+        all_passed = false;
+    }
+
+    if (orientation_ok)
+        std::printf("[PASS] Orientation decomposition recovers known pitch/roll (incl. past 90 deg)\n");
+    else {
+        std::printf("[FAIL] Orientation decomposition is wrong\n");
+        all_passed = false;
+    }
+
+    if (remove_ok && respawn_ok)
+        std::printf("[PASS] Remove folded the world back to %d bodies, respawn returned to %d (no accumulation)\n",
+                    bodies_after_remove, bodies_after_respawn);
+    else {
+        std::printf("[FAIL] Articulation lifecycle accumulated state\n");
         all_passed = false;
     }
 
