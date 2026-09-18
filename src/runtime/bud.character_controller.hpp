@@ -70,6 +70,9 @@ namespace bud::scene {
         bud::math::vec3 last_pos{ 0.0f };
         int stuck_frames = 0;
         bud::math::vec3 gravity = bud::math::vec3(0.0f, -9.80665f, 0.0f);
+        // Fallback transforms for non-Jolt backends (e.g. MuJoCo robot simulation mode)
+        bud::math::vec3 fallback_position{ 0.0f };
+        bud::math::vec3 fallback_velocity{ 0.0f };
         std::vector<uint32_t> ignored_bodies;
     };
 

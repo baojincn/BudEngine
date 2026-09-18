@@ -65,6 +65,19 @@ void TriangleApp::on_init(const AppConfig& config) {
 			if (avatar_ok) {
 				bud::print("[TriangleApp] Unitree G1 Avatar initialized and bound to Sponza scene!");
 				avatar->set_camera_view(bud::robots::AvatarCameraView::ThirdPerson, scene.main_camera);
+
+				if (!m_policy_spec_path.empty()) {
+					std::string policy_error;
+					if (avatar->load_policy(m_policy_path, m_policy_spec_path, policy_error)) {
+						bud::print("[TriangleApp] external policy active; WASD/QE or the gamepad drive it");
+						if (m_has_policy_command)
+							avatar->set_policy_command(m_policy_command);
+					}
+					else {
+						bud::eprint("[TriangleApp] policy load failed: {}", policy_error);
+					}
+				}
+
 				m_robot_avatar = std::move(avatar);
 			}
 			else {
@@ -92,11 +105,11 @@ void TriangleApp::on_update(float delta_time) {
 
 
 	static bool prev_v = false;
-	bool curr_v = input.is_key_down(bud::input::Key::V);
+	bool curr_v = input.is_key_down(bud::input::Key::V) ||
+	              (input.is_gamepad_connected() && input.is_gamepad_button_down(bud::input::GamepadButton::Y));
 	if (curr_v && !prev_v) {
-		if (m_robot_avatar) {
+		if (m_robot_avatar)
 			m_robot_avatar->toggle_camera_mode(cam);
-		}
 		else {
 			const bool first_person = (cam.get_mode() == bud::scene::CameraMode::FirstPerson);
 			cam.set_mode(first_person ? bud::scene::CameraMode::FirstPerson
@@ -107,20 +120,49 @@ void TriangleApp::on_update(float delta_time) {
 	prev_v = curr_v;
 
 	static bool prev_b = false;
-	bool curr_b = input.is_key_down(bud::input::Key::B);
+	bool curr_b = input.is_key_down(bud::input::Key::B) ||
+	              (input.is_gamepad_connected() && input.is_gamepad_button_down(bud::input::GamepadButton::B));
 	if (curr_b && !prev_b) {
-		if (m_robot_avatar) {
+		if (m_robot_avatar)
 			m_robot_avatar->toggle_render_mode();
-		}
 	}
 	prev_b = curr_b;
 
+	static bool prev_recenter = false;
+	bool curr_recenter = input.is_key_down(bud::input::Key::R) ||
+	                     (input.is_gamepad_connected() && (
+	                         input.is_gamepad_button_down(bud::input::GamepadButton::RS) ||
+	                         input.is_gamepad_button_down(bud::input::GamepadButton::X)));
+	if (curr_recenter && !prev_recenter) {
+		if (m_robot_avatar)
+			m_robot_avatar->recenter_camera(cam);
+		else {
+			cam.orbit_yaw = 90.0f;
+			cam.orbit_pitch = -15.0f;
+		}
+		bud::print("[Camera] re-centered behind target");
+	}
+	prev_recenter = curr_recenter;
+
 	// Process camera rotation input (gamepad and mouse) prior to avatar update
 	if (input.is_gamepad_connected()) {
-		float rx = input.get_gamepad_axis(bud::input::GamepadAxis::RightX);
-		float ry = input.get_gamepad_axis(bud::input::GamepadAxis::RightY);
+		const auto stick_deadzone = [](float val) {
+			constexpr float kDeadzone = 0.15f;
+			if (std::abs(val) < kDeadzone)
+				return 0.0f;
+			return (val - std::copysign(kDeadzone, val)) / (1.0f - kDeadzone);
+		};
+		float rx = stick_deadzone(input.get_gamepad_axis(bud::input::GamepadAxis::RightX));
+		float ry = stick_deadzone(input.get_gamepad_axis(bud::input::GamepadAxis::RightY));
 		if (rx != 0.0f || ry != 0.0f)
 			cam.process_mouse_movement(rx * 600.0f * delta_time, ry * 600.0f * delta_time, true);
+
+		float lt = input.get_gamepad_axis(bud::input::GamepadAxis::LeftTrigger);
+		float rt = input.get_gamepad_axis(bud::input::GamepadAxis::RightTrigger);
+		if (lt > 0.1f)
+			cam.process_mouse_scroll(-lt * 10.0f * delta_time);
+		if (rt > 0.1f)
+			cam.process_mouse_scroll(rt * 10.0f * delta_time);
 	}
 
 	float dx, dy;
@@ -151,10 +193,16 @@ void TriangleApp::on_update(float delta_time) {
 				move_dir += cam.right;
 
 			if (input.is_gamepad_connected()) {
-				float lx = input.get_gamepad_axis(bud::input::GamepadAxis::LeftX);
-				float ly = input.get_gamepad_axis(bud::input::GamepadAxis::LeftY);
+				const auto stick_deadzone = [](float val) {
+					constexpr float kDeadzone = 0.15f;
+					if (std::abs(val) < kDeadzone)
+						return 0.0f;
+					return (val - std::copysign(kDeadzone, val)) / (1.0f - kDeadzone);
+				};
+				float lx = stick_deadzone(input.get_gamepad_axis(bud::input::GamepadAxis::LeftX));
+				float ly = -stick_deadzone(input.get_gamepad_axis(bud::input::GamepadAxis::LeftY));
 				move_dir += cam.right * lx;
-				move_dir += cam.front * (-ly);
+				move_dir += cam.front * ly;
 			}
 
 			if (glm::length(move_dir) > 0.0f)

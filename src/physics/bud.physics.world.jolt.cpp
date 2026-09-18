@@ -751,6 +751,11 @@ namespace bud::physics {
         // Jolt has no articulation solver, so there is nothing to reset here.
     }
 
+    bool JoltPhysicsWorld::get_articulation_imu(ArticulationHandle, ArticulationImu&) const {
+        // Jolt has no articulation IMU either.
+        return false;
+    }
+
     size_t JoltPhysicsWorld::get_body_count() const {
         return size();
     }

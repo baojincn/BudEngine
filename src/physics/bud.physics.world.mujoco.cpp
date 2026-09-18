@@ -211,8 +211,18 @@ namespace bud::physics {
         mesh_vfs = vfs;
 
         body_state.resize(config.max_bodies);
-        handle_user_data.assign(config.max_bodies, nullptr);
-        handle_static.assign(config.max_bodies, false);
+        handle_body_ids.clear();
+        handle_body_ids.reserve(config.max_bodies);
+        handle_body_names.clear();
+        handle_body_names.reserve(config.max_bodies);
+        handle_user_data.clear();
+        handle_user_data.reserve(config.max_bodies);
+        handle_static.clear();
+        handle_static.reserve(config.max_bodies);
+        handle_half_extents.clear();
+        handle_half_extents.reserve(config.max_bodies);
+        uncollidable_static_meshes = 0;
+        proxy_box_static_colliders = 0;
 
         if (config.enable_ground_plane) {
             mjsBody* world_body = mjs_findBody(spec, "world");
@@ -226,8 +236,10 @@ namespace bud::physics {
                 ground->pos[2] = ground_pos.z;
                 constexpr double kPlaneHalfExtent = 50.0;
                 constexpr double kPlaneGridSpacing = 0.1;
-                constexpr double kTorsionalFriction = 0.01;
-                constexpr double kRollingFriction = 0.001;
+        // Torsional friction has to be high enough that a planted foot does not twist freely: with a
+        // near-zero value a walking policy veers off its commanded heading even though it steps.
+        constexpr double kTorsionalFriction = 0.5;
+        constexpr double kRollingFriction = 0.001;
                 ground->size[0] = kPlaneHalfExtent;
                 ground->size[1] = kPlaneHalfExtent;
                 ground->size[2] = kPlaneGridSpacing;
@@ -246,6 +258,48 @@ namespace bud::physics {
                 ground->solimp[4] = 2.0;
                 bud::print("[MuJoCo] ground plane created at y={:.3f} (friction={:.2f}, condim=4)",
                            config.ground_plane_height, config.ground_friction);
+
+                // Add 4 courtyard perimeter boundary walls (North, South, East, West)
+                // to enclose the walkable Sponza courtyard and prevent robot falling into the void.
+                struct BoundaryWall {
+                    const char* name;
+                    bud::math::vec3 center;
+                    bud::math::vec3 half_extent;
+                };
+                const BoundaryWall kPerimeterWalls[] = {
+                    { "perimeter_wall_north", { 0.0f, 1.75f, 6.3f },  { 14.5f, 1.75f, 0.3f } },
+                    { "perimeter_wall_south", { 0.0f, 1.75f, -6.3f }, { 14.5f, 1.75f, 0.3f } },
+                    { "perimeter_wall_east",  { 14.3f, 1.75f, 0.0f },  { 0.3f, 1.75f, 6.5f } },
+                    { "perimeter_wall_west",  { -14.3f, 1.75f, 0.0f }, { 0.3f, 1.75f, 6.5f } },
+                };
+                for (const auto& w : kPerimeterWalls) {
+                    mjsBody* wall_body = mjs_addBody(world_body, nullptr);
+                    mjs_setName(wall_body->element, w.name);
+                    const bud::math::vec3 mj_pos = to_mujoco(w.center);
+                    wall_body->pos[0] = mj_pos.x;
+                    wall_body->pos[1] = mj_pos.y;
+                    wall_body->pos[2] = mj_pos.z;
+
+                    mjsGeom* wall_geom = mjs_addGeom(wall_body, nullptr);
+                    mjs_setName(wall_geom->element, (std::string(w.name) + "_geom").c_str());
+                    wall_geom->type = mjGEOM_BOX;
+                    wall_geom->size[0] = std::abs(w.half_extent.x);
+                    wall_geom->size[1] = std::abs(w.half_extent.z);
+                    wall_geom->size[2] = std::abs(w.half_extent.y);
+                    wall_geom->friction[0] = 0.8;
+                    wall_geom->friction[1] = 0.8;
+                    wall_geom->contype = 1;
+                    wall_geom->conaffinity = 1;
+                    wall_geom->condim = 3;
+
+                    handle_body_ids.push_back(-1);
+                    handle_body_names.push_back(w.name);
+                    handle_user_data.push_back(nullptr);
+                    handle_static.push_back(true);
+                    handle_half_extents.push_back(w.half_extent);
+                    ++proxy_box_static_colliders;
+                }
+                bud::print("[MuJoCo] created 4 courtyard perimeter boundary walls");
             }
         }
 
@@ -263,20 +317,75 @@ namespace bud::physics {
         }
 
         if (desc.shape.type == ShapeType::Mesh || desc.shape.type == ShapeType::ConvexHull) {
-            // Triangle meshes and hulls are not converted to phantom boxes in MuJoCo: that used to
-            // corrupt the world with an invisible collider. The handle is still returned so the
-            // visual mesh can load, but it maps to no MuJoCo body (body id -1) and therefore never
-            // collides. This is not silent: the first occurrence warns, compile_world() reports the
-            // total, and the robot stands on the configured ground plane rather than on scene meshes.
-            if (uncollidable_static_meshes == 0) {
-                bud::eprint("[MuJoCo] static scene meshes/hulls are visual-only here and carry no "
-                            "collision; robots stand on the configured ground plane");
+            if (!desc.shape.vertices.empty()) {
+                bud::math::vec3 min_pt(1.0e9f);
+                bud::math::vec3 max_pt(-1.0e9f);
+                for (const auto& v : desc.shape.vertices) {
+                    min_pt = glm::min(min_pt, v);
+                    max_pt = glm::max(max_pt, v);
+                }
+                const bud::math::vec3 size = max_pt - min_pt;
+                const bud::math::vec3 center = (min_pt + max_pt) * 0.5f;
+                const bud::math::vec3 half_extent = size * 0.5f;
+
+                // 1. Skip large floor slabs (handled cleanly by mathematical ground plane mjGEOM_PLANE)
+                const bool is_floor = (max_pt.y <= 0.15f && (size.x > 5.0f || size.z > 5.0f));
+
+                // 2. Skip upper-level structures above robot reachable height (roofs, 2nd floor, ceilings)
+                const bool is_upper = (min_pt.y > 2.0f);
+
+                // 3. Skip giant enclosing backdrops / lids to prevent hollow spaces becoming solid blocks
+                const bool is_enclosing = (size.x > 18.0f && size.z > 10.0f);
+
+                // 4. Ground obstacles: courtyard pillars, ground walls, ground plinths/props
+                const bool is_ground_obstacle = (!is_floor && !is_upper && !is_enclosing &&
+                                                 min_pt.y <= 1.8f && max_pt.y >= 0.05f &&
+                                                 half_extent.x > 0.01f && half_extent.y > 0.01f && half_extent.z > 0.01f);
+
+                if (is_ground_obstacle) {
+                    mjsBody* body = mjs_addBody(world_body, nullptr);
+                    const std::string body_name = "proxy_box_" + std::to_string(handle_body_ids.size());
+                    mjs_setName(body->element, body_name.c_str());
+
+                    const bud::math::vec3 mujoco_position = to_mujoco(center);
+                    body->pos[0] = mujoco_position.x;
+                    body->pos[1] = mujoco_position.y;
+                    body->pos[2] = mujoco_position.z;
+
+                    mjsGeom* geom = mjs_addGeom(body, nullptr);
+                    mjs_setName(geom->element, (body_name + "_geom").c_str());
+                    geom->type = mjGEOM_BOX;
+                    geom->size[0] = std::abs(half_extent.x);
+                    geom->size[1] = std::abs(half_extent.z);
+                    geom->size[2] = std::abs(half_extent.y);
+
+                    constexpr double kDefaultProxyFriction = 0.8;
+                    geom->friction[0] = desc.material.friction > 0.0f ? desc.material.friction : kDefaultProxyFriction;
+                    geom->friction[1] = desc.material.friction > 0.0f ? desc.material.friction : kDefaultProxyFriction;
+                    geom->contype = 1;
+                    geom->conaffinity = 1;
+                    geom->condim = 3;
+
+                    const uint32_t handle_id = static_cast<uint32_t>(handle_body_ids.size());
+                    handle_body_ids.push_back(-1); // resolved at compile time
+                    handle_body_names.push_back(body_name);
+                    handle_user_data.push_back(nullptr);
+                    handle_static.push_back(true);
+                    handle_half_extents.push_back(half_extent);
+                    spec_dirty = true;
+                    ++proxy_box_static_colliders;
+                    return RigidBodyHandle{ handle_id };
+                }
             }
+
+            // Non-obstacle meshes (floors, roofs, high arches) remain visual-only
             ++uncollidable_static_meshes;
             const uint32_t handle_id = static_cast<uint32_t>(handle_body_ids.size());
             handle_body_ids.push_back(-1);
+            handle_body_names.push_back("");
             handle_user_data.push_back(nullptr);
             handle_static.push_back(true);
+            handle_half_extents.push_back(bud::math::vec3(0.0f));
             return RigidBodyHandle{ handle_id };
         }
 
@@ -333,8 +442,10 @@ namespace bud::physics {
 
         const uint32_t handle_id = static_cast<uint32_t>(handle_body_ids.size());
         handle_body_ids.push_back(-1); // resolved at compile time
+        handle_body_names.push_back(body_name);
         handle_user_data.push_back(nullptr);
         handle_static.push_back(desc.motion_type != MotionType::Dynamic);
+        handle_half_extents.push_back(desc.shape.half_extent);
         spec_dirty = true;
         return RigidBodyHandle{ handle_id };
     }
@@ -362,10 +473,13 @@ namespace bud::physics {
         // (they mean the robot will not compile), but the happy path stays to a single summary line.
         size_t mesh_bytes_total = 0;
         int mesh_buffers_added = 0;
+        int mesh_buffers_reused = 0;
         for (const auto& mesh : desc.cooked_model.meshes) {
             // A second articulation of the same robot reuses the VFS entries already registered.
-            if (registered_mesh_names.count(mesh.model_name) > 0)
+            if (registered_mesh_names.count(mesh.model_name) > 0) {
+                ++mesh_buffers_reused;
                 continue;
+            }
             // Path resolution is backend-agnostic: the loader hands us a path that either exists
             // as-is or is relative to the configured asset root. No robot-specific fallbacks.
             std::filesystem::path asset_path = mesh.asset_path;
@@ -403,8 +517,9 @@ namespace bud::physics {
             return {};
         }
 
-        bud::print("[MuJoCo] robot '{}' model parsed: {} meshes ({} bytes), MJCF {} bytes",
-                   desc.name, mesh_buffers_added, mesh_bytes_total, mjcf.size());
+        bud::print("[MuJoCo] robot '{}' model parsed: {} meshes added ({} bytes), {} reused from the "
+                   "VFS, MJCF {} bytes",
+                   desc.name, mesh_buffers_added, mesh_bytes_total, mesh_buffers_reused, mjcf.size());
         mjsBody* world_body = mjs_findBody(spec, "world");
         mjsBody* robot_root = mjs_findBody(robot_spec, desc.root_link.c_str());
         if (!world_body || !robot_root) {
@@ -496,6 +611,8 @@ namespace bud::physics {
         // whether or not the world has been compiled yet.
         const std::unordered_set<std::string> joint_names(articulation.joint_names.begin(),
                                                           articulation.joint_names.end());
+        const std::unordered_set<std::string> link_names(articulation.link_names.begin(),
+                                                         articulation.link_names.end());
         std::vector<mjsElement*> actuators_to_delete;
         for (mjsElement* element = mjs_firstElement(spec, mjOBJ_ACTUATOR); element != nullptr;
              element = mjs_nextElement(spec, element)) {
@@ -507,6 +624,35 @@ namespace bud::physics {
                 actuators_to_delete.push_back(element);
         }
         for (mjsElement* element : actuators_to_delete)
+            mjs_delete(spec, element);
+
+        // Sensors that reference sites or bodies inside this articulation must go too: deleting the
+        // body subtree does not remove them, and a respawn would then collide on their names.
+        std::vector<mjsElement*> sensors_to_delete;
+        for (mjsElement* element = mjs_firstElement(spec, mjOBJ_SENSOR); element != nullptr;
+             element = mjs_nextElement(spec, element)) {
+            mjsSensor* sensor = mjs_asSensor(element);
+            if (sensor == nullptr || sensor->objname == nullptr)
+                continue;
+            mjsElement* referenced = nullptr;
+            if (sensor->objtype == mjOBJ_SITE)
+                referenced = mjs_findElement(spec, mjOBJ_SITE, mjs_getString(sensor->objname));
+            else if (sensor->objtype == mjOBJ_BODY)
+                referenced = mjs_findElement(spec, mjOBJ_BODY, mjs_getString(sensor->objname));
+            if (referenced == nullptr)
+                continue;
+            mjsElement* owner = referenced;
+            if (sensor->objtype == mjOBJ_SITE) {
+                mjsBody* parent_body = mjs_getParent(referenced);
+                owner = (parent_body != nullptr) ? parent_body->element : nullptr;
+            }
+            if (owner == nullptr)
+                continue;
+            const char* owner_name = mjs_getString(mjs_getName(owner));
+            if (owner_name != nullptr && link_names.count(owner_name) > 0)
+                sensors_to_delete.push_back(element);
+        }
+        for (mjsElement* element : sensors_to_delete)
             mjs_delete(spec, element);
 
         // Delete the body subtree. mjs_delete cascades into the child bodies, geoms and joints of
@@ -590,6 +736,63 @@ namespace bud::physics {
         return model ? model->nu : 0;
     }
 
+    int MujocoPhysicsWorld::model_sensor_count() const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        return model ? static_cast<int>(model->nsensor) : 0;
+    }
+
+    bool MujocoPhysicsWorld::get_articulation_imu(ArticulationHandle handle, ArticulationImu& out) const {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        if (!model || !data || !handle.is_valid() || handle.id >= articulations.size())
+            return false;
+        if (!articulations[handle.id].valid || imu_quat_sensor < 0)
+            return false;
+
+        // framequat is (w, x, y, z) in MuJoCo's Z-up world. Keep the raw robot-frame value for
+        // policies and also publish the engine-frame one for engine-side consumers.
+        const int quat_adr = model->sensor_adr[imu_quat_sensor];
+        const bud::math::quaternion mujoco_orientation(static_cast<float>(data->sensordata[quat_adr + 0]),
+                                                       static_cast<float>(data->sensordata[quat_adr + 1]),
+                                                       static_cast<float>(data->sensordata[quat_adr + 2]),
+                                                       static_cast<float>(data->sensordata[quat_adr + 3]));
+        out.orientation_robot = mujoco_orientation;
+        out.orientation = from_mujoco(mujoco_orientation);
+
+        // gyro and accelerometer are expressed in the site (root body) frame already, i.e. exactly the
+        // robot body frame policies expect, so they are passed through unconverted.
+        out.angular_velocity = bud::math::vec3(0.0f);
+        if (imu_gyro_sensor >= 0) {
+            const int gyro_adr = model->sensor_adr[imu_gyro_sensor];
+            out.angular_velocity = bud::math::vec3(static_cast<float>(data->sensordata[gyro_adr + 0]),
+                                                   static_cast<float>(data->sensordata[gyro_adr + 1]),
+                                                   static_cast<float>(data->sensordata[gyro_adr + 2]));
+        }
+        out.linear_acceleration = bud::math::vec3(0.0f);
+        if (imu_accel_sensor >= 0) {
+            const int accel_adr = model->sensor_adr[imu_accel_sensor];
+            out.linear_acceleration = bud::math::vec3(static_cast<float>(data->sensordata[accel_adr + 0]),
+                                                      static_cast<float>(data->sensordata[accel_adr + 1]),
+                                                      static_cast<float>(data->sensordata[accel_adr + 2]));
+        }
+
+        // Base linear velocity in the robot body frame, from the root free joint. MuJoCo reports it
+        // in its own world frame, so rotate it into the body frame with the raw robot orientation.
+        out.linear_velocity = bud::math::vec3(0.0f);
+        const Articulation& articulation = articulations[handle.id];
+        if (!articulation.body_ids.empty() && articulation.body_ids[0] >= 0) {
+            const int root_body = articulation.body_ids[0];
+            const int joint = model->body_jntadr[root_body];
+            if (joint >= 0 && model->jnt_type[joint] == mjJNT_FREE) {
+                const int dof_adr = model->jnt_dofadr[joint];
+                const bud::math::vec3 world_velocity(static_cast<float>(data->qvel[dof_adr + 0]),
+                                                     static_cast<float>(data->qvel[dof_adr + 1]),
+                                                     static_cast<float>(data->qvel[dof_adr + 2]));
+                out.linear_velocity = glm::conjugate(mujoco_orientation) * world_velocity;
+            }
+        }
+        return true;
+    }
+
     bool MujocoPhysicsWorld::compile_world() {
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!spec_dirty && model)
@@ -665,10 +868,19 @@ namespace bud::physics {
             actuator_ids_by_name[joint_name] = actuator;
         }
 
-        // Our handles point at bodies by id; scene bodies were named body_<n>.
+        // The cooked robot carries an IMU on its root link; resolve the sensors once per compile.
+        imu_quat_sensor = mj_name2id(model, mjOBJ_SENSOR, "imu_quat");
+        imu_gyro_sensor = mj_name2id(model, mjOBJ_SENSOR, "imu_gyro");
+        imu_accel_sensor = mj_name2id(model, mjOBJ_SENSOR, "imu_accel");
+
+        // Our handles point at bodies by id; resolved by registered name
         for (size_t handle = 0; handle < handle_body_ids.size(); ++handle) {
-            const auto it = body_ids_by_name.find("body_" + std::to_string(handle));
-            handle_body_ids[handle] = (it != body_ids_by_name.end()) ? it->second : -1;
+            if (handle < handle_body_names.size() && !handle_body_names[handle].empty()) {
+                const auto it = body_ids_by_name.find(handle_body_names[handle]);
+                handle_body_ids[handle] = (it != body_ids_by_name.end()) ? it->second : -1;
+            } else {
+                handle_body_ids[handle] = -1;
+            }
         }
 
         // Articulation id maps plus the spawn pose. Removed articulations keep their slot (so handles
@@ -766,8 +978,8 @@ namespace bud::physics {
                     model->geom_solimp[5 * geom + 4] = 2.0;
                 }
             }
-            bud::print("[MuJoCo] geoms: {} total, {} colliding, {} visual only, {} mesh",
-                       model->ngeom, colliding, visual_only, mesh_geoms);
+            bud::print("[MuJoCo] geoms: {} total, {} colliding, {} visual only, {} mesh, {} proxy boxes",
+                       model->ngeom, colliding, visual_only, mesh_geoms, proxy_box_static_colliders);
         }
         if (uncollidable_static_meshes > 0) {
             bud::print("[MuJoCo] {} static scene meshes skipped (visual-only; standing surface is the "
@@ -892,6 +1104,9 @@ namespace bud::physics {
             body_state.body_masses[index] = static_cast<float>(model->body_mass[body]);
             body_state.body_flags[index] = handle_static[handle] ? BODY_FLAG_STATIC : 0;
             body_state.body_user_data[index] = handle_user_data[handle];
+            body_state.body_half_extents[index] = (handle < handle_half_extents.size())
+                ? handle_half_extents[handle]
+                : bud::math::vec3(0.0f);
         }
     }
 

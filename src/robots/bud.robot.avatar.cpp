@@ -167,10 +167,19 @@ bool RobotAvatarController::init(bud::engine::BudEngine* engine,
 
     RobotSpawnParams params{};
     params.position = m_current_pelvis_pos;
-    if (physics_scene->get_backend() == physics::PhysicsBackend::Mujoco)
+    if (physics_scene->get_backend() == physics::PhysicsBackend::Mujoco) {
+        // MuJoCo simulation basis: URDF (+X fwd, +Y left, +Z up) -> Engine (+X fwd, -Z left, +Y up)
+        glm::mat3 urdf_basis(
+            glm::vec3(1.0f, 0.0f, 0.0f),
+            glm::vec3(0.0f, 0.0f, -1.0f),
+            glm::vec3(0.0f, 1.0f, 0.0f)
+        );
+        m_urdf_to_world_rot = glm::quat_cast(urdf_basis);
         params.rotation = bud::math::quaternion(1.0f, 0.0f, 0.0f, 0.0f);
-    else
+    }
+    else {
         params.rotation = m_urdf_to_world_rot;
+    }
     params.activate = true;
     params.enable_motors = true;
     params.default_motor_stiffness = 800.0f;
@@ -214,6 +223,131 @@ bool RobotAvatarController::init(bud::engine::BudEngine* engine,
     return true;
 }
 
+bool RobotAvatarController::load_policy(const std::string& onnx_path, const std::string& spec_path,
+                                        std::string& error) {
+    if (!m_robot || !m_robot->is_simulation()) {
+        error = "a policy can only drive a simulated (MuJoCo) robot";
+        return false;
+    }
+    auto* physics_scene = m_engine ? m_engine->get_physics_scene() : nullptr;
+    if (!physics_scene) {
+        error = "no physics scene to load a policy into";
+        return false;
+    }
+
+    std::cout << "[RobotAvatarController] loading policy onnx='" << onnx_path << "' spec='" << spec_path
+              << "'" << std::endl;
+
+    bud::rl::PolicyControllerConfig config;
+    config.enabled = true;
+    config.onnx_path = onnx_path;
+    config.spec_path = spec_path;
+
+    // Loading touches external files (spec JSON, ONNX graph) and ONNX Runtime, any of which can
+    // throw. This runs on the async scene-load callback thread, where an escaping exception would
+    // terminate the process, so report it as a load failure instead.
+    auto controller = std::make_unique<bud::rl::G1PolicyController>();
+    try {
+        if (!controller->initialize(physics_scene->get_world(), m_robot->get_articulation_handle(),
+                                    m_robot->get_definition(), config, error)) {
+            m_policy_error = error;
+            return false;
+        }
+    } catch (const std::exception& e) {
+        error = std::string("policy load threw: ") + e.what();
+        m_policy_error = error;
+        return false;
+    } catch (...) {
+        error = "policy load threw an unknown exception";
+        m_policy_error = error;
+        return false;
+    }
+
+    m_policy = std::move(controller);
+    m_policy_error.clear();
+    std::cout << "[RobotAvatarController] policy '" << m_policy->spec().name << "' loaded: obs="
+              << m_policy->observation_dim() << " action=" << m_policy->action_dim()
+              << (m_policy->has_network() ? "" : " (null policy: zero action, holds the default pose)")
+              << std::endl;
+    return true;
+}
+
+bool RobotAvatarController::has_policy() const {
+    return m_policy && m_policy->ready();
+}
+
+const std::string& RobotAvatarController::policy_error() const {
+    return m_policy_error;
+}
+
+void RobotAvatarController::set_policy_command(const bud::math::vec3& command) {
+    m_policy_command_override = command;
+    m_has_policy_command_override = true;
+}
+
+bud::math::vec3 RobotAvatarController::policy_command_from_input(const bud::input::Input& input) const {
+    // Command convention: (vx forward, vy left, yaw_rate counter-clockwise).
+    float vx = 0.0f;
+    float vy = 0.0f;
+    float yaw_rate = 0.0f;
+
+    // Keyboard bindings:
+    // W / S: Forward / Backward along robot heading
+    // A / D: Steer Left / Right (yaw rate)
+    // Q / E: Lateral Strafe Left / Right
+    if (input.is_key_down(bud::input::Key::W))
+        vx += 0.8f;
+    if (input.is_key_down(bud::input::Key::S))
+        vx -= 0.4f;
+    if (input.is_key_down(bud::input::Key::A))
+        yaw_rate += 0.5f;
+    if (input.is_key_down(bud::input::Key::D))
+        yaw_rate -= 0.5f;
+    if (input.is_key_down(bud::input::Key::Q))
+        vy += 0.25f;
+    if (input.is_key_down(bud::input::Key::E))
+        vy -= 0.25f;
+
+    // Gamepad bindings:
+    // Left Stick: Y = Forward/Backward, X = Steer Left/Right
+    // LB / RB & D-Pad Left/Right: Lateral Strafe Left/Right
+    // D-Pad Up/Down: Forward/Backward
+    if (input.is_gamepad_connected()) {
+        const auto deadzone = [](float value) {
+            constexpr float kDeadzone = 0.15f;
+            if (std::abs(value) < kDeadzone)
+                return 0.0f;
+            return (value - std::copysign(kDeadzone, value)) / (1.0f - kDeadzone);
+        };
+        const float ly = -deadzone(input.get_gamepad_axis(bud::input::GamepadAxis::LeftY));
+        const float lx = deadzone(input.get_gamepad_axis(bud::input::GamepadAxis::LeftX));
+
+        if (std::abs(ly) > 1.0e-3f)
+            vx += (ly > 0.0f) ? (ly * 0.8f) : (ly * 0.4f);
+        if (std::abs(lx) > 1.0e-3f)
+            yaw_rate += -lx * 0.5f;
+
+        if (input.is_gamepad_button_down(bud::input::GamepadButton::LB) ||
+            input.is_gamepad_button_down(bud::input::GamepadButton::DPadLeft))
+            vy += 0.25f;
+        if (input.is_gamepad_button_down(bud::input::GamepadButton::RB) ||
+            input.is_gamepad_button_down(bud::input::GamepadButton::DPadRight))
+            vy -= 0.25f;
+        if (input.is_gamepad_button_down(bud::input::GamepadButton::DPadUp))
+            vx += 0.8f;
+        if (input.is_gamepad_button_down(bud::input::GamepadButton::DPadDown))
+            vx -= 0.4f;
+    }
+
+    // When steering without forward input, provide minimum stepping velocity so the RL gait activates and turns
+    if (std::abs(yaw_rate) > 1.0e-3f && std::abs(vx) < 1.0e-3f && std::abs(vy) < 1.0e-3f)
+        vx = 0.30f;
+
+    // Clamp to the range the policy was trained on; commanding outside it degrades the gait.
+    return bud::math::vec3(std::clamp(vx, -0.5f, 1.0f), std::clamp(vy, -0.3f, 0.3f),
+                           std::clamp(yaw_rate, -0.5f, 0.5f));
+}
+
 void RobotAvatarController::toggle_camera_mode(bud::scene::Camera& camera) {
     if (m_view_mode == AvatarCameraView::ThirdPerson)
         set_camera_view(AvatarCameraView::FirstPerson, camera);
@@ -227,7 +361,19 @@ void RobotAvatarController::set_camera_view(AvatarCameraView view, bud::scene::C
         camera.set_mode(bud::scene::CameraMode::ThirdPerson);
         camera.orbit_distance = 2.4f;
         camera.orbit_pitch = -15.0f;
-        camera.orbit_yaw = 0.0f;
+        if (m_robot && m_robot->is_simulation()) {
+            const std::string& root_name = !m_robot->get_definition().root_link.empty()
+                                               ? m_robot->get_definition().root_link
+                                               : "pelvis";
+            const glm::vec3 fwd = m_robot->get_link_rotation(root_name) * glm::vec3(1.0f, 0.0f, 0.0f);
+            const float cur_sim_yaw = std::atan2(-fwd.z, fwd.x);
+            camera.orbit_yaw = 90.0f + bud::math::degrees(cur_sim_yaw);
+            m_prev_sim_yaw = cur_sim_yaw;
+            m_has_prev_sim_yaw = true;
+        } else {
+            camera.orbit_yaw = 90.0f;
+            m_has_prev_sim_yaw = false;
+        }
         camera.target_position = get_torso_position();
         camera.update(0.0f);
         std::cout << "[RobotAvatarController] Switched to Third-Person View (Bound directly to G1 relative pose)" << std::endl;
@@ -236,9 +382,37 @@ void RobotAvatarController::set_camera_view(AvatarCameraView view, bud::scene::C
         camera.set_mode(bud::scene::CameraMode::FirstPerson);
         camera.position = get_head_camera_position();
         camera.pitch = 0.0f;
-        camera.yaw = -90.0f - bud::math::degrees(m_current_yaw);
+        camera.yaw = 0.0f;
         camera.rebuild_camera_vectors();
         std::cout << "[RobotAvatarController] Switched to First-Person View (G1 Visor relative pose)" << std::endl;
+    }
+}
+
+void RobotAvatarController::recenter_camera(bud::scene::Camera& camera) {
+    if (m_view_mode == AvatarCameraView::ThirdPerson) {
+        if (m_robot && m_robot->is_simulation()) {
+            const std::string& root_name = !m_robot->get_definition().root_link.empty()
+                                               ? m_robot->get_definition().root_link
+                                               : "pelvis";
+            const glm::vec3 fwd = m_robot->get_link_rotation(root_name) * glm::vec3(1.0f, 0.0f, 0.0f);
+            const float cur_sim_yaw = std::atan2(-fwd.z, fwd.x);
+            camera.orbit_yaw = 90.0f + bud::math::degrees(cur_sim_yaw);
+            m_prev_sim_yaw = cur_sim_yaw;
+            m_has_prev_sim_yaw = true;
+        } else {
+            camera.orbit_yaw = 90.0f;
+            m_has_prev_sim_yaw = false;
+        }
+        camera.orbit_pitch = -15.0f;
+        camera.orbit_distance = 2.4f;
+        camera.target_position = get_torso_position();
+        camera.update(0.0f);
+        std::cout << "[RobotAvatarController] Camera re-centered behind avatar" << std::endl;
+    } else {
+        camera.pitch = 0.0f;
+        camera.yaw = 0.0f;
+        camera.rebuild_camera_vectors();
+        std::cout << "[RobotAvatarController] Camera re-centered forward" << std::endl;
     }
 }
 
@@ -255,40 +429,155 @@ void RobotAvatarController::update(float dt, const bud::input::Input& input, bud
         if (glm::length(real_pelvis_pos) > 1.0e-4f)
             m_current_pelvis_pos = real_pelvis_pos;
 
-        // Process movement input to update gait / target angles
-        bud::math::vec3 move_dir(0.0f);
+        // Process movement & steering input:
+        // W / S: Forward / Backward along robot heading
+        // A / D: Steer Left / Right (yaw rate)
+        // Q / E: Lateral Strafe Left / Right
+        float vx_cmd = 0.0f;
+        float vy_cmd = 0.0f;
+        float yaw_cmd = 0.0f;
+
         if (input.is_key_down(bud::input::Key::W))
-            move_dir += camera.front;
+            vx_cmd += 0.8f;
         if (input.is_key_down(bud::input::Key::S))
-            move_dir -= camera.front;
+            vx_cmd -= 0.4f;
         if (input.is_key_down(bud::input::Key::A))
-            move_dir -= camera.right;
+            yaw_cmd += 0.5f;
         if (input.is_key_down(bud::input::Key::D))
-            move_dir += camera.right;
+            yaw_cmd -= 0.5f;
+        if (input.is_key_down(bud::input::Key::Q))
+            vy_cmd += 0.25f;
+        if (input.is_key_down(bud::input::Key::E))
+            vy_cmd -= 0.25f;
 
-        move_dir.y = 0.0f;
-        const float move_len = glm::length(move_dir);
-        if (move_len > 0.001f) {
-            move_dir /= move_len;
-            m_is_moving = true;
-            m_current_yaw = std::atan2(-move_dir.x, -move_dir.z);
-            apply_walking_gait(dt, move_len);
+        if (input.is_gamepad_connected()) {
+            const auto deadzone = [](float value) {
+                constexpr float kDeadzone = 0.15f;
+                if (std::abs(value) < kDeadzone)
+                    return 0.0f;
+                return (value - std::copysign(kDeadzone, value)) / (1.0f - kDeadzone);
+            };
+            const float ly = -deadzone(input.get_gamepad_axis(bud::input::GamepadAxis::LeftY));
+            const float lx = deadzone(input.get_gamepad_axis(bud::input::GamepadAxis::LeftX));
 
-            std::vector<physics::JointCommand> commands;
-            commands.reserve(m_target_joint_angles.size());
-            for (const auto& [name, target_q] : m_target_joint_angles) {
-                physics::JointCommand jc;
-                jc.joint_name = name;
-                jc.q = target_q;
-                jc.dq = 0.0f;
-                get_default_g1_gains(name, jc.kp, jc.kd);
-                jc.tau_ff = 0.0f;
-                commands.push_back(std::move(jc));
+            // Left Stick: Y = forward/backward, X = steer left/right
+            if (std::abs(ly) > 1.0e-3f)
+                vx_cmd += (ly > 0.0f) ? (ly * 0.8f) : (ly * 0.4f);
+            if (std::abs(lx) > 1.0e-3f)
+                yaw_cmd += -lx * 0.5f;
+
+            // Bumpers & D-Pad: Strafe left/right, D-Pad walk
+            if (input.is_gamepad_button_down(bud::input::GamepadButton::LB) ||
+                input.is_gamepad_button_down(bud::input::GamepadButton::DPadLeft))
+                vy_cmd += 0.25f;
+            if (input.is_gamepad_button_down(bud::input::GamepadButton::RB) ||
+                input.is_gamepad_button_down(bud::input::GamepadButton::DPadRight))
+                vy_cmd -= 0.25f;
+            if (input.is_gamepad_button_down(bud::input::GamepadButton::DPadUp))
+                vx_cmd += 0.8f;
+            if (input.is_gamepad_button_down(bud::input::GamepadButton::DPadDown))
+                vx_cmd -= 0.4f;
+        }
+
+        // When steering without forward input, provide minimum stepping velocity so the RL gait activates and turns
+        if (std::abs(yaw_cmd) > 1.0e-3f && std::abs(vx_cmd) < 1.0e-3f && std::abs(vy_cmd) < 1.0e-3f)
+            vx_cmd = 0.30f;
+
+        if (m_policy && m_policy->ready()) {
+            const bool has_user_input = (std::abs(vx_cmd) > 1.0e-3f || std::abs(vy_cmd) > 1.0e-3f || std::abs(yaw_cmd) > 1.0e-3f);
+            if (has_user_input)
+                m_has_policy_command_override = false;
+
+            bud::math::vec3 command(0.0f);
+            if (m_has_policy_command_override) {
+                command = m_policy_command_override;
+            } else if (has_user_input) {
+                command = bud::math::vec3(std::clamp(vx_cmd, -0.5f, 1.0f),
+                                          std::clamp(vy_cmd, -0.3f, 0.3f),
+                                          std::clamp(yaw_cmd, -0.5f, 0.5f));
             }
-            m_robot->set_joint_commands(commands);
-        } else {
-            m_is_moving = false;
-            reset_to_idle_stance();
+
+            const bool is_translating = (std::abs(command.x) > 0.01f || std::abs(command.y) > 0.01f);
+            m_is_moving = is_translating || (std::abs(command.z) > 0.01f);
+
+            const glm::vec3 forward =
+                m_robot->get_link_rotation("pelvis") * glm::vec3(1.0f, 0.0f, 0.0f);
+            const float current_yaw = std::atan2(-forward.z, forward.x);
+            if (!m_policy_yaw_initialized) {
+                m_policy_target_yaw = current_yaw;
+                m_policy_yaw_initialized = true;
+            }
+
+            if (m_policy_heading_hold) {
+                if (std::abs(yaw_cmd) > 1.0e-3f) {
+                    // Actively steering: target tracks where user steers
+                    m_policy_target_yaw = current_yaw;
+                } else if (is_translating) {
+                    // Actively walking straight: hold current target heading
+                    float error = m_policy_target_yaw - current_yaw;
+                    while (error > 3.14159265f)
+                        error -= 6.28318531f;
+                    while (error < -3.14159265f)
+                        error += 6.28318531f;
+                    command.z = std::clamp(1.5f * error, -0.2f, 0.2f);
+                } else {
+                    // Standing idle: reset target, zero yaw velocity
+                    m_policy_target_yaw = current_yaw;
+                    command.z = 0.0f;
+                }
+            }
+            m_policy->set_command(command);
+            m_policy->update(dt);
+        }
+        else {
+            bud::math::vec3 move_dir(0.0f);
+            if (input.is_key_down(bud::input::Key::W))
+                move_dir += camera.front;
+            if (input.is_key_down(bud::input::Key::S))
+                move_dir -= camera.front;
+            if (input.is_key_down(bud::input::Key::A))
+                move_dir -= camera.right;
+            if (input.is_key_down(bud::input::Key::D))
+                move_dir += camera.right;
+
+            if (input.is_gamepad_connected()) {
+                const auto deadzone = [](float value) {
+                    constexpr float kDeadzone = 0.15f;
+                    if (std::abs(value) < kDeadzone)
+                        return 0.0f;
+                    return (value - std::copysign(kDeadzone, value)) / (1.0f - kDeadzone);
+                };
+                float lx = deadzone(input.get_gamepad_axis(bud::input::GamepadAxis::LeftX));
+                float ly = -deadzone(input.get_gamepad_axis(bud::input::GamepadAxis::LeftY));
+                move_dir += camera.right * lx;
+                move_dir += camera.front * ly;
+            }
+
+            move_dir.y = 0.0f;
+            const float move_len = glm::length(move_dir);
+
+            if (move_len > 0.001f) {
+                move_dir /= move_len;
+                m_is_moving = true;
+                m_current_yaw = std::atan2(-move_dir.x, -move_dir.z);
+                apply_walking_gait(dt, move_len);
+
+                std::vector<physics::JointCommand> commands;
+                commands.reserve(m_target_joint_angles.size());
+                for (const auto& [name, target_q] : m_target_joint_angles) {
+                    physics::JointCommand jc;
+                    jc.joint_name = name;
+                    jc.q = target_q;
+                    jc.dq = 0.0f;
+                    get_default_g1_gains(name, jc.kp, jc.kd);
+                    jc.tau_ff = 0.0f;
+                    commands.push_back(std::move(jc));
+                }
+                m_robot->set_joint_commands(commands);
+            }
+            else {
+                m_is_moving = false;
+                reset_to_idle_stance();
 
             const bud::math::quaternion pelvis_rot = m_robot->get_link_rotation(root_name);
             float pitch_rad = 0.0f;
@@ -300,9 +589,10 @@ void RobotAvatarController::update(float dt, const bud::input::Input& input, bud
             m_prev_pitch = pitch_rad;
             m_prev_roll = roll_rad;
 
-            LowCmd cmd = make_g1_standing_cmd();
-            apply_standing_balance(cmd, pitch_rad, pitch_vel, roll_rad, roll_vel);
-            m_robot->set_low_cmd(cmd);
+                LowCmd cmd = make_g1_standing_cmd();
+                apply_standing_balance(cmd, pitch_rad, pitch_vel, roll_rad, roll_vel);
+                m_robot->set_low_cmd(cmd);
+            }
         }
 
         // Sync joint angles from physical simulation to forward kinematics state
@@ -337,9 +627,31 @@ void RobotAvatarController::update(float dt, const bud::input::Input& input, bud
 
         if (m_view_mode == AvatarCameraView::ThirdPerson) {
             camera.target_position = get_torso_position();
+            const glm::vec3 fwd_vec = m_robot->get_link_rotation(root_name) * glm::vec3(1.0f, 0.0f, 0.0f);
+            const float cur_sim_yaw = std::atan2(-fwd_vec.z, fwd_vec.x);
+            if (m_has_prev_sim_yaw) {
+                float delta = cur_sim_yaw - m_prev_sim_yaw;
+                while (delta > 3.14159265f)
+                    delta -= 6.28318531f;
+                while (delta < -3.14159265f)
+                    delta += 6.28318531f;
+                camera.orbit_yaw += bud::math::degrees(delta);
+            }
+            m_prev_sim_yaw = cur_sim_yaw;
+            m_has_prev_sim_yaw = true;
             camera.update(dt);
         } else {
             camera.position = get_head_camera_position();
+        }
+
+        if (auto* controller = m_engine->get_character_controller()) {
+            const bud::math::vec3 cur_pos = m_robot->get_link_position(root_name);
+            const bud::math::vec3 prev_pos = controller->get_position();
+            bud::math::vec3 vel(0.0f);
+            if (dt > 1e-5f)
+                vel = (cur_pos - prev_pos) / dt;
+            controller->teleport(cur_pos);
+            controller->set_velocity(vel);
         }
         return;
     }
@@ -357,10 +669,16 @@ void RobotAvatarController::update(float dt, const bud::input::Input& input, bud
             move_dir += camera.right;
 
         if (input.is_gamepad_connected()) {
-            float lx = input.get_gamepad_axis(bud::input::GamepadAxis::LeftX);
-            float ly = input.get_gamepad_axis(bud::input::GamepadAxis::LeftY);
+            const auto deadzone = [](float value) {
+                constexpr float kDeadzone = 0.15f;
+                if (std::abs(value) < kDeadzone)
+                    return 0.0f;
+                return (value - std::copysign(kDeadzone, value)) / (1.0f - kDeadzone);
+            };
+            float lx = deadzone(input.get_gamepad_axis(bud::input::GamepadAxis::LeftX));
+            float ly = -deadzone(input.get_gamepad_axis(bud::input::GamepadAxis::LeftY));
             move_dir += camera.right * lx;
-            move_dir += camera.front * (-ly);
+            move_dir += camera.front * ly;
         }
 
         move_dir.y = 0.0f;
@@ -660,7 +978,7 @@ bud::math::vec3 RobotAvatarController::get_head_camera_position() const {
         const auto head_pos = m_robot->get_link_position("head_link");
         if (glm::length(head_pos) > 1.0e-4f) {
             const auto head_rot = m_robot->get_link_rotation("head_link");
-            const auto fwd = head_rot * bud::math::vec3(0.0f, 0.0f, -1.0f);
+            const auto fwd = head_rot * bud::math::vec3(1.0f, 0.0f, 0.0f);
             return head_pos + fwd * k_head_fwd_offset;
         }
     }

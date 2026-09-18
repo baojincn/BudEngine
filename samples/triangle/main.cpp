@@ -16,6 +16,10 @@ int main(int argc, char* argv[]) {
         bool custom_resolution = false;
 
         float test_duration = 0.0f;
+        std::string policy_path;
+        std::string policy_spec_path;
+        bud::math::vec3 policy_command(0.0f);
+        bool has_policy_command = false;
 
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
@@ -52,6 +56,22 @@ int main(int argc, char* argv[]) {
             else if (arg == "--duration" && i + 1 < argc) {
                 test_duration = std::stof(argv[++i]);
             }
+            else if (arg == "--policy" && i + 1 < argc) {
+                policy_path = argv[++i];
+            }
+            else if (arg == "--policy-spec" && i + 1 < argc) {
+                policy_spec_path = argv[++i];
+            }
+            else if (arg == "--cmd" && i + 3 < argc) {
+                // Read into named locals: argument evaluation order is unspecified, so three
+                // pre-increments inside one call would not map to vx/vy/yaw reliably.
+                const float command_x = std::stof(argv[i + 1]);
+                const float command_y = std::stof(argv[i + 2]);
+                const float command_yaw = std::stof(argv[i + 3]);
+                i += 3;
+                policy_command = bud::math::vec3(command_x, command_y, command_yaw);
+                has_policy_command = true;
+            }
         }
 
         if (!custom_resolution) {
@@ -65,6 +85,10 @@ int main(int argc, char* argv[]) {
         TriangleApp app;
         if (test_duration > 0.0f)
             app.set_test_duration(test_duration);
+        if (!policy_spec_path.empty())
+            app.set_policy(policy_path, policy_spec_path);
+        if (has_policy_command)
+            app.set_policy_command(policy_command);
         app.run(config);
 
         if (app.has_test_failed())

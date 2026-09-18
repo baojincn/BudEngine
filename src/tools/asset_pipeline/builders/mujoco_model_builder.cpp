@@ -179,6 +179,75 @@ namespace bud::asset_pipeline {
                               std::to_string(motors_created) + " torque motors");
         }
 
+        // IMU on the root link. RL observations want base orientation and angular velocity in the
+        // body frame; MuJoCo's own sensor pipeline gives exactly that, so the runtime reads
+        // sensordata instead of reconstructing it from qpos/qvel.
+        {
+            if (mjs_findElement(spec, mjOBJ_SITE, "imu") != nullptr) {
+                support::log_info("[MujocoCook] a site named 'imu' already exists; keeping it");
+            } else {
+                mjsBody* root_body = mjs_findBody(spec, robot_def.root_link.c_str());
+                if (root_body == nullptr) {
+                    support::log_warn("[MujocoCook] root link '" + robot_def.root_link +
+                                      "' not found; no IMU site was added");
+                } else {
+                    mjsSite* imu_site = mjs_addSite(root_body, nullptr);
+                    mjs_setName(imu_site->element, "imu");
+
+                    const struct {
+                        mjtSensor type;
+                        const char* name;
+                    } imu_sensors[] = {
+                        { mjSENS_FRAMEQUAT, "imu_quat" },
+                        { mjSENS_GYRO, "imu_gyro" },
+                        { mjSENS_ACCELEROMETER, "imu_accel" },
+                    };
+                    int imu_sensor_count = 0;
+                    for (const auto& entry : imu_sensors) {
+                        mjsSensor* sensor = mjs_addSensor(spec);
+                        if (sensor == nullptr)
+                            continue;
+                        sensor->type = entry.type;
+                        sensor->objtype = mjOBJ_SITE;
+                        if (sensor->objname != nullptr)
+                            mjs_setString(sensor->objname, "imu");
+                        mjs_setName(sensor->element, entry.name);
+                        ++imu_sensor_count;
+                    }
+                    support::log_info("[MujocoCook] IMU on root link '" + robot_def.root_link + "': " +
+                                      std::to_string(imu_sensor_count) +
+                                      " sensors (framequat/gyro/accelerometer)");
+                }
+            }
+        }
+
+        // Foot contact needs torsional friction. MuJoCo's URDF import leaves geoms at the default
+        // condim (3 = sliding only), and a foot with no torsional friction spins freely on the ground
+        // when a walking policy plants it, so the robot veers off its commanded heading even though it
+        // steps. Raising condim to 4 enables the spin term on the ankle-roll (foot) geoms.
+        {
+            int foot_geoms = 0;
+            for (mjsElement* element = mjs_firstElement(spec, mjOBJ_GEOM); element != nullptr;
+                 element = mjs_nextElement(spec, element)) {
+                mjsGeom* geom = mjs_asGeom(element);
+                if (geom == nullptr)
+                    continue;
+                mjsBody* body = mjs_getParent(element);
+                if (body == nullptr)
+                    continue;
+                const char* body_name = mjs_getString(mjs_getName(body->element));
+                if (body_name == nullptr)
+                    continue;
+                if (std::string(body_name).find("ankle_roll") == std::string::npos)
+                    continue;
+                geom->condim = 4;
+                geom->friction[1] = 0.5; // torsional (spin)
+                ++foot_geoms;
+            }
+            support::log_info("[MujocoCook] foot contact: condim=4 + torsional friction on " +
+                              std::to_string(foot_geoms) + " geom(s)");
+        }
+
         support::log_info("[MujocoCook] phase: compile");
         mjModel* model = mj_compile(spec, &vfs);
         support::log_info("[MujocoCook] phase: compiled");
@@ -202,6 +271,7 @@ namespace bud::asset_pipeline {
                 "[MujocoCook][conformance] counts: nbody=" + std::to_string(model->nbody) +
                 " njnt=" + std::to_string(model->njnt) + " nu=" + std::to_string(model->nu) +
                 " ngeom=" + std::to_string(model->ngeom) + " nmesh=" + std::to_string(model->nmesh) +
+                " nsensor=" + std::to_string(model->nsensor) +
                 " mass=" + std::to_string(total_mass));
 
             for (int joint = 0; joint < model->njnt; ++joint) {

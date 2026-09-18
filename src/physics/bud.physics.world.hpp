@@ -206,6 +206,22 @@ namespace bud::physics {
         }
     };
 
+    // IMU measurements for an articulation, read from the robot's root-link sensors. orientation is
+    // in the engine world frame (Y up); angular_velocity and linear_acceleration are in the root body
+    // frame, in engine axes. These are the quantities RL observations expect (projected gravity and
+    // base angular velocity), so the frame conversion happens here rather than in every consumer.
+    struct ArticulationImu {
+        // Engine world frame (Y up), consistent with the rest of the engine.
+        bud::math::quaternion orientation{ 1.0f, 0.0f, 0.0f, 0.0f };
+        // Robot (cooked model / URDF) body frame. External policies are trained against the robot's
+        // own axes, so projected gravity and base angular velocity must be reported in this frame,
+        // not the engine's remapped one.
+        bud::math::quaternion orientation_robot{ 1.0f, 0.0f, 0.0f, 0.0f };
+        bud::math::vec3       angular_velocity{ 0.0f };    // robot body frame
+        bud::math::vec3       linear_acceleration{ 0.0f }; // robot body frame
+        bud::math::vec3       linear_velocity{ 0.0f };     // robot body frame
+    };
+
     // ------------------------------------------------------------------
     // Contacts
     // ------------------------------------------------------------------
@@ -288,6 +304,9 @@ namespace bud::physics {
         // path and must not rebuild the world (a recompile would wipe every other articulation's
         // state).
         virtual void reset_articulation(ArticulationHandle handle) = 0;
+        // Reads the articulation's root-link IMU. False when the backend or the cooked model has no
+        // IMU, so callers can fall back to deriving orientation from the root link transform.
+        virtual bool get_articulation_imu(ArticulationHandle handle, ArticulationImu& out) const = 0;
 
         // --- spatial queries ---
         virtual std::optional<RaycastResult> raycast(const bud::math::vec3& from,

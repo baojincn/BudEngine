@@ -26,6 +26,7 @@ namespace bud::scene {
         physics_scene = physics;
         capsule_radius = radius;
         capsule_height = height;
+        fallback_position = start_pos;
 
         // The player character is Jolt's CharacterVirtual. A non-Jolt backend (the MuJoCo robot
         // world) runs no player character: robot simulation is the subject there. Say so once instead
@@ -140,24 +141,26 @@ namespace bud::scene {
 
     void CharacterController::set_velocity(const bud::math::vec3& velocity) {
         desired_velocity = velocity;
+        fallback_velocity = velocity;
     }
 
     bud::math::vec3 CharacterController::get_position() const {
         if (!character)
-            return {};
+            return fallback_position;
         auto pos = character->GetPosition();
         return bud::math::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
     }
 
     bud::math::vec3 CharacterController::get_linear_velocity() const {
         if (!character)
-            return bud::math::vec3(0.0f);
+            return fallback_velocity;
         auto vel = character->GetLinearVelocity();
         return bud::math::vec3(vel.GetX(), vel.GetY(), vel.GetZ());
     }
 
     bud::math::vec3 CharacterController::get_eye_position() const {
-        if (!character) return {};
+        if (!character)
+            return fallback_position + bud::math::vec3(0.0f, 1.5f, 0.0f);
         auto pos = character->GetPosition();
         // UE5 ACharacter::BaseEyeHeight = 150cm above the character's feet.
         // Feet = shape center - (half cylinder height + radius).
@@ -170,6 +173,7 @@ namespace bud::scene {
     }
 
     void CharacterController::teleport(const bud::math::vec3& pos) {
+        fallback_position = pos;
         if (character)
             character->SetPosition(JPH::RVec3(pos.x, pos.y, pos.z));
     }

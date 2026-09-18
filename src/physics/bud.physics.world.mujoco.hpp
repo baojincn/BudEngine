@@ -73,11 +73,13 @@ namespace bud::physics {
                                              const bud::math::quaternion& rotation) override;
         void set_articulation_activated(ArticulationHandle, bool) override {}
         void reset_articulation(ArticulationHandle handle) override;
+        bool get_articulation_imu(ArticulationHandle handle, ArticulationImu& out) const override;
 
-        // Compile census, for diagnostics/tests: how many bodies and actuators the current world
-        // model holds. Used to prove that spawn/remove cycles do not accumulate.
+        // Compile census, for diagnostics/tests: how many bodies, actuators and sensors the current
+        // world model holds. Used to prove that spawn/remove cycles do not accumulate.
         int model_body_count() const;
         int model_actuator_count() const;
+        int model_sensor_count() const;
 
         // --- spatial queries ---
         std::optional<RaycastResult> raycast(const bud::math::vec3& from,
@@ -152,11 +154,19 @@ namespace bud::physics {
 
         RigidBodyStateSoA body_state;
         std::vector<int> handle_body_ids;          // our handle id -> MuJoCo body id
+        std::vector<std::string> handle_body_names;
         std::vector<void*> handle_user_data;
         std::vector<bool> handle_static;
+        std::vector<bud::math::vec3> handle_half_extents;
         // Static scene meshes are visual-only in this backend (no MuJoCo collision geometry is built
         // for them). Counted so the compile log states how much of the scene is non-colliding.
         int uncollidable_static_meshes = 0;
+        int proxy_box_static_colliders = 0;
+
+        // Sensor ids of the cooked robot IMU, resolved by name at compile time (-1 when absent).
+        int imu_quat_sensor = -1;
+        int imu_gyro_sensor = -1;
+        int imu_accel_sensor = -1;
         std::vector<Articulation> articulations;
         std::vector<SpawnPose> spawn_poses;
         std::unordered_map<int, std::string> body_names_by_id;

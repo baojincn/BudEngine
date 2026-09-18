@@ -231,6 +231,20 @@ int main(int argc, char** argv) {
     // --- Articulation lifecycle (F6): reset is recompile-free, remove/respawn does not accumulate ---
     const int bodies_with_robot = world.model_body_count();
     const int actuators_with_robot = world.model_actuator_count();
+    const int sensors_with_robot = world.model_sensor_count();
+
+    // IMU path: standing upright, the cooked framequat must report a unit quaternion whose body up
+    // axis points along world up, and the gyro must be near zero.
+    bool imu_ok = false;
+    {
+        bud::physics::ArticulationImu imu;
+        if (world.get_articulation_imu(handle, imu)) {
+            const glm::vec3 body_up = glm::mat3_cast(imu.orientation) * glm::vec3(0.0f, 1.0f, 0.0f);
+            const float quat_len = glm::length(imu.orientation);
+            imu_ok = std::abs(quat_len - 1.0f) < 1.0e-3f && body_up.y > 0.95f &&
+                     glm::length(imu.angular_velocity) < 0.5f;
+        }
+    }
 
     world.reset_articulation(handle);
     world.step(step_dt);
@@ -246,23 +260,29 @@ int main(int argc, char** argv) {
     auto active_handle = handle;
     int bodies_after_remove = 0;
     int actuators_after_remove = 0;
+    int sensors_after_remove = 0;
     int bodies_after_respawn = 0;
     int actuators_after_respawn = 0;
+    int sensors_after_respawn = 0;
     bool lifecycle_ok = true;
     for (int cycle = 0; cycle < kLifecycleCycles; ++cycle) {
         world.remove_articulation(active_handle);
         world.step(step_dt);
         bodies_after_remove = world.model_body_count();
         actuators_after_remove = world.model_actuator_count();
+        sensors_after_remove = world.model_sensor_count();
 
         active_handle = world.create_articulation(articulation);
         world.set_articulation_joint_commands(active_handle, base_standing_cmd.to_joint_commands());
         world.step(step_dt);
         bodies_after_respawn = world.model_body_count();
         actuators_after_respawn = world.model_actuator_count();
+        sensors_after_respawn = world.model_sensor_count();
 
         if (bodies_after_remove != kExpectedEmptyBodies || actuators_after_remove != 0 ||
-            bodies_after_respawn != bodies_with_robot || actuators_after_respawn != actuators_with_robot)
+            sensors_after_remove != 0 || bodies_after_respawn != bodies_with_robot ||
+            actuators_after_respawn != actuators_with_robot ||
+            sensors_after_respawn != sensors_with_robot)
             lifecycle_ok = false;
     }
 
@@ -280,6 +300,7 @@ int main(int argc, char** argv) {
                 world.raycast(bud::math::vec3(0.0f, 3.0f, 0.0f), bud::math::vec3(0.0f, -5.0f, 0.0f));
                 world.get_body_count();
                 reader_calls.fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         });
         for (int i = 0; i < 60; ++i) {
@@ -327,10 +348,11 @@ int main(int argc, char** argv) {
     const bool remove_ok = lifecycle_ok && actuators_after_remove == 0;
     const bool respawn_ok = lifecycle_ok && bodies_after_respawn == bodies_with_robot &&
                             actuators_after_respawn == actuators_with_robot;
-    std::printf("[test] lifecycle: reset=%s, %d cycles, remove bodies %d->%d / actuators %d->%d, respawn bodies=%d / actuators=%d\n",
+    std::printf("[test] lifecycle: reset=%s, %d cycles, remove bodies %d->%d / actuators %d->%d / sensors %d->%d, respawn bodies=%d / actuators=%d / sensors=%d\n",
                 reset_ok ? "ok" : "FAILED", kLifecycleCycles, bodies_with_robot, bodies_after_remove,
-                actuators_with_robot, actuators_after_remove, bodies_after_respawn,
-                actuators_after_respawn);
+                actuators_with_robot, actuators_after_remove, sensors_with_robot, sensors_after_remove,
+                bodies_after_respawn, actuators_after_respawn, sensors_after_respawn);
+    std::printf("[test] imu: %s\n", imu_ok ? "ok" : "FAILED");
 
     const float pelvis_fluctuation = max_pelvis_y - min_pelvis_y;
     std::printf("\n--- Stage 4 Standing Stabilization Summary ---\n");
@@ -390,9 +412,17 @@ int main(int argc, char** argv) {
         all_passed = false;
     }
 
+    if (imu_ok)
+        std::printf("[PASS] IMU reports an upright unit orientation with near-zero angular velocity\n");
+    else {
+        std::printf("[FAIL] IMU read is wrong or missing\n");
+        all_passed = false;
+    }
+
     if (remove_ok && respawn_ok)
-        std::printf("[PASS] Remove folded the world back to %d bodies, respawn returned to %d (no accumulation)\n",
-                    bodies_after_remove, bodies_after_respawn);
+        std::printf("[PASS] Remove folded the world back to %d bodies / %d sensors, respawn returned to %d / %d (no accumulation)\n",
+                    bodies_after_remove, sensors_after_remove, bodies_after_respawn,
+                    sensors_after_respawn);
     else {
         std::printf("[FAIL] Articulation lifecycle accumulated state\n");
         all_passed = false;

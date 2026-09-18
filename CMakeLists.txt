@@ -302,6 +302,11 @@ target_sources(bud_engine_core
 		"src/robots/bud.robot.avatar.cpp"
 		"src/robots/bud.robot.skinning.cpp"
 		"src/robots/bud.robot.lowcmd.cpp"
+		"src/rl/bud.rl.policy_spec.cpp"
+		"src/rl/bud.rl.observation.cpp"
+		"src/rl/bud.rl.policy_runner.cpp"
+		"src/rl/bud.rl.dense_policy.cpp"
+		"src/rl/bud.rl.g1_policy_controller.cpp"
 
     PUBLIC
 		"src/core/bud.core.hpp"
