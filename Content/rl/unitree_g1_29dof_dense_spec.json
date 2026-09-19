@@ -56,7 +56,7 @@
   },
   "network": {
     "type": "mlp",
-    "weights": "config/rl/unitree_g1_29dof_weights.bin",
+    "weights": "Content/rl/unitree_g1_29dof_weights.bin",
     "layer_sizes": [480, 512, 256, 128, 29]
   },
   "inputs": { "joystick": true }

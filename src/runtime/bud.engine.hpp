@@ -82,6 +82,9 @@ namespace bud::engine {
 				window->request_close();
 		}
 
+		void reset_frame_timer();
+		void pump_events();
+
 	private:
 		void handle_events();
 
@@ -100,6 +103,7 @@ namespace bud::engine {
 	private:
 
 		double accumulator = 0.0;
+		std::atomic<bool> reset_timer_requested{ false };
 
 		uint32_t current_write_index = 0;
 

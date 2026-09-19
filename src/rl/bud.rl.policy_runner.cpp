@@ -4,6 +4,11 @@
 #include <filesystem>
 #include <vector>
 
+#ifdef _WIN32
+    #define WIN32_LEAN_AND_MEAN
+    #include <windows.h>
+#endif
+
 #include <onnxruntime/onnxruntime_cxx_api.h>
 
 #include "src/core/bud.logger.hpp"
@@ -14,6 +19,30 @@ namespace bud::rl {
         // One environment for the process: creating an Ort::Env per policy is expensive and
         // unnecessary because session options are what carry the per-model settings.
         Ort::Env& shared_env() {
+#ifdef _WIN32
+            SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_NAME_FILTER", "__DISABLED__");
+            SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_OP_TYPE_FILTER", "__DISABLED__");
+            SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_DUMP_SHAPE_DATA", "0");
+            SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_DUMP_INPUT_DATA", "0");
+            SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_DUMP_OUTPUT_DATA", "0");
+            SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_DUMP_STATISTICS_DATA", "0");
+            SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_DUMP_NODE_PLACEMENT", "0");
+            _putenv("ORT_DEBUG_NODE_IO_NAME_FILTER=__DISABLED__");
+            _putenv("ORT_DEBUG_NODE_IO_OP_TYPE_FILTER=__DISABLED__");
+            _putenv("ORT_DEBUG_NODE_IO_DUMP_SHAPE_DATA=0");
+            _putenv("ORT_DEBUG_NODE_IO_DUMP_INPUT_DATA=0");
+            _putenv("ORT_DEBUG_NODE_IO_DUMP_OUTPUT_DATA=0");
+            _putenv("ORT_DEBUG_NODE_IO_DUMP_STATISTICS_DATA=0");
+            _putenv("ORT_DEBUG_NODE_IO_DUMP_NODE_PLACEMENT=0");
+#else
+            setenv("ORT_DEBUG_NODE_IO_NAME_FILTER", "__DISABLED__", 1);
+            setenv("ORT_DEBUG_NODE_IO_OP_TYPE_FILTER", "__DISABLED__", 1);
+            setenv("ORT_DEBUG_NODE_IO_DUMP_SHAPE_DATA", "0", 1);
+            setenv("ORT_DEBUG_NODE_IO_DUMP_INPUT_DATA", "0", 1);
+            setenv("ORT_DEBUG_NODE_IO_DUMP_OUTPUT_DATA", "0", 1);
+            setenv("ORT_DEBUG_NODE_IO_DUMP_STATISTICS_DATA", "0", 1);
+            setenv("ORT_DEBUG_NODE_IO_DUMP_NODE_PLACEMENT", "0", 1);
+#endif
             static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "bud_rl");
             return env;
         }
@@ -91,7 +120,10 @@ namespace bud::rl {
             // fight the physics/render threads for cores.
             options.SetIntraOpNumThreads(1);
             options.SetInterOpNumThreads(1);
-            options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+            // ORT_DISABLE_ALL avoids the schema-registration debug assertion inside the vcpkg
+            // Debug build of ONNX Runtime (schema.cc:1641). Graph optimisation is irrelevant in
+            // Debug configurations, and the model still evaluates correctly without it.
+            options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_DISABLE_ALL);
 
             impl->session =
                 Ort::Session(shared_env(), model_bytes.data(), model_bytes.size(), options);

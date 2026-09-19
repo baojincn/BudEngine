@@ -169,6 +169,25 @@ namespace bud::robots {
         return angles;
     }
 
+    std::unordered_map<std::string, float> get_microduck_standing_joint_angles() {
+        return {
+            { "left_hip_yaw", 0.0f },
+            { "left_hip_roll", -0.0873f },
+            { "left_hip_pitch", -0.4579f },
+            { "left_knee", -0.0049f },
+            { "left_ankle", 0.4530f },
+            { "neck_pitch", 0.3491f },
+            { "head_pitch", 0.3491f },
+            { "head_yaw", 0.0f },
+            { "head_roll", 0.0f },
+            { "right_hip_yaw", 0.0f },
+            { "right_hip_roll", 0.0873f },
+            { "right_hip_pitch", 0.4579f },
+            { "right_knee", 0.0049f },
+            { "right_ankle", -0.4530f }
+        };
+    }
+
     void compute_body_orientation(const bud::math::quaternion& eng_rot,
                                   float& out_pitch_rad,
                                   float& out_roll_rad,

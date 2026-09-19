@@ -4,6 +4,7 @@
 #include <exception>
 #include <functional>
 #include <unordered_map>
+#include <thread>
 
 #include "triangle.hpp"
 #include "src/core/bud.core.hpp"
@@ -11,6 +12,8 @@
 #include "src/runtime/bud.engine.hpp"
 #include "src/runtime/bud.scene.io.hpp"
 #include "src/robots/bud.robot.lowcmd.hpp"
+#include "src/graphics/bud.graphics.renderer.hpp"
+#include "src/physics/bud.cloth.hpp"
 #include <imgui.h>
 
 using namespace bud::game;
@@ -25,6 +28,13 @@ void TriangleApp::on_init(const AppConfig& config) {
 
 	auto engine = get_engine();
 	auto renderer = engine->get_renderer();
+
+	// Defer the heavy Sponza cloth world build until the simulation is actually running. Building
+	// it during scene load competes with physics compilation / mesh uploads and leaves the window
+	// with a static UI for tens of seconds. Registration still marks the cloth dirty; the build is
+	// kicked off by the first flush after simulation becomes ready.
+	if (auto* cloth = renderer->get_cloth_system())
+		cloth->set_build_enabled(false);
 
 	// 1. Initial Render Config
 	bud::graphics::RenderConfig render_config;
@@ -46,49 +56,98 @@ void TriangleApp::on_init(const AppConfig& config) {
 
 	// 2. Load Scene via Engine Data-Driven Pipeline
 	if (!config.scene_file.empty()) {
-		engine->load_scene_async(config.scene_file, [this, engine, renderer]() {
-			auto& scene = engine->get_scene();
-			if (auto* sm = engine->get_streaming_manager()) {
-				sm->set_unload_radius(scene.streaming_unload_radius);
-			}
-			auto cur_cfg = renderer->get_config();
-			cur_cfg.lod_error_threshold_px = scene.lod_error_threshold_px;
-			renderer->set_config(cur_cfg);
+		const float ground_plane_height = config.ground_plane_height;
+		engine->load_scene_async(config.scene_file, [this, engine, renderer, ground_plane_height]() {
+			try {
+				auto& scene = engine->get_scene();
+				if (auto* sm = engine->get_streaming_manager()) {
+					sm->set_unload_radius(scene.streaming_unload_radius);
+				}
+				auto cur_cfg = renderer->get_config();
+				cur_cfg.lod_error_threshold_px = scene.lod_error_threshold_px;
+				renderer->set_config(cur_cfg);
 
-			pending_mesh_loads->store(0);
+				pending_mesh_loads->store(0);
 
-			// Initialize Unitree G1 Robot Avatar
-			auto avatar = std::make_unique<bud::robots::RobotAvatarController>();
-			bool avatar_ok = avatar->init(engine,
-				"Content/Robots/g1_description/g1_29dof.budasset",
-				"Content/Robots/g1_description");
-			if (avatar_ok) {
-				bud::print("[TriangleApp] Unitree G1 Avatar initialized and bound to Sponza scene!");
-				avatar->set_camera_view(bud::robots::AvatarCameraView::ThirdPerson, scene.main_camera);
+				// Initialize Unitree G1 Robot Avatar
+				auto avatar = std::make_unique<bud::robots::RobotAvatarController>();
+				bool avatar_ok = avatar->init(engine,
+					"Content/Robots/g1_description/g1_29dof.budasset",
+					"Content/Robots/g1_description");
+				if (avatar_ok) {
+					bud::print("[TriangleApp] Unitree G1 Avatar initialized and bound to Sponza scene!");
+					avatar->set_camera_view(bud::robots::AvatarCameraView::ThirdPerson, scene.main_camera);
 
-				if (!m_policy_spec_path.empty()) {
-					std::string policy_error;
-					if (avatar->load_policy(m_policy_path, m_policy_spec_path, policy_error)) {
-						bud::print("[TriangleApp] external policy active; WASD/QE or the gamepad drive it");
-						if (m_has_policy_command)
-							avatar->set_policy_command(m_policy_command);
+					if (!m_policy_spec_path.empty()) {
+						std::string policy_error;
+						if (avatar->load_policy(m_policy_path, m_policy_spec_path, policy_error)) {
+							bud::print("[TriangleApp] external policy active; WASD/QE or the gamepad drive it");
+							if (m_has_policy_command)
+								avatar->set_policy_command(m_policy_command);
+						}
+						else {
+							bud::eprint("[TriangleApp] policy load failed: {}", policy_error);
+						}
 					}
-					else {
-						bud::eprint("[TriangleApp] policy load failed: {}", policy_error);
+
+					m_robot_avatar = std::move(avatar);
+
+					if (m_companion_enabled) {
+						auto companion = std::make_unique<bud::robots::MicroduckCompanionController>();
+						// Spawn Microduck 1.2m behind G1 to clear swing leg envelope
+						const bud::math::vec3 duck_spawn(-1.20f, ground_plane_height + 0.16f, 0.0f);
+						std::string package_root = std::filesystem::path(m_companion_asset_path).parent_path().string();
+						if (companion->init(engine, duck_spawn, m_companion_asset_path, package_root)) {
+							bud::print("[TriangleApp] Microduck companion initialized 1.2m behind G1!");
+							m_microduck_companion = std::move(companion);
+							scene.main_camera.orbit_pitch = -22.0f;
+							scene.main_camera.orbit_distance = 2.6f;
+							scene.main_camera.target_position = m_robot_avatar->get_pelvis_position() + bud::math::vec3(-0.15f, -0.05f, 0.0f);
+							scene.main_camera.update(0.0f);
+						}
+						else {
+							bud::eprint("[TriangleApp] Failed to initialize Microduck companion!");
+						}
 					}
+
+					// All articulations are registered. Compile the MuJoCo world and warm up policy on background thread
+					// so the main render thread never stalls and Windows message pump remains responsive.
+					if (m_init_worker_thread.joinable())
+						m_init_worker_thread.join();
+					m_init_worker_thread = std::thread([this, engine]() {
+						if (auto* physics_scene = engine->get_physics_scene()) {
+							physics_scene->get_world().prepare_simulation();
+						}
+						if (m_microduck_companion) {
+							if (!m_microduck_companion->start_policy(m_companion_policy_path))
+								bud::eprint("[TriangleApp] Microduck policy failed to start (ONNX load error)");
+						}
+						m_simulation_ready.store(true, std::memory_order_release);
+						bud::print("[TriangleApp] Asynchronous simulation preparation & policy warmup finished!");
+					});
+				}
+				else {
+					m_simulation_ready.store(true, std::memory_order_release);
+					bud::eprint("[TriangleApp] Failed to initialize Unitree G1 Avatar controller!");
 				}
 
-				m_robot_avatar = std::move(avatar);
+				bud::print("[TriangleApp] init finished");
 			}
-			else {
-				bud::eprint("[TriangleApp] Failed to initialize Unitree G1 Avatar controller!");
+			catch (const std::exception& e) {
+				bud::eprint("[TriangleApp] Exception in load_scene_async: {}", e.what());
+				std::fprintf(stderr, "[FATAL] Exception in load_scene_async: %s\n", e.what());
+				std::fflush(stderr);
 			}
-
-			bud::print("[TriangleApp] init finished");
+			catch (...) {
+				bud::eprint("[TriangleApp] Unknown exception in load_scene_async!");
+				std::fprintf(stderr, "[FATAL] Unknown exception in load_scene_async!\n");
+				std::fflush(stderr);
+			}
 		});
 	}
 	else {
 		pending_mesh_loads->store(0);
+		m_simulation_ready.store(true, std::memory_order_release);
 		bud::print("[TriangleApp] init finished");
 	}
 }
@@ -144,6 +203,23 @@ void TriangleApp::on_update(float delta_time) {
 	}
 	prev_recenter = curr_recenter;
 
+	static bool prev_c = false;
+	bool curr_c = input.is_key_down(bud::input::Key::C);
+	if (curr_c && !prev_c && m_microduck_companion) {
+		m_camera_focus_companion = !m_camera_focus_companion;
+		if (m_camera_focus_companion) {
+			cam.orbit_distance = 0.95f;
+			cam.orbit_pitch = -12.0f;
+			bud::print("[Camera] Focused on Microduck Companion (press C to return focus to G1)");
+		}
+		else {
+			cam.orbit_distance = 2.6f;
+			cam.orbit_pitch = -22.0f;
+			bud::print("[Camera] Focused on Unitree G1 Avatar");
+		}
+	}
+	prev_c = curr_c;
+
 	// Process camera rotation input (gamepad and mouse) prior to avatar update
 	if (input.is_gamepad_connected()) {
 		const auto stick_deadzone = [](float val) {
@@ -175,10 +251,53 @@ void TriangleApp::on_update(float delta_time) {
 			cam.process_mouse_movement(dx, dy);
 	}
 
+	float scroll = input.get_mouse_scroll();
+	if (!imgui_wants_mouse && scroll != 0.0f)
+		cam.process_mouse_scroll(scroll * 0.5f);
+
+	if (!m_simulation_ready.load(std::memory_order_acquire)) {
+		if (m_robot_avatar) {
+			cam.target_position = m_robot_avatar->get_pelvis_position() + bud::math::vec3(-0.15f, -0.05f, 0.0f);
+			cam.update(0.0f);
+		}
+		return;
+	}
+
+	if (!m_simulation_ready_notified) {
+		m_simulation_ready_notified = true;
+		engine->reset_frame_timer();
+		bud::print("[TriangleApp] Simulation active. Frame timer reset, starting simulation steps.");
+		// Simulation is live: release the deferred cloth build now (see on_init).
+		if (auto* renderer = engine->get_renderer()) {
+			if (auto* cloth = renderer->get_cloth_system())
+				cloth->set_build_enabled(true);
+		}
+	}
+
 	if (m_robot_avatar) {
 		m_robot_avatar->update(delta_time, input, cam);
+		if (m_companion_enabled) {
+			if (m_camera_focus_companion && m_microduck_companion) {
+				cam.target_position = m_microduck_companion->get_position() + bud::math::vec3(0.0f, 0.15f, 0.0f);
+				cam.update(0.0f);
+			}
+			else {
+				cam.target_position = m_robot_avatar->get_pelvis_position() + bud::math::vec3(-0.15f, -0.05f, 0.0f);
+				cam.update(0.0f);
+			}
+		}
 	}
-	else {
+
+	if (m_microduck_companion && m_robot_avatar) {
+		const bud::math::vec3 g1_pelvis = m_robot_avatar->get_pelvis_position();
+		bud::math::vec3 g1_fwd(1.0f, 0.0f, 0.0f);
+		if (auto* g1_robot = m_robot_avatar->get_robot()) {
+			const bud::math::quaternion rot = g1_robot->get_link_rotation("pelvis");
+			g1_fwd = rot * bud::math::vec3(1.0f, 0.0f, 0.0f);
+		}
+		m_microduck_companion->update_follower(delta_time, g1_pelvis, g1_fwd);
+	}
+	else if (!m_robot_avatar) {
 		auto* controller = engine->get_character_controller();
 		auto* physics = engine->get_physics_scene();
 		if (controller && physics) {
@@ -265,6 +384,9 @@ void TriangleApp::on_update(float delta_time) {
 }
 
 void TriangleApp::on_shutdown() {
+	if (m_init_worker_thread.joinable())
+		m_init_worker_thread.join();
+	m_microduck_companion.reset();
 	m_robot_avatar.reset();
 	bud::print("[TriangleApp] Shutting down.");
 }

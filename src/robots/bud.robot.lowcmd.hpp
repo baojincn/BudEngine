@@ -67,6 +67,7 @@ namespace bud::robots {
 
     // Standing pose joint angles as a map (convenient for spawn pose initialization)
     std::unordered_map<std::string, float> get_g1_standing_joint_angles();
+    std::unordered_map<std::string, float> get_microduck_standing_joint_angles();
 
     // Computes pitch and roll angles (in radians) and total tilt (in degrees) from body orientation
     // in BudEngine coordinates (where Y is Up, X is Forward, Z is Right).

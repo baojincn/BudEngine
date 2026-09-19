@@ -264,6 +264,11 @@ namespace bud::physics {
         virtual bool init(const PhysicsWorldConfig& config) = 0;
         virtual void step(float delta_time, int collision_steps = 1, int integration_steps = 1) = 0;
         virtual const char* backend_name() const = 0;
+        // Optional: compile or flush any pending structural changes (e.g. all articulations) before
+        // the first step. Backends with lazy compilation (MuJoCo) use this to compile once with all
+        // robots present rather than recompiling on the first query after a partial spawn. Backends
+        // that do not need it provide the default no-op implementation below.
+        virtual bool prepare_simulation() { return true; }
 
         // --- rigid bodies ---
         virtual RigidBodyHandle add_rigid_body(const RigidBodyDesc& desc) = 0;

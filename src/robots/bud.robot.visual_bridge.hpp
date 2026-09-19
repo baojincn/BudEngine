@@ -22,6 +22,13 @@ struct VisualPartEntry {
     bud::math::mat4 local_offset{ 1.0f };
 };
 
+// Forward kinematics of the robot's link tree in URDF/local space for the given joint angles.
+// The root link maps to identity; each child composes its parent through the joint origin, rest
+// rotation and joint angle. Shared by the steady-state visual sync and the pre-physics rest pose.
+std::unordered_map<std::string, bud::math::mat4> compute_link_local_transforms(
+    const bud::robots::RobotDef& robot_def,
+    const std::unordered_map<std::string, float>& joint_angles);
+
 class RobotVisualBridge {
 public:
     RobotVisualBridge() = default;
@@ -39,6 +46,15 @@ public:
 
     // Synchronizes the entity transforms directly from world link transforms (exact rigid FK hierarchy)
     void sync_transforms(const std::unordered_map<std::string, glm::mat4>& world_link_transforms,
+                         bud::scene::Scene& scene);
+
+    // Places every visual part at the robot's spawn pose using forward kinematics, without
+    // consulting physics. Call right after init() so the robot appears upright at its target
+    // position while the physics world compiles asynchronously, instead of sitting at the origin
+    // in the mesh's native Z-up orientation until the first sync_transforms().
+    void place_rest_pose(const bud::robots::RobotDef& robot_def,
+                         const std::unordered_map<std::string, float>& joint_angles,
+                         const bud::math::vec3& root_position,
                          bud::scene::Scene& scene);
 
     // Shows or hides all robot visual parts

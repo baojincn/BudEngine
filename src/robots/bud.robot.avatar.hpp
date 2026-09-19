@@ -125,6 +125,7 @@ private:
     bool m_policy_heading_hold = true;
     bool m_policy_yaw_initialized = false;
     float m_policy_target_yaw = 0.0f;
+    bud::math::vec3 m_smoothed_command{ 0.0f };
     float m_prev_sim_yaw = 0.0f;
     bool m_has_prev_sim_yaw = false;
 };

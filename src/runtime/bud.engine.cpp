@@ -237,6 +237,10 @@ namespace bud::engine {
 			task_scheduler->pump_main_thread_tasks();
 			handle_events();
 
+			if (reset_timer_requested.exchange(false)) {
+				last_time = Clock::now();
+				accumulator = 0.0;
+			}
 
 			auto now = Clock::now();
 			double frame_time = std::chrono::duration<double>(now - last_time).count();
@@ -469,6 +473,9 @@ namespace bud::engine {
 		render_scene.reset(total_submesh_count + buffering_size);
 
 		auto mesh_bounds = renderer->get_mesh_bounds_snapshot();
+		// Meshes whose queued GPU upload has not run yet must not be drawn: their pool base is only
+		// published by the upload command, so adding them now would read an uninitialised region.
+		const auto pending_mesh_uploads = renderer->get_pending_mesh_uploads_snapshot();
 
 		bud::threading::Counter extract_scene_counter;
 
@@ -485,6 +492,11 @@ namespace bud::engine {
 
 					if (entity.mesh_index >= mesh_bounds.size()) [[unlikely]] {
 						continue;
+					}
+
+					if (!pending_mesh_uploads.empty() &&
+						pending_mesh_uploads.find(entity.mesh_index) != pending_mesh_uploads.end()) {
+						continue; // upload still queued (see get_pending_mesh_uploads_snapshot)
 					}
 
 					if (!entity.is_active)
@@ -521,7 +533,7 @@ namespace bud::engine {
 
 		task_scheduler->wait_for_counter(extract_scene_counter);
 
-		// --- Backdrop discovery for full-scene shadow casters ---------------------
+		// --- Backdrop discovery for full-scene shadow casters (diagnostic) ---------
 		// Feeding the cascades the whole scene (RenderConfig::shadow_full_scene_casters)
 		// is the correct CSM model: an object outside the primary camera frustum must
 		// still be rasterized into the cascade it falls in, otherwise shadows break the
@@ -532,63 +544,112 @@ namespace bud::engine {
 		// is driven by a ParallelFor through an atomic counter, so instance order is not
 		// stable. Report by asset_path instead, which is exactly what the scene file
 		// stores. Re-printing is suppressed by a signature of the current candidate set.
+		//
+		// The scan is diagnostic only, so it runs on a worker: the per-frame main-thread
+		// cost is just the snapshot copy below. Strings are copied because the scene's
+		// entity storage can grow / reallocate while the task runs.
 		{
-			std::vector<bud::math::AABB> boxes;
-			std::vector<size_t> box_entity;                   // boxes[k] <- logic_entities[box_entity[k]]
-			std::vector<std::pair<float, size_t>> by_footprint;   // (x*z footprint, box slot k)
-			boxes.reserve(logic_entities.size());
-			box_entity.reserve(logic_entities.size());
-			by_footprint.reserve(logic_entities.size());
-			bud::math::vec3 bmin(1e30f, 1e30f, 1e30f), bmax(-1e30f, -1e30f, -1e30f);
+			struct BackdropScanState {
+				std::mutex mutex;               // guards last_report
+				std::string last_report;
+				std::atomic<bool> in_flight{ false };
+				// Entity / mesh revision of the last completed attempt. The scan is only useful while
+				// the scene's mesh set is still changing (asset registration / streaming), so once it
+				// stabilises the per-frame cost drops to hashing a few integers per entity.
+				std::atomic<uint64_t> last_scanned_revision{ 0 };
+			};
+			static BackdropScanState scan_state;
 
-			for (size_t i = 0; i < logic_entities.size(); ++i) {
-				const auto& entity = logic_entities[i];
-				if (!entity.is_active || entity.mesh_index == bud::asset::INVALID_INDEX)
-					continue;
-				if (entity.mesh_index >= mesh_bounds.size())
-					continue;
-				const auto wb = mesh_bounds[entity.mesh_index].transform(entity.transform);
-				bmin.x = std::min(bmin.x, wb.min.x); bmin.y = std::min(bmin.y, wb.min.y); bmin.z = std::min(bmin.z, wb.min.z);
-				bmax.x = std::max(bmax.x, wb.max.x); bmax.y = std::max(bmax.y, wb.max.y); bmax.z = std::max(bmax.z, wb.max.z);
-				const float fp = (wb.max.x - wb.min.x) * (wb.max.z - wb.min.z);
-				by_footprint.emplace_back(fp, boxes.size());
-				boxes.push_back(wb);
-				box_entity.push_back(i);
+			uint64_t revision = 1469598103934665603ull; // FNV-1a offset basis
+			for (const auto& entity : logic_entities) {
+				uint64_t v = static_cast<uint64_t>(entity.mesh_index) * 1099511628211ull
+					+ (entity.is_cast_shadow ? 2ull : 1ull);
+				revision = (revision ^ v) * 1099511628211ull;
 			}
+			revision ^= static_cast<uint64_t>(mesh_bounds.size()) * 1099511628211ull;
 
-			static std::string s_last_report;
-			if (!boxes.empty() && bmax.x > bmin.x) {
-				const float scene_fp = std::max((bmax.x - bmin.x) * (bmax.z - bmin.z), 1e-3f);
-				const float mid_y = (bmin.y + bmax.y) * 0.5f;
+			bool scan_expected = false;
+			if (revision != scan_state.last_scanned_revision.load(std::memory_order_acquire) &&
+				scan_state.in_flight.compare_exchange_strong(scan_expected, true)) {
+				struct BackdropEntity {
+					std::string asset_path;
+					std::string name;
+					bool is_cast_shadow = true;
+					bud::math::AABB world_bounds{};
+					float footprint = 0.0f;
+				};
 
-				std::sort(by_footprint.begin(), by_footprint.end(),
-					[](const auto& a, const auto& b) { return a.first > b.first; });
-
-				std::vector<size_t> cands;
-				std::string signature;
-				for (const auto& [fp, slot] : by_footprint) {
-					if (fp < 0.25f * scene_fp) break;          // sorted descending: rest are smaller
-					const auto& wb = boxes[slot];
-					// Only something whose *lowest* point is already above mid-height can
-					// lid the scene; a floor or a plinth cannot.
-					if (wb.min.y < mid_y) continue;
-					cands.push_back(slot);
-					signature += logic_entities[box_entity[slot]].asset_path;
-					signature += logic_entities[box_entity[slot]].is_cast_shadow ? "1;" : "0;";
+				auto snapshot = std::make_shared<std::vector<BackdropEntity>>();
+				snapshot->reserve(logic_entities.size());
+				for (const auto& entity : logic_entities) {
+					if (!entity.is_active || entity.mesh_index == bud::asset::INVALID_INDEX)
+						continue;
+					if (entity.mesh_index >= mesh_bounds.size())
+						continue;
+					const auto wb = mesh_bounds[entity.mesh_index].transform(entity.transform);
+					BackdropEntity entry;
+					entry.asset_path = entity.asset_path;
+					entry.name = entity.name;
+					entry.is_cast_shadow = entity.is_cast_shadow;
+					entry.world_bounds = wb;
+					entry.footprint = (wb.max.x - wb.min.x) * (wb.max.z - wb.min.z);
+					snapshot->push_back(std::move(entry));
 				}
 
-				if (!cands.empty() && signature != s_last_report) {
-					s_last_report = signature;
-					bud::print("[CSM] backdrop candidates (footprint >= 25% of scene {:.1f}m2, entirely above y={:.2f}) - add \"is_cast_shadow\": false to these in the scene file:",
-						scene_fp, mid_y);
-					for (const size_t slot : cands) {
-						const auto& entity = logic_entities[box_entity[slot]];
-						const auto& wb = boxes[slot];
-						const float fp = (wb.max.x - wb.min.x) * (wb.max.z - wb.min.z);
-						bud::print("[CSM]   name={} asset={} footprint={:.1f}m2 ({:.0f}%) thickness={:.2f}m y=[{:.2f},{:.2f}] x=[{:.1f},{:.1f}] z=[{:.1f},{:.1f}] is_cast_shadow={}",
-							entity.name, entity.asset_path, fp, 100.0f * fp / scene_fp, wb.max.y - wb.min.y,
-							wb.min.y, wb.max.y, wb.min.x, wb.max.x, wb.min.z, wb.max.z, entity.is_cast_shadow);
-					}
+				// Record the revision even for an empty snapshot, otherwise a scene with no resident
+				// meshes yet would rebuild an empty snapshot on every frame.
+				scan_state.last_scanned_revision.store(revision, std::memory_order_release);
+				if (snapshot->empty()) {
+					scan_state.in_flight.store(false, std::memory_order_release);
+				}
+				else {
+					task_scheduler->spawn("CsmBackdropScan", [snapshot]() {
+						std::vector<size_t> by_footprint;
+						by_footprint.reserve(snapshot->size());
+						bud::math::vec3 bmin(1e30f, 1e30f, 1e30f), bmax(-1e30f, -1e30f, -1e30f);
+						for (size_t i = 0; i < snapshot->size(); ++i) {
+							const auto& wb = (*snapshot)[i].world_bounds;
+							bmin.x = std::min(bmin.x, wb.min.x); bmin.y = std::min(bmin.y, wb.min.y); bmin.z = std::min(bmin.z, wb.min.z);
+							bmax.x = std::max(bmax.x, wb.max.x); bmax.y = std::max(bmax.y, wb.max.y); bmax.z = std::max(bmax.z, wb.max.z);
+							by_footprint.push_back(i);
+						}
+
+						if (bmax.x > bmin.x) {
+							std::sort(by_footprint.begin(), by_footprint.end(),
+								[&snapshot](size_t a, size_t b) { return (*snapshot)[a].footprint > (*snapshot)[b].footprint; });
+
+							const float scene_fp = std::max((bmax.x - bmin.x) * (bmax.z - bmin.z), 1e-3f);
+							const float mid_y = (bmin.y + bmax.y) * 0.5f;
+
+							std::vector<size_t> cands;
+							std::string signature;
+							for (const size_t i : by_footprint) {
+								const auto& e = (*snapshot)[i];
+								if (e.footprint < 0.25f * scene_fp) break;   // sorted descending
+								if (e.world_bounds.min.y < mid_y) continue;
+								cands.push_back(i);
+								signature += e.asset_path;
+								signature += e.is_cast_shadow ? "1;" : "0;";
+							}
+
+							std::lock_guard lock(scan_state.mutex);
+							if (!cands.empty() && signature != scan_state.last_report) {
+								scan_state.last_report = signature;
+								bud::print("[CSM] backdrop candidates (footprint >= 25% of scene {:.1f}m2, entirely above y={:.2f}) - add \"is_cast_shadow\": false to these in the scene file:",
+									scene_fp, mid_y);
+								for (const size_t i : cands) {
+									const auto& e = (*snapshot)[i];
+									const auto& wb = e.world_bounds;
+									const float fp = e.footprint;
+									bud::print("[CSM]   name={} asset={} footprint={:.1f}m2 ({:.0f}%) thickness={:.2f}m y=[{:.2f},{:.2f}] x=[{:.1f},{:.1f}] z=[{:.1f},{:.1f}] is_cast_shadow={}",
+										e.name, e.asset_path, fp, 100.0f * fp / scene_fp, wb.max.y - wb.min.y,
+										wb.min.y, wb.max.y, wb.min.x, wb.max.x, wb.min.z, wb.max.z, e.is_cast_shadow);
+								}
+							}
+						}
+
+						scan_state.in_flight.store(false, std::memory_order_release);
+					});
 				}
 			}
 		}
@@ -1391,5 +1452,13 @@ namespace bud::engine {
 				});
 			}
 		}
+	}
+
+	void BudEngine::reset_frame_timer() {
+		reset_timer_requested.store(true, std::memory_order_release);
+	}
+
+	void BudEngine::pump_events() {
+		handle_events();
 	}
 } // namespace bud::engine

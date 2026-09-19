@@ -367,7 +367,7 @@ q_des[i] = default_joint_pos[i] + action[i] * action_scale
 - `src/rl/bud.rl.g1_policy_controller.{hpp,cpp}`：把 policy 关节顺序映射到资产关节（缺一个就报错），
   解析默认姿态（数组优先，否则命名姿态），增益取 `joint.motor` 或 G1 增益表，
   动作 `q_des = default + action * scale` 经现有 `set_articulation_joint_commands` 下发。
-- 参考规格：`config/rl/unitree_g1_29dof_dense_spec.json`（29 关节；此前那份 96 维示例规格
+- 参考规格：`Content/rl/unitree_g1_29dof_dense_spec.json`（29 关节；此前那份 96 维示例规格
   已随 12-DOF 方案删除）。
 
 ### D3 · ONNX Runtime 推理
@@ -425,8 +425,8 @@ q_des[i] = default_joint_pos[i] + action[i] * action_scale
 | 策略 | LSTM（h/c 为 buffer） | runner 支持多输入/输出 + 持久状态；导出脚本把 h/c 显式化 |
 
 产物：
-- `config/rl/unitree_g1_12dof_spec.json` —— 与官方策略逐项对齐的规格。
-- `config/rl/export_unitree_g1_onnx.py` —— 从官方 `.pt` 重建前向、h/c 显式导出、并与 TorchScript 对拍。
+- `Content/rl/unitree_g1_12dof_spec.json` —— 与官方策略逐项对齐的规格。
+- `Content/rl/export_unitree_g1_onnx.py` —— 从官方 `.pt` 重建前向、h/c 显式导出、并与 TorchScript 对拍。
 
 **阻塞点：vcpkg 的 onnxruntime 1.23.2 在解析"含初始化器（权重）"的 ONNX 图时，于
 `Ort::Session` 构造中抛出未捕获的 C++ 异常（exit 0xE06D7363），进程直接终止。**
@@ -461,7 +461,7 @@ q_des[i] = default_joint_pos[i] + action[i] * action_scale
 
 规格 `network` 段：
 ```json
-"network": { "type": "lstm_mlp", "weights": "config/rl/unitree_g1_weights.bin",
+"network": { "type": "lstm_mlp", "weights": "Content/rl/unitree_g1_weights.bin",
              "input_size": 47, "hidden_size": 64, "actor_hidden": 32,
              "output_size": 12, "layers": 1 }
 ```
@@ -472,9 +472,9 @@ q_des[i] = default_joint_pos[i] + action[i] * action_scale
 改成 pitch-first 后立即站住。**这条对所有外部策略都成立：关节顺序必须按模型的 qpos/动作顺序，
 不能按配置字典的书写顺序。**
 
-验证（`triangle_sample --backend mujoco --policy-spec config/rl/unitree_g1_12dof_dense_spec.json`）：
+验证（`triangle_sample --backend mujoco --policy-spec Content/rl/unitree_g1_12dof_dense_spec.json`）：
 ```
-[RL] dense policy ready: obs=47 action=12 state=128 weights='config/rl/unitree_g1_weights.bin'
+[RL] dense policy ready: obs=47 action=12 state=128 weights='Content/rl/unitree_g1_weights.bin'
 [RL] first policy step: obs=47 action=12 state=128 q[0]=-0.175 gravity_robot=(0,0,-1)
 [StandingTest] Time: 12.0/12.0s, Pelvis Y: 0.7479m (range: [0.7463, 0.7542]), Tilt: 2.14 deg (max: 6.06 deg)
 Final Result: PASSED
@@ -527,12 +527,12 @@ deploy/robots/g1_29dof/config/policy/velocity/v0/params/deploy.yaml
 不加外环会画圈）。
 
 产物：
-- `config/rl/unitree_g1_29dof_dense_spec.json` —— 29 关节策略顺序、默认姿态、kp/kd、obs 缩放与历史。
-- `config/rl/unitree_g1_29dof_weights.bin` —— 从 ONNX initializer 导出的扁平权重（414,237 floats）。
-- `config/rl/export_unitree_g1_29dof_weights.py` —— 导出脚本（含与 onnxruntime 的对拍）。
+- `Content/rl/unitree_g1_29dof_dense_spec.json` —— 29 关节策略顺序、默认姿态、kp/kd、obs 缩放与历史。
+- `Content/rl/unitree_g1_29dof_weights.bin` —— 从 ONNX initializer 导出的扁平权重（414,237 floats）。
+- 密集权重由引擎自己的资源管线从 ONNX 生成（`Content/rl/unitree_g1_29dof_weights.bin`），不保留外部 Python 导出脚本。
 - `triangle_sample --policy-spec <spec> [--cmd vx vy yaw]`。
 
-**实测（`triangle_sample --backend mujoco --policy-spec config/rl/unitree_g1_29dof_dense_spec.json`）**
+**实测（`triangle_sample --backend mujoco --policy-spec Content/rl/unitree_g1_29dof_dense_spec.json`）**
 
 | 工况 | 结果 |
 | :-- | :-- |

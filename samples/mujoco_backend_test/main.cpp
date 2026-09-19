@@ -138,6 +138,13 @@ int main(int argc, char** argv) {
 
     auto base_standing_cmd = bud::robots::make_g1_standing_cmd();
     world.set_articulation_joint_commands(handle, base_standing_cmd.to_joint_commands());
+
+    // Compilation is explicit: step() no longer lazily compiles, because doing so on the stepping
+    // thread is what froze the window during startup. Build the world once, up front.
+    if (!world.prepare_simulation()) {
+        std::printf("[test] prepare_simulation failed\n");
+        return 1;
+    }
     std::printf("[test] initialized standing stance (%zu joints), target duration: %.1fs\n",
                 articulation.joints.size(), duration_sec);
 
@@ -267,6 +274,7 @@ int main(int argc, char** argv) {
     bool lifecycle_ok = true;
     for (int cycle = 0; cycle < kLifecycleCycles; ++cycle) {
         world.remove_articulation(active_handle);
+        world.prepare_simulation(); // structural change: recompile explicitly
         world.step(step_dt);
         bodies_after_remove = world.model_body_count();
         actuators_after_remove = world.model_actuator_count();
@@ -274,6 +282,7 @@ int main(int argc, char** argv) {
 
         active_handle = world.create_articulation(articulation);
         world.set_articulation_joint_commands(active_handle, base_standing_cmd.to_joint_commands());
+        world.prepare_simulation();
         world.step(step_dt);
         bodies_after_respawn = world.model_body_count();
         actuators_after_respawn = world.model_actuator_count();

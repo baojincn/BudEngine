@@ -517,18 +517,21 @@ namespace bud::io {
 		: virtual_file_system(virtual_file_system), task_scheduler(scheduler), image_loader(virtual_file_system), model_loader(virtual_file_system) {
 	}
 
-	void AssetManager::load_mesh_async(const std::string& path, std::function<void(MeshData)> on_loaded) {
-		task_scheduler->spawn("AsyncMeshLoad", [this, path, on_loaded]() {
+	void AssetManager::load_mesh_async(const std::string& path,
+	                                   std::function<void(MeshData)> on_loaded,
+	                                   std::function<void(MeshData&)> on_worker) {
+		task_scheduler->spawn("AsyncMeshLoad", [this, path, on_loaded, on_worker]() {
 			std::optional<MeshData> mesh_opt = this->model_loader.load_bud_asset(path);
 
 			if (mesh_opt) {
 				auto resolved = this->virtual_file_system->resolve_path(path);
-				if (resolved) {
+				if (resolved)
 					bud::print("[IO] Loaded mesh (resolved): {}", resolved->string());
-				}
-				else {
+				else
 					bud::print("[IO] Loaded mesh: {}", path);
-				}
+
+				if (on_worker)
+					on_worker(*mesh_opt);
 
 				task_scheduler->submit_main_thread_task([on_loaded, mesh = std::move(*mesh_opt)]() mutable {
 					on_loaded(std::move(mesh));

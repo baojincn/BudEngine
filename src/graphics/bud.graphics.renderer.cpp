@@ -2,6 +2,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 #include <print>
 #include <cstring>
 
@@ -182,6 +183,11 @@ namespace bud::graphics {
 	std::vector<bud::math::AABB> Renderer::get_mesh_bounds_snapshot() const {
 		std::lock_guard lock(mesh_bounds_mutex);
 		return mesh_bounds;
+	}
+
+	std::unordered_set<uint32_t> Renderer::get_pending_mesh_uploads_snapshot() const {
+		std::lock_guard lock(mesh_bounds_mutex);
+		return pending_mesh_uploads;
 	}
 
 	std::vector<std::vector<bud::math::AABB>> Renderer::get_submesh_bounds_snapshot() const {
@@ -462,6 +468,10 @@ namespace bud::graphics {
 					mesh_vertex_offsets.resize(assigned_mesh_id + 1, -1);
 
 				mesh_vertex_offsets[assigned_mesh_id] = reserved_vertex_offset;
+
+				// Publish "not drawable yet": the queued command clears this once the geometry pool
+				// base and the vertex/index copies are actually in GPU memory.
+				pending_mesh_uploads.insert(assigned_mesh_id);
 			}
 
 			queue->commands.push_back([this, mesh_data_copy, texture_slot_map, assigned_mesh_id, cpu_aabb, reserved_vertex_base, reserved_index_base, base_material_id]() {
@@ -632,6 +642,12 @@ namespace bud::graphics {
 						meshes.resize(assigned_mesh_id + 1);
 					meshes[assigned_mesh_id] = std::move(new_mesh);
 				}
+
+				// Geometry and material state are now resident: the mesh may be drawn.
+				{
+					std::lock_guard bounds_lock(mesh_bounds_mutex);
+					pending_mesh_uploads.erase(assigned_mesh_id);
+				}
 			});
 		}
 
@@ -651,20 +667,30 @@ namespace bud::graphics {
 #endif
 		}
 
-		std::vector<std::function<void()>> commands_to_run;
-		{
-			std::lock_guard lock(queue_ptr->mutex);
-			if (queue_ptr->commands.empty()) {
-				// No pending upload commands — not an error. Just return silently.
-				return;
+		// A startup burst (dozens of robot meshes, textures and cloth buffers) would otherwise keep
+		// the render task busy for seconds. The main thread waits on that task every frame, so the
+		// UI freezes even though it is not the thread doing the work. Process commands FIFO until a
+		// small frame budget is spent and leave the rest queued for later frames: the order inside
+		// the queue is preserved, so the vertex-offset reservations taken in upload_mesh() still
+		// match the execution order.
+		constexpr auto upload_budget = std::chrono::milliseconds(12);
+		const auto flush_start = std::chrono::steady_clock::now();
+
+		for (;;) {
+			std::function<void()> rhi_cmd;
+			{
+				std::lock_guard lock(queue_ptr->mutex);
+				if (queue_ptr->commands.empty())
+					break;
+				rhi_cmd = std::move(queue_ptr->commands.front());
+				queue_ptr->commands.pop_front();
 			}
 
-			commands_to_run.swap(queue_ptr->commands);
-		}
-
-		for (const auto& rhi_cmd : commands_to_run) {
 			if (rhi_cmd)
 				rhi_cmd();
+
+			if (std::chrono::steady_clock::now() - flush_start >= upload_budget)
+				break;
 		}
 	}
 

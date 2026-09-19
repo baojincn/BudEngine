@@ -3,14 +3,24 @@
 #include <memory>
 #include <atomic>
 #include <string>
+#include <thread>
 #include "src/runtime/bud.game.hpp"
 #include "src/streaming/bud.streaming.manager.hpp"
 #include "src/robots/bud.robot.avatar.hpp"
+#include "src/robots/bud.robot.companion.hpp"
 
 class TriangleApp : public bud::game::GameFramework {
 private:
 	std::shared_ptr<std::atomic<int>> pending_mesh_loads = std::make_shared<std::atomic<int>>(1);
 	std::unique_ptr<bud::robots::RobotAvatarController> m_robot_avatar;
+	std::unique_ptr<bud::robots::MicroduckCompanionController> m_microduck_companion;
+	std::thread m_init_worker_thread;
+	std::atomic<bool> m_simulation_ready{ false };
+	bool m_simulation_ready_notified = false;
+	bool m_companion_enabled = false;
+	std::string m_companion_asset_path = "Content/Robots/microduck/microduck.budasset";
+	std::string m_companion_policy_path = "Content/rl/microduck/velstand.onnx";
+	bool m_camera_focus_companion = false;
 	float m_test_duration = 0.0f;
 	float m_elapsed_time = 0.0f;
 	float m_last_log_time = 0.0f;
@@ -24,6 +34,15 @@ private:
 	bool m_has_policy_command = false;
 
 public:
+	void set_companion_enabled(bool enabled,
+	                           const std::string& asset_path = "",
+	                           const std::string& policy_path = "") {
+		m_companion_enabled = enabled;
+		if (!asset_path.empty())
+			m_companion_asset_path = asset_path;
+		if (!policy_path.empty())
+			m_companion_policy_path = policy_path;
+	}
 	void set_test_duration(float duration) {
 		m_test_duration = duration;
 	}

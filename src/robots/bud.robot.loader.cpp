@@ -539,9 +539,12 @@ std::unique_ptr<RobotInstance> RobotLoader::spawn_robot(physics::PhysicsScene& s
         // No implicit height: the caller states where the robot spawns, in physical units.
         articulation.root_position = params.position;
         articulation.root_rotation = params.rotation;
-        if (params.initial_joint_angles.empty())
-            articulation.initial_joint_angles = get_g1_standing_joint_angles();
-        else
+        if (params.initial_joint_angles.empty()) {
+            if (robot_def.name == "microduck")
+                articulation.initial_joint_angles = get_microduck_standing_joint_angles();
+            else
+                articulation.initial_joint_angles = get_g1_standing_joint_angles();
+        } else
             articulation.initial_joint_angles = params.initial_joint_angles;
         for (const auto& link : robot_def.links) {
             bud::physics::ArticulationLinkDesc link_desc{};
@@ -585,8 +588,10 @@ std::unique_ptr<RobotInstance> RobotLoader::spawn_robot(physics::PhysicsScene& s
             return nullptr;
         }
 
-        auto base_standing_cmd = bud::robots::make_g1_standing_cmd();
-        scene.get_world().set_articulation_joint_commands(handle, base_standing_cmd.to_joint_commands());
+        if (robot_def.name == "g1" || robot_def.name == "g1_29dof") {
+            auto base_standing_cmd = bud::robots::make_g1_standing_cmd();
+            scene.get_world().set_articulation_joint_commands(handle, base_standing_cmd.to_joint_commands());
+        }
 
         std::unordered_map<std::string, int> link_to_part;
         for (size_t i = 0; i < robot_def.links.size(); ++i) {

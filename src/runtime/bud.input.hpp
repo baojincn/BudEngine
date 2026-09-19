@@ -23,6 +23,7 @@ namespace bud::input {
 		LShift,
 		V,
 		B,
+		C,
 		Tab,
 		F1,
 		F2,

@@ -216,6 +216,14 @@ bool RobotAvatarController::init(bud::engine::BudEngine* engine,
     m_visual_bridge = std::make_unique<RobotVisualBridge>();
     if (m_robot) {
         m_visual_bridge->init(engine, scene, m_robot->get_definition(), package_root);
+
+        // Place the visual hierarchy at the spawn pose right away. The MuJoCo world compiles on a
+        // background thread (tens of seconds); without this the G1 renders at the origin in the
+        // mesh's native Z-up orientation until the first update() actually syncs transforms.
+        if (physics_scene->get_backend() == physics::PhysicsBackend::Mujoco) {
+            m_visual_bridge->place_rest_pose(m_robot->get_definition(), m_current_joint_angles,
+                                             m_current_pelvis_pos, scene);
+        }
     }
 
     std::cout << "[RobotAvatarController] Initialized Unitree G1 Avatar (Pelvis Y: "
@@ -437,18 +445,23 @@ void RobotAvatarController::update(float dt, const bud::input::Input& input, bud
         float vy_cmd = 0.0f;
         float yaw_cmd = 0.0f;
 
+        constexpr float k_nominal_forward_speed = 0.50f;
+        constexpr float k_nominal_backward_speed = 0.30f;
+        constexpr float k_nominal_steer_speed = 0.40f;
+        constexpr float k_nominal_strafe_speed = 0.20f;
+
         if (input.is_key_down(bud::input::Key::W))
-            vx_cmd += 0.8f;
+            vx_cmd += k_nominal_forward_speed;
         if (input.is_key_down(bud::input::Key::S))
-            vx_cmd -= 0.4f;
+            vx_cmd -= k_nominal_backward_speed;
         if (input.is_key_down(bud::input::Key::A))
-            yaw_cmd += 0.5f;
+            yaw_cmd += k_nominal_steer_speed;
         if (input.is_key_down(bud::input::Key::D))
-            yaw_cmd -= 0.5f;
+            yaw_cmd -= k_nominal_steer_speed;
         if (input.is_key_down(bud::input::Key::Q))
-            vy_cmd += 0.25f;
+            vy_cmd += k_nominal_strafe_speed;
         if (input.is_key_down(bud::input::Key::E))
-            vy_cmd -= 0.25f;
+            vy_cmd -= k_nominal_strafe_speed;
 
         if (input.is_gamepad_connected()) {
             const auto deadzone = [](float value) {
@@ -462,43 +475,40 @@ void RobotAvatarController::update(float dt, const bud::input::Input& input, bud
 
             // Left Stick: Y = forward/backward, X = steer left/right
             if (std::abs(ly) > 1.0e-3f)
-                vx_cmd += (ly > 0.0f) ? (ly * 0.8f) : (ly * 0.4f);
+                vx_cmd += (ly > 0.0f) ? (ly * k_nominal_forward_speed) : (ly * k_nominal_backward_speed);
             if (std::abs(lx) > 1.0e-3f)
-                yaw_cmd += -lx * 0.5f;
+                yaw_cmd += -lx * k_nominal_steer_speed;
 
             // Bumpers & D-Pad: Strafe left/right, D-Pad walk
             if (input.is_gamepad_button_down(bud::input::GamepadButton::LB) ||
                 input.is_gamepad_button_down(bud::input::GamepadButton::DPadLeft))
-                vy_cmd += 0.25f;
+                vy_cmd += k_nominal_strafe_speed;
             if (input.is_gamepad_button_down(bud::input::GamepadButton::RB) ||
                 input.is_gamepad_button_down(bud::input::GamepadButton::DPadRight))
-                vy_cmd -= 0.25f;
+                vy_cmd -= k_nominal_strafe_speed;
             if (input.is_gamepad_button_down(bud::input::GamepadButton::DPadUp))
-                vx_cmd += 0.8f;
+                vx_cmd += k_nominal_forward_speed;
             if (input.is_gamepad_button_down(bud::input::GamepadButton::DPadDown))
-                vx_cmd -= 0.4f;
+                vx_cmd -= k_nominal_backward_speed;
         }
 
         // When steering without forward input, provide minimum stepping velocity so the RL gait activates and turns
         if (std::abs(yaw_cmd) > 1.0e-3f && std::abs(vx_cmd) < 1.0e-3f && std::abs(vy_cmd) < 1.0e-3f)
-            vx_cmd = 0.30f;
+            vx_cmd = 0.25f;
 
         if (m_policy && m_policy->ready()) {
             const bool has_user_input = (std::abs(vx_cmd) > 1.0e-3f || std::abs(vy_cmd) > 1.0e-3f || std::abs(yaw_cmd) > 1.0e-3f);
             if (has_user_input)
                 m_has_policy_command_override = false;
 
-            bud::math::vec3 command(0.0f);
+            bud::math::vec3 target_command(0.0f);
             if (m_has_policy_command_override) {
-                command = m_policy_command_override;
+                target_command = m_policy_command_override;
             } else if (has_user_input) {
-                command = bud::math::vec3(std::clamp(vx_cmd, -0.5f, 1.0f),
-                                          std::clamp(vy_cmd, -0.3f, 0.3f),
-                                          std::clamp(yaw_cmd, -0.5f, 0.5f));
+                target_command = bud::math::vec3(std::clamp(vx_cmd, -0.4f, 0.6f),
+                                                 std::clamp(vy_cmd, -0.3f, 0.3f),
+                                                 std::clamp(yaw_cmd, -0.5f, 0.5f));
             }
-
-            const bool is_translating = (std::abs(command.x) > 0.01f || std::abs(command.y) > 0.01f);
-            m_is_moving = is_translating || (std::abs(command.z) > 0.01f);
 
             const glm::vec3 forward =
                 m_robot->get_link_rotation("pelvis") * glm::vec3(1.0f, 0.0f, 0.0f);
@@ -508,25 +518,55 @@ void RobotAvatarController::update(float dt, const bud::input::Input& input, bud
                 m_policy_yaw_initialized = true;
             }
 
+            const bool is_target_translating = (std::abs(target_command.x) > 0.01f || std::abs(target_command.y) > 0.01f);
+
             if (m_policy_heading_hold) {
                 if (std::abs(yaw_cmd) > 1.0e-3f) {
                     // Actively steering: target tracks where user steers
                     m_policy_target_yaw = current_yaw;
-                } else if (is_translating) {
+                } else if (is_target_translating) {
                     // Actively walking straight: hold current target heading
                     float error = m_policy_target_yaw - current_yaw;
                     while (error > 3.14159265f)
                         error -= 6.28318531f;
                     while (error < -3.14159265f)
                         error += 6.28318531f;
-                    command.z = std::clamp(1.5f * error, -0.2f, 0.2f);
+                    target_command.z = std::clamp(1.5f * error, -0.2f, 0.2f);
                 } else {
                     // Standing idle: reset target, zero yaw velocity
                     m_policy_target_yaw = current_yaw;
-                    command.z = 0.0f;
+                    target_command.z = 0.0f;
                 }
             }
-            m_policy->set_command(command);
+
+            // Slew-rate limiter for G1 command: prevents step impulses that topple the biped
+            constexpr float k_max_forward_accel = 0.8f;  // m/s^2 forward acceleration
+            constexpr float k_max_forward_decel = 1.2f;  // m/s^2 forward deceleration (stable braking)
+            constexpr float k_max_lateral_accel = 0.6f;  // m/s^2 lateral acceleration
+            constexpr float k_max_yaw_accel = 1.5f;      // rad/s^2 yaw acceleration
+
+            // Forward vx slew-rate
+            if (target_command.x > m_smoothed_command.x)
+                m_smoothed_command.x = std::min(target_command.x, m_smoothed_command.x + k_max_forward_accel * dt);
+            else
+                m_smoothed_command.x = std::max(target_command.x, m_smoothed_command.x - k_max_forward_decel * dt);
+
+            // Lateral vy slew-rate
+            if (target_command.y > m_smoothed_command.y)
+                m_smoothed_command.y = std::min(target_command.y, m_smoothed_command.y + k_max_lateral_accel * dt);
+            else
+                m_smoothed_command.y = std::max(target_command.y, m_smoothed_command.y - k_max_lateral_accel * dt);
+
+            // Yaw rate slew-rate
+            if (target_command.z > m_smoothed_command.z)
+                m_smoothed_command.z = std::min(target_command.z, m_smoothed_command.z + k_max_yaw_accel * dt);
+            else
+                m_smoothed_command.z = std::max(target_command.z, m_smoothed_command.z - k_max_yaw_accel * dt);
+
+            const bool is_translating = (std::abs(m_smoothed_command.x) > 0.01f || std::abs(m_smoothed_command.y) > 0.01f);
+            m_is_moving = is_translating || (std::abs(m_smoothed_command.z) > 0.01f);
+
+            m_policy->set_command(m_smoothed_command);
             m_policy->update(dt);
         }
         else {
@@ -903,61 +943,7 @@ void RobotAvatarController::update_forward_kinematics() {
     if (!m_robot)
         return;
 
-    const auto& def = m_robot->get_definition();
-    if (def.root_link.empty())
-        return;
-
-    m_current_link_xforms.clear();
-    m_current_link_xforms[def.root_link] = glm::mat4(1.0f);
-
-    std::queue<std::string> q;
-    q.push(def.root_link);
-
-    std::unordered_set<std::string> visited;
-    visited.insert(def.root_link);
-
-    while (!q.empty()) {
-        std::string parent_name = q.front();
-        q.pop();
-
-        glm::mat4 parent_mat = m_current_link_xforms[parent_name];
-        auto child_joints = def.get_child_joints(parent_name);
-
-        for (const auto* joint : child_joints) {
-            if (!joint || joint->child_link.empty())
-                continue;
-            if (visited.find(joint->child_link) != visited.end())
-                continue;
-
-            glm::vec3 j_pos(joint->origin_xyz[0], joint->origin_xyz[1], joint->origin_xyz[2]);
-            float roll = joint->origin_rpy[0];
-            float pitch = joint->origin_rpy[1];
-            float yaw = joint->origin_rpy[2];
-
-            glm::quat j_rot = glm::angleAxis(yaw, glm::vec3(0.0f, 0.0f, 1.0f))
-                            * glm::angleAxis(pitch, glm::vec3(0.0f, 1.0f, 0.0f))
-                            * glm::angleAxis(roll, glm::vec3(1.0f, 0.0f, 0.0f));
-
-            float angle = 0.0f;
-            auto it = m_current_joint_angles.find(joint->name);
-            if (it != m_current_joint_angles.end())
-                angle = it->second;
-
-            glm::vec3 axis(joint->axis[0], joint->axis[1], joint->axis[2]);
-            float axis_len = glm::length(axis);
-            glm::mat4 rot = glm::mat4(1.0f);
-            if (axis_len > 1e-4f && std::abs(angle) > 1e-6f) {
-                rot = glm::rotate(glm::mat4(1.0f), angle, axis / axis_len);
-            }
-
-            glm::mat4 joint_local = glm::translate(glm::mat4(1.0f), j_pos) * glm::mat4_cast(j_rot) * rot;
-            glm::mat4 child_mat = parent_mat * joint_local;
-
-            m_current_link_xforms[joint->child_link] = child_mat;
-            visited.insert(joint->child_link);
-            q.push(joint->child_link);
-        }
-    }
+    m_current_link_xforms = compute_link_local_transforms(m_robot->get_definition(), m_current_joint_angles);
 }
 
 bud::math::vec3 RobotAvatarController::get_pelvis_position() const {

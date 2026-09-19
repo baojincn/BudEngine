@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -137,6 +138,100 @@ bud::math::mat4 calc_visual_local_transform(const bud::robots::VisualDef& vis) {
     return t * r * s;
 }
 
+static void prepare_robot_mesh(bud::io::MeshData& mesh, const std::string& path) {
+    // Recompute smooth normals for CAD/STL meshes to eliminate flat-faceted shading
+    smooth_mesh_normals(mesh, 75.0f);
+
+    // Clear placeholder default.png checkerboard textures so the robot renders with realistic PBR materials
+    mesh.texture_paths.clear();
+    mesh.materials.clear();
+
+    bud::io::MeshData::Material mat{};
+    std::string lower_path = path;
+    std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
+
+    if (lower_path.find("microduck") != std::string::npos) {
+        // Palette copied from the official Microduck product shots: white shell and body,
+        // duck-yellow trim/feet/beak, black visor, dark mechanics. Colouring every "shell"
+        // yellow made the whole robot one yellow blob, which is what made it look wrong.
+        if (lower_path.find("lens") != std::string::npos || lower_path.find("noenoeil") != std::string::npos) {
+            // Glossy black camera lens / eyes behind the visor
+            mat.base_color_factor = glm::vec4(0.02f, 0.02f, 0.03f, 1.0f);
+            mat.metallic_factor = 0.90f;
+            mat.roughness_factor = 0.05f;
+        }
+        else if (lower_path.find("bottom_head_shell") != std::string::npos ||
+                 lower_path.find("jaw") != std::string::npos ||
+                 lower_path.find("mouth") != std::string::npos ||
+                 lower_path.find("foot") != std::string::npos ||
+                 lower_path.find("sole") != std::string::npos ||
+                 lower_path.find("ankle") != std::string::npos) {
+            // Duck-yellow accent trim: lower head rim, beak and webbed feet
+            mat.base_color_factor = glm::vec4(0.98f, 0.78f, 0.13f, 1.0f);
+            mat.metallic_factor = 0.05f;
+            mat.roughness_factor = 0.42f;
+        }
+        else if (lower_path.find("shell") != std::string::npos ||
+                 lower_path.find("trunk") != std::string::npos ||
+                 lower_path.find("face") != std::string::npos) {
+            // Shells and body: warm white, as on the reference model
+            mat.base_color_factor = glm::vec4(0.93f, 0.93f, 0.94f, 1.0f);
+            mat.metallic_factor = 0.05f;
+            mat.roughness_factor = 0.35f;
+        }
+        else {
+            // Internal mechanics, motors, brackets: dark matte tech finish
+            mat.base_color_factor = glm::vec4(0.22f, 0.23f, 0.25f, 1.0f);
+            mat.metallic_factor = 0.85f;
+            mat.roughness_factor = 0.30f;
+        }
+    }
+    else if (lower_path.find("logo") != std::string::npos) {
+        // Unitree 3D logo: high-gloss obsidian black lettering on chest
+        mat.base_color_factor = glm::vec4(0.015f, 0.015f, 0.02f, 1.0f);
+        mat.metallic_factor = 0.90f;
+        mat.roughness_factor = 0.08f;
+    }
+    else if (lower_path.find("head") != std::string::npos) {
+        // Head visor: high-gloss deep tinted optical glass / dark visor
+        mat.base_color_factor = glm::vec4(0.02f, 0.02f, 0.025f, 1.0f);
+        mat.metallic_factor = 0.92f;
+        mat.roughness_factor = 0.06f;
+    }
+    else if (lower_path.find("rubber") != std::string::npos || lower_path.find("ankle_roll") != std::string::npos) {
+        // Rubber hands / foot soles: matte vulcanized rubber
+        mat.base_color_factor = glm::vec4(0.08f, 0.08f, 0.09f, 1.0f);
+        mat.metallic_factor = 0.02f;
+        mat.roughness_factor = 0.85f;
+    }
+    else if (lower_path.find("pelvis_contour") == std::string::npos &&
+             (lower_path.find("pelvis") != std::string::npos || lower_path.find("hip_pitch") != std::string::npos)) {
+        // Pelvis internal chassis & hip pitch joints: machined gunmetal titanium
+        mat.base_color_factor = glm::vec4(0.32f, 0.33f, 0.35f, 1.0f);
+        mat.metallic_factor = 0.95f;
+        mat.roughness_factor = 0.22f;
+    }
+    else if (lower_path.find("knee") != std::string::npos || lower_path.find("elbow") != std::string::npos ||
+             lower_path.find("pitch") != std::string::npos || lower_path.find("roll") != std::string::npos ||
+             lower_path.find("yaw") != std::string::npos || lower_path.find("wrist") != std::string::npos) {
+        // Joint actuators & limb structures: CNC machined aerospace titanium alloy
+        mat.base_color_factor = glm::vec4(0.52f, 0.54f, 0.57f, 1.0f);
+        mat.metallic_factor = 0.96f;
+        mat.roughness_factor = 0.20f;
+    }
+    else {
+        // Torso / Pelvis contour / Armor plates: Unitree pearl metallic silver
+        mat.base_color_factor = glm::vec4(0.88f, 0.88f, 0.90f, 1.0f);
+        mat.metallic_factor = 0.88f;
+        mat.roughness_factor = 0.22f;
+    }
+
+    mesh.materials.push_back(mat);
+    for (auto& s : mesh.subsets) {
+        s.material_index = 0;
+    }
+}
+
 } // namespace
 
 bool RobotVisualBridge::init(bud::engine::BudEngine* engine,
@@ -214,94 +309,46 @@ bool RobotVisualBridge::init(bud::engine::BudEngine* engine,
     auto total_mesh_count = std::make_shared<std::atomic<uint32_t>>(0);
     const uint32_t expected_meshes = static_cast<uint32_t>(path_to_entity_indices.size());
 
-    // Asynchronously load distinct visual meshes and upload to GPU
+    // Asynchronously load distinct visual meshes: smooth normals and materials on worker threads,
+    // upload to GPU on main thread.
     for (const auto& [path, indices] : path_to_entity_indices) {
-        asset_manager->load_mesh_async(path, [engine, indices, path, total_mesh_count, expected_meshes](bud::io::MeshData mesh) {
-            auto* cur_renderer = engine->get_renderer();
-            if (!cur_renderer)
-                return;
+        asset_manager->load_mesh_async(
+            path,
+            [engine, indices, path, total_mesh_count, expected_meshes](bud::io::MeshData mesh) {
+                auto* cur_renderer = engine->get_renderer();
+                if (!cur_renderer)
+                    return;
 
-            // Recompute smooth normals for CAD/STL meshes to eliminate flat-faceted shading
-            smooth_mesh_normals(mesh, 75.0f);
+                auto handle = cur_renderer->upload_mesh(mesh);
+                if (!handle.is_valid())
+                    return;
 
-            // Clear placeholder default.png checkerboard textures so the robot renders with realistic PBR materials
-            mesh.texture_paths.clear();
-            mesh.materials.clear();
-
-            bud::io::MeshData::Material mat{};
-            std::string lower_path = path;
-            std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
-
-            if (lower_path.find("logo") != std::string::npos) {
-                // Unitree 3D logo: high-gloss obsidian black lettering on chest
-                mat.base_color_factor = glm::vec4(0.015f, 0.015f, 0.02f, 1.0f);
-                mat.metallic_factor = 0.90f;
-                mat.roughness_factor = 0.08f;
-            }
-            else if (lower_path.find("head") != std::string::npos) {
-                // Head visor: high-gloss deep tinted optical glass / dark visor
-                mat.base_color_factor = glm::vec4(0.02f, 0.02f, 0.025f, 1.0f);
-                mat.metallic_factor = 0.92f;
-                mat.roughness_factor = 0.06f;
-            }
-            else if (lower_path.find("rubber") != std::string::npos || lower_path.find("ankle_roll") != std::string::npos) {
-                // Rubber hands / foot soles: matte vulcanized rubber
-                mat.base_color_factor = glm::vec4(0.08f, 0.08f, 0.09f, 1.0f);
-                mat.metallic_factor = 0.02f;
-                mat.roughness_factor = 0.85f;
-            }
-            else if (lower_path.find("pelvis_contour") == std::string::npos &&
-                     (lower_path.find("pelvis") != std::string::npos || lower_path.find("hip_pitch") != std::string::npos)) {
-                // Pelvis internal chassis & hip pitch joints: machined gunmetal titanium
-                mat.base_color_factor = glm::vec4(0.32f, 0.33f, 0.35f, 1.0f);
-                mat.metallic_factor = 0.95f;
-                mat.roughness_factor = 0.22f;
-            }
-            else if (lower_path.find("knee") != std::string::npos || lower_path.find("elbow") != std::string::npos ||
-                     lower_path.find("pitch") != std::string::npos || lower_path.find("roll") != std::string::npos ||
-                     lower_path.find("yaw") != std::string::npos || lower_path.find("wrist") != std::string::npos) {
-                // Joint actuators & limb structures: CNC machined aerospace titanium alloy
-                mat.base_color_factor = glm::vec4(0.52f, 0.54f, 0.57f, 1.0f);
-                mat.metallic_factor = 0.96f;
-                mat.roughness_factor = 0.20f;
-            }
-            else {
-                // Torso / Pelvis contour / Armor plates: Unitree pearl metallic silver
-                mat.base_color_factor = glm::vec4(0.88f, 0.88f, 0.90f, 1.0f);
-                mat.metallic_factor = 0.88f;
-                mat.roughness_factor = 0.22f;
-            }
-
-            mesh.materials.push_back(mat);
-            for (auto& s : mesh.subsets) {
-                s.material_index = 0;
-            }
-
-            auto handle = cur_renderer->upload_mesh(mesh);
-            if (!handle.is_valid())
-                return;
-
-            // Aligned with cloth pipeline: expand bounds to prevent aggressive frustum culling on dynamic parts
-            bud::math::AABB bounds{};
-            for (const auto& v : mesh.vertices) {
-                bounds.merge(bud::math::vec3(v.pos[0], v.pos[1], v.pos[2]));
-            }
-            bounds.min -= bud::math::vec3(1.0f);
-            bounds.max += bud::math::vec3(1.0f);
-            cur_renderer->update_mesh_bounds(handle.mesh_id, bounds);
-
-            auto& cur_scene = engine->get_scene();
-            for (size_t e_idx : indices) {
-                if (e_idx < cur_scene.entities.size()) {
-                    cur_scene.entities[e_idx].mesh_index = handle.mesh_id;
-                    cur_scene.entities[e_idx].material_index = handle.material_id;
+                // Aligned with cloth pipeline: expand bounds to prevent aggressive frustum culling on dynamic parts
+                bud::math::AABB bounds{};
+                for (const auto& v : mesh.vertices) {
+                    bounds.merge(bud::math::vec3(v.pos[0], v.pos[1], v.pos[2]));
                 }
-            }
+                bounds.min -= bud::math::vec3(1.0f);
+                bounds.max += bud::math::vec3(1.0f);
+                cur_renderer->update_mesh_bounds(handle.mesh_id, bounds);
 
-            uint32_t loaded = total_mesh_count->fetch_add(1, std::memory_order_relaxed) + 1;
-            std::cout << "[RobotVisualBridge] Uploaded mesh (" << loaded << "/" << expected_meshes 
-                      << "): " << path << " (mesh_id=" << handle.mesh_id << ")" << std::endl;
-        });
+                auto& cur_scene = engine->get_scene();
+                for (size_t e_idx : indices) {
+                    if (e_idx < cur_scene.entities.size()) {
+                        cur_scene.entities[e_idx].mesh_index = handle.mesh_id;
+                        cur_scene.entities[e_idx].material_index = handle.material_id;
+                    }
+                }
+
+                uint32_t loaded = total_mesh_count->fetch_add(1, std::memory_order_relaxed) + 1;
+                std::cout << "[RobotVisualBridge] Uploaded mesh (" << loaded << "/" << expected_meshes 
+                          << "): " << path << " (mesh_id=" << handle.mesh_id << ")" << std::endl;
+            },
+            [path](bud::io::MeshData& mesh) {
+                // Heavy normal calculation and material setup run in parallel on background worker threads
+                prepare_robot_mesh(mesh, path);
+            }
+        );
     }
 
     m_initialized = true;
@@ -335,11 +382,8 @@ void RobotVisualBridge::sync_transforms(const bud::robots::RobotInstance& robot,
         bud::math::vec4(0.f, 0.f, -1.f, 0.f),
         bud::math::vec4(0.f, 1.f,  0.f, 0.f),
         bud::math::vec4(0.f, 0.f,  0.f, 1.f));
-    static const bud::math::mat4 k_Binv = glm::transpose(bud::math::mat4(
-        bud::math::vec4(1.f, 0.f,  0.f, 0.f),
-        bud::math::vec4(0.f, 0.f, -1.f, 0.f),
-        bud::math::vec4(0.f, 1.f,  0.f, 0.f),
-        bud::math::vec4(0.f, 0.f,  0.f, 1.f)));
+    // B is orthonormal and translation-free, so its inverse is its transpose.
+    static const bud::math::mat4 k_B_inv = glm::transpose(k_B);
 
     for (const auto& lt : transforms) {
         auto it = m_link_to_part_indices.find(lt.link_name);
@@ -358,9 +402,17 @@ void RobotVisualBridge::sync_transforms(const bud::robots::RobotInstance& robot,
             if (part.entity_index < scene.entities.size()) {
                 auto& ent = scene.entities[part.entity_index];
 
+                // The world link matrix is already converted from MuJoCo Z-up to Engine Y-up via from_mujoco(),
+                // so world_link_mat = B * T_link_mj * B^{-1}.
+                // To transform the mesh vertices v_stl (which are in MuJoCo link space), we need
+                // p_world_eng = B * (T_link_mj * T_local_mj * v_stl).
+                // Composing with world_link_mat: (B * T_link_mj * B^{-1}) * (B * T_local_mj) * v_stl
+                // = B * T_link_mj * T_local_mj * v_stl.
+                // Post-multiplying by B^{-1} here was erroneously pre-rotating all CAD/STL vertices
+                // by +90 degrees around X, inverting the beak and connection axles.
                 bud::math::mat4 final_offset = part.local_offset;
                 if (m_is_simulation)
-                    final_offset = k_B * part.local_offset * k_Binv;
+                    final_offset = k_B * part.local_offset;
 
                 if (!ent.has_prev_transform) {
                     ent.prev_transform = world_link_mat * final_offset;
@@ -401,6 +453,96 @@ void RobotVisualBridge::sync_transforms(const std::unordered_map<std::string, gl
             }
         }
     }
+}
+
+
+
+std::unordered_map<std::string, bud::math::mat4> compute_link_local_transforms(
+    const bud::robots::RobotDef& robot_def,
+    const std::unordered_map<std::string, float>& joint_angles) {
+    std::unordered_map<std::string, bud::math::mat4> local_transforms;
+    if (robot_def.root_link.empty())
+        return local_transforms;
+
+    local_transforms[robot_def.root_link] = bud::math::mat4(1.0f);
+
+    std::queue<std::string> pending;
+    pending.push(robot_def.root_link);
+
+    std::unordered_set<std::string> visited;
+    visited.insert(robot_def.root_link);
+
+    while (!pending.empty()) {
+        const std::string parent_name = pending.front();
+        pending.pop();
+
+        const bud::math::mat4 parent_mat = local_transforms[parent_name];
+        for (const auto* joint : robot_def.get_child_joints(parent_name)) {
+            if (!joint || joint->child_link.empty())
+                continue;
+            if (visited.find(joint->child_link) != visited.end())
+                continue;
+
+            const glm::vec3 joint_pos(joint->origin_xyz[0], joint->origin_xyz[1], joint->origin_xyz[2]);
+            const float roll = joint->origin_rpy[0];
+            const float pitch = joint->origin_rpy[1];
+            const float yaw = joint->origin_rpy[2];
+
+            const glm::quat joint_rest_rot = glm::angleAxis(yaw, glm::vec3(0.0f, 0.0f, 1.0f))
+                                           * glm::angleAxis(pitch, glm::vec3(0.0f, 1.0f, 0.0f))
+                                           * glm::angleAxis(roll, glm::vec3(1.0f, 0.0f, 0.0f));
+
+            float angle = 0.0f;
+            const auto angle_it = joint_angles.find(joint->name);
+            if (angle_it != joint_angles.end())
+                angle = angle_it->second;
+
+            const glm::vec3 axis(joint->axis[0], joint->axis[1], joint->axis[2]);
+            const float axis_len = glm::length(axis);
+            glm::mat4 joint_motion(1.0f);
+            if (axis_len > 1.0e-4f && std::abs(angle) > 1.0e-6f)
+                joint_motion = glm::rotate(glm::mat4(1.0f), angle, axis / axis_len);
+
+            const glm::mat4 joint_local = glm::translate(glm::mat4(1.0f), joint_pos)
+                                        * glm::mat4_cast(joint_rest_rot)
+                                        * joint_motion;
+            local_transforms[joint->child_link] = parent_mat * joint_local;
+            visited.insert(joint->child_link);
+            pending.push(joint->child_link);
+        }
+    }
+    return local_transforms;
+}
+
+void RobotVisualBridge::place_rest_pose(const bud::robots::RobotDef& robot_def,
+                                        const std::unordered_map<std::string, float>& joint_angles,
+                                        const bud::math::vec3& root_position,
+                                        bud::scene::Scene& scene) {
+    if (!m_initialized || !m_visible)
+        return;
+
+    const auto local_transforms = compute_link_local_transforms(robot_def, joint_angles);
+    if (local_transforms.empty())
+        return;
+
+    // URDF Z-up -> engine Y-up basis, identical to the one used by the MuJoCo sync path. Applying
+    // it at the root makes the composition match what sync_transforms() produces once physics
+    // reports the spawn pose, so there is no pop when the first real sync happens.
+    static const bud::math::mat4 k_basis(
+        bud::math::vec4(1.f, 0.f,  0.f, 0.f),
+        bud::math::vec4(0.f, 0.f, -1.f, 0.f),
+        bud::math::vec4(0.f, 1.f,  0.f, 0.f),
+        bud::math::vec4(0.f, 0.f,  0.f, 1.f));
+
+    const bud::math::mat4 root_world =
+        glm::translate(bud::math::mat4(1.0f), root_position) * k_basis;
+
+    std::unordered_map<std::string, glm::mat4> world_link_transforms;
+    world_link_transforms.reserve(local_transforms.size());
+    for (const auto& [link_name, local_mat] : local_transforms)
+        world_link_transforms[link_name] = root_world * local_mat;
+
+    sync_transforms(world_link_transforms, scene);
 }
 
 void RobotVisualBridge::set_visible(bool visible, bud::scene::Scene& scene) {

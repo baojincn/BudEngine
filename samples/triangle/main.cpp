@@ -1,7 +1,51 @@
 #include "triangle.hpp"
 #include <string>
+#include <cstdio>
+#include <exception>
+
+#ifdef _WIN32
+    #define WIN32_LEAN_AND_MEAN
+    #include <windows.h>
+#endif
 
 int main(int argc, char* argv[]) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+#ifdef _WIN32
+    SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_NAME_FILTER", "__DISABLED__");
+    SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_OP_TYPE_FILTER", "__DISABLED__");
+    SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_DUMP_SHAPE_DATA", "0");
+    SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_DUMP_INPUT_DATA", "0");
+    SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_DUMP_OUTPUT_DATA", "0");
+    SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_DUMP_STATISTICS_DATA", "0");
+    SetEnvironmentVariableA("ORT_DEBUG_NODE_IO_DUMP_NODE_PLACEMENT", "0");
+    _putenv("ORT_DEBUG_NODE_IO_NAME_FILTER=__DISABLED__");
+    _putenv("ORT_DEBUG_NODE_IO_OP_TYPE_FILTER=__DISABLED__");
+    _putenv("ORT_DEBUG_NODE_IO_DUMP_SHAPE_DATA=0");
+    _putenv("ORT_DEBUG_NODE_IO_DUMP_INPUT_DATA=0");
+    _putenv("ORT_DEBUG_NODE_IO_DUMP_OUTPUT_DATA=0");
+    _putenv("ORT_DEBUG_NODE_IO_DUMP_STATISTICS_DATA=0");
+    _putenv("ORT_DEBUG_NODE_IO_DUMP_NODE_PLACEMENT=0");
+#endif
+    std::set_terminate([]() {
+        std::exception_ptr p = std::current_exception();
+        if (p) {
+            try {
+                std::rethrow_exception(p);
+            }
+            catch (const std::exception& e) {
+                std::fprintf(stderr, "[FATAL] std::terminate called with exception: %s\n", e.what());
+            }
+            catch (...) {
+                std::fprintf(stderr, "[FATAL] std::terminate called with unknown exception\n");
+            }
+        }
+        else {
+            std::fprintf(stderr, "[FATAL] std::terminate called without active exception\n");
+        }
+        std::fflush(stderr);
+        std::abort();
+    });
     bud::print("[TriangleApp] Main started.");
     try {
         bud::game::AppConfig config;
@@ -20,6 +64,9 @@ int main(int argc, char* argv[]) {
         std::string policy_spec_path;
         bud::math::vec3 policy_command(0.0f);
         bool has_policy_command = false;
+        bool companion_enabled = false;
+        std::string companion_policy_path;
+        std::string companion_asset_path;
 
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
@@ -72,6 +119,17 @@ int main(int argc, char* argv[]) {
                 policy_command = bud::math::vec3(command_x, command_y, command_yaw);
                 has_policy_command = true;
             }
+            else if (arg == "--companion") {
+                companion_enabled = true;
+            }
+            else if (arg == "--companion-policy" && i + 1 < argc) {
+                companion_policy_path = argv[++i];
+                companion_enabled = true;
+            }
+            else if (arg == "--companion-asset" && i + 1 < argc) {
+                companion_asset_path = argv[++i];
+                companion_enabled = true;
+            }
         }
 
         if (!custom_resolution) {
@@ -89,6 +147,8 @@ int main(int argc, char* argv[]) {
             app.set_policy(policy_path, policy_spec_path);
         if (has_policy_command)
             app.set_policy_command(policy_command);
+        if (companion_enabled)
+            app.set_companion_enabled(true, companion_asset_path, companion_policy_path);
         app.run(config);
 
         if (app.has_test_failed())

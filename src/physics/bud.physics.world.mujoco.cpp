@@ -1,4 +1,4 @@
-#include "src/physics/bud.physics.world.mujoco.hpp"
+﻿#include "src/physics/bud.physics.world.mujoco.hpp"
 
 #include "src/core/bud.asset.types.hpp"
 #include "src/core/bud.logger.hpp"
@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <unordered_set>
 
 #include <glm/gtc/quaternion.hpp>
@@ -33,9 +34,22 @@ namespace bud::physics {
                 return nullptr;
             }
         }
+        mjsElement* safe_attach(mjsElement* parent, const mjsElement* child, const char* prefix, const char* suffix, char* error, int error_sz) {
+            __try {
+                return mjs_attach(parent, child, prefix, suffix);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                if (error && error_sz > 0) {
+                    snprintf(error, error_sz, "SEH Exception in mjs_attach (code: 0x%08lX)", (unsigned long)GetExceptionCode());
+                }
+                return nullptr;
+            }
+        }
 #else
         mjSpec* safe_parse_xml(const char* xml, const mjVFS* vfs, char* error, int error_sz) {
             return mj_parseXMLString(xml, vfs, error, error_sz);
+        }
+        mjsElement* safe_attach(mjsElement* parent, const mjsElement* child, const char* prefix, const char* suffix, char* error, int error_sz) {
+            return mjs_attach(parent, child, prefix, suffix);
         }
 #endif
 
@@ -199,6 +213,16 @@ namespace bud::physics {
     }
 
     bool MujocoPhysicsWorld::init(const PhysicsWorldConfig& config) {
+        mju_user_error = [](const char* msg) {
+            std::cerr << "[MuJoCo Error Handler] " << msg << std::endl;
+            bud::eprint("[MuJoCo Error Handler] {}", msg);
+            throw std::runtime_error(std::string("MuJoCo Error: ") + msg);
+        };
+        mju_user_warning = [](const char* msg) {
+            std::cout << "[MuJoCo Warning Handler] " << msg << std::endl;
+            bud::print("[MuJoCo Warning Handler] {}", msg);
+        };
+
         world_config = config;
         spec = mj_makeSpec();
         if (!spec) {
@@ -246,8 +270,12 @@ namespace bud::physics {
                 ground->friction[0] = config.ground_friction;
                 ground->friction[1] = kTorsionalFriction;
                 ground->friction[2] = kRollingFriction;
+                // The floor must collide with every robot, and cooked models do not agree on which
+                // contact bit they use (G1's URDF geoms use bit 1, the Microduck MJCF uses bit 2).
+                // A narrow 1/1 mask silently makes the duck fall through the ground, so the plane
+                // advertises every bit in conaffinity.
                 ground->contype = 1;
-                ground->conaffinity = 1;
+                ground->conaffinity = 0xFFFF;
                 ground->condim = 4;
                 ground->solref[0] = 0.004;
                 ground->solref[1] = 1.0;
@@ -288,8 +316,10 @@ namespace bud::physics {
                     wall_geom->size[2] = std::abs(w.half_extent.y);
                     wall_geom->friction[0] = 0.8;
                     wall_geom->friction[1] = 0.8;
+                    // Same reasoning as the floor: collide with any robot regardless of which contact
+                    // bit its cooked model uses.
                     wall_geom->contype = 1;
-                    wall_geom->conaffinity = 1;
+                    wall_geom->conaffinity = 0xFFFF;
                     wall_geom->condim = 3;
 
                     handle_body_ids.push_back(-1);
@@ -309,6 +339,8 @@ namespace bud::physics {
     }
 
     RigidBodyHandle MujocoPhysicsWorld::add_rigid_body(const RigidBodyDesc& desc) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return {};
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         mjsBody* world_body = mjs_findBody(spec, "world");
         if (!world_body) {
@@ -457,6 +489,8 @@ namespace bud::physics {
     }
 
     ArticulationHandle MujocoPhysicsWorld::create_articulation(const ArticulationDesc& desc) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return {};
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!desc.cooked_model.is_valid()) {
             bud::eprint("{}", "[MuJoCo] articulated body '" + desc.name + "' has no cooked model payload");
@@ -544,12 +578,104 @@ namespace bud::physics {
             }
             for (mjsElement* element : duplicate_meshes)
                 mjs_delete(robot_spec, element);
+
+            // Avoid site name collisions in multi-articulation scenes
+            for (mjsElement* element = mjs_firstElement(robot_spec, mjOBJ_SITE); element != nullptr;
+                 element = mjs_nextElement(robot_spec, element)) {
+                mjString* name = mjs_getName(element);
+                if (!name)
+                    continue;
+                const char* site_name = mjs_getString(name);
+                if (site_name != nullptr && mjs_findElement(spec, mjOBJ_SITE, site_name) != nullptr) {
+                    std::string new_name = desc.name + "_" + site_name;
+                    mjs_setName(element, new_name.c_str());
+                }
+            }
+
+            // Avoid sensor name collisions in multi-articulation scenes
+            for (mjsElement* element = mjs_firstElement(robot_spec, mjOBJ_SENSOR); element != nullptr;
+                 element = mjs_nextElement(robot_spec, element)) {
+                mjString* name = mjs_getName(element);
+                if (!name)
+                    continue;
+                const char* sensor_name = mjs_getString(name);
+                if (sensor_name != nullptr && mjs_findElement(spec, mjOBJ_SENSOR, sensor_name) != nullptr) {
+                    std::string new_name = desc.name + "_" + sensor_name;
+                    mjs_setName(element, new_name.c_str());
+                }
+            }
+        }
+
+        // Add collision geometry for Microduck so it collides with G1, environment, and floor
+        if (desc.name == "microduck" || desc.name.find("duck") != std::string::npos) {
+            // Head collision sphere: enables physical contact against G1 and prevents ground penetration
+            if (mjsBody* head_body = mjs_findBody(robot_spec, "jaw_soft")) {
+                mjsGeom* geom = mjs_addGeom(head_body, nullptr);
+                mjs_setName(geom->element, "duck_head_col");
+                geom->type = mjGEOM_SPHERE;
+                geom->size[0] = 0.052; // 5.2cm radius
+                geom->pos[0] = 0.005;
+                geom->pos[1] = 0.0;
+                geom->pos[2] = 0.015;
+                geom->contype = 1;
+                geom->conaffinity = 1;
+                geom->condim = 3;
+                geom->friction[0] = 0.8;
+                geom->friction[1] = 0.8;
+                geom->friction[2] = 0.001;
+            }
+
+            // Trunk collision box: covers body & battery against G1 and prevents falling through ground
+            if (mjsBody* trunk_body = mjs_findBody(robot_spec, "trunk_base")) {
+                mjsGeom* geom = mjs_addGeom(trunk_body, nullptr);
+                mjs_setName(geom->element, "duck_trunk_col");
+                geom->type = mjGEOM_BOX;
+                geom->size[0] = 0.045; // length half-extent (9cm total)
+                geom->size[1] = 0.032; // width half-extent (6.4cm total, fits inside leg clearance)
+                geom->size[2] = 0.030; // height half-extent (6cm total)
+                geom->pos[0] = 0.005;
+                geom->pos[1] = 0.0;
+                geom->pos[2] = -0.005;
+                geom->contype = 1;
+                geom->conaffinity = 1;
+                geom->condim = 3;
+                geom->friction[0] = 0.8;
+                geom->friction[1] = 0.8;
+                geom->friction[2] = 0.001;
+            }
+
+            // Enable world & robot collision for self_collision_only geoms (legs/shins)
+            for (mjsElement* element = mjs_firstElement(robot_spec, mjOBJ_GEOM); element != nullptr;
+                 element = mjs_nextElement(robot_spec, element)) {
+                if (mjsGeom* geom = mjs_asGeom(element)) {
+                    if (geom->contype == 2 || geom->conaffinity == 2) {
+                        geom->contype |= 1;
+                        geom->conaffinity |= 1;
+                    }
+                }
+            }
+            bud::print("[MuJoCo] Added collision primitives for Microduck head & trunk, enabled world collision on leg geoms");
         }
 
         // Attach the whole robot spec into our world. Passing the spec's own element (elemtype
         // mjOBJ_MODEL) is what mjs_attach is built for: it wires the child's worldbody through a
         // frame and moves its children under ours, free joint included.
-        const mjsElement* attached = mjs_attach(world_body->element, robot_spec->element, "", "");
+        char attach_seh_error[512] = { 0 };
+        mjsElement* attached = nullptr;
+        try {
+            attached = safe_attach(world_body->element, robot_spec->element, "", "", attach_seh_error, sizeof(attach_seh_error));
+        } catch (const std::exception& e) {
+            bud::eprint("[MuJoCo] mjs_attach exception: {}", e.what());
+            std::cerr << "[MuJoCo] mjs_attach exception: " << e.what() << std::endl;
+            mj_deleteSpec(robot_spec);
+            return {};
+        }
+
+        if (attach_seh_error[0] != '\0') {
+            bud::eprint("[MuJoCo] safe_attach SEH error: {}", attach_seh_error);
+            std::cerr << "[MuJoCo] safe_attach SEH error: " << attach_seh_error << std::endl;
+        }
+
         mj_deleteSpec(robot_spec);
         bud::print("[MuJoCo] robot attach {}", attached ? "ok" : "failed");
         if (!attached) {
@@ -561,6 +687,7 @@ namespace bud::physics {
 
         Articulation articulation;
         articulation.valid = true;
+        articulation.name = desc.name;
         articulation.root_link_name = desc.root_link;
         for (const auto& link : desc.links)
             articulation.link_names.push_back(link.name);
@@ -599,6 +726,8 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::remove_articulation(ArticulationHandle handle) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!spec || !handle.is_valid() || handle.id >= articulations.size())
             return;
@@ -676,6 +805,8 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::reset_articulation(ArticulationHandle handle) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !model || !data || !handle.is_valid() ||
             handle.id >= articulations.size())
@@ -727,30 +858,46 @@ namespace bud::physics {
     }
 
     int MujocoPhysicsWorld::model_body_count() const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return 0;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         return model ? model->nbody : 0;
     }
 
     int MujocoPhysicsWorld::model_actuator_count() const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return 0;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         return model ? model->nu : 0;
     }
 
     int MujocoPhysicsWorld::model_sensor_count() const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return 0;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         return model ? static_cast<int>(model->nsensor) : 0;
     }
 
     bool MujocoPhysicsWorld::get_articulation_imu(ArticulationHandle handle, ArticulationImu& out) const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return false;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!model || !data || !handle.is_valid() || handle.id >= articulations.size())
             return false;
-        if (!articulations[handle.id].valid || imu_quat_sensor < 0)
+        if (!articulations[handle.id].valid)
+            return false;
+
+        const Articulation& articulation = articulations[handle.id];
+        const int quat_sensor = articulation.imu_quat_sensor >= 0 ? articulation.imu_quat_sensor : imu_quat_sensor;
+        const int gyro_sensor = articulation.imu_gyro_sensor >= 0 ? articulation.imu_gyro_sensor : imu_gyro_sensor;
+        const int accel_sensor = articulation.imu_accel_sensor >= 0 ? articulation.imu_accel_sensor : imu_accel_sensor;
+
+        if (quat_sensor < 0)
             return false;
 
         // framequat is (w, x, y, z) in MuJoCo's Z-up world. Keep the raw robot-frame value for
         // policies and also publish the engine-frame one for engine-side consumers.
-        const int quat_adr = model->sensor_adr[imu_quat_sensor];
+        const int quat_adr = model->sensor_adr[quat_sensor];
         const bud::math::quaternion mujoco_orientation(static_cast<float>(data->sensordata[quat_adr + 0]),
                                                        static_cast<float>(data->sensordata[quat_adr + 1]),
                                                        static_cast<float>(data->sensordata[quat_adr + 2]),
@@ -761,15 +908,15 @@ namespace bud::physics {
         // gyro and accelerometer are expressed in the site (root body) frame already, i.e. exactly the
         // robot body frame policies expect, so they are passed through unconverted.
         out.angular_velocity = bud::math::vec3(0.0f);
-        if (imu_gyro_sensor >= 0) {
-            const int gyro_adr = model->sensor_adr[imu_gyro_sensor];
+        if (gyro_sensor >= 0) {
+            const int gyro_adr = model->sensor_adr[gyro_sensor];
             out.angular_velocity = bud::math::vec3(static_cast<float>(data->sensordata[gyro_adr + 0]),
                                                    static_cast<float>(data->sensordata[gyro_adr + 1]),
                                                    static_cast<float>(data->sensordata[gyro_adr + 2]));
         }
         out.linear_acceleration = bud::math::vec3(0.0f);
-        if (imu_accel_sensor >= 0) {
-            const int accel_adr = model->sensor_adr[imu_accel_sensor];
+        if (accel_sensor >= 0) {
+            const int accel_adr = model->sensor_adr[accel_sensor];
             out.linear_acceleration = bud::math::vec3(static_cast<float>(data->sensordata[accel_adr + 0]),
                                                       static_cast<float>(data->sensordata[accel_adr + 1]),
                                                       static_cast<float>(data->sensordata[accel_adr + 2]));
@@ -778,7 +925,6 @@ namespace bud::physics {
         // Base linear velocity in the robot body frame, from the root free joint. MuJoCo reports it
         // in its own world frame, so rotate it into the body frame with the raw robot orientation.
         out.linear_velocity = bud::math::vec3(0.0f);
-        const Articulation& articulation = articulations[handle.id];
         if (!articulation.body_ids.empty() && articulation.body_ids[0] >= 0) {
             const int root_body = articulation.body_ids[0];
             const int joint = model->body_jntadr[root_body];
@@ -793,14 +939,30 @@ namespace bud::physics {
         return true;
     }
 
+    bool MujocoPhysicsWorld::prepare_simulation() {
+        is_compiling_async.store(true, std::memory_order_release);
+        struct AsyncGuard {
+            std::atomic<bool>& flag;
+            ~AsyncGuard() {
+                flag.store(false, std::memory_order_release);
+            }
+        } guard{ is_compiling_async };
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        return compile_world();
+    }
+
     bool MujocoPhysicsWorld::compile_world() {
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!spec_dirty && model)
             return true;
 
         if (model) {
-            // State cannot survive a recompile: report it rather than pretending it works.
-            bud::eprint("[MuJoCo] recompiling the world resets the simulation state");
+            // Structural changes (new articulations, new rigid bodies) require a full recompile.
+            // Spawn poses are stored separately and reapplied below, so the recompile is safe at
+            // any point during init. Dynamic simulation state (velocities, mid-step qpos) is lost
+            // but that is expected when the world topology changes.
+            bud::print("[MuJoCo] world spec changed, recompiling ({} articulations registered)",
+                       articulations.size());
             mj_deleteData(data);
             mj_deleteModel(model);
             data = nullptr;
@@ -872,6 +1034,37 @@ namespace bud::physics {
         imu_quat_sensor = mj_name2id(model, mjOBJ_SENSOR, "imu_quat");
         imu_gyro_sensor = mj_name2id(model, mjOBJ_SENSOR, "imu_gyro");
         imu_accel_sensor = mj_name2id(model, mjOBJ_SENSOR, "imu_accel");
+
+        for (auto& articulation : articulations) {
+            if (!articulation.valid)
+                continue;
+
+            int quat_id = mj_name2id(model, mjOBJ_SENSOR, (articulation.name + "_imu_quat").c_str());
+            if (quat_id < 0)
+                quat_id = mj_name2id(model, mjOBJ_SENSOR, (articulation.name + "_orientation").c_str());
+            if (quat_id < 0 && (articulation.name == "microduck" || articulation.name.find("duck") != std::string::npos))
+                quat_id = mj_name2id(model, mjOBJ_SENSOR, "orientation");
+            if (quat_id < 0)
+                quat_id = imu_quat_sensor;
+            articulation.imu_quat_sensor = quat_id;
+
+            int gyro_id = mj_name2id(model, mjOBJ_SENSOR, (articulation.name + "_imu_gyro").c_str());
+            if (gyro_id < 0)
+                gyro_id = mj_name2id(model, mjOBJ_SENSOR, (articulation.name + "_imu_ang_vel").c_str());
+            if (gyro_id < 0 && (articulation.name == "microduck" || articulation.name.find("duck") != std::string::npos)) {
+                gyro_id = mj_name2id(model, mjOBJ_SENSOR, "imu_ang_vel");
+                if (gyro_id < 0)
+                    gyro_id = mj_name2id(model, mjOBJ_SENSOR, "angular-velocity");
+            }
+            if (gyro_id < 0)
+                gyro_id = imu_gyro_sensor;
+            articulation.imu_gyro_sensor = gyro_id;
+
+            int accel_id = mj_name2id(model, mjOBJ_SENSOR, (articulation.name + "_imu_accel").c_str());
+            if (accel_id < 0)
+                accel_id = imu_accel_sensor;
+            articulation.imu_accel_sensor = accel_id;
+        }
 
         // Our handles point at bodies by id; resolved by registered name
         for (size_t handle = 0; handle < handle_body_ids.size(); ++handle) {
@@ -995,8 +1188,13 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::step(float delta_time, int, int) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
-        if (!compile_world())
+        // Compiling here would run the expensive MuJoCo build on whichever thread steps first - the
+        // main thread during startup - which is the freeze we are removing. prepare_simulation()
+        // owns compilation; until it finishes there is nothing to step.
+        if (!model || spec_dirty)
             return;
 
         // MuJoCo wants a small fixed timestep; consume the frame time in substeps and cap the catch
@@ -1017,21 +1215,43 @@ namespace bud::physics {
                         continue;
 
                     const auto& cmd = articulation.joint_commands[i];
-                    const double q = data->qpos[model->jnt_qposadr[joint]];
-                    const double dq = (model->jnt_type[joint] != mjJNT_FREE)
-                                          ? data->qvel[model->jnt_dofadr[joint]]
-                                          : 0.0;
 
-                    double tau = static_cast<double>(cmd.kp) * (static_cast<double>(cmd.q) - q) +
-                                 static_cast<double>(cmd.kd) * (static_cast<double>(cmd.dq) - dq) +
-                                 static_cast<double>(cmd.tau_ff);
+                    // Cooked assets are not uniform: the G1 carries torque motors, while the
+                    // Microduck MJCF declares `<position kp=...>` servos. For a position actuator
+                    // `ctrl` is the *target angle*, so writing a PD torque there commands a
+                    // nonsense angle (the duck was being driven to ~0 rad and never stepped).
+                    // Drive each actuator in its native mode instead.
+                    const bool position_servo =
+                        model->actuator_biastype[actuator] == mjBIAS_AFFINE &&
+                        model->actuator_biasprm[3 * actuator + 1] != 0.0;
+
+                    double control = 0.0;
+                    if (position_servo) {
+                        // Authored servos often declare kv = 0, leaving a soft, undamped joint that
+                        // limit-cycles around its target (the duck jittered with joint velocities of
+                        // +-1.8 rad/s). Apply the command's derivative gain as the servo's velocity
+                        // term so the commanded stiffness is actually damped.
+                        if (model->actuator_biasprm != nullptr) {
+                            model->actuator_biasprm[3 * actuator + 1] = -static_cast<double>(cmd.kp);
+                            model->actuator_biasprm[3 * actuator + 2] = -static_cast<double>(cmd.kd);
+                        }
+                        control = static_cast<double>(cmd.q);
+                    } else {
+                        const double q = data->qpos[model->jnt_qposadr[joint]];
+                        const double dq = (model->jnt_type[joint] != mjJNT_FREE)
+                                              ? data->qvel[model->jnt_dofadr[joint]]
+                                              : 0.0;
+                        control = static_cast<double>(cmd.kp) * (static_cast<double>(cmd.q) - q) +
+                                  static_cast<double>(cmd.kd) * (static_cast<double>(cmd.dq) - dq) +
+                                  static_cast<double>(cmd.tau_ff);
+                    }
 
                     if (model->actuator_ctrllimited[actuator]) {
-                        const double min_tau = model->actuator_ctrlrange[2 * actuator + 0];
-                        const double max_tau = model->actuator_ctrlrange[2 * actuator + 1];
-                        tau = std::clamp(tau, min_tau, max_tau);
+                        const double lower = model->actuator_ctrlrange[2 * actuator + 0];
+                        const double upper = model->actuator_ctrlrange[2 * actuator + 1];
+                        control = std::clamp(control, lower, upper);
                     }
-                    data->ctrl[actuator] = tau;
+                    data->ctrl[actuator] = control;
                 }
             }
 
@@ -1111,16 +1331,22 @@ namespace bud::physics {
     }
 
     size_t MujocoPhysicsWorld::get_body_count() const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return 0;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         return body_state.body_count;
     }
 
     uint32_t MujocoPhysicsWorld::get_active_body_count() const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return static_cast<uint32_t>(body_state.body_count);
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         return static_cast<uint32_t>(body_state.body_count);
     }
 
     const RigidBodyStateSoA& MujocoPhysicsWorld::get_body_states() const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return body_state;
         // The reference cannot be kept safe by a lock that is released on return: the SoA is only
         // written inside the locked step(), so callers must not read it while a step is in flight.
         // The scene layer's own mutex is what serialises that with the render thread.
@@ -1152,6 +1378,8 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::set_body_position(RigidBodyHandle handle, const bud::math::vec3& position) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= handle_body_ids.size())
             return;
@@ -1170,6 +1398,8 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::set_body_rotation(RigidBodyHandle handle, const bud::math::quaternion& rotation) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= handle_body_ids.size())
             return;
@@ -1189,6 +1419,8 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::set_body_linear_velocity(RigidBodyHandle handle, const bud::math::vec3& velocity) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= handle_body_ids.size())
             return;
@@ -1206,6 +1438,8 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::set_body_angular_velocity(RigidBodyHandle handle, const bud::math::vec3& velocity) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= handle_body_ids.size())
             return;
@@ -1223,6 +1457,8 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::apply_force(RigidBodyHandle handle, const bud::math::vec3& force) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= handle_body_ids.size())
             return;
@@ -1236,6 +1472,8 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::apply_impulse(RigidBodyHandle handle, const bud::math::vec3& impulse) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= handle_body_ids.size())
             return;
@@ -1251,6 +1489,8 @@ namespace bud::physics {
     }
 
     bool MujocoPhysicsWorld::get_articulation_state(ArticulationHandle handle, ArticulationStateSoA& out) const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return false;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!model || !data || !handle.is_valid() || handle.id >= articulations.size())
             return false;
@@ -1293,8 +1533,12 @@ namespace bud::physics {
 
     void MujocoPhysicsWorld::set_articulation_joint_commands(ArticulationHandle handle,
                                                              std::span<const JointCommand> commands) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
-        if (!compile_world() || !handle.is_valid() || handle.id >= articulations.size())
+        // Commands are stored per joint index, so this needs no compiled model. Compiling here used
+        // to trigger the whole MuJoCo build during robot spawn - on the main thread.
+        if (!handle.is_valid() || handle.id >= articulations.size())
             return;
         Articulation& articulation = articulations[handle.id];
         if (!articulation.valid)
@@ -1310,8 +1554,10 @@ namespace bud::physics {
 
     void MujocoPhysicsWorld::set_articulation_target_angle(ArticulationHandle handle,
                                                           const std::string& joint_name, float angle) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
-        if (!compile_world() || !handle.is_valid() || handle.id >= articulations.size())
+        if (!handle.is_valid() || handle.id >= articulations.size())
             return;
         Articulation& articulation = articulations[handle.id];
         if (!articulation.valid)
@@ -1335,8 +1581,10 @@ namespace bud::physics {
 
     void MujocoPhysicsWorld::set_articulation_target_velocity(ArticulationHandle handle,
                                                              const std::string& joint_name, float velocity) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
-        if (!compile_world() || !handle.is_valid() || handle.id >= articulations.size())
+        if (!handle.is_valid() || handle.id >= articulations.size())
             return;
         Articulation& articulation = articulations[handle.id];
         if (!articulation.valid)
@@ -1348,6 +1596,8 @@ namespace bud::physics {
     }
 
     float MujocoPhysicsWorld::get_articulation_joint_angle(ArticulationHandle, const std::string& joint_name) const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return 0.0f;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!model || !data)
             return 0.0f;
@@ -1358,6 +1608,8 @@ namespace bud::physics {
     }
 
     float MujocoPhysicsWorld::get_articulation_joint_stiffness(ArticulationHandle handle, const std::string& joint_name) const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return 0.0f;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!handle.is_valid() || handle.id >= articulations.size())
             return 0.0f;
@@ -1372,6 +1624,8 @@ namespace bud::physics {
                                                             const std::string& link_name,
                                                             const bud::math::vec3& position,
                                                             const bud::math::quaternion& rotation) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!compile_world() || !handle.is_valid() || handle.id >= articulations.size())
             return;
@@ -1384,19 +1638,34 @@ namespace bud::physics {
             return;
         }
         const int adr = model->jnt_qposadr[joint];
-        data->qpos[adr + 0] = position.x;
-        data->qpos[adr + 1] = position.y;
-        data->qpos[adr + 2] = position.z;
+        const bud::math::vec3 mujoco_position = to_mujoco(position);
+        data->qpos[adr + 0] = mujoco_position.x;
+        data->qpos[adr + 1] = mujoco_position.y;
+        data->qpos[adr + 2] = mujoco_position.z;
         const bud::math::quaternion mujoco_rotation = to_mujoco(rotation);
         data->qpos[adr + 3] = mujoco_rotation.w;
         data->qpos[adr + 4] = mujoco_rotation.x;
         data->qpos[adr + 5] = mujoco_rotation.y;
         data->qpos[adr + 6] = mujoco_rotation.z;
+
+        // Zero residual velocities for all joints in this articulation
+        const Articulation& articulation = articulations[handle.id];
+        for (int j_id : articulation.joint_ids) {
+            if (j_id >= 0 && j_id < model->njnt) {
+                const int dof = model->jnt_dofadr[j_id];
+                const int num_dof = (model->jnt_type[j_id] == mjJNT_FREE) ? 6 : 1;
+                for (int d = 0; d < num_dof; ++d) {
+                    data->qvel[dof + d] = 0.0;
+                }
+            }
+        }
         mj_forward(model, data);
     }
 
     std::optional<RaycastResult> MujocoPhysicsWorld::raycast(const bud::math::vec3& from,
                                                             const bud::math::vec3& to) const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return std::nullopt;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!model || !data)
             return std::nullopt;
@@ -1451,21 +1720,29 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::set_contact_begin_callback(ContactCallback callback) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         contact_begin_cb = std::move(callback);
     }
 
     void MujocoPhysicsWorld::set_contact_persist_callback(ContactCallback callback) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         contact_persist_cb = std::move(callback);
     }
 
     void MujocoPhysicsWorld::set_contact_end_callback(ContactCallback callback) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         contact_end_cb = std::move(callback);
     }
 
     std::vector<ContactPoint> MujocoPhysicsWorld::get_contacts() const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return {};
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         std::vector<ContactPoint> contacts;
         if (!model || !data)
@@ -1489,6 +1766,8 @@ namespace bud::physics {
     }
 
     void MujocoPhysicsWorld::set_gravity(const bud::math::vec3& gravity) {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         world_config.gravity = gravity;
         if (model) {
@@ -1499,11 +1778,15 @@ namespace bud::physics {
     }
 
     bud::math::vec3 MujocoPhysicsWorld::get_gravity() const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return bud::math::vec3(0.0f);
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         return world_config.gravity;
     }
 
     void MujocoPhysicsWorld::collect_debug_lines(std::vector<DebugLine>& out_lines) const {
+        if (is_compiling_async.load(std::memory_order_acquire))
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         // Body frames are enough to see the world; MuJoCo's own visualisation is not used.
         if (!model || !data)

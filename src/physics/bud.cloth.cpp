@@ -221,6 +221,16 @@ namespace bud::physics {
 	}
 
 	void ClothSystem::shutdown() {
+		// Stop the background build first: it must not be writing a result while the GPU buffers and
+		// the RHI are being torn down.
+		join_build_thread();
+		build_in_flight.store(false, std::memory_order_release);
+		{
+			std::lock_guard built_lock(built_mutex);
+			built_ready = false;
+			built_result = ClothWorldBuild{};
+		}
+
 		std::lock_guard lock(state_mutex);
 		if (stored_rhi) {
 			if (active_world) {
@@ -519,13 +529,17 @@ namespace bud::physics {
 		}
 	}
 
-	std::shared_ptr<ClothSimWorld> ClothSystem::build_world() {
-		// Main thread only (called from flush_pending). instances is main-thread data.
+	bool ClothSystem::build_world_cpu(std::vector<ClothInstanceCPU> build_instances,
+		const std::vector<BoxCollider>& build_colliders,
+		const ClothConfig& build_config,
+		ClothWorldBuild& out) {
+		// Worker thread. Reads only the snapshot passed in, so the build never holds state_mutex for
+		// its whole duration and the main thread stays responsive.
 		auto world = std::make_shared<ClothSimWorld>();
 		world->particle_count = 0;
 		world->constraint_count = 0;
 		world->binding_count = 0;
-		for (const auto& inst : instances) {
+		for (const auto& inst : build_instances) {
 			if (inst.vertex_offset < 0)
 				continue;
 			world->particle_count += static_cast<uint32_t>(inst.particles.size());
@@ -533,14 +547,9 @@ namespace bud::physics {
 			world->binding_count += static_cast<uint32_t>(inst.bindings.size());
 		}
 		if (world->particle_count == 0) {
-			// Keep dirty when some instances still wait for their vertex offset.
-			for (const auto& inst : instances) {
-				if (inst.vertex_offset < 0) {
-					world_dirty = true;
-					break;
-				}
-			}
-			return nullptr;
+			// Nothing to build yet (instances still waiting for their vertex offset); the caller keeps
+			// the world dirty and retries next frame.
+			return false;
 		}
 
 		// 1. Concatenate all instances into global pools.
@@ -553,7 +562,7 @@ namespace bud::physics {
 		bindings.reserve(world->binding_count);
 
 		uint32_t pbase = 0;
-		for (auto& inst : instances) {
+		for (auto& inst : build_instances) {
 			if (inst.vertex_offset < 0)
 				continue;
 
@@ -581,16 +590,16 @@ namespace bud::physics {
 					const float len = bud::math::length(d);
 
 					if (c.compliance >= 2.0e-3f) {
-						c.compliance = current_config.bend_compliance;
+						c.compliance = build_config.bend_compliance;
 						raw_bending_constraints.push_back(c);
 					} else if (len > 1e-5f) {
 						const float dy = std::abs(d.y / len);
 						if (dy > 0.82f) {
-							c.compliance = current_config.warp_compliance;
+							c.compliance = build_config.warp_compliance;
 						} else if (dy < 0.28f) {
-							c.compliance = current_config.weft_compliance;
+							c.compliance = build_config.weft_compliance;
 						} else {
-							c.compliance = current_config.shear_compliance;
+							c.compliance = build_config.shear_compliance;
 						}
 					}
 				}
@@ -904,7 +913,7 @@ namespace bud::physics {
 		// whose proxy engulfs the cloth rest pose do not deform the fabric.
 		{
 			bud::math::vec3 lo(1e30f), hi(-1e30f);
-			for (const auto& inst : instances) {
+			for (const auto& inst : build_instances) {
 				if (inst.vertex_offset < 0)
 					continue;
 				lo = glm::min(lo, inst.min_p);
@@ -914,8 +923,8 @@ namespace bud::physics {
 			hi += bud::math::vec3(2.0f);
 
 			std::vector<BoxCollider> nearby;
-			nearby.reserve(scene_colliders.size());
-			for (const auto& box : scene_colliders) {
+			nearby.reserve(build_colliders.size());
+			for (const auto& box : build_colliders) {
 				if (box.center.x + box.half_extents.x < lo.x || box.center.x - box.half_extents.x > hi.x ||
 				    box.center.y + box.half_extents.y < lo.y || box.center.y - box.half_extents.y > hi.y ||
 				    box.center.z + box.half_extents.z < lo.z || box.center.z - box.half_extents.z > hi.z)
@@ -982,59 +991,130 @@ namespace bud::physics {
 					packed[i * 2u + 0u] = bud::math::vec4(nearby[i].center, 0.0f);
 					packed[i * 2u + 1u] = bud::math::vec4(nearby[i].half_extents, 0.0f);
 				}
-				world->gpu_colliders = stored_rhi->create_gpu_buffer(
-					static_cast<uint64_t>(packed.size()) * sizeof(bud::math::vec4),
-					bud::graphics::ResourceState::UnorderedAccess);
-				upload_buffer(stored_rhi, packed, world->gpu_colliders);
+				out.colliders = std::move(packed);
 			}
 		}
 
-		// 4. Upload GPU buffers.
-		world->gpu_particles = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->particle_count) * sizeof(SimParticle), bud::graphics::ResourceState::UnorderedAccess);
-		world->gpu_rest_particles = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->particle_count) * sizeof(SimParticle), bud::graphics::ResourceState::UnorderedAccess);
-		world->gpu_lambdas = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->constraint_count) * sizeof(float), bud::graphics::ResourceState::UnorderedAccess);
-		world->gpu_constraints = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->constraint_count) * sizeof(DistanceConstraint), bud::graphics::ResourceState::UnorderedAccess);
-		world->gpu_bindings = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->binding_count) * sizeof(ClothSkinBinding), bud::graphics::ResourceState::UnorderedAccess);
+		// Hand the CPU staging to the caller. The GPU buffers are created and filled on the main
+		// thread once this build is published: the RHI's immediate copy submits to a queue and is not
+		// thread-safe, so it must not run on the build worker.
+		out.world = world;
+		out.particles = std::move(particles);
+		out.rest = std::move(rest);
+		out.constraints = std::move(sorted_constraints);
+		out.bindings = std::move(bindings);
+		out.triangles = std::move(sorted_tri_constraints);
+		out.bending = std::move(sorted_bending_constraints);
 
-		upload_buffer(stored_rhi, particles, world->gpu_particles);
-		upload_buffer(stored_rhi, rest, world->gpu_rest_particles);
-		if (world->constraint_count > 0) {
-			upload_buffer(stored_rhi, sorted_constraints, world->gpu_constraints);
+		bud::print("[ClothSystem] Assembled SimWorld: {} particles, {} constraints in {} batches, {} triangles in {} batches, {} bindings, {} columns",
+			world->particle_count, world->constraint_count, world->batches.size(), world->triangle_count, world->triangle_batches.size(), world->binding_count, world->column_count);
+		return true;
+	}
+
+	void ClothSystem::finalize_world_gpu(ClothWorldBuild& build) {
+		if (!stored_rhi || !build.world)
+			return;
+		ClothSimWorld& world = *build.world;
+
+		if (!build.colliders.empty()) {
+			world.gpu_colliders = stored_rhi->create_gpu_buffer(
+				static_cast<uint64_t>(build.colliders.size()) * sizeof(bud::math::vec4),
+				bud::graphics::ResourceState::UnorderedAccess);
+			upload_buffer(stored_rhi, build.colliders, world.gpu_colliders);
 		}
-		if (world->binding_count > 0) {
-			upload_buffer(stored_rhi, bindings, world->gpu_bindings);
-			world->gpu_prev_vertex_positions = stored_rhi->create_gpu_buffer(
-				static_cast<uint64_t>(world->binding_count) * sizeof(bud::math::vec4),
+
+		world.gpu_particles = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world.particle_count) * sizeof(SimParticle), bud::graphics::ResourceState::UnorderedAccess);
+		world.gpu_rest_particles = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world.particle_count) * sizeof(SimParticle), bud::graphics::ResourceState::UnorderedAccess);
+		world.gpu_lambdas = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world.constraint_count) * sizeof(float), bud::graphics::ResourceState::UnorderedAccess);
+		world.gpu_constraints = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world.constraint_count) * sizeof(DistanceConstraint), bud::graphics::ResourceState::UnorderedAccess);
+		world.gpu_bindings = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world.binding_count) * sizeof(ClothSkinBinding), bud::graphics::ResourceState::UnorderedAccess);
+
+		upload_buffer(stored_rhi, build.particles, world.gpu_particles);
+		upload_buffer(stored_rhi, build.rest, world.gpu_rest_particles);
+		if (world.constraint_count > 0) {
+			upload_buffer(stored_rhi, build.constraints, world.gpu_constraints);
+		}
+		if (world.binding_count > 0) {
+			upload_buffer(stored_rhi, build.bindings, world.gpu_bindings);
+			world.gpu_prev_vertex_positions = stored_rhi->create_gpu_buffer(
+				static_cast<uint64_t>(world.binding_count) * sizeof(bud::math::vec4),
 				bud::graphics::ResourceState::ShaderResource);
 		}
-		if (world->triangle_count > 0) {
-			world->gpu_triangle_constraints = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->triangle_count) * sizeof(TriangleConstraint), bud::graphics::ResourceState::UnorderedAccess);
-			world->gpu_triangle_lambdas = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->triangle_count) * 4u * sizeof(float), bud::graphics::ResourceState::UnorderedAccess);
-			upload_buffer(stored_rhi, sorted_tri_constraints, world->gpu_triangle_constraints);
+		if (world.triangle_count > 0) {
+			world.gpu_triangle_constraints = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world.triangle_count) * sizeof(TriangleConstraint), bud::graphics::ResourceState::UnorderedAccess);
+			world.gpu_triangle_lambdas = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world.triangle_count) * 4u * sizeof(float), bud::graphics::ResourceState::UnorderedAccess);
+			upload_buffer(stored_rhi, build.triangles, world.gpu_triangle_constraints);
 		}
-		if (world->bending_count > 0) {
-			world->gpu_bending_constraints = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->bending_count) * sizeof(DistanceConstraint), bud::graphics::ResourceState::UnorderedAccess);
-			world->gpu_bending_lambdas = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->bending_count) * sizeof(float), bud::graphics::ResourceState::UnorderedAccess);
-			upload_buffer(stored_rhi, sorted_bending_constraints, world->gpu_bending_constraints);
+		if (world.bending_count > 0) {
+			world.gpu_bending_constraints = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world.bending_count) * sizeof(DistanceConstraint), bud::graphics::ResourceState::UnorderedAccess);
+			world.gpu_bending_lambdas = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world.bending_count) * sizeof(float), bud::graphics::ResourceState::UnorderedAccess);
+			upload_buffer(stored_rhi, build.bending, world.gpu_bending_constraints);
 		}
 
 		// Spatial hash for self-collision: head table + per-particle next links.
 		// Table is a power of two (>= 4 entries per particle) so the shader can
 		// mask the hash instead of dividing.
 		uint32_t table = 4096u;
-		while (table < world->particle_count * 4u && table < (1u << 20u))
+		while (table < world.particle_count * 4u && table < (1u << 20u))
 			table <<= 1u;
-		world->hash_table_size = table;
-		world->gpu_cell_heads = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(table) * sizeof(uint32_t), bud::graphics::ResourceState::UnorderedAccess);
-		world->gpu_particle_next = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world->particle_count) * sizeof(uint32_t), bud::graphics::ResourceState::UnorderedAccess);
+		world.hash_table_size = table;
+		world.gpu_cell_heads = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(table) * sizeof(uint32_t), bud::graphics::ResourceState::UnorderedAccess);
+		world.gpu_particle_next = stored_rhi->create_gpu_buffer(static_cast<uint64_t>(world.particle_count) * sizeof(uint32_t), bud::graphics::ResourceState::UnorderedAccess);
 
-		bud::print("[ClothSystem] Built SimWorld: {} particles, {} constraints in {} batches, {} triangles in {} batches, {} bindings, {} columns",
-			world->particle_count, world->constraint_count, world->batches.size(), world->triangle_count, world->triangle_batches.size(), world->binding_count, world->column_count);
-		return world;
+		bud::print("[ClothSystem] Uploaded SimWorld: {} particles to the GPU", world.particle_count);
+
+		// The staging copies are no longer needed once the GPU owns the data.
+		build.particles.clear();
+		build.rest.clear();
+		build.constraints.clear();
+		build.bindings.clear();
+		build.triangles.clear();
+		build.bending.clear();
+		build.colliders.clear();
 	}
 
 	void ClothSystem::flush_pending() {
 		if (!stored_rhi)
+			return;
+
+		// 1. Publish a finished background build. This is the only part that touches the GPU and it
+		// is cheap: create the buffers, upload the staged arrays, swap the world in.
+		{
+			ClothWorldBuild ready;
+			bool have_ready = false;
+			{
+				std::lock_guard built_lock(built_mutex);
+				if (built_ready) {
+					ready = std::move(built_result);
+					built_result = ClothWorldBuild{};
+					built_ready = false;
+					have_ready = true;
+				}
+			}
+			if (have_ready) {
+				// A build that produced nothing (all instances still unresolved) stays dirty.
+				if (ready.world) {
+					finalize_world_gpu(ready);
+					std::lock_guard lock(state_mutex);
+					if (active_world)
+						retire_world(std::move(active_world), stored_rhi->get_current_frame_index());
+					active_world = std::move(ready.world);
+					world_dirty = false;
+					for (const auto& inst : instances) {
+						if (inst.vertex_offset < 0) {
+							world_dirty = true;
+							break;
+						}
+					}
+					has_world.store(active_world != nullptr, std::memory_order_release);
+				}
+			}
+		}
+
+		// Startup deferral: while disabled, never start a new assembly. A finished build is still
+		// published above, so nothing already in flight is lost. Registration keeps setting
+		// world_dirty, so the first flush after enabling builds once with every instance present.
+		if (!build_enabled.load(std::memory_order_acquire))
 			return;
 
 		bool need = false;
@@ -1058,23 +1138,41 @@ namespace bud::physics {
 		if (!need)
 			return;
 
-		auto world = build_world();
-		if (!world)
-			return; // stays dirty, retry next frame
-
-		std::lock_guard lock(state_mutex);
-		if (active_world)
-			retire_world(std::move(active_world), stored_rhi->get_current_frame_index());
-		active_world = std::move(world);
-		world_dirty = false;
-		// Keep dirty when some instances still wait for their vertex offset.
-		for (const auto& inst : instances) {
-			if (inst.vertex_offset < 0) {
-				world_dirty = true;
-				break;
-			}
+		// 2. Already assembling? Nothing to do this frame; the loop keeps running.
+		if (build_in_flight.load(std::memory_order_acquire))
+			return;
+		{
+			std::lock_guard built_lock(built_mutex);
+			if (built_ready)
+				return;
 		}
-		has_world.store(active_world != nullptr, std::memory_order_release);
+
+		// 3. Assemble in the background. The previous worker is joined first so the snapshot members
+		// are never written while a build is still reading them.
+		join_build_thread();
+		{
+			std::lock_guard lock(state_mutex);
+			build_snapshot_instances = instances;
+			build_snapshot_colliders = scene_colliders;
+			build_snapshot_config = current_config;
+		}
+		build_in_flight.store(true, std::memory_order_release);
+		build_thread = std::thread([this]() {
+			ClothWorldBuild result;
+			build_world_cpu(std::move(build_snapshot_instances), build_snapshot_colliders,
+				build_snapshot_config, result);
+			{
+				std::lock_guard built_lock(built_mutex);
+				built_result = std::move(result);
+				built_ready = true;
+			}
+			build_in_flight.store(false, std::memory_order_release);
+		});
+	}
+
+	void ClothSystem::join_build_thread() {
+		if (build_thread.joinable())
+			build_thread.join();
 	}
 
 	void ClothSystem::simulate_and_skin(bud::graphics::RHI* rhi, bud::graphics::CommandHandle cmd,

@@ -23,6 +23,7 @@ add_library(bud_asset_pipeline STATIC
     importers/dae_importer.cpp
     importers/stl_importer.cpp
     importers/urdf_parser.cpp
+    importers/mjcf_parser.cpp
     third_party/pugixml/pugixml.cpp
     importers/texture_importer.cpp
     builders/virtual_geometry_builder.cpp
@@ -33,6 +34,7 @@ add_library(bud_asset_pipeline STATIC
     builders/cloth_builder.cpp
     builders/cascade_builder.cpp
     builders/urdf_builder.cpp
+    builders/mjcf_builder.cpp
     builders/mujoco_model_builder.cpp
     builders/collision_builder.cpp
     ${CMAKE_SOURCE_DIR}/src/runtime/bud.scene.cpp

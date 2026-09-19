@@ -13,6 +13,7 @@
 #include "src/tools/asset_pipeline/importers/stl_importer.hpp"
 #include "src/tools/asset_pipeline/importers/texture_importer.hpp"
 #include "src/tools/asset_pipeline/builders/urdf_builder.hpp"
+#include "src/tools/asset_pipeline/builders/mjcf_builder.hpp"
 #include "src/tools/asset_pipeline/core/support.hpp"
 #include <Jolt/Jolt.h>
 #include <Jolt/Core/Factory.h>
@@ -20,7 +21,7 @@
 
 void print_usage() {
     std::cout << "Usage: BudAssetImporter --input <file> --output <dir/path> [options]" << std::endl;
-    std::cout << "       --input <file.obj/gltf/fbx/dae/stl/urdf/png> (Required: Input source file)" << std::endl;
+    std::cout << "       --input <file.obj/gltf/fbx/dae/stl/urdf/xml/mjcf/png> (Required: Input source file)" << std::endl;
     std::cout << "       --output <path>               (Required: Output directory or target file)" << std::endl;
     std::cout << "       --package-root <dir>          (ROS package root for URDF, auto-detected from input path if omitted)" << std::endl;
     std::cout << "       --max-convex-verts <count>    (Max vertices per convex hull, default: 128)" << std::endl;
@@ -207,6 +208,25 @@ int main(int argc, char* argv[]) {
             return 0;
         } else {
             std::cerr << "[BudAssetImporter] Failed to cook robot package from: " << input_path << std::endl;
+            return 1;
+        }
+    } else if (ext == ".xml" || ext == ".mjcf") {
+        if (output_dir.empty()) {
+            std::cerr << "[BudAssetImporter] Error: --output is required." << std::endl;
+            return 1;
+        }
+
+        bud::asset_pipeline::MjcfBuildOptions build_opts{};
+        build_opts.max_convex_vertices = max_convex_verts;
+        build_opts.scale = scale;
+        build_opts.dump_json = true;
+        build_opts.use_cache = use_cache;
+
+        if (bud::asset_pipeline::MjcfBuilder::build_mjcf(input_path, output_dir, build_opts)) {
+            std::cout << "[BudAssetImporter] Successfully cooked native MJCF robot package to: " << output_dir << std::endl;
+            return 0;
+        } else {
+            std::cerr << "[BudAssetImporter] Failed to cook MJCF robot package from: " << input_path << std::endl;
             return 1;
         }
     } else if (ext == ".budasset") {

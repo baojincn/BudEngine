@@ -280,7 +280,7 @@ target_sources(bud_engine_core
 		"src/io/bud.io.cpp"
 		"src/core/bud.raw_mesh.cpp"
 		"src/robots/bud.robot.types.cpp"
-	"src/robots/bud.robot.mujoco.cpp"
+		"src/robots/bud.robot.mujoco.cpp"
 		"src/threading/bud.threading.cpp"
         "src/third_party/bud_third_party.cpp"
 
@@ -293,9 +293,9 @@ target_sources(bud_engine_core
 		"src/graphics/passes/bud.pass.physics_debug.cpp"
 		"src/graphics/passes/bud.pass.cloth_debug.cpp"
 		"src/physics/bud.physics.scene.cpp"
-	"src/physics/bud.physics.world.cpp"
-	"src/physics/bud.physics.world.jolt.cpp"
-	"src/physics/bud.physics.world.mujoco.cpp"
+		"src/physics/bud.physics.world.cpp"
+		"src/physics/bud.physics.world.jolt.cpp"
+		"src/physics/bud.physics.world.mujoco.cpp"
 		"src/physics/bud.cloth.cpp"
 		"src/robots/bud.robot.loader.cpp"
 		"src/robots/bud.robot.visual_bridge.cpp"
@@ -307,6 +307,8 @@ target_sources(bud_engine_core
 		"src/rl/bud.rl.policy_runner.cpp"
 		"src/rl/bud.rl.dense_policy.cpp"
 		"src/rl/bud.rl.g1_policy_controller.cpp"
+		"src/rl/bud.rl.microduck_policy_controller.cpp"
+		"src/robots/bud.robot.companion.cpp"
 
     PUBLIC
 		"src/core/bud.core.hpp"
@@ -317,8 +319,10 @@ target_sources(bud_engine_core
 		"src/robots/bud.robot.loader.hpp"
 		"src/robots/bud.robot.visual_bridge.hpp"
 		"src/robots/bud.robot.avatar.hpp"
+		"src/robots/bud.robot.companion.hpp"
 		"src/robots/bud.robot.skinning.hpp"
 		"src/robots/bud.robot.lowcmd.hpp"
+		"src/rl/bud.rl.microduck_policy_controller.hpp"
 		"src/io/bud.io.hpp"
 		"src/runtime/bud.engine.hpp"
 		"src/platform/bud.platform.hpp"
@@ -331,12 +335,12 @@ target_sources(bud_engine_core
 
 		"src/runtime/bud.character_controller.hpp"
 
-	"src/physics/bud.physics.hpp"
-	"src/physics/bud.physics.types.hpp"
-	"src/physics/bud.physics.world.hpp"
-	"src/physics/bud.physics.world.jolt.hpp"
-	"src/physics/bud.physics.world.mujoco.hpp"
-	"src/physics/bud.physics.scene.hpp"
+		"src/physics/bud.physics.hpp"
+		"src/physics/bud.physics.types.hpp"
+		"src/physics/bud.physics.world.hpp"
+		"src/physics/bud.physics.world.jolt.hpp"
+		"src/physics/bud.physics.world.mujoco.hpp"
+		"src/physics/bud.physics.scene.hpp"
 		"src/physics/bud.cloth.hpp"
 		"src/physics/bud.cloth.types.hpp"
 
@@ -425,23 +429,23 @@ if(BUD_BUILD_SAMPLES)
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/cmake")
     file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/cmake/link_content_$<CONFIG>.cmake"
         CONTENT "file(TO_NATIVE_PATH \"$<TARGET_FILE_DIR:triangle_sample>/Content\" _dst)
-file(TO_NATIVE_PATH \"${CMAKE_CURRENT_SOURCE_DIR}/Content\" _src)
-# A stale real directory (e.g. from the old copy_directory step) must be removed
-# BEFORE creating the junction, otherwise mklink fails and we'd fall back to
-# copying 5.9 GB every build. Removing a junction only removes the link.
-if(EXISTS \"\${_dst}\" AND NOT IS_SYMLINK \"\${_dst}\")
-    message(STATUS \"Replacing stale real Content dir with a junction...\")
-    file(REMOVE_RECURSE \"\${_dst}\")
-endif()
-if(NOT EXISTS \"\${_dst}\")
-    file(MAKE_DIRECTORY \"$<TARGET_FILE_DIR:triangle_sample>\")
-    execute_process(COMMAND cmd /c mklink /J \"\${_dst}\" \"\${_src}\"
-        ERROR_VARIABLE _err)
-    if(_err)
-        message(STATUS \"Junction creation failed, falling back to copy.\")
-        file(COPY \"${CMAKE_CURRENT_SOURCE_DIR}/Content\" DESTINATION \"$<TARGET_FILE_DIR:triangle_sample>\")
-    endif()
-endif()"
+	file(TO_NATIVE_PATH \"${CMAKE_CURRENT_SOURCE_DIR}/Content\" _src)
+	# A stale real directory (e.g. from the old copy_directory step) must be removed
+	# BEFORE creating the junction, otherwise mklink fails and we'd fall back to
+	# copying 5.9 GB every build. Removing a junction only removes the link.
+	if(EXISTS \"\${_dst}\" AND NOT IS_SYMLINK \"\${_dst}\")
+		message(STATUS \"Replacing stale real Content dir with a junction...\")
+		file(REMOVE_RECURSE \"\${_dst}\")
+	endif()
+	if(NOT EXISTS \"\${_dst}\")
+		file(MAKE_DIRECTORY \"$<TARGET_FILE_DIR:triangle_sample>\")
+		execute_process(COMMAND cmd /c mklink /J \"\${_dst}\" \"\${_src}\"
+			ERROR_VARIABLE _err)
+		if(_err)
+			message(STATUS \"Junction creation failed, falling back to copy.\")
+			file(COPY \"${CMAKE_CURRENT_SOURCE_DIR}/Content\" DESTINATION \"$<TARGET_FILE_DIR:triangle_sample>\")
+		endif()
+	endif()"
     )
     add_custom_command(TARGET triangle_sample POST_BUILD
         COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/cmake/link_content_$<CONFIG>.cmake"

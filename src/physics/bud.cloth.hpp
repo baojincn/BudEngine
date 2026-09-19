@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <atomic>
+#include <thread>
 
 #include "src/core/bud.math.hpp"
 #include "src/core/bud.asset.types.hpp"
@@ -73,6 +74,20 @@ namespace bud::physics {
 		uint32_t hash_table_size = 0;
 	};
 
+	// CPU output of a cloth world build. The heavy assembly (particles, constraints, graph colouring)
+	// runs on a worker thread; the GPU buffer creation and uploads happen later on the main thread,
+	// because the RHI's immediate copy submits to a queue and is not thread-safe.
+	struct ClothWorldBuild {
+		std::shared_ptr<ClothSimWorld> world;
+		std::vector<SimParticle> particles;
+		std::vector<SimParticle> rest;
+		std::vector<DistanceConstraint> constraints;
+		std::vector<ClothSkinBinding> bindings;
+		std::vector<TriangleConstraint> triangles;
+		std::vector<DistanceConstraint> bending;
+		std::vector<bud::math::vec4> colliders; // packed: two vec4 per box (center, half extents)
+	};
+
 	class ClothSystem {
 	public:
 		ClothSystem() = default;
@@ -86,6 +101,12 @@ namespace bud::physics {
 
 		// Main-thread: rebuild the global SimWorld if instances changed. Cheap no-op otherwise.
 		void flush_pending();
+
+		// Controls whether flush_pending() may start a new world assembly. Disabled during startup so
+		// the (multi-second) Sponza cloth build does not run while the scene / physics are still
+		// initialising; registration keeps marking the world dirty, so enabling it later builds once.
+		void set_build_enabled(bool enabled) { build_enabled.store(enabled, std::memory_order_release); }
+		bool is_build_enabled() const { return build_enabled.load(std::memory_order_acquire); }
 
 		// Returns true if a simulated cloth world is active and pipelines are loaded.
 		bool has_cloth() const { return has_world.load(std::memory_order_acquire) && pipelines_loaded; }
@@ -142,6 +163,20 @@ namespace bud::physics {
 
 		bool pipelines_loaded = false;
 
+		// Startup deferral gate (see set_build_enabled). Published builds finish regardless.
+		std::atomic<bool> build_enabled{ true };
+
+		// Background cloth build: the worker assembles CPU data, the main thread finishes the GPU
+		// upload on a later frame (flush_pending never blocks on the build).
+		std::thread build_thread;
+		std::atomic<bool> build_in_flight{ false };
+		std::mutex built_mutex;
+		ClothWorldBuild built_result;
+		bool built_ready = false;
+		std::vector<ClothInstanceCPU> build_snapshot_instances;
+		std::vector<BoxCollider> build_snapshot_colliders;
+		ClothConfig build_snapshot_config{};
+
 		// Keep this member LAST: pipeline-load callbacks hold a weak_ptr to it and
 		// check expiry to detect a destroyed ClothSystem (use-after-free guard).
 		std::shared_ptr<int> alive_token = std::make_shared<int>(0);
@@ -149,7 +184,17 @@ namespace bud::physics {
 		void load_pipelines();
 		void retire_world(std::shared_ptr<ClothSimWorld> world, uint64_t current_frame);
 		void sweep_retired_worlds(uint64_t current_frame);
-		std::shared_ptr<ClothSimWorld> build_world();
+		// Heavy CPU assembly (worker thread). Reads only the passed snapshot, so it never needs the
+		// state lock for the whole build.
+		// Takes the instance snapshot by value: the build patches per-instance data, and owning the
+		// copy is what lets it run without the state lock.
+		bool build_world_cpu(std::vector<ClothInstanceCPU> build_instances,
+			const std::vector<BoxCollider>& build_colliders,
+			const ClothConfig& build_config,
+			ClothWorldBuild& out);
+		// GPU buffer creation + upload (main thread only).
+		void finalize_world_gpu(ClothWorldBuild& build);
+		void join_build_thread();
 		void select_columns(ClothSimWorld& world);
 	};
 

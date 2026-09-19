@@ -3,8 +3,10 @@
 #include <memory>
 #include <atomic>
 #include <vector>
+#include <deque>
 #include <mutex>
 #include <limits>
+#include <unordered_set>
 
 #include "src/io/bud.io.hpp"
 #include "src/core/bud.math.hpp"
@@ -64,6 +66,10 @@ namespace bud::graphics {
 		// Game-thread safe snapshot (CPU-side bounds only)
 		std::vector<bud::math::AABB> get_mesh_bounds_snapshot() const;
 		std::vector<std::vector<bud::math::AABB>> get_submesh_bounds_snapshot() const;
+		// Mesh ids whose queued GPU upload has not executed yet. Instances for these must not be
+		// drawn: their geometry-pool base is only published when the upload command runs, so drawing
+		// them early reads an uninitialised pool region.
+		std::unordered_set<uint32_t> get_pending_mesh_uploads_snapshot() const;
 		void register_mesh_bounds(uint32_t mesh_id, const bud::math::AABB& aabb);
 		// Update bounds WITHOUT touching is_page_based (used by simulated cloth meshes
 		// which must stay on the traditional Range-B draw path).
@@ -96,7 +102,9 @@ namespace bud::graphics {
 		private:
 		struct UploadQueue {
 			std::mutex mutex;
-			std::vector<std::function<void()>> commands;
+			// FIFO so the reservation order taken in upload_mesh() matches the order the GPU copies
+			// execute. Deque because a flush may pop a budgeted number of commands from the front.
+			std::deque<std::function<void()>> commands;
 		};
 
 		void update_cascades(SceneView& view, const RenderConfig& config, const bud::math::AABB& scene_aabb);
@@ -154,6 +162,9 @@ namespace bud::graphics {
 		std::vector<RenderMesh> meshes;
 		std::vector<bud::math::AABB> mesh_bounds;
 		std::vector<int32_t> mesh_vertex_offsets;
+		// Mesh ids enqueued by upload_mesh() whose queued copy has not run yet. Guarded by
+		// mesh_bounds_mutex; consulted by extract_render_scene_data via the snapshot accessor.
+		std::unordered_set<uint32_t> pending_mesh_uploads;
 		mutable std::mutex mesh_bounds_mutex;
 		mutable std::mutex mesh_mutex;
 

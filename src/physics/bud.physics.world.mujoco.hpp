@@ -38,6 +38,10 @@ namespace bud::physics {
         bool init(const PhysicsWorldConfig& config) override;
         void step(float delta_time, int collision_steps = 1, int integration_steps = 1) override;
         const char* backend_name() const override { return "MuJoCo"; }
+        // Compiles all registered articulations and scene bodies into the MuJoCo model once so
+        // the first step does not trigger a model-resetting recompile. Call this after all
+        // create_articulation() calls and before the first step().
+        bool prepare_simulation() override;
 
         // --- rigid bodies (scene geometry: floor, props) ---
         RigidBodyHandle add_rigid_body(const RigidBodyDesc& desc) override;
@@ -81,6 +85,8 @@ namespace bud::physics {
         int model_actuator_count() const;
         int model_sensor_count() const;
 
+
+
         // --- spatial queries ---
         std::optional<RaycastResult> raycast(const bud::math::vec3& from,
                                              const bud::math::vec3& to) const override;
@@ -105,6 +111,7 @@ namespace bud::physics {
     private:
         struct Articulation {
             bool valid = false;
+            std::string name;
             std::string root_link_name;            // the link that carries the free joint
             std::vector<std::string> link_names;   // index -> body name
             std::vector<std::string> joint_names;  // index -> joint name
@@ -118,6 +125,9 @@ namespace bud::physics {
             // (armature, friction loss, torque limit) lives in the cooked model, not here.
             std::vector<ArticulationJointDesc> joint_descs;
             std::vector<JointCommand> joint_commands;
+            int imu_quat_sensor = -1;
+            int imu_gyro_sensor = -1;
+            int imu_accel_sensor = -1;
         };
 
         // Spawn pose of an articulation, applied once at compile time so nothing has to move on the
@@ -151,6 +161,7 @@ namespace bud::physics {
         std::unordered_set<std::string> registered_mesh_names;
         bool spec_dirty = true;
         double accumulated_time = 0.0;
+        std::atomic<bool> is_compiling_async{ false };
 
         RigidBodyStateSoA body_state;
         std::vector<int> handle_body_ids;          // our handle id -> MuJoCo body id
