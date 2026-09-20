@@ -34,9 +34,10 @@ namespace bud::graphics {
 			// a full San-Miguel-class scene (~5100 pages) in the CPU-driven path.
 			static constexpr uint64_t page_pool_size = 1024ull * 1024 * 1024;
 			// 131040 is an exact multiple of 48 (sizeof asset::Vertex), 24, 16, and 4.
-			// Fixed 128 KB slots keep page-pool memory management simple. The tool
-			// constrains each .budmesh page so its CPU-decoded legacy layout (48B
-			// vertices + u32 indices) fits this slot.
+			// Fixed 128 KB slots keep page-pool memory management simple. The asset
+			// pipeline constrains each page to fit this slot (legacy CPU-decoded pages
+			// use 48B vertices + u32 indices; virtual-geometry pages quantize positions
+			// and use u16 indices).
 			static constexpr uint32_t page_size = 128 * 1024; // 131072 bytes (UE5 Nanite 128 KB exact)
 			static constexpr uint32_t max_pages = page_pool_size / page_size;
 

@@ -129,7 +129,9 @@ BudEngine implements a GPU-driven **Virtual Geometry** pipeline modeled after op
 * **Decoupling VRAM from Scene Complexity:** Traditional engines load entire static meshes into GPU memory. In open-world or high-fidelity scenes, this quickly exhausts VRAM. Virtual Geometry streams individual 128KB pages on demand, keeping only visible or camera-adjacent geometry resident in GPU memory.
 * **Eliminating Bind-Loop Bottlenecks:** By storing all page-streamed meshes inside a single global GPU Page Pool Buffer, the rendering pipeline executes zero per-mesh vertex/index buffer rebinds. All geometry is addressed indirectly by the GPU.
 
-### 2. Offline Page Slicing and Layout (`BudAssetTool`)
+### 2. Offline Page Slicing and Layout (`BudAssetTool`, legacy)
+
+> Superseded: `.budmesh`/`BudAssetTool` were replaced by the `.budasset` virtual-geometry pipeline (`BudAssetImporter`/`BudAssetCompiler`). The runtime page pool below is unchanged, but pages are now quantized virtual-geometry pages; see `vg_refactoring_plan.md`. The `.budmesh` layout is kept for history.
 During asset processing, static meshes are sliced into 128KB page blocks (.bin files) and accompanied by metadata (.budmesh.json). To satisfy Vulkan buffer alignment (e.g., 48-byte vertex stride alignment and std140/std430 SSBO rules), each binary page adheres to a strict internal layout:
 1. **PageBinaryHeader (64 Bytes):** Fixed-size header storing metadata (`page_id`, `vertex_count`, `triangle_count`, `meshlet_count`, `data_size`, and local bounding box).
 2. **Meshlet Descriptors Array:** 16-byte descriptors per meshlet within the page.
@@ -170,6 +172,8 @@ When GPU-driven rendering (`render_config.enable_gpu_driven = true`) is active, 
 The engine uses **Visual Studio 2026 (Professional)** as the primary toolchain. For Visual Studio Code, use the `Visual Studio 18 2026` generator in `CMakePresets.json` to ensure robust automatic discovery of the MSVC environment and Vulkan SDK, providing a "one-click" build experience.
 
 ## Asset Pipeline: Meshletization & Scene Workflow
+
+> Superseded: the `.budmesh`/`.budmap`/`BudAssetTool` workflow below is historical. The current pipeline cooks glTF/URDF/MJCF into `.budasset` (with `.budasset.json` sidecars) via `BudAssetImporter`/`BudAssetCompiler`; see `vg_refactoring_plan.md`.
 
 BudEngine uses a dedicated asset pipeline to transform source data (glTF) into runtime-optimized formats.
 
