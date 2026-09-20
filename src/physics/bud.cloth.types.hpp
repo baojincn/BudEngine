@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <vector>
@@ -90,9 +90,8 @@ namespace bud::physics {
 		bud::math::vec4 capsule_top_friction{ 0.0f, 1.0f, 0.0f, 0.25f }; // xyz: p_top, w: friction mu_k
 		bud::math::vec4 capsule_velocity{ 0.0f };                        // xyz: character velocity, w: unused
 		bud::math::vec4 misc{ 0.0f, 0.0166f, 0.0f, 0.0f };               // x: floor_y, y: dt, z: self_friction_static, w: self_friction_kinetic
-		bud::math::vec4 sphere_center_radius{ 0.0f };                    // xyz: camera sphere center, w: radius (0 = disabled)
 	};
-	static_assert(sizeof(ClothPushConstantsSolver) == 240, "ClothPushConstantsSolver must be exactly 240 bytes");
+	static_assert(sizeof(ClothPushConstantsSolver) == 224, "ClothPushConstantsSolver must be exactly 224 bytes");
 
 	// Push constants for cloth_skinning.comp
 	struct ClothPushConstantsSkinning {

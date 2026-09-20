@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 setlocal
 
 set SCENE_TOOL="D:\PersonalProjects\BudEngine\build\bin\debug\SceneTool.exe"
@@ -16,7 +16,7 @@ if %errorlevel% neq 0 (
 )
 
 echo [ImportAsset] Importing asset: %SOURCE_MODEL% into scene: %TARGET_SCENE% at directory: %TARGET_DIR%
-%IMPORTER% --input %SOURCE_MODEL% --output-dir %TARGET_DIR% --scene %TARGET_SCENE% --no-cache --dump-text
+%IMPORTER% --input %SOURCE_MODEL% --output %TARGET_DIR% --scene %TARGET_SCENE% --no-cache --dump-text
 if %errorlevel% neq 0 (
     exit /b 1
 )

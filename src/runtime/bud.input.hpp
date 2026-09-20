@@ -22,6 +22,8 @@ namespace bud::input {
 		E,
 		LShift,
 		V,
+		B,
+		C,
 		Tab,
 		F1,
 		F2,

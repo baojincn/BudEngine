@@ -30,7 +30,8 @@ namespace bud::asset {
 		Material = 2,
 		Animation = 3,
 		Physics = 4,
-		Scene = 5
+		Scene = 5,
+		Articulation = 6
 	};
 
 	enum class AssetChunkType : uint32_t {
@@ -41,13 +42,19 @@ namespace bud::asset {
 		Collision = 5,
 		RawMesh = 6,
 		RawTexture = 7,
-		ClothPhysics = 8
+		ClothPhysics = 8,
+		Articulation = 9,
+		Skinning = 10,
+		// Cooked MuJoCo model for a robot (normalized MJCF + mesh references + metadata). MuJoCo is
+		// the only handler of robot physics data, so this chunk is what the runtime backend loads.
+		PhysicsModel = 11
 	};
 
 	enum class AssetChunkFlags : uint32_t {
 		None = 0,
 		BulkData = 1 << 0,
-		Compressed = 1 << 1
+		Compressed = 1 << 1,
+		ExternalReference = 1 << 2
 	};
 
 	#pragma pack(push, 1)
@@ -323,6 +330,32 @@ namespace bud::asset {
 		float lod_switch_distances[MAX_CLOTH_LODS];
 		ClothPhysicsLODHeader lods[MAX_CLOTH_LODS];
 	};
+
+	// ====================================================================
+	// Collision / CollisionLOD Chunk Layout
+	// ====================================================================
+	enum class CollisionShapeType : uint32_t {
+		None = 0,
+		Box = 1,
+		ConvexHull = 2,
+		Mesh = 3 // CollisionLOD TriangleMesh
+	};
+
+	inline constexpr uint32_t COLLISION_CHUNK_MAGIC = 0x4C4F4342; // 'BCOL'
+	inline constexpr uint32_t COLLISION_CHUNK_VERSION = 1;
+
+	struct CollisionChunkHeader {
+		uint32_t magic;
+		uint32_t version;
+		uint32_t shape_type;
+		uint32_t vertex_count;
+		uint32_t index_count;
+		float aabb_min[3];
+		float aabb_max[3];
+		float friction;
+		float restitution;
+	};
+	static_assert(sizeof(CollisionChunkHeader) == 52, "CollisionChunkHeader must be 52 bytes");
 
 	#pragma pack(pop)
 

@@ -30,7 +30,7 @@ namespace bud::graphics {
 	}
 
 	RGHandle ScreenSpaceReflectionPass::add_to_graph(RenderGraph& rg, RGHandle depth_buffer, RGHandle scene_color,
-		const SceneView& view, const RenderConfig& config) {
+		RGHandle velocity_buffer, const SceneView& view, const RenderConfig& config) {
 		if (!config.enable_ssr || !depth_buffer.is_valid())
 			return {};
 
@@ -48,11 +48,13 @@ namespace bud::graphics {
 
 		return rg.add_pass("Screen Space Reflection Pass",
 			[=](RGBuilder& builder) {
-				builder.set_queue(QueueType::AsyncCompute);
+				builder.set_queue(QueueType::Graphics);
 				*raw_ssr_h = builder.create("SSRTexture", ssr_desc);
 				builder.read(depth_buffer, ResourceState::ShaderResource);
 				if (scene_color.is_valid())
 					builder.read(scene_color, ResourceState::ShaderResource);
+				if (velocity_buffer.is_valid())
+					builder.read(velocity_buffer, ResourceState::ShaderResource);
 				builder.write(*raw_ssr_h, ResourceState::UnorderedAccess);
 				return *raw_ssr_h;
 			},
@@ -63,11 +65,14 @@ namespace bud::graphics {
 				TextureHandle depth_tex;
 				TextureHandle color_tex;
 				TextureHandle ssr_tex;
+				TextureHandle vel_tex;
 
 				try {
 					depth_tex = rg.get_texture(depth_buffer);
 					if (scene_color.is_valid())
 						color_tex = rg.get_texture(scene_color);
+					if (velocity_buffer.is_valid())
+						vel_tex = rg.get_texture(velocity_buffer);
 					ssr_tex = rg.get_texture(*raw_ssr_h);
 				}
 				catch (const std::exception& e) {
@@ -82,6 +87,7 @@ namespace bud::graphics {
 				rhi->cmd_bind_compute_texture(cmd, ssr_pipeline, 0, depth_tex);
 				rhi->cmd_bind_compute_texture(cmd, ssr_pipeline, 1, color_tex.is_valid() ? color_tex : rhi->get_fallback_texture());
 				rhi->cmd_bind_compute_texture(cmd, ssr_pipeline, 2, ssr_tex, 0, true);
+				rhi->cmd_bind_compute_texture(cmd, ssr_pipeline, 3, vel_tex.is_valid() ? vel_tex : rhi->get_fallback_texture());
 
 				struct SSRPushConsts {
 					bud::math::mat4 proj;

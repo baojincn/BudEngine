@@ -1,4 +1,4 @@
-﻿#include "obj_importer.hpp"
+#include "obj_importer.hpp"
 #include "texture_importer.hpp"
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
@@ -102,9 +102,18 @@ static std::optional<RawMesh> import_assimp_common(const std::string& filepath, 
             rm.metallic_factor = metallic_factor;
         }
         float roughness_factor = 0.85f;
-        if (mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness_factor) == AI_SUCCESS) {
+        if (mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness_factor) == AI_SUCCESS)
             rm.roughness_factor = roughness_factor;
-        }
+        else
+            rm.roughness_factor = roughness_factor;
+
+        std::string lower_name = rm.name;
+        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+        if (lower_name.find("fabric") != std::string::npos ||
+            lower_name.find("curtain") != std::string::npos ||
+            lower_name.find("cloth") != std::string::npos ||
+            lower_name.find("banner") != std::string::npos)
+            rm.roughness_factor = 0.95f;
 
         // Comprehensive Material Alpha Mode Analysis (Opaque, Mask/AlphaTest, Blend/Translucent)
         rm.alpha_mode = bud::asset::AlphaMode::Opaque;

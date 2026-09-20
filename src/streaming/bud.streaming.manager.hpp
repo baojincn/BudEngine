@@ -30,7 +30,7 @@ struct StreamingPage {
 	// True when the page raw data comes from a Virtual Geometry asset
 	// (quantized positions + packed attributes + u16 indices).
 	bool is_virtual_geometry = false;
-	// World-space AABB of the page's geometry, exported by BudAssetTool and
+	// World-space AABB of the page's geometry, exported by the asset pipeline and
 	// used for distance-based eviction.
 	bud::math::AABB aabb;
 	bud::math::AABB global_aabb;

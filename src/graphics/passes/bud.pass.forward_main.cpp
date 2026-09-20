@@ -47,10 +47,19 @@ namespace bud::graphics {
 	}
 
 	void ForwardTranslucentPass::shutdown(RHI* rhi) {
-		if (pipeline.is_valid()) rhi->destroy_pipeline(pipeline);
-		if (pipeline_wireframe.is_valid()) rhi->destroy_pipeline(pipeline_wireframe);
+		if (pipeline.is_valid())
+			rhi->destroy_pipeline(pipeline);
+		if (pipeline_wireframe.is_valid())
+			rhi->destroy_pipeline(pipeline_wireframe);
 		pipeline.reset();
 		pipeline_wireframe.reset();
+		for (auto& buf : indirect_buffers) {
+			if (buf.is_valid())
+				rhi->destroy_buffer(buf);
+			buf.reset();
+		}
+		indirect_buffers.clear();
+		buffer_capacities.clear();
 	}
 
 	void ForwardTranslucentPass::add_to_graph(RenderGraph& render_graph, RGHandle shadow_map, RGHandle backbuffer, RGHandle depth_buffer,
@@ -172,39 +181,70 @@ namespace bud::graphics {
 				rhi->cmd_bind_vertex_buffer(cmd, mega_vertex_buffer);
 				rhi->cmd_bind_index_buffer(cmd, mega_index_buffer);
 
+				const uint32_t frame_idx = rhi->get_current_image_index();
+				if (indirect_buffers.size() <= frame_idx) {
+					indirect_buffers.resize(frame_idx + 1);
+					buffer_capacities.resize(frame_idx + 1, 0);
+				}
+
+				const uint32_t needed_capacity = std::max(256u, static_cast<uint32_t>(ranges.range_c_count));
+				if (buffer_capacities[frame_idx] < needed_capacity || !indirect_buffers[frame_idx].is_valid()) {
+					if (indirect_buffers[frame_idx].is_valid())
+						rhi->destroy_buffer(indirect_buffers[frame_idx]);
+					indirect_buffers[frame_idx] = rhi->create_upload_buffer(static_cast<uint64_t>(needed_capacity) * sizeof(IndirectCommand));
+					buffer_capacities[frame_idx] = needed_capacity;
+				}
+
+				auto* ind_buf = rhi->get_buffer(indirect_buffers[frame_idx]);
+				if (!ind_buf || !ind_buf->mapped_ptr)
+					return;
+
+				auto* mapped_cmds = static_cast<IndirectCommand*>(ind_buf->mapped_ptr);
+				size_t cmd_count = 0;
+
 				const size_t end_idx = std::min(ranges.range_c_start + ranges.range_c_count, sort_list.size());
 				for (size_t i = ranges.range_c_start; i < end_idx; ++i) {
 					const auto& item = sort_list[i];
 					uint32_t idx = item.entity_index;
-					if (idx >= render_scene.mesh_indices.size()) continue;
+					if (idx >= render_scene.mesh_indices.size())
+						continue;
 
 					uint32_t mesh_id = render_scene.mesh_indices[idx];
-					if (mesh_id >= meshes.size()) continue;
+					if (mesh_id >= meshes.size())
+						continue;
 
 					const auto& mesh = meshes[mesh_id];
-					if (!mesh.is_valid() || mesh.is_page_based) continue; // Non-VG traditional meshes only
+					if (!mesh.is_valid() || mesh.is_page_based)
+						continue; // Non-VG traditional meshes only
 
 					const auto& mesh_geometry = gpu_scene.get_mesh_geometry(mesh_id);
 
+					auto& out_cmd = mapped_cmds[cmd_count++];
+					out_cmd.instance_count = 1;
+					out_cmd.vertex_offset = mesh_geometry.vertex_offset;
+					out_cmd.first_instance = static_cast<uint32_t>(i);
+
+					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
+						const auto& sub = mesh.submeshes[item.submesh_index];
+						out_cmd.index_count = sub.index_count;
+						out_cmd.first_index = mesh_geometry.first_index + sub.index_start;
+					}
+					else {
+						out_cmd.index_count = mesh.index_count;
+						out_cmd.first_index = mesh_geometry.first_index;
+					}
+				}
+
+				if (cmd_count > 0) {
 					struct PushConstants {
 						bud::math::mat4 model;
 						uint32_t material_id;
 						uint32_t is_indirect;
 					} pc{};
-					pc.model = (idx < render_scene.world_matrices.size()) ? render_scene.world_matrices[idx] : bud::math::mat4(1.0f);
-					pc.material_id = (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size())
-						? mesh.submeshes[item.submesh_index].material_id
-						: (!mesh.submeshes.empty() ? mesh.submeshes[0].material_id : 0);
-					pc.is_indirect = 0;
+					pc.is_indirect = 1;
 					rhi->cmd_push_constants(cmd, active_pipeline, sizeof(PushConstants), &pc);
 
-					if (item.submesh_index != UINT32_MAX && item.submesh_index < mesh.submeshes.size()) {
-						const auto& sub = mesh.submeshes[item.submesh_index];
-						rhi->cmd_draw_indexed(cmd, sub.index_count, 1, mesh_geometry.first_index + sub.index_start, mesh_geometry.vertex_offset, 0);
-					}
-					else {
-						rhi->cmd_draw_indexed(cmd, mesh.index_count, 1, mesh_geometry.first_index, mesh_geometry.vertex_offset, 0);
-					}
+					rhi->cmd_draw_indexed_indirect(cmd, indirect_buffers[frame_idx], 0, static_cast<uint32_t>(cmd_count), sizeof(IndirectCommand));
 				}
 
 				rhi->cmd_end_render_pass(cmd);

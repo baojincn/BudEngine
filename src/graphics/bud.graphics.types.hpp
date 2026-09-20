@@ -10,6 +10,7 @@
 #include "src/core/bud.core.hpp"
 #include "src/core/bud.math.hpp"
 #include "src/physics/bud.cloth.types.hpp"
+#include "src/physics/bud.physics.types.hpp"
 
 namespace math = bud::math;
 
@@ -150,6 +151,7 @@ namespace bud::graphics {
 		BGRA8_SRGB,
 		BC7_UNORM,
 		BC5_UNORM,
+		RG16_FLOAT,
 		RGBA16_FLOAT,
 		R32G32B32_FLOAT,
 		R32G32_UINT,
@@ -224,11 +226,17 @@ namespace bud::graphics {
 		std::string name;
 	};
 
+	enum class EngineMode : uint8_t {
+		Game = 0,         // 游戏模式: Jolt 物理 + 运动学虚拟驱动 + 确定性手感
+		Simulation = 1    // 仿真模式: MuJoCo 物理 + Articulation 动力学 + LowCmd 官方控制
+	};
+
 	struct EngineConfig {
 		std::string name = "Bud Engine";
 		int width = 1920;
 		int height = 1080;
 		Backend backend = Backend::Vulkan;
+		EngineMode mode = EngineMode::Game;
 		uint32_t inflight_frame_count = 3;
 		bool enable_validation = true;
 		bool vsync = false;
@@ -238,6 +246,11 @@ namespace bud::graphics {
 		// Standard World Spatial & Physical Units (1.0f == 1.0 cm)
 		float world_unit_scale_cm = bud::core::units::cm;
 		float default_gravity = -bud::core::units::gravity; // -980.665 cm/s^2
+
+		// Physics Backend & Ground Plane configuration
+		bud::physics::PhysicsBackend physics_backend = bud::physics::PhysicsBackend::Jolt;
+		bool enable_ground_plane = false;
+		float ground_plane_height = 0.0f;
 	};
 
 	enum class AOMode : uint32_t {
@@ -287,8 +300,8 @@ namespace bud::graphics {
 		//     Units = vkCmdSetDepthBias factors (device depth units, NOT
 		//     normalized [0,1] fractions). Only used by CSMShadowPass.
 		// -----------------------------------------------------------------
-		float shadow_bias_constant = 2.0f;  // constantFactor (integer part is what counts)
-		float shadow_bias_slope = 1.75f;    // slopeFactor
+		float shadow_bias_constant = 1.5f;  // constantFactor (integer part is what counts)
+		float shadow_bias_slope = 1.5f;    // slopeFactor
 		float shadow_bias_clamp = 0.0f;     // 0 == no clamping (Vulkan convention)
 
 		// (2) Receiver stage bias, applied when sampling the shadow map in
@@ -296,7 +309,7 @@ namespace bud::graphics {
 		//     cascade size / map resolution / camera pitch:
 		//         world_offset = cascade_texel_size * <these factors>
 		float shadow_normal_offset_texels = 1.0f; // world-space offset along N
-		float shadow_receiver_bias_texels = 1.5f; // residual light-depth offset
+		float shadow_receiver_bias_texels = 0.85f; // residual light-depth offset
 
 		float shadow_ortho_size = 35.0f;
 		// ^ Legacy: only a fallback for the shadow caster LOD metric when a cascade has
@@ -541,7 +554,8 @@ namespace bud::graphics {
 			TAA,
 			ClothIntegrate,
 			ClothSolver,
-			ClothSkinning
+			ClothSkinning,
+			RobotSkinning
 		};
 
 		ShaderStage cs;

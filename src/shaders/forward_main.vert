@@ -37,16 +37,24 @@ layout(binding = 0) uniform UniformBufferObject {
 	uint debug_cluster;
 } ubo;
 
-struct InstanceData {
-	mat4 model;
+struct HierarchyInstance {
+	mat4 model_matrix;
+	uint mesh_id;
 	uint material_id;
-	uint page_slot;
-	float blend_factor;
-	uint padding;
+	uint root_group_index;
+	uint flags;
+	float global_sphere_center_x;
+	float global_sphere_center_y;
+	float global_sphere_center_z;
+	float global_sphere_radius;
+	float error_threshold;
+	uint base_virtual_page;
+	uint pad0;
+	uint pad1;
 };
 
-layout(std430, binding = 3) readonly buffer InstanceBuffer {
-	InstanceData data[];
+layout(std430, set = 0, binding = 3) readonly buffer InstanceBuffer {
+	HierarchyInstance data[];
 } instance_buffer;
 
 layout(push_constant) uniform PushConstants {
@@ -61,10 +69,11 @@ void main() {
 	float blend_factor = 0.0;
 
 	if (push_consts.is_indirect != 0) {
-		uint draw_id = gl_DrawIDARB;
-		model_mat = instance_buffer.data[draw_id].model;
-		material_id = instance_buffer.data[draw_id].material_id;
-		blend_factor = instance_buffer.data[draw_id].blend_factor;
+		HierarchyInstance instance = instance_buffer.data[gl_InstanceIndex];
+		bool is_cloth = bool(instance.flags & 8u);
+		model_mat = is_cloth ? mat4(1.0) : instance.model_matrix;
+		material_id = instance.material_id;
+		blend_factor = 0.0;
 	} else {
 		model_mat = push_consts.model;
 		material_id = push_consts.material_id;

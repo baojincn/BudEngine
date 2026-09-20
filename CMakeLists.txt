@@ -89,6 +89,7 @@ find_package(pybind11 CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
 find_package(Jolt CONFIG REQUIRED)
+find_package(mujoco CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
 find_package(unofficial-spirv-reflect CONFIG REQUIRED)
 # End, find dependencies
@@ -255,6 +256,7 @@ target_sources(bud_engine_core
 		"src/graphics/passes/bud.pass.ssr.cpp"
 		"src/graphics/passes/bud.pass.ssgi.cpp"
 		"src/graphics/passes/bud.pass.resolve.cpp"
+		"src/graphics/passes/bud.pass.velocity.cpp"
 		"src/graphics/passes/bud.pass.taa.cpp"
 		"src/graphics/passes/bud.pass.ui.cpp"
 		"src/graphics/bud.graphics.graph.cpp"
@@ -276,7 +278,9 @@ target_sources(bud_engine_core
 		"src/graphics/vulkan/bud.vulkan.transient_heap.cpp"
 
 		"src/io/bud.io.cpp"
-		"src/tools/asset_pipeline/core/raw_mesh.cpp"
+		"src/core/bud.raw_mesh.cpp"
+		"src/robots/bud.robot.types.cpp"
+		"src/robots/bud.robot.mujoco.cpp"
 		"src/threading/bud.threading.cpp"
         "src/third_party/bud_third_party.cpp"
 
@@ -289,12 +293,36 @@ target_sources(bud_engine_core
 		"src/graphics/passes/bud.pass.physics_debug.cpp"
 		"src/graphics/passes/bud.pass.cloth_debug.cpp"
 		"src/physics/bud.physics.scene.cpp"
+		"src/physics/bud.physics.world.cpp"
+		"src/physics/bud.physics.world.jolt.cpp"
+		"src/physics/bud.physics.world.mujoco.cpp"
 		"src/physics/bud.cloth.cpp"
+		"src/robots/bud.robot.loader.cpp"
+		"src/robots/bud.robot.visual_bridge.cpp"
+		"src/robots/bud.robot.avatar.cpp"
+		"src/robots/bud.robot.skinning.cpp"
+		"src/robots/bud.robot.lowcmd.cpp"
+		"src/rl/bud.rl.policy_spec.cpp"
+		"src/rl/bud.rl.observation.cpp"
+		"src/rl/bud.rl.policy_runner.cpp"
+		"src/rl/bud.rl.dense_policy.cpp"
+		"src/rl/bud.rl.g1_policy_controller.cpp"
+		"src/rl/bud.rl.microduck_policy_controller.cpp"
+		"src/robots/bud.robot.companion.cpp"
 
     PUBLIC
 		"src/core/bud.core.hpp"
 		"src/core/bud.math.hpp"
 		"src/core/bud.logger.hpp"
+		"src/core/bud.raw_mesh.hpp"
+		"src/robots/bud.robot.types.hpp"
+		"src/robots/bud.robot.loader.hpp"
+		"src/robots/bud.robot.visual_bridge.hpp"
+		"src/robots/bud.robot.avatar.hpp"
+		"src/robots/bud.robot.companion.hpp"
+		"src/robots/bud.robot.skinning.hpp"
+		"src/robots/bud.robot.lowcmd.hpp"
+		"src/rl/bud.rl.microduck_policy_controller.hpp"
 		"src/io/bud.io.hpp"
 		"src/runtime/bud.engine.hpp"
 		"src/platform/bud.platform.hpp"
@@ -309,6 +337,9 @@ target_sources(bud_engine_core
 
 		"src/physics/bud.physics.hpp"
 		"src/physics/bud.physics.types.hpp"
+		"src/physics/bud.physics.world.hpp"
+		"src/physics/bud.physics.world.jolt.hpp"
+		"src/physics/bud.physics.world.mujoco.hpp"
 		"src/physics/bud.physics.scene.hpp"
 		"src/physics/bud.cloth.hpp"
 		"src/physics/bud.cloth.types.hpp"
@@ -350,6 +381,7 @@ target_link_libraries(bud_engine_core
 		nlohmann_json::nlohmann_json
 		meshoptimizer::meshoptimizer
 		Jolt::Jolt
+		mujoco::mujoco
 )
 
 if (WIN32)
@@ -397,23 +429,23 @@ if(BUD_BUILD_SAMPLES)
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/cmake")
     file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/cmake/link_content_$<CONFIG>.cmake"
         CONTENT "file(TO_NATIVE_PATH \"$<TARGET_FILE_DIR:triangle_sample>/Content\" _dst)
-file(TO_NATIVE_PATH \"${CMAKE_CURRENT_SOURCE_DIR}/Content\" _src)
-# A stale real directory (e.g. from the old copy_directory step) must be removed
-# BEFORE creating the junction, otherwise mklink fails and we'd fall back to
-# copying 5.9 GB every build. Removing a junction only removes the link.
-if(EXISTS \"\${_dst}\" AND NOT IS_SYMLINK \"\${_dst}\")
-    message(STATUS \"Replacing stale real Content dir with a junction...\")
-    file(REMOVE_RECURSE \"\${_dst}\")
-endif()
-if(NOT EXISTS \"\${_dst}\")
-    file(MAKE_DIRECTORY \"$<TARGET_FILE_DIR:triangle_sample>\")
-    execute_process(COMMAND cmd /c mklink /J \"\${_dst}\" \"\${_src}\"
-        ERROR_VARIABLE _err)
-    if(_err)
-        message(STATUS \"Junction creation failed, falling back to copy.\")
-        file(COPY \"${CMAKE_CURRENT_SOURCE_DIR}/Content\" DESTINATION \"$<TARGET_FILE_DIR:triangle_sample>\")
-    endif()
-endif()"
+	file(TO_NATIVE_PATH \"${CMAKE_CURRENT_SOURCE_DIR}/Content\" _src)
+	# A stale real directory (e.g. from the old copy_directory step) must be removed
+	# BEFORE creating the junction, otherwise mklink fails and we'd fall back to
+	# copying 5.9 GB every build. Removing a junction only removes the link.
+	if(EXISTS \"\${_dst}\" AND NOT IS_SYMLINK \"\${_dst}\")
+		message(STATUS \"Replacing stale real Content dir with a junction...\")
+		file(REMOVE_RECURSE \"\${_dst}\")
+	endif()
+	if(NOT EXISTS \"\${_dst}\")
+		file(MAKE_DIRECTORY \"$<TARGET_FILE_DIR:triangle_sample>\")
+		execute_process(COMMAND cmd /c mklink /J \"\${_dst}\" \"\${_src}\"
+			ERROR_VARIABLE _err)
+		if(_err)
+			message(STATUS \"Junction creation failed, falling back to copy.\")
+			file(COPY \"${CMAKE_CURRENT_SOURCE_DIR}/Content\" DESTINATION \"$<TARGET_FILE_DIR:triangle_sample>\")
+		endif()
+	endif()"
     )
     add_custom_command(TARGET triangle_sample POST_BUILD
         COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/cmake/link_content_$<CONFIG>.cmake"
@@ -445,6 +477,21 @@ endif()"
     )
 endif()
 # End, triangle_sample
+
+add_executable(robot_sim_sample samples/robot_sim_sample/main.cpp)
+target_link_libraries(robot_sim_sample PRIVATE bud_engine_core)
+target_include_directories(robot_sim_sample PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# MuJoCo feasibility spike: standalone, no engine, no Jolt. Compiles the G1 URDF from memory (VFS)
+# and checks whether position actuators (kp/kv) hold the robot up.
+add_executable(mujoco_spike samples/mujoco_spike/main.cpp)
+target_link_libraries(mujoco_spike PRIVATE mujoco::mujoco)
+
+# End to end check of the MuJoCo backend: loads the cooked robot asset (no URDF, no loose files) and
+# steps the world through PhysicsWorldBase.
+add_executable(mujoco_backend_test samples/mujoco_backend_test/main.cpp)
+target_link_libraries(mujoco_backend_test PRIVATE bud_engine_core)
+target_include_directories(mujoco_backend_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Begin, tools
 add_subdirectory(src/tools/asset_pipeline)
@@ -483,27 +530,18 @@ add_custom_target(GenerateShaderReport
 
 # End, tools
 
-# Python ML Bridge
+# Python ML Bridge / Gym Environment
 set(Python3_FIND_VIRTUALENV FIRST)
 
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
- message(STATUS "Python include: ${Python3_INCLUDE_DIRS}")
-     if(NOT Python3_INCLUDE_DIRS)
-       message(FATAL_ERROR "Python3 development headers not found. Install python dev or ensure vcpkg python3 for the triplet is installed.")
-     endif()
-
-    # Ensure triangle_sample links to Python import library when Python is available
-    if(Python3_FOUND)
-        target_link_libraries(triangle_sample PRIVATE Python3::Python)
-    endif()
-find_package(pybind11 CONFIG REQUIRED)
-
-# Ensure bud_engine_core can compile pybind11-using sources when Python was found
-if(Python3_FOUND)
-    target_include_directories(bud_engine_core PUBLIC ${Python3_INCLUDE_DIRS})
+message(STATUS "Python include: ${Python3_INCLUDE_DIRS}")
+if(NOT Python3_INCLUDE_DIRS)
+    message(FATAL_ERROR "Python3 development headers not found. Install python dev or ensure vcpkg python3 for the triplet is installed.")
 endif()
 
-pybind11_add_module(bud_rl src/ml/bud.ml.rl_py_bind.cpp "samples/triangle/triangle.cpp")
+find_package(pybind11 CONFIG REQUIRED)
+
+pybind11_add_module(bud_rl samples/gym_env/gym_env.cpp samples/gym_env/py_bindings.cpp)
+target_include_directories(bud_rl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bud_rl PRIVATE pybind11::module bud_engine_core)
-# Output to where python might run
 set_target_properties(bud_rl PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")

@@ -16,6 +16,10 @@ namespace bud::game {
 		uint32_t height = 720;
 		bool is_puppet_mode = false;
 		bool is_headless = false;
+		bud::graphics::EngineMode mode = bud::graphics::EngineMode::Game;
+		bud::physics::PhysicsBackend physics_backend = bud::physics::PhysicsBackend::Jolt;
+		bool enable_ground_plane = false;
+		float ground_plane_height = 0.0f;
 
 		bud::graphics::EngineConfig to_engine_config() const {
 			bud::graphics::EngineConfig config;
@@ -24,6 +28,19 @@ namespace bud::game {
 			config.height = height;
 			config.is_puppet_mode = is_puppet_mode;
 			config.is_headless = is_headless;
+			config.mode = mode;
+
+			if (mode == bud::graphics::EngineMode::Simulation)
+				config.physics_backend = bud::physics::PhysicsBackend::Mujoco;
+			else
+				config.physics_backend = physics_backend;
+
+			if (mode == bud::graphics::EngineMode::Simulation)
+				config.enable_ground_plane = true;
+			else
+				config.enable_ground_plane = enable_ground_plane;
+
+			config.ground_plane_height = ground_plane_height;
 			return config;
 		}
 	};
@@ -46,6 +63,8 @@ namespace bud::game {
 
 		// Async resource load blocking
 		virtual bool is_fully_loaded() const { return true; }
+
+		const void* get_readback_pixels() const;
 
 	protected:
 		bud::engine::BudEngine* get_engine() { return engine.get(); }

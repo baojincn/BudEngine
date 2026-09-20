@@ -28,6 +28,7 @@
     "nlohmann-json",
     "meshoptimizer",
     "joltphysics",
+    "mujoco",
     "assimp",
     "spirv-reflect",
     "spirv-headers",

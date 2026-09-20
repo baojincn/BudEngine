@@ -49,12 +49,6 @@ void main() {
         }
     }
 
-    if (frag_blend_factor > 0.0 && frag_blend_factor < 1.0) {
-        float noise = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-        if (noise < frag_blend_factor)
-            discard;
-    }
-
     uint instance_id = frag_instance_id & 0xFFFFu;
     uint material_id = frag_material_id & 0xFFFFu;
 

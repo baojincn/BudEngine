@@ -15,7 +15,7 @@
 #include <tiny_obj_loader.h>
 #include <stb_image.h>
 #include "src/core/bud.logger.hpp"
-#include "src/tools/asset_pipeline/core/raw_mesh.hpp"
+#include "src/core/bud.raw_mesh.hpp"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -446,7 +446,7 @@ namespace bud::io {
 			return std::nullopt;
 		}
 
-		auto raw_mesh_opt = bud::asset_pipeline::RawMesh::deserialize_binary(
+		auto raw_mesh_opt = bud::asset::RawMesh::deserialize_binary(
 			reinterpret_cast<const uint8_t*>(ptr + raw_chunk->offset), raw_chunk->size);
 		if (!raw_mesh_opt) {
 			bud::eprint("[IO] Failed to deserialize RawMesh chunk: {}", display_path);
@@ -517,18 +517,21 @@ namespace bud::io {
 		: virtual_file_system(virtual_file_system), task_scheduler(scheduler), image_loader(virtual_file_system), model_loader(virtual_file_system) {
 	}
 
-	void AssetManager::load_mesh_async(const std::string& path, std::function<void(MeshData)> on_loaded) {
-		task_scheduler->spawn("AsyncMeshLoad", [this, path, on_loaded]() {
+	void AssetManager::load_mesh_async(const std::string& path,
+	                                   std::function<void(MeshData)> on_loaded,
+	                                   std::function<void(MeshData&)> on_worker) {
+		task_scheduler->spawn("AsyncMeshLoad", [this, path, on_loaded, on_worker]() {
 			std::optional<MeshData> mesh_opt = this->model_loader.load_bud_asset(path);
 
 			if (mesh_opt) {
 				auto resolved = this->virtual_file_system->resolve_path(path);
-				if (resolved) {
+				if (resolved)
 					bud::print("[IO] Loaded mesh (resolved): {}", resolved->string());
-				}
-				else {
+				else
 					bud::print("[IO] Loaded mesh: {}", path);
-				}
+
+				if (on_worker)
+					on_worker(*mesh_opt);
 
 				task_scheduler->submit_main_thread_task([on_loaded, mesh = std::move(*mesh_opt)]() mutable {
 					on_loaded(std::move(mesh));
@@ -536,12 +539,14 @@ namespace bud::io {
 			}
 			else {
 				auto resolved = this->virtual_file_system->resolve_path(path);
-				if (resolved) {
+				if (resolved)
 					bud::eprint("[Asset] Failed to load mesh: {} (resolved: {})", path, resolved->string());
-				}
-				else {
+				else
 					bud::eprint("[Asset] Failed to load mesh: {} (could not resolve)", path);
-				}
+
+				task_scheduler->submit_main_thread_task([on_loaded]() mutable {
+					on_loaded(MeshData{});
+				});
 			}
 		});
 	}

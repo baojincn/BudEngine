@@ -112,6 +112,68 @@ namespace bud::scene {
         return oss.str();
     }
 
+    // Collider
+    inline std::string collider_type_to_string(ColliderType type) {
+        switch (type) {
+            case ColliderType::None:
+                return "none";
+            case ColliderType::Auto:
+                return "auto";
+            case ColliderType::ConvexHull:
+                return "convex";
+            case ColliderType::Mesh:
+                return "mesh";
+            case ColliderType::Box:
+                return "box";
+            default:
+                return "auto";
+        }
+    }
+
+    inline ColliderType string_to_collider_type(const std::string& str) {
+        if (str == "none")
+            return ColliderType::None;
+        if (str == "convex" || str == "convexhull")
+            return ColliderType::ConvexHull;
+        if (str == "mesh" || str == "triangle_mesh")
+            return ColliderType::Mesh;
+        if (str == "box")
+            return ColliderType::Box;
+        return ColliderType::Auto;
+    }
+
+    template <typename BasicJsonType>
+    inline void to_json(BasicJsonType& j, const EntityColliderDesc& c) {
+        j = BasicJsonType{
+            {"type", collider_type_to_string(c.type)},
+            {"friction", c.friction},
+            {"restitution", c.restitution},
+            {"simplification_ratio", c.simplification_ratio},
+            {"max_convex_vertices", c.max_convex_vertices},
+            {"box_half_extent", c.box_half_extent}
+        };
+    }
+
+    template <typename BasicJsonType>
+    inline void from_json(const BasicJsonType& j, EntityColliderDesc& c) {
+        if (j.contains("type")) {
+            if (j.at("type").is_string())
+                c.type = string_to_collider_type(j.at("type").template get<std::string>());
+            else if (j.at("type").is_number_integer())
+                c.type = static_cast<ColliderType>(j.at("type").template get<uint8_t>());
+        }
+        if (j.contains("friction"))
+            j.at("friction").get_to(c.friction);
+        if (j.contains("restitution"))
+            j.at("restitution").get_to(c.restitution);
+        if (j.contains("simplification_ratio"))
+            j.at("simplification_ratio").get_to(c.simplification_ratio);
+        if (j.contains("max_convex_vertices"))
+            j.at("max_convex_vertices").get_to(c.max_convex_vertices);
+        if (j.contains("box_half_extent"))
+            j.at("box_half_extent").get_to(c.box_half_extent);
+    }
+
     // Entity
     template <typename BasicJsonType>
     inline void to_json(BasicJsonType& j, const Entity& e) {
@@ -125,22 +187,36 @@ namespace bud::scene {
             {"material_index", e.material_index},
             {"mesh_index", e.mesh_index},
             {"name", e.name},
-            {"transform", e.transform}
+            {"transform", e.transform},
+            {"collider", e.collider}
         };
     }
     template <typename BasicJsonType>
     inline void from_json(const BasicJsonType& j, Entity& e) {
-        if (j.contains("name")) j.at("name").get_to(e.name);
-        if (j.contains("asset_path")) j.at("asset_path").get_to(e.asset_path);
-        if (j.contains("mesh_index")) j.at("mesh_index").get_to(e.mesh_index);
-        if (j.contains("material_index")) j.at("material_index").get_to(e.material_index);
-        if (j.contains("transform")) j.at("transform").get_to(e.transform);
-        if (j.contains("is_static")) j.at("is_static").get_to(e.is_static);
-        if (j.contains("is_active")) j.at("is_active").get_to(e.is_active);
-        if (j.contains("is_cast_shadow")) j.at("is_cast_shadow").get_to(e.is_cast_shadow);
-        if (j.contains("is_receive_shadow")) j.at("is_receive_shadow").get_to(e.is_receive_shadow);
-        if (j.contains("enable_physics")) j.at("enable_physics").get_to(e.enable_physics);
-        if (j.contains("lod_bias")) j.at("lod_bias").get_to(e.lod_bias);
+        if (j.contains("name"))
+            j.at("name").get_to(e.name);
+        if (j.contains("asset_path"))
+            j.at("asset_path").get_to(e.asset_path);
+        if (j.contains("mesh_index"))
+            j.at("mesh_index").get_to(e.mesh_index);
+        if (j.contains("material_index"))
+            j.at("material_index").get_to(e.material_index);
+        if (j.contains("transform"))
+            j.at("transform").get_to(e.transform);
+        if (j.contains("is_static"))
+            j.at("is_static").get_to(e.is_static);
+        if (j.contains("is_active"))
+            j.at("is_active").get_to(e.is_active);
+        if (j.contains("is_cast_shadow"))
+            j.at("is_cast_shadow").get_to(e.is_cast_shadow);
+        if (j.contains("is_receive_shadow"))
+            j.at("is_receive_shadow").get_to(e.is_receive_shadow);
+        if (j.contains("enable_physics"))
+            j.at("enable_physics").get_to(e.enable_physics);
+        if (j.contains("lod_bias"))
+            j.at("lod_bias").get_to(e.lod_bias);
+        if (j.contains("collider"))
+            j.at("collider").get_to(e.collider);
     }
 
     // Camera

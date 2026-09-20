@@ -165,7 +165,9 @@ private:
 	public:
     AssetManager(VirtualFileSystem* virtual_file_system, bud::threading::TaskScheduler* scheduler);
 
-		void load_mesh_async(const std::string& path, std::function<void(MeshData)> on_loaded);
+		void load_mesh_async(const std::string& path,
+		                     std::function<void(MeshData)> on_loaded,
+		                     std::function<void(MeshData&)> on_worker = nullptr);
 		void load_image_async(const std::string& path, std::function<void(Image)> on_loaded);
 		void load_file_async(const std::string& path, std::function<void(std::vector<char>)> on_loaded);
 		void load_file_chunk_async(const std::string& path, uint64_t offset, uint64_t size,

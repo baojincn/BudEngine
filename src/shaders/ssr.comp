@@ -2,11 +2,12 @@
 #extension GL_GOOGLE_include_directive : enable
 #extension GL_EXT_nonuniform_qualifier : enable
 
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform sampler2D depth_sampler;
 layout(set = 0, binding = 1) uniform sampler2D color_sampler;
 layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D out_ssr_image;
+layout(set = 0, binding = 3) uniform sampler2D velocity_sampler;
 
 layout(push_constant) uniform SSRPushConsts {
     mat4 proj;
@@ -33,28 +34,38 @@ vec3 reconstruct_view_pos(vec2 uv, float raw_depth) {
 
 vec3 reconstruct_view_normal(vec2 uv, float raw_depth) {
     vec2 texel_size = 1.0 / pc.screen_size;
+    // In Vulkan, screen UV origin (0, 0) is at TOP-LEFT.
+    // -texel_size.y moves UP towards the top, +texel_size.y moves DOWN towards the bottom.
     float d_right = texture(depth_sampler, uv + vec2(texel_size.x, 0.0)).r;
     float d_left  = texture(depth_sampler, uv - vec2(texel_size.x, 0.0)).r;
-    float d_up    = texture(depth_sampler, uv + vec2(0.0, texel_size.y)).r;
-    float d_down  = texture(depth_sampler, uv - vec2(0.0, texel_size.y)).r;
+    float d_up    = texture(depth_sampler, uv - vec2(0.0, texel_size.y)).r;
+    float d_down  = texture(depth_sampler, uv + vec2(0.0, texel_size.y)).r;
 
     vec3 p_c     = reconstruct_view_pos(uv, raw_depth);
     vec3 p_right = reconstruct_view_pos(uv + vec2(texel_size.x, 0.0), d_right);
     vec3 p_left  = reconstruct_view_pos(uv - vec2(texel_size.x, 0.0), d_left);
-    vec3 p_up    = reconstruct_view_pos(uv + vec2(0.0, texel_size.y), d_up);
-    vec3 p_down  = reconstruct_view_pos(uv - vec2(0.0, texel_size.y), d_down);
+    vec3 p_up    = reconstruct_view_pos(uv - vec2(0.0, texel_size.y), d_up);
+    vec3 p_down  = reconstruct_view_pos(uv + vec2(0.0, texel_size.y), d_down);
 
-    vec3 dx = (abs(p_right.z - p_c.z) < abs(p_left.z - p_c.z)) ? (p_right - p_c) : (p_c - p_left);
-    vec3 dy = (abs(p_up.z - p_c.z) < abs(p_down.z - p_c.z)) ? (p_up - p_c) : (p_c - p_down);
+    float dz_r = abs(p_right.z - p_c.z);
+    float dz_l = abs(p_left.z - p_c.z);
+    float dz_u = abs(p_up.z - p_c.z);
+    float dz_d = abs(p_down.z - p_c.z);
 
+    // Reject depth discontinuities across silhouette borders (e.g. pot/leaf edge against far background)
+    float depth_discontinuity_thresh = max(0.15, abs(p_c.z) * 0.035);
+    if (min(dz_r, dz_l) > depth_discontinuity_thresh || min(dz_u, dz_d) > depth_discontinuity_thresh)
+        return vec3(0.0);
+
+    vec3 dx = (dz_r < dz_l) ? (p_right - p_c) : (p_c - p_left);
+    vec3 dy = (dz_u < dz_d) ? (p_up - p_c) : (p_c - p_down);
+
+    // dx points right (+X in view space), dy points up (+Y in view space).
+    // cross(dx, dy) naturally points towards the camera (+Z in right-handed view space).
     vec3 N = cross(dx, dy);
-    // Ensure normal points TOWARDS camera in view space (p_c is at negative Z)
-    if (dot(N, -p_c) < 0.0) {
-        N = -N;
-    }
     float len = length(N);
     if (len > 1e-5)
-        return normalize(N);
+        return N / len;
     return vec3(0.0, 0.0, 1.0);
 }
 
@@ -75,7 +86,18 @@ void main() {
 
     vec3 view_pos = reconstruct_view_pos(uv, raw_depth);
     vec3 N = reconstruct_view_normal(uv, raw_depth);
+    if (dot(N, N) < 0.5) {
+        imageStore(out_ssr_image, pixel_coord, vec4(0.0));
+        return;
+    }
     vec3 V = normalize(-view_pos);
+
+    // Smooth fade out at steep grazing angles to prevent 100% Fresnel rim explosion
+    float grazing_fade = smoothstep(0.05, 0.20, dot(N, V));
+    if (grazing_fade <= 0.0) {
+        imageStore(out_ssr_image, pixel_coord, vec4(0.0));
+        return;
+    }
 
     vec3 R = reflect(-V, N);
 
@@ -92,7 +114,10 @@ void main() {
 
     // Adaptive starting bias to prevent self-intersection of floor/walls
     vec3 ray_start = view_pos + N * (0.05 + 0.02 * clamp(abs(view_pos.z) * 0.02, 0.0, 0.5));
-    float current_dist = step_size * 0.5;
+
+    // Interleaved gradient noise to jitter ray step positions and eliminate concentric banding
+    float jitter = fract(52.9829189 * fract(dot(vec2(pixel_coord), vec2(0.06711056, 0.00583715))));
+    float current_dist = step_size * (0.2 + 0.8 * jitter);
 
     bool hit = false;
     vec2 hit_uv = vec2(0.0);
@@ -131,8 +156,8 @@ void main() {
         if (depth_diff < 0.0 && abs(depth_diff) < adaptive_thickness && current_dist > 0.08) {
             vec3 sampled_normal = reconstruct_view_normal(sample_uv, sampled_raw_depth);
 
-            // Reject self-intersection of the same planar surface (e.g. flat floor)
-            if (dot(sampled_normal, N) > 0.85 && current_dist < 1.5) {
+            // Reject self-intersection of the same planar surface (e.g. flat floor or wall)
+            if (dot(sampled_normal, N) > 0.80 && current_dist < 2.0) {
                 current_dist += step_size;
                 continue;
             }
@@ -194,18 +219,22 @@ void main() {
         dist_factor *= dist_factor;
 
         // Reproject final hit position to previous frame screen UV
-        vec4 prev_clip = pc.reproj_view_to_prev_clip * vec4(hit_pos, 1.0);
         vec2 sample_color_uv = hit_uv;
-        if (prev_clip.w > 0.001) {
-            vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
-            if (prev_uv.x >= 0.0 && prev_uv.x <= 1.0 && prev_uv.y >= 0.0 && prev_uv.y <= 1.0) {
-                sample_color_uv = prev_uv;
+        vec2 hit_velocity = textureLod(velocity_sampler, hit_uv, 0.0).xy;
+        if (dot(hit_velocity, hit_velocity) > 1e-10) {
+            sample_color_uv = hit_uv - hit_velocity;
+        } else {
+            vec4 prev_clip = pc.reproj_view_to_prev_clip * vec4(hit_pos, 1.0);
+            if (prev_clip.w > 0.001) {
+                vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
+                if (prev_uv.x >= 0.0 && prev_uv.x <= 1.0 && prev_uv.y >= 0.0 && prev_uv.y <= 1.0)
+                    sample_color_uv = prev_uv;
             }
         }
 
         // Sample history scene color using reprojected UV
         vec3 reflection_color = texture(color_sampler, sample_color_uv).rgb;
-        float alpha = edge_factor * dist_factor * pc.intensity;
+        float alpha = edge_factor * dist_factor * grazing_fade * pc.intensity;
 
         imageStore(out_ssr_image, pixel_coord, vec4(reflection_color, alpha));
     } else {

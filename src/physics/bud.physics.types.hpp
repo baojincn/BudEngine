@@ -12,6 +12,12 @@ namespace bud::physics {
     // Jolt uses meters internally. Bud uses meters (1.0f = 1 m) as defined in
     // bud.core.hpp. No scaling needed.
 
+    enum class PhysicsBackend : uint8_t {
+        Jolt,      // game world
+        Mujoco,    // robot world
+        GpuXpbd,   // future: unified rigid + soft XPBD world on the GPU
+    };
+
     enum class MotionType : uint8_t {
         Static,
         Kinematic,
@@ -22,6 +28,7 @@ namespace bud::physics {
         Sphere,
         Box,
         Capsule,
+        Plane,
         ConvexHull,
         Mesh,
         Compound

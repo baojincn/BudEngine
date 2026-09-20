@@ -28,28 +28,28 @@ vec3 reconstruct_view_pos(vec2 uv, float raw_depth) {
 
 vec3 reconstruct_view_normal(vec2 uv, float raw_depth) {
     vec2 texel = pc.inv_screen_size;
+    // In Vulkan, screen UV origin (0, 0) is at TOP-LEFT.
+    // -texel.y moves UP towards the top, +texel.y moves DOWN towards the bottom.
     float d_r = texture(in_depth_sampler, uv + vec2(texel.x, 0.0)).r;
     float d_l = texture(in_depth_sampler, uv - vec2(texel.x, 0.0)).r;
-    float d_u = texture(in_depth_sampler, uv + vec2(0.0, texel.y)).r;
-    float d_d = texture(in_depth_sampler, uv - vec2(0.0, texel.y)).r;
+    float d_u = texture(in_depth_sampler, uv - vec2(0.0, texel.y)).r;
+    float d_d = texture(in_depth_sampler, uv + vec2(0.0, texel.y)).r;
 
     vec3 p_c = reconstruct_view_pos(uv, raw_depth);
     vec3 p_r = reconstruct_view_pos(uv + vec2(texel.x, 0.0), d_r);
     vec3 p_l = reconstruct_view_pos(uv - vec2(texel.x, 0.0), d_l);
-    vec3 p_u = reconstruct_view_pos(uv + vec2(0.0, texel.y), d_u);
-    vec3 p_d = reconstruct_view_pos(uv - vec2(0.0, texel.y), d_d);
+    vec3 p_u = reconstruct_view_pos(uv - vec2(0.0, texel.y), d_u);
+    vec3 p_d = reconstruct_view_pos(uv + vec2(0.0, texel.y), d_d);
 
     vec3 dx = (abs(p_r.z - p_c.z) < abs(p_l.z - p_c.z)) ? (p_r - p_c) : (p_c - p_l);
     vec3 dy = (abs(p_u.z - p_c.z) < abs(p_d.z - p_c.z)) ? (p_u - p_c) : (p_c - p_d);
 
+    // dx points right (+X in view space), dy points up (+Y in view space).
+    // cross(dx, dy) naturally points towards the camera (+Z in right-handed view space).
     vec3 n = cross(dx, dy);
-    // Ensure normal points TOWARDS camera in view space
-    if (dot(n, -p_c) < 0.0) {
-        n = -n;
-    }
     float len = length(n);
     if (len > 1e-5)
-        return normalize(n);
+        return n / len;
     return vec3(0.0, 0.0, 1.0);
 }
 

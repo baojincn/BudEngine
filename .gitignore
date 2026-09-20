@@ -1,4 +1,4 @@
-﻿# .gitignore
+# .gitignore
 # Build directories
 build/
 cmake-build-*/
@@ -84,3 +84,10 @@ Content/**
 !Content/Textures/default.png
 !Content/**/default.png
 !Content/**/.gitkeep
+# RL policy specs and dense weights live under Content/ like every other resource, but stay
+# version-controlled (the small JSON specs and flat .bin weights, not the cooked assets).
+!Content/rl/
+!Content/rl/**
+
+# MuJoCo writes its own log next to the working directory
+MUJOCO_LOG.TXT

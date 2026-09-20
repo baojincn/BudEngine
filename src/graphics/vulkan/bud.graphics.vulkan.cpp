@@ -201,10 +201,21 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		alloc.init(device);
 	}
 
+	frames.resize(max_frames_in_flight);
+
 	// 交换链与呈现资源
 	if (!headless_mode) {
 		create_swapchain(plat_window);
 		create_image_views();
+	}
+	else {
+		int w = 1280;
+		int h = 720;
+		if (plat_window)
+			plat_window->get_size(w, h);
+		swapchain_extent.width = static_cast<uint32_t>(w > 0 ? w : 1280);
+		swapchain_extent.height = static_cast<uint32_t>(h > 0 ? h : 720);
+		swapchain_image_format = VK_FORMAT_R8G8B8A8_SRGB;
 	}
 
 	// 命令池与同步对象
@@ -257,6 +268,9 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	// Binding 7: GPU Materials Buffer (std430 GPUMaterialData)
 	layout_builder.add_binding(7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT, 1,
+		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+	// Binding 8: Dedicated Cloth Previous Vertex Positions Buffer (vec4 per vertex)
+	layout_builder.add_binding(8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 
 	global_set_layout = layout_builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
@@ -405,6 +419,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
 		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
 	};
 	compute_ssr_set_layout = build_ssr_compute_layout();
@@ -444,6 +459,7 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT);
 		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
 	};
 	compute_taa_set_layout = build_taa_compute_layout();
@@ -473,9 +489,19 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
 		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
 		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
 	};
 	compute_cloth_skinning_set_layout = build_cloth_skinning_compute_layout();
+
+	auto build_robot_skinning_compute_layout = [&]() {
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+		return builder.build(device, 0, nullptr, VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+	};
+	compute_robot_skinning_set_layout = build_robot_skinning_compute_layout();
 
 	// 创建 Per-Frame UBO Buffers (Binding 0)
 	VkDeviceSize ubo_size = sizeof(UniformBufferObject);
@@ -513,8 +539,8 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, (uint32_t)frames.size() },
 			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (uint32_t)frames.size() * 1001 }, // 1000 bindless + 1 shadow
 			// Binding 3 (instance) / 4 (page table) / 5 (page pool) / 6 (CSM
-			// instance models) are all STORAGE_BUFFER per frame.
-			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)frames.size() * 8 }
+			// instance models) / 7 (materials) / 8 (cloth prev pos) are STORAGE_BUFFER per frame.
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)frames.size() * 10 }
 		};
 
 		VkDescriptorPoolCreateInfo pool_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -602,6 +628,9 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		}
 	}
 
+	dummy_storage_buffer_handle = create_gpu_buffer(256, ResourceState::ShaderResource);
+	auto* dummy_vk_buf = get_vulkan_buffer(dummy_storage_buffer_handle);
+
 	// 分配并初始化全局 Descriptor Sets
 	for (auto& frame : frames) {
 		VkDescriptorSetAllocateInfo alloc_info{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
@@ -616,6 +645,14 @@ void VulkanRHI::init(bud::platform::Window* plat_window, bud::threading::TaskSch
 		DescriptorWriter writer;
 		writer.write_buffer(0, frame.uniform_buffer, ubo_size, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
 		writer.write_image(2, 0, dummy_depth_texture.view, shadow_sampler, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+		if (dummy_vk_buf && dummy_vk_buf->buffer) {
+			writer.write_buffer(3, dummy_vk_buf->buffer, 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+			writer.write_buffer(4, dummy_vk_buf->buffer, 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+			writer.write_buffer(5, dummy_vk_buf->buffer, 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+			writer.write_buffer(6, dummy_vk_buf->buffer, 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+			writer.write_buffer(7, dummy_vk_buf->buffer, 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+			writer.write_buffer(8, dummy_vk_buf->buffer, 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+		}
 
 		writer.update_set(device, frame.global_descriptor_set);
 	}
@@ -659,6 +696,11 @@ void VulkanRHI::cleanup() {
         resource_pool->release_texture(fallback_texture_handle);
         fallback_texture_handle.reset();
     }
+
+	if (dummy_storage_buffer_handle.is_valid()) {
+		destroy_buffer(dummy_storage_buffer_handle);
+		dummy_storage_buffer_handle.reset();
+	}
 
     // Destroy any VulkanTexture instances stored in the RHI maps/containers.
     // These may hold VMA allocations that must be freed before destroying the allocator.
@@ -892,6 +934,7 @@ void VulkanRHI::cleanup() {
 	if (compute_cloth_integrate_set_layout) vkDestroyDescriptorSetLayout(device, compute_cloth_integrate_set_layout, nullptr);
 	if (compute_cloth_solver_set_layout) vkDestroyDescriptorSetLayout(device, compute_cloth_solver_set_layout, nullptr);
 	if (compute_cloth_skinning_set_layout) vkDestroyDescriptorSetLayout(device, compute_cloth_skinning_set_layout, nullptr);
+	if (compute_robot_skinning_set_layout) vkDestroyDescriptorSetLayout(device, compute_robot_skinning_set_layout, nullptr);
 	compute_hierarchy_traversal_set_layout = VK_NULL_HANDLE;
 	compute_page_emit_set_layout = VK_NULL_HANDLE;
 	compute_cluster_cull_set_layout = VK_NULL_HANDLE;
@@ -905,6 +948,7 @@ void VulkanRHI::cleanup() {
 	compute_cloth_integrate_set_layout = VK_NULL_HANDLE;
 	compute_cloth_solver_set_layout = VK_NULL_HANDLE;
 	compute_cloth_skinning_set_layout = VK_NULL_HANDLE;
+	compute_robot_skinning_set_layout = VK_NULL_HANDLE;
 
 	// Device & Instance
 	if (shadow_sampler)
@@ -1381,6 +1425,9 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 	case ComputePipelineDesc::LayoutKind::ClothSkinning:
 		chosen_layout = compute_cloth_skinning_set_layout;
 		break;
+	case ComputePipelineDesc::LayoutKind::RobotSkinning:
+		chosen_layout = compute_robot_skinning_set_layout;
+		break;
 	default:
 		chosen_layout = compute_hiz_cull_set_layout;
 		break;
@@ -1433,6 +1480,7 @@ PipelineHandle VulkanRHI::create_compute_pipeline(const ComputePipelineDesc& des
 			case ComputePipelineDesc::LayoutKind::ClothIntegrate: return "ClothIntegrate";
 			case ComputePipelineDesc::LayoutKind::ClothSolver: return "ClothSolver";
 			case ComputePipelineDesc::LayoutKind::ClothSkinning: return "ClothSkinning";
+			case ComputePipelineDesc::LayoutKind::RobotSkinning: return "RobotSkinning";
 			default: return "Compute";
 			}
 		};
@@ -1632,9 +1680,11 @@ void VulkanRHI::flush_active_graphics_segment() {
     std::vector<uint64_t> wait_values;
 
     if (is_first_graphics_submit_in_frame) {
-        wait_semaphores.push_back(frames[current_frame].image_available_semaphore);
-        wait_stages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        wait_values.push_back(0);
+        if (!headless_mode) {
+            wait_semaphores.push_back(frames[current_frame].image_available_semaphore);
+            wait_stages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            wait_values.push_back(0);
+        }
         is_first_graphics_submit_in_frame = false;
     }
 
@@ -1729,12 +1779,17 @@ CommandHandle VulkanRHI::begin_frame() {
 		}
 	}
 
-	VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, frames[current_frame].image_available_semaphore, VK_NULL_HANDLE, &current_image_index);
-	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-		swapchain_out_of_date.store(true, std::memory_order_release);
-		return nullptr;
-	} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-		throw std::runtime_error("failed to acquire swap chain image!");
+	if (headless_mode) {
+		current_image_index = current_frame;
+	}
+	else {
+		VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, frames[current_frame].image_available_semaphore, VK_NULL_HANDLE, &current_image_index);
+		if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+			swapchain_out_of_date.store(true, std::memory_order_release);
+			return nullptr;
+		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+			throw std::runtime_error("failed to acquire swap chain image!");
+		}
 	}
 
 	memory_allocator->on_frame_begin(current_frame);
@@ -1805,9 +1860,11 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	std::vector<uint64_t> wait_values;
 
 	if (is_first_graphics_submit_in_frame) {
-		wait_semaphores.push_back(frames[current_frame].image_available_semaphore);
-		wait_stages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-		wait_values.push_back(0);
+		if (!headless_mode) {
+			wait_semaphores.push_back(frames[current_frame].image_available_semaphore);
+			wait_stages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+			wait_values.push_back(0);
+		}
 		is_first_graphics_submit_in_frame = false;
 	}
 
@@ -1826,16 +1883,26 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	}
 
 	uint64_t graphics_signal_value = ++graphics_timeline_value;
-	VkSemaphore signal_semaphores[2] = {
-		render_finished_semaphores[current_image_index],
-		graphics_timeline_semaphore
-	};
-	uint64_t signal_values[2] = { 0, graphics_signal_value };
+	VkSemaphore signal_semaphores[2];
+	uint64_t signal_values[2];
+	uint32_t signal_count = 0;
+
+	if (headless_mode) {
+		signal_semaphores[0] = graphics_timeline_semaphore;
+		signal_values[0] = graphics_signal_value;
+		signal_count = 1;
+	} else {
+		signal_semaphores[0] = render_finished_semaphores[current_image_index];
+		signal_semaphores[1] = graphics_timeline_semaphore;
+		signal_values[0] = 0;
+		signal_values[1] = graphics_signal_value;
+		signal_count = 2;
+	}
 
 	VkTimelineSemaphoreSubmitInfo timeline_info{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
 	timeline_info.waitSemaphoreValueCount = static_cast<uint32_t>(wait_values.size());
 	timeline_info.pWaitSemaphoreValues = wait_values.data();
-	timeline_info.signalSemaphoreValueCount = 2;
+	timeline_info.signalSemaphoreValueCount = signal_count;
 	timeline_info.pSignalSemaphoreValues = signal_values;
 
 	VkSubmitInfo submit_info{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -1845,7 +1912,7 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 	submit_info.pWaitDstStageMask = wait_stages.data();
 	submit_info.commandBufferCount = 1;
 	submit_info.pCommandBuffers = &command_buffer;
-	submit_info.signalSemaphoreCount = 2;
+	submit_info.signalSemaphoreCount = signal_count;
 	submit_info.pSignalSemaphores = signal_semaphores;
 	async_compute_pending_this_frame = false;
 	current_graphics_cb = VK_NULL_HANDLE;
@@ -1867,26 +1934,28 @@ void VulkanRHI::end_frame(CommandHandle cmd) {
 #endif
 	}
 
-	VkPresentInfoKHR present_info{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
-	present_info.waitSemaphoreCount = 1;
-	present_info.pWaitSemaphores = signal_semaphores;
-	VkSwapchainKHR swap_chains[] = { swapchain };
-	present_info.swapchainCount = 1;
-	present_info.pSwapchains = swap_chains;
-	present_info.pImageIndices = &current_image_index;
+	if (!headless_mode) {
+		VkPresentInfoKHR present_info{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+		present_info.waitSemaphoreCount = 1;
+		present_info.pWaitSemaphores = signal_semaphores;
+		VkSwapchainKHR swap_chains[] = { swapchain };
+		present_info.swapchainCount = 1;
+		present_info.pSwapchains = swap_chains;
+		present_info.pImageIndices = &current_image_index;
 
-	VkResult present_result = vkQueuePresentKHR(present_queue, &present_info);
-	if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
-		swapchain_out_of_date.store(true, std::memory_order_release);
-	} else if (present_result != VK_SUCCESS) {
-		std::string err = std::format("VulkanRHI::end_frame vkQueuePresentKHR failed: {}", (int)present_result);
-		bud::eprint("{}", err);
+		VkResult present_result = vkQueuePresentKHR(present_queue, &present_info);
+		if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
+			swapchain_out_of_date.store(true, std::memory_order_release);
+		} else if (present_result != VK_SUCCESS) {
+			std::string err = std::format("VulkanRHI::end_frame vkQueuePresentKHR failed: {}", (int)present_result);
+			bud::eprint("{}", err);
 #if defined(_DEBUG)
-		throw std::runtime_error(err);
+			throw std::runtime_error(err);
 #else
-		swapchain_out_of_date.store(true, std::memory_order_release);
-		return;
+			swapchain_out_of_date.store(true, std::memory_order_release);
+			return;
 #endif
+		}
 	}
 
 	frames[current_frame].graphics_timeline_value = graphics_signal_value;
@@ -1921,6 +1990,11 @@ void VulkanRHI::resize_swapchain(uint32_t width, uint32_t height) {
 
 	if (width == 0 || height == 0)
 		return;
+
+	if (headless_mode) {
+		swapchain_out_of_date.store(false, std::memory_order_release);
+		return;
+	}
 
 	vkDeviceWaitIdle(device);
 
@@ -2819,7 +2893,9 @@ void VulkanRHI::pick_physical_device() {
 void VulkanRHI::create_logical_device(bool enable_validation) {
 	QueueFamilyIndices indices = find_queue_families(physical_device);
 	std::vector<VkDeviceQueueCreateInfo> queue_infos;
-	std::set<uint32_t> unique_families = { indices.graphics_family.value(), indices.present_family.value() };
+	std::set<uint32_t> unique_families = { indices.graphics_family.value() };
+	if (!headless_mode && indices.present_family.has_value())
+		unique_families.insert(indices.present_family.value());
 	if (indices.copy_family.has_value())
 		unique_families.insert(indices.copy_family.value());
 	if (indices.compute_family.has_value())
@@ -2959,7 +3035,10 @@ void VulkanRHI::create_logical_device(bool enable_validation) {
 #endif
 
 	vkGetDeviceQueue(device, indices.graphics_family.value(), 0, &graphics_queue);
-	vkGetDeviceQueue(device, indices.present_family.value(), 0, &present_queue);
+	if (!headless_mode && indices.present_family.has_value())
+		vkGetDeviceQueue(device, indices.present_family.value(), 0, &present_queue);
+	else
+		present_queue = VK_NULL_HANDLE;
 
 	graphics_family_index = indices.graphics_family.value();
 	copy_family_index = indices.copy_family.has_value() ? indices.copy_family.value() : graphics_family_index;
@@ -3218,8 +3297,9 @@ void VulkanRHI::create_sync_objects() {
 
 		}
 
-		render_finished_semaphores.resize(swapchain_images.size());
-	for (size_t i = 0; i < swapchain_images.size(); ++i) {
+	uint32_t sem_count = headless_mode ? max_frames_in_flight : static_cast<uint32_t>(swapchain_images.size());
+	render_finished_semaphores.resize(sem_count);
+	for (size_t i = 0; i < sem_count; ++i) {
 		if (vkCreateSemaphore(device, &semaphore_info, nullptr, &render_finished_semaphores[i]) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create render finished semaphores!");
 		}
@@ -3454,12 +3534,20 @@ QueueFamilyIndices VulkanRHI::find_queue_families(VkPhysicalDevice device) {
 
 	int i = 0;
 	for (const auto& queue_family : queue_families) {
-		if (queue_family.queueFlags & VK_QUEUE_GRAPHICS_BIT) indices.graphics_family = i;
-		VkBool32 present_support = false;
-		vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &present_support);
-		if (present_support) indices.present_family = i;
-		if (indices.is_complete()) break;
+		if (queue_family.queueFlags & VK_QUEUE_GRAPHICS_BIT)
+			indices.graphics_family = i;
+		if (surface != VK_NULL_HANDLE) {
+			VkBool32 present_support = false;
+			vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &present_support);
+			if (present_support)
+				indices.present_family = i;
+		}
+		if (indices.is_complete())
+			break;
 		i++;
+	}
+	if (headless_mode && !indices.present_family.has_value()) {
+		indices.present_family = indices.graphics_family;
 	}
 
 	// Dedicated transfer (copy) family: a family with VK_QUEUE_TRANSFER_BIT but
@@ -4399,6 +4487,7 @@ void VulkanRHI::update_global_uniforms(uint32_t image_index, const SceneView& sc
 		scene_view.jitter_ndc.x,
 		scene_view.jitter_ndc.y
 	);
+	ubo.unjittered_view_proj = scene_view.unjittered_view_proj_matrix;
 
 	if (frames[current_frame].uniform_mapped) {
 		std::memcpy(frames[current_frame].uniform_mapped, &ubo, sizeof(UniformBufferObject));
@@ -4464,12 +4553,26 @@ void VulkanRHI::update_global_csm_instance_data(bud::graphics::BufferHandle buff
 }
 
 void VulkanRHI::update_global_materials_buffer(bud::graphics::BufferHandle buffer) {
-	if (!buffer.is_valid()) return;
+	if (!buffer.is_valid())
+		return;
 	auto* vk_buf = get_vulkan_buffer(buffer);
-	if (!vk_buf || !vk_buf->buffer) return;
+	if (!vk_buf || !vk_buf->buffer)
+		return;
 
 	DescriptorWriter writer;
 	writer.write_buffer(7, vk_buf->buffer, vk_buf->size > 0 ? vk_buf->size : VK_WHOLE_SIZE, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+	writer.update_set(device, frames[current_frame].global_descriptor_set);
+}
+
+void VulkanRHI::update_global_cloth_prev_pos(bud::graphics::BufferHandle buffer) {
+	if (!buffer.is_valid())
+		return;
+	auto* vk_buf = get_vulkan_buffer(buffer);
+	if (!vk_buf || !vk_buf->buffer)
+		return;
+
+	DescriptorWriter writer;
+	writer.write_buffer(8, vk_buf->buffer, vk_buf->size > 0 ? vk_buf->size : VK_WHOLE_SIZE, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 	writer.update_set(device, frames[current_frame].global_descriptor_set);
 }
 

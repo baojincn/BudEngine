@@ -23,6 +23,7 @@
 #include "src/runtime/bud.scene.builder.hpp"
 #include "src/graphics/vulkan/bud.graphics.vulkan.hpp"
 #include "src/physics/bud.cloth.hpp"
+#include "src/robots/bud.robot.avatar.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -236,6 +237,10 @@ namespace bud::engine {
 			task_scheduler->pump_main_thread_tasks();
 			handle_events();
 
+			if (reset_timer_requested.exchange(false)) {
+				last_time = Clock::now();
+				accumulator = 0.0;
+			}
 
 			auto now = Clock::now();
 			double frame_time = std::chrono::duration<double>(now - last_time).count();
@@ -295,12 +300,21 @@ namespace bud::engine {
 	// PhysicsDebugPass. Runs on the logic thread right after the physics step;
 	// the cross-thread handoff itself is guarded inside the pass.
 	void BudEngine::update_physics_debug_overlay() {
-		if (!physics_scene || !renderer) return;
-		if (!renderer->get_config().debug_physics) return;
+		if (!physics_scene || !renderer)
+			return;
+		if (!renderer->get_config().debug_physics)
+			return;
+
+		std::vector<bud::graphics::PhysicsDebugVertex> dbg_verts;
+
+		if (robot_avatar)
+			robot_avatar->get_debug_collision_vertices(dbg_verts);
 
 		const size_t n = physics_scene->size();
-		auto& pos = physics_scene->body_positions;
-		auto& he = physics_scene->body_half_extents;
+		const auto& body_states = physics_scene->get_body_states();
+		const auto& pos = body_states.body_positions;
+		const auto& he = body_states.body_half_extents;
+		const auto& rot = body_states.body_rotations;
 
 		// 12 box edges as a 24 vertex line list.
 		static const int box_edges[24] = {
@@ -308,20 +322,24 @@ namespace bud::engine {
 				0,4, 1,5, 2,6, 3,7
 		};
 
-		std::vector<bud::graphics::PhysicsDebugVertex> dbg_verts;
-		dbg_verts.reserve(n * 24);
 		for (size_t i = 0; i < n && i < pos.size() && i < he.size(); ++i) {
 			auto c = pos[i];
 			auto h = he[i];
+			if (h.x <= 0.001f || h.y <= 0.001f || h.z <= 0.001f)
+				continue;
+
+			bud::math::quaternion q = (i < rot.size()) ? rot[i] : bud::math::quaternion(1.0f, 0.0f, 0.0f, 0.0f);
+			bud::math::mat3 r_mat = glm::mat3_cast(q);
+
 			bud::math::vec3 corners[8] = {
-				c + bud::math::vec3(-h.x,-h.y,-h.z),
-				c + bud::math::vec3( h.x,-h.y,-h.z),
-				c + bud::math::vec3( h.x, h.y,-h.z),
-				c + bud::math::vec3(-h.x, h.y,-h.z),
-				c + bud::math::vec3(-h.x,-h.y, h.z),
-				c + bud::math::vec3( h.x,-h.y, h.z),
-				c + bud::math::vec3( h.x, h.y, h.z),
-				c + bud::math::vec3(-h.x, h.y, h.z),
+				c + r_mat * bud::math::vec3(-h.x,-h.y,-h.z),
+				c + r_mat * bud::math::vec3( h.x,-h.y,-h.z),
+				c + r_mat * bud::math::vec3( h.x, h.y,-h.z),
+				c + r_mat * bud::math::vec3(-h.x, h.y,-h.z),
+				c + r_mat * bud::math::vec3(-h.x,-h.y, h.z),
+				c + r_mat * bud::math::vec3( h.x,-h.y, h.z),
+				c + r_mat * bud::math::vec3( h.x, h.y, h.z),
+				c + r_mat * bud::math::vec3(-h.x, h.y, h.z),
 			};
 			for (int e = 0; e < 24; ++e) {
 				auto& p = corners[box_edges[e]];
@@ -341,11 +359,9 @@ namespace bud::engine {
 			}
 		};
 
-		// Character controller capsule wireframe (yellow): latitude rings over both
-		// hemispherical caps plus vertical silhouette lines, so it reads as an
-		// actual capsule instead of a bare cylinder. This is the same volume the
-		// cloth solver pushes particles out of in FP/TP modes.
-		if (character_controller) {
+		// Character controller capsule wireframe (yellow): suppressed when robot avatar
+		// is present because full-body mesh collisions take precedence.
+		if (character_controller && !robot_avatar) {
 			const float r = character_controller->get_capsule_radius();
 			const float hh = character_controller->get_capsule_height() * 0.5f;
 			const bud::math::vec3 c = character_controller->get_position();
@@ -376,34 +392,6 @@ namespace bud::engine {
 				dbg_verts.push_back({{p0.x, p0.y, p0.z}, {color.x, color.y, color.z}});
 				dbg_verts.push_back({{p1.x, p1.y, p1.z}, {color.x, color.y, color.z}});
 			}
-		}
-
-		// Camera interaction sphere (cyan): the volume that pushes hanging cloth
-		// aside in FP/TP (0.35 m at the camera position). Drawn ONLY in walkable
-		// modes - FreeFly is a spectator mode with cloth collision disabled by
-		// design, so a missing cage there is expected, not a bug.
-		if (character_controller &&
-		    scene.main_camera.get_mode() != bud::scene::CameraMode::FreeFly) {
-			const float sr = 0.35f;
-			const bud::math::vec3 sc = scene.main_camera.position;
-			const bud::math::vec3 color(0.2f, 0.9f, 1.0f);
-			constexpr int kSeg = 16;
-			constexpr float kTwoPi = 6.2831853f;
-			auto push_ring_at = [&](const bud::math::vec3& center, float ring_r,
-			                        const bud::math::vec3& axis_x, const bud::math::vec3& axis_y) {
-				for (int i = 0; i < kSeg; ++i) {
-					const float a0 = kTwoPi * float(i) / float(kSeg);
-					const float a1 = kTwoPi * float(i + 1) / float(kSeg);
-					const bud::math::vec3 p0 = center + axis_x * (std::cos(a0) * ring_r) + axis_y * (std::sin(a0) * ring_r);
-					const bud::math::vec3 p1 = center + axis_x * (std::cos(a1) * ring_r) + axis_y * (std::sin(a1) * ring_r);
-					dbg_verts.push_back({{p0.x, p0.y, p0.z}, {color.x, color.y, color.z}});
-					dbg_verts.push_back({{p1.x, p1.y, p1.z}, {color.x, color.y, color.z}});
-				}
-			};
-			// Three great-circle rings -> unambiguous sphere cage around the camera.
-			push_ring_at(sc, sr, bud::math::vec3(1, 0, 0), bud::math::vec3(0, 1, 0));
-			push_ring_at(sc, sr, bud::math::vec3(0, 1, 0), bud::math::vec3(0, 0, 1));
-			push_ring_at(sc, sr, bud::math::vec3(1, 0, 0), bud::math::vec3(0, 0, 1));
 		}
 
 		renderer->update_physics_debug_vertices(dbg_verts);
@@ -485,6 +473,9 @@ namespace bud::engine {
 		render_scene.reset(total_submesh_count + buffering_size);
 
 		auto mesh_bounds = renderer->get_mesh_bounds_snapshot();
+		// Meshes whose queued GPU upload has not run yet must not be drawn: their pool base is only
+		// published by the upload command, so adding them now would read an uninitialised region.
+		const auto pending_mesh_uploads = renderer->get_pending_mesh_uploads_snapshot();
 
 		bud::threading::Counter extract_scene_counter;
 
@@ -503,6 +494,11 @@ namespace bud::engine {
 						continue;
 					}
 
+					if (!pending_mesh_uploads.empty() &&
+						pending_mesh_uploads.find(entity.mesh_index) != pending_mesh_uploads.end()) {
+						continue; // upload still queued (see get_pending_mesh_uploads_snapshot)
+					}
+
 					if (!entity.is_active)
 						continue; 
 
@@ -511,6 +507,10 @@ namespace bud::engine {
 					auto world_aabb = local_aabb.transform(world_matrix);
 
 					bool is_cloth = bud::physics::is_cloth_name_or_path(entity.name) || bud::physics::is_cloth_name_or_path(entity.asset_path);
+
+					bud::math::mat4 prev_world_matrix = world_matrix;
+					if (entity.has_prev_transform)
+						prev_world_matrix = entity.prev_transform;
 
 					render_scene.add_instance(
 						world_matrix,
@@ -523,7 +523,8 @@ namespace bud::engine {
 						entity.base_virtual_page,
 						entity.is_cast_shadow,
 						entity.is_receive_shadow,
-						is_cloth
+						is_cloth,
+						prev_world_matrix
 					);
 				}
 			},
@@ -532,7 +533,7 @@ namespace bud::engine {
 
 		task_scheduler->wait_for_counter(extract_scene_counter);
 
-		// --- Backdrop discovery for full-scene shadow casters ---------------------
+		// --- Backdrop discovery for full-scene shadow casters (diagnostic) ---------
 		// Feeding the cascades the whole scene (RenderConfig::shadow_full_scene_casters)
 		// is the correct CSM model: an object outside the primary camera frustum must
 		// still be rasterized into the cascade it falls in, otherwise shadows break the
@@ -543,63 +544,112 @@ namespace bud::engine {
 		// is driven by a ParallelFor through an atomic counter, so instance order is not
 		// stable. Report by asset_path instead, which is exactly what the scene file
 		// stores. Re-printing is suppressed by a signature of the current candidate set.
+		//
+		// The scan is diagnostic only, so it runs on a worker: the per-frame main-thread
+		// cost is just the snapshot copy below. Strings are copied because the scene's
+		// entity storage can grow / reallocate while the task runs.
 		{
-			std::vector<bud::math::AABB> boxes;
-			std::vector<size_t> box_entity;                   // boxes[k] <- logic_entities[box_entity[k]]
-			std::vector<std::pair<float, size_t>> by_footprint;   // (x*z footprint, box slot k)
-			boxes.reserve(logic_entities.size());
-			box_entity.reserve(logic_entities.size());
-			by_footprint.reserve(logic_entities.size());
-			bud::math::vec3 bmin(1e30f, 1e30f, 1e30f), bmax(-1e30f, -1e30f, -1e30f);
+			struct BackdropScanState {
+				std::mutex mutex;               // guards last_report
+				std::string last_report;
+				std::atomic<bool> in_flight{ false };
+				// Entity / mesh revision of the last completed attempt. The scan is only useful while
+				// the scene's mesh set is still changing (asset registration / streaming), so once it
+				// stabilises the per-frame cost drops to hashing a few integers per entity.
+				std::atomic<uint64_t> last_scanned_revision{ 0 };
+			};
+			static BackdropScanState scan_state;
 
-			for (size_t i = 0; i < logic_entities.size(); ++i) {
-				const auto& entity = logic_entities[i];
-				if (!entity.is_active || entity.mesh_index == bud::asset::INVALID_INDEX)
-					continue;
-				if (entity.mesh_index >= mesh_bounds.size())
-					continue;
-				const auto wb = mesh_bounds[entity.mesh_index].transform(entity.transform);
-				bmin.x = std::min(bmin.x, wb.min.x); bmin.y = std::min(bmin.y, wb.min.y); bmin.z = std::min(bmin.z, wb.min.z);
-				bmax.x = std::max(bmax.x, wb.max.x); bmax.y = std::max(bmax.y, wb.max.y); bmax.z = std::max(bmax.z, wb.max.z);
-				const float fp = (wb.max.x - wb.min.x) * (wb.max.z - wb.min.z);
-				by_footprint.emplace_back(fp, boxes.size());
-				boxes.push_back(wb);
-				box_entity.push_back(i);
+			uint64_t revision = 1469598103934665603ull; // FNV-1a offset basis
+			for (const auto& entity : logic_entities) {
+				uint64_t v = static_cast<uint64_t>(entity.mesh_index) * 1099511628211ull
+					+ (entity.is_cast_shadow ? 2ull : 1ull);
+				revision = (revision ^ v) * 1099511628211ull;
 			}
+			revision ^= static_cast<uint64_t>(mesh_bounds.size()) * 1099511628211ull;
 
-			static std::string s_last_report;
-			if (!boxes.empty() && bmax.x > bmin.x) {
-				const float scene_fp = std::max((bmax.x - bmin.x) * (bmax.z - bmin.z), 1e-3f);
-				const float mid_y = (bmin.y + bmax.y) * 0.5f;
+			bool scan_expected = false;
+			if (revision != scan_state.last_scanned_revision.load(std::memory_order_acquire) &&
+				scan_state.in_flight.compare_exchange_strong(scan_expected, true)) {
+				struct BackdropEntity {
+					std::string asset_path;
+					std::string name;
+					bool is_cast_shadow = true;
+					bud::math::AABB world_bounds{};
+					float footprint = 0.0f;
+				};
 
-				std::sort(by_footprint.begin(), by_footprint.end(),
-					[](const auto& a, const auto& b) { return a.first > b.first; });
-
-				std::vector<size_t> cands;
-				std::string signature;
-				for (const auto& [fp, slot] : by_footprint) {
-					if (fp < 0.25f * scene_fp) break;          // sorted descending: rest are smaller
-					const auto& wb = boxes[slot];
-					// Only something whose *lowest* point is already above mid-height can
-					// lid the scene; a floor or a plinth cannot.
-					if (wb.min.y < mid_y) continue;
-					cands.push_back(slot);
-					signature += logic_entities[box_entity[slot]].asset_path;
-					signature += logic_entities[box_entity[slot]].is_cast_shadow ? "1;" : "0;";
+				auto snapshot = std::make_shared<std::vector<BackdropEntity>>();
+				snapshot->reserve(logic_entities.size());
+				for (const auto& entity : logic_entities) {
+					if (!entity.is_active || entity.mesh_index == bud::asset::INVALID_INDEX)
+						continue;
+					if (entity.mesh_index >= mesh_bounds.size())
+						continue;
+					const auto wb = mesh_bounds[entity.mesh_index].transform(entity.transform);
+					BackdropEntity entry;
+					entry.asset_path = entity.asset_path;
+					entry.name = entity.name;
+					entry.is_cast_shadow = entity.is_cast_shadow;
+					entry.world_bounds = wb;
+					entry.footprint = (wb.max.x - wb.min.x) * (wb.max.z - wb.min.z);
+					snapshot->push_back(std::move(entry));
 				}
 
-				if (!cands.empty() && signature != s_last_report) {
-					s_last_report = signature;
-					bud::print("[CSM] backdrop candidates (footprint >= 25% of scene {:.1f}m2, entirely above y={:.2f}) - add \"is_cast_shadow\": false to these in the scene file:",
-						scene_fp, mid_y);
-					for (const size_t slot : cands) {
-						const auto& entity = logic_entities[box_entity[slot]];
-						const auto& wb = boxes[slot];
-						const float fp = (wb.max.x - wb.min.x) * (wb.max.z - wb.min.z);
-						bud::print("[CSM]   name={} asset={} footprint={:.1f}m2 ({:.0f}%) thickness={:.2f}m y=[{:.2f},{:.2f}] x=[{:.1f},{:.1f}] z=[{:.1f},{:.1f}] is_cast_shadow={}",
-							entity.name, entity.asset_path, fp, 100.0f * fp / scene_fp, wb.max.y - wb.min.y,
-							wb.min.y, wb.max.y, wb.min.x, wb.max.x, wb.min.z, wb.max.z, entity.is_cast_shadow);
-					}
+				// Record the revision even for an empty snapshot, otherwise a scene with no resident
+				// meshes yet would rebuild an empty snapshot on every frame.
+				scan_state.last_scanned_revision.store(revision, std::memory_order_release);
+				if (snapshot->empty()) {
+					scan_state.in_flight.store(false, std::memory_order_release);
+				}
+				else {
+					task_scheduler->spawn("CsmBackdropScan", [snapshot]() {
+						std::vector<size_t> by_footprint;
+						by_footprint.reserve(snapshot->size());
+						bud::math::vec3 bmin(1e30f, 1e30f, 1e30f), bmax(-1e30f, -1e30f, -1e30f);
+						for (size_t i = 0; i < snapshot->size(); ++i) {
+							const auto& wb = (*snapshot)[i].world_bounds;
+							bmin.x = std::min(bmin.x, wb.min.x); bmin.y = std::min(bmin.y, wb.min.y); bmin.z = std::min(bmin.z, wb.min.z);
+							bmax.x = std::max(bmax.x, wb.max.x); bmax.y = std::max(bmax.y, wb.max.y); bmax.z = std::max(bmax.z, wb.max.z);
+							by_footprint.push_back(i);
+						}
+
+						if (bmax.x > bmin.x) {
+							std::sort(by_footprint.begin(), by_footprint.end(),
+								[&snapshot](size_t a, size_t b) { return (*snapshot)[a].footprint > (*snapshot)[b].footprint; });
+
+							const float scene_fp = std::max((bmax.x - bmin.x) * (bmax.z - bmin.z), 1e-3f);
+							const float mid_y = (bmin.y + bmax.y) * 0.5f;
+
+							std::vector<size_t> cands;
+							std::string signature;
+							for (const size_t i : by_footprint) {
+								const auto& e = (*snapshot)[i];
+								if (e.footprint < 0.25f * scene_fp) break;   // sorted descending
+								if (e.world_bounds.min.y < mid_y) continue;
+								cands.push_back(i);
+								signature += e.asset_path;
+								signature += e.is_cast_shadow ? "1;" : "0;";
+							}
+
+							std::lock_guard lock(scan_state.mutex);
+							if (!cands.empty() && signature != scan_state.last_report) {
+								scan_state.last_report = signature;
+								bud::print("[CSM] backdrop candidates (footprint >= 25% of scene {:.1f}m2, entirely above y={:.2f}) - add \"is_cast_shadow\": false to these in the scene file:",
+									scene_fp, mid_y);
+								for (const size_t i : cands) {
+									const auto& e = (*snapshot)[i];
+									const auto& wb = e.world_bounds;
+									const float fp = e.footprint;
+									bud::print("[CSM]   name={} asset={} footprint={:.1f}m2 ({:.0f}%) thickness={:.2f}m y=[{:.2f},{:.2f}] x=[{:.1f},{:.1f}] z=[{:.1f},{:.1f}] is_cast_shadow={}",
+										e.name, e.asset_path, fp, 100.0f * fp / scene_fp, wb.max.y - wb.min.y,
+										wb.min.y, wb.max.y, wb.min.x, wb.max.x, wb.min.z, wb.max.z, e.is_cast_shadow);
+								}
+							}
+						}
+
+						scan_state.in_flight.store(false, std::memory_order_release);
+					});
 				}
 			}
 		}
@@ -881,9 +931,7 @@ namespace bud::engine {
             renderer->update_ui_draw_data(ImGui::GetDrawData());
         }
 
-		// Update character capsule + camera colliders for cloth interaction.
-		// FreeFly is a spectator mode by design: neither the (invisible) character
-		// nor the camera participate in cloth collision there.
+		// Update the bound character capsule collider for cloth interaction.
 		if (renderer && renderer->get_cloth_system()) {
 			// Rebuild the cloth SimWorld if assets / colliders changed this frame (main thread).
 			renderer->get_cloth_system()->flush_pending();
@@ -892,7 +940,6 @@ namespace bud::engine {
 
 			if (spectator_mode || !character_controller) {
 				renderer->get_cloth_system()->set_capsule_collider({}, false);
-				renderer->get_cloth_system()->set_camera_sphere(scene.main_camera.position, 0.0f);
 			}
 			else {
 				bud::physics::CapsuleCollider capsule{};
@@ -912,9 +959,6 @@ namespace bud::engine {
 
 				renderer->get_cloth_system()->set_capsule_collider(capsule, true);
 
-				// The camera itself also pushes hanging cloth aside (first-person eye
-				// sphere / third-person orbit camera sweeping through fabric).
-				renderer->get_cloth_system()->set_camera_sphere(scene.main_camera.position, 0.35f);
 			}
 		}
 
@@ -941,9 +985,15 @@ namespace bud::engine {
 		character_controller.reset();
 		physics_scene.reset();
 		physics_scene = std::make_unique<bud::physics::PhysicsScene>();
-		physics_scene->init();
+		bud::physics::PhysicsWorldConfig phys_config{};
+		phys_config.backend = engine_config.physics_backend;
+		phys_config.enable_ground_plane = engine_config.enable_ground_plane;
+		phys_config.ground_plane_height = engine_config.ground_plane_height;
+		phys_config.asset_root = "Content";
+		physics_scene->init(phys_config);
 
-		bud::print("[BudEngine] Physics scene initialized, ready for bodies.");
+		bud::print("[BudEngine] Physics scene initialized ({}), ready for bodies.",
+		           engine_config.physics_backend == bud::physics::PhysicsBackend::Mujoco ? "MuJoCo" : "Jolt");
 
 		// Create character controller
 		character_controller = std::make_unique<bud::scene::CharacterController>();
@@ -952,123 +1002,67 @@ namespace bud::engine {
 		// Wrap on_finished to create physics bodies after mesh bounds are loaded
 		auto wrapped_finish = [this, cb = std::move(on_finished)]() {
 			auto bounds = renderer->get_mesh_bounds_snapshot();
-			int skipped = 0, added = 0, dropped = 0, giant = 0, shell_faces = 0;
+			int skipped = 0, added = 0, dropped = 0, data_driven = 0;
 
-			// First pass: collect world-space AABB candidates and the bounds they span.
-			struct StaticAABB {
-				const std::string* name;
-				bud::math::vec3 center;
-				bud::math::vec3 half;
-			};
-			std::vector<StaticAABB> candidates;
-			candidates.reserve(scene.entities.size());
-			bud::math::vec3 scene_min(1e30f), scene_max(-1e30f);
 			for (auto& entity : scene.entities) {
-				if (!entity.is_active || !entity.enable_physics || !entity.is_static) { skipped++; continue; }
+				if (!entity.is_active || !entity.enable_physics || !entity.is_static) {
+					skipped++;
+					continue;
+				}
+				if (entity.collider.type == bud::scene::ColliderType::None) {
+					skipped++;
+					continue;
+				}
 				if (bud::physics::is_cloth_name_or_path(entity.name) || bud::physics::is_cloth_name_or_path(entity.asset_path)) {
 					skipped++;
 					continue;
 				}
-				if (entity.mesh_index == 0xFFFFFFFF || entity.mesh_index >= bounds.size()) { skipped++; continue; }
-				auto world_aabb = bounds[entity.mesh_index].transform(entity.transform);
-				auto s = world_aabb.size();
-				if (s.x < 0.001f && s.y < 0.001f && s.z < 0.001f) { skipped++; continue; }
-				auto c = world_aabb.center();
-				auto half = s * 0.5f;
-				candidates.push_back({ &entity.name, c, half });
-				scene_min = bud::math::vec3(std::min(scene_min.x, c.x - half.x),
-				                            std::min(scene_min.y, c.y - half.y),
-				                            std::min(scene_min.z, c.z - half.z));
-				scene_max = bud::math::vec3(std::max(scene_max.x, c.x + half.x),
-				                            std::max(scene_max.y, c.y + half.y),
-				                            std::max(scene_max.z, c.z + half.z));
-			}
-
-			const bud::math::vec3 scene_span = scene_max - scene_min;
-			const float scene_volume = std::max(scene_span.x * scene_span.y * scene_span.z, 1e-6f);
-
-			// Biggest first, so the level proxies can be read straight off the log.
-			std::sort(candidates.begin(), candidates.end(),
-			          [](const StaticAABB& a, const StaticAABB& b) {
-			             return a.half.x * a.half.y * a.half.z > b.half.x * b.half.y * b.half.z;
-			          });
-
-			// ---- how an entity world-AABB becomes a collider --------------------------
-			// A solid box is only a faithful proxy when the mesh is box-like, so classify
-			// each candidate by SHAPE instead of by size alone:
-			//  * thin along its smallest axis  -> it is a slab: floor, ceiling, wall, ramp.
-			//    Keep one solid box; this is exactly what must block the character.
-			//  * small in volume               -> a chunky prop (column, statue, stairs).
-			//    Keep one solid box.
-			//  * big AND thick                 -> a building / facade / courtyard shell. As a
-			//    solid box it fills the interior and welds the character (Jolt cannot push a
-			//    capsule out of a 15 m block), so emit it as a HOLLOW shell of 6 thin slabs:
-			//    the floor, the ceiling and the surrounding walls stay colliders while the
-			//    interior remains walkable.
-			constexpr float kMaxSlabThickness   = 2.5f;  // min extent at/under this = slab
-			constexpr float kMaxPropVolume      = 30.0f; // volume at/under this = prop
-			constexpr float kShellSlabThickness = 0.5f;  // thickness of the 6 shell faces
-			constexpr bool  kShellBigThickBoxes = true;  // false = keep them solid (investigation)
-
-			auto add_static_box = [&](const bud::math::vec3& center, const bud::math::vec3& half) -> bool {
-				bud::physics::RigidBodyDesc desc;
-				desc.motion_type = bud::physics::MotionType::Static;
-				desc.shape.type = bud::physics::ShapeType::Box;
-				desc.shape.half_extent = half;
-				desc.position = center;
-				// add_rigid_body() returns an invalid handle when the SoA storage is full;
-				// propagate that so the log can never report phantom bodies again.
-				return physics_scene->add_rigid_body(desc).is_valid();
-			};
-
-			for (const auto& cand : candidates) {
-				const float volume = 8.0f * cand.half.x * cand.half.y * cand.half.z;
-				const bud::math::vec3 size = cand.half * 2.0f;
-				const float min_extent = std::min({ size.x, size.y, size.z });
-				const float pct_of_scene = 100.0f * volume / scene_volume;
-				const bool is_slab  = min_extent <= kMaxSlabThickness;
-				const bool is_prop  = volume <= kMaxPropVolume;
-
-				if (!is_slab && !is_prop) {
-					giant++;
-					const char* name = cand.name ? cand.name->c_str() : "?";
-					if (!kShellBigThickBoxes) {
-						bud::print("[Physics] big+thick AABB '{}' size=({:.1f} x {:.1f} x {:.1f}) m center=({:.1f}, {:.1f}, {:.1f}) kept SOLID {:.1f}% of scene",
-						           name, size.x, size.y, size.z, cand.center.x, cand.center.y, cand.center.z, pct_of_scene);
-					} else {
-						// Hollow shell: 6 faces, each kShellSlabThickness deep, flush with the
-						// outside of the AABB so the walkable volume is never made smaller.
-						const float t  = std::min(kShellSlabThickness, min_extent * 0.25f);
-						const float ht = t * 0.5f;
-						const bud::math::vec3& c = cand.center;
-						const bud::math::vec3& h = cand.half;
-						add_static_box({ c.x + (h.x - ht), c.y, c.z },           { ht,  h.y,  h.z  });
-						add_static_box({ c.x - (h.x - ht), c.y, c.z },           { ht,  h.y,  h.z  });
-						add_static_box({ c.x, c.y + (h.y - ht), c.z },           { h.x, ht,    h.z });
-						add_static_box({ c.x, c.y - (h.y - ht), c.z },           { h.x, ht,    h.z });
-						add_static_box({ c.x, c.y, c.z + (h.z - ht) },           { h.x, h.y,   ht  });
-						add_static_box({ c.x, c.y, c.z - (h.z - ht) },           { h.x, h.y,   ht  });
-						shell_faces += 6;
-						bud::print("[Physics] big+thick AABB '{}' size=({:.1f} x {:.1f} x {:.1f}) m center=({:.1f}, {:.1f}, {:.1f}) -> hollow shell of 6 faces (t={:.2f} m, {:.1f}% of scene)",
-						           name, size.x, size.y, size.z, c.x, c.y, c.z, t, pct_of_scene);
-						continue;
-					}
+				// If this asset already has a baked CollisionLOD chunk loaded, it's already registered
+				if (collision_loaded_assets.find(entity.asset_path) != collision_loaded_assets.end()) {
+					data_driven++;
+					continue;
 				}
 
-				if (add_static_box(cand.center, cand.half)) added++; else dropped++;
+				// Only explicit authored box colliders should generate box rigid bodies
+				if (entity.collider.type == bud::scene::ColliderType::Box) {
+					bud::math::vec3 half = entity.collider.box_half_extent;
+					if (half.x <= 0.0f || half.y <= 0.0f || half.z <= 0.0f) {
+						if (entity.mesh_index < bounds.size())
+							half = bounds[entity.mesh_index].transform(entity.transform).size() * 0.5f;
+						else
+							half = bud::math::vec3(0.5f);
+					}
+					bud::physics::RigidBodyDesc desc;
+					desc.motion_type = entity.is_static ? bud::physics::MotionType::Static : bud::physics::MotionType::Dynamic;
+					desc.shape.type = bud::physics::ShapeType::Box;
+					desc.shape.half_extent = half;
+					desc.position = bud::math::vec3(entity.transform[3]);
+					desc.material.friction = entity.collider.friction;
+					desc.material.restitution = entity.collider.restitution;
+					if (physics_scene->add_rigid_body(desc).is_valid())
+						added++;
+					else
+						dropped++;
+				} else {
+					skipped++;
+				}
 			}
 
-			bud::print("> physics: static_aabb solid_boxes={}, big+thick={} -> {} shell faces, dropped={}, skipped={}, scene_bodies={} <",
-			           added, giant, shell_faces, dropped, skipped, physics_scene->size());
+			bud::print("[Physics] Scene colliders ready: data_driven={}, explicit_boxes={}, dropped={}, skipped={}, total_bodies={}",
+			           data_driven, added, dropped, skipped, physics_scene->size());
+
+			// Sync all colliders to Jolt so the broadphase and narrowphase queries (like raycasts) are valid
+			physics_scene->sync_to_jolt();
 
 			// Feed static colliders to cloth system for cloth-rigid interaction
 			if (renderer && renderer->get_cloth_system()) {
 				std::vector<bud::physics::BoxCollider> cloth_boxes;
 				size_t num_bodies = physics_scene->size();
+				const auto& body_states = physics_scene->get_body_states();
 				cloth_boxes.reserve(num_bodies);
 				for (size_t i = 0; i < num_bodies; ++i) {
-					if (physics_scene->body_flags[i] & bud::physics::PhysicsScene::BODY_FLAG_STATIC)
-						cloth_boxes.push_back({ physics_scene->body_positions[i], physics_scene->body_half_extents[i] });
+					if (body_states.body_flags[i] & bud::physics::BODY_FLAG_STATIC)
+						cloth_boxes.push_back({ body_states.body_positions[i], body_states.body_half_extents[i] });
 				}
 				renderer->get_cloth_system()->set_scene_colliders(std::move(cloth_boxes));
 			}
@@ -1077,24 +1071,227 @@ namespace bud::engine {
 			// game loop is built around FP/TP (character-driven cloth interaction).
 			scene.main_camera.set_mode(bud::scene::CameraMode::FirstPerson);
 
-			// Spawn exactly like the original working build: the character is created
-			// at the scene camera position and simply falls to the floor below. No
-			// teleport, no unstick - automatic lifting is unsafe next to AABB proxies
-			// (non-rectangular meshes produce phantom volumes over open areas, and a
-			// lift would deposit the character on an invisible slab above).
+			// Snap character capsule feet to the static ground surface via downward raycast.
 			if (character_controller && physics_scene->size() > 0) {
-				bud::print("[Physics] character spawns at the scene camera position: ({:.2f}, {:.2f}, {:.2f})",
+				character_controller->snap_to_ground();
+				bud::print("[Physics] character snapped to ground: ({:.2f}, {:.2f}, {:.2f})",
 				           character_controller->get_position().x,
 				           character_controller->get_position().y,
 				           character_controller->get_position().z);
 			}
+
+			{
+				std::scoped_lock lock(collision_mutex);
+				if (renderer)
+					renderer->set_static_physics_debug_vertices(static_collision_debug_vertices);
+			}
+
+			if (cb)
+				cb();
 		};
 
 		load_scene_resources_async(wrapped_finish);
 		return true;
 	}
 
+	void BudEngine::register_collision_asset(const std::string& path, const std::vector<char>& data) {
+		if (data.size() < sizeof(bud::asset::CollisionChunkHeader))
+			return;
+
+		bud::asset::CollisionChunkHeader header{};
+		std::memcpy(&header, data.data(), sizeof(header));
+		if (header.magic != bud::asset::COLLISION_CHUNK_MAGIC)
+			return;
+		if (header.version != bud::asset::COLLISION_CHUNK_VERSION) {
+			bud::eprint("[Physics] Unsupported collision chunk version {} for '{}'", header.version, path);
+			return;
+		}
+		if (header.index_count == 0 || header.index_count % 3 != 0 || header.vertex_count == 0) {
+			bud::eprint("[Physics] Invalid collision counts for '{}': vertices={}, indices={}",
+						path, header.vertex_count, header.index_count);
+			return;
+		}
+
+		const size_t vert_bytes = static_cast<size_t>(header.vertex_count) * sizeof(bud::math::vec3);
+		const size_t idx_bytes = static_cast<size_t>(header.index_count) * sizeof(uint32_t);
+		if (vert_bytes > data.size() - sizeof(header) ||
+			idx_bytes > data.size() - sizeof(header) - vert_bytes) {
+			bud::eprint("[Physics] Truncated collision chunk for '{}'", path);
+			return;
+		}
+
+		std::vector<bud::math::vec3> local_vertices(header.vertex_count);
+		const char* src = data.data() + sizeof(header);
+		if (vert_bytes > 0)
+			std::memcpy(local_vertices.data(), src, vert_bytes);
+		src += vert_bytes;
+
+		std::vector<uint32_t> local_indices(header.index_count);
+		if (idx_bytes > 0)
+			std::memcpy(local_indices.data(), src, idx_bytes);
+
+		for (const auto& vertex : local_vertices) {
+			if (!std::isfinite(vertex.x) || !std::isfinite(vertex.y) || !std::isfinite(vertex.z)) {
+				bud::eprint("[Physics] Non-finite vertex in collision chunk '{}'", path);
+				return;
+			}
+		}
+		for (uint32_t index : local_indices) {
+			if (index >= local_vertices.size()) {
+				bud::eprint("[Physics] Out-of-range index {} in collision chunk '{}'", index, path);
+				return;
+			}
+		}
+
+		bud::asset::CollisionShapeType baked_shape = static_cast<bud::asset::CollisionShapeType>(header.shape_type);
+		{
+			std::scoped_lock lock(collision_mutex);
+			collision_loaded_assets.insert(path);
+
+			for (auto& entity : scene.entities) {
+				if (entity.asset_path != path)
+					continue;
+				if (!entity.is_active || !entity.enable_physics)
+					continue;
+				if (entity.collider.type == bud::scene::ColliderType::None)
+					continue;
+				if (bud::physics::is_cloth_name_or_path(entity.name) || bud::physics::is_cloth_name_or_path(entity.asset_path))
+					continue;
+
+				bud::physics::RigidBodyDesc desc;
+				desc.motion_type = entity.is_static ? bud::physics::MotionType::Static : bud::physics::MotionType::Dynamic;
+				desc.material.friction = entity.collider.friction;
+				desc.material.restitution = entity.collider.restitution;
+
+				std::vector<bud::math::vec3> world_vertices;
+				world_vertices.reserve(local_vertices.size());
+				bool non_finite_transform = false;
+				for (const auto& lv : local_vertices) {
+					bud::math::vec4 wv = entity.transform * bud::math::vec4(lv, 1.0f);
+					if (!std::isfinite(wv.x) || !std::isfinite(wv.y) || !std::isfinite(wv.z)) {
+						non_finite_transform = true;
+						break;
+					}
+					world_vertices.push_back(bud::math::vec3(wv.x, wv.y, wv.z));
+				}
+				if (non_finite_transform) {
+					bud::eprint("[Physics] Non-finite world vertex from transform of '{}' - collision skipped", entity.name);
+					continue;
+				}
+
+				// Sliver/degenerate triangles MUST NOT reach Jolt's MeshShape: its EPA
+				// expansion overruns a fixed-size pool on them (Jolt documents this in
+				// EPAPenetrationDepth.h) and the failure only shows up in release builds,
+				// where the guarding assertions are compiled out. Meshopt simplification
+				// produces slivers routinely, so keep triangles that are:
+				//   - not collapsed (distinct indices),
+				//   - flat enough in both absolute area and minimum height
+				//     (min height = 2 * area / longest edge),
+				//   - not extreme slivers (longest edge / min height bounded).
+				std::vector<uint32_t> valid_indices;
+				valid_indices.reserve(local_indices.size());
+				uint32_t dropped_degenerate = 0;
+				for (size_t i = 0; i + 2 < local_indices.size(); i += 3) {
+					const uint32_t i0 = local_indices[i];
+					const uint32_t i1 = local_indices[i + 1];
+					const uint32_t i2 = local_indices[i + 2];
+					if (i0 == i1 || i1 == i2 || i0 == i2) {
+						++dropped_degenerate;
+						continue;
+					}
+					const auto& a = world_vertices[i0];
+					const auto& b = world_vertices[i1];
+					const auto& c = world_vertices[i2];
+					const auto ab = b - a;
+					const auto ac = c - a;
+					const auto bc = c - b;
+					const float area2 = glm::length(glm::cross(ab, ac)); // 2 * area
+					const float longest = std::sqrt(std::max(glm::dot(ab, ab),
+						std::max(glm::dot(ac, ac), glm::dot(bc, bc))));
+					const float min_height = (longest > 1e-8f) ? (area2 / longest) : 0.0f;
+					constexpr float kMinArea2 = 1.0e-6f;   // 2 * 0.5 mm^2
+					constexpr float kMinHeight = 5.0e-3f;  // 5 mm
+					constexpr float kMaxAspect = 40.0f;    // longest edge / min height
+					if (area2 < kMinArea2 || min_height < kMinHeight ||
+						(min_height > 0.0f && longest / min_height > kMaxAspect)) {
+						++dropped_degenerate;
+						continue;
+					}
+					valid_indices.insert(valid_indices.end(), { i0, i1, i2 });
+				}
+				if (dropped_degenerate > 0) {
+					bud::print("[Physics] '{}' dropped {} degenerate/sliver collision triangles",
+							   entity.name, dropped_degenerate);
+				}
+
+				if (valid_indices.empty()) {
+					bud::eprint("[Physics] Skipping collision asset '{}' for entity '{}': no non-degenerate triangles",
+								path, entity.name);
+					continue;
+				}
+
+				// Static colliders keep using the baked CollisionLOD triangle meshes.
+				bool use_mesh = (entity.is_static && (entity.collider.type == bud::scene::ColliderType::Mesh ||
+								(entity.collider.type == bud::scene::ColliderType::Auto && baked_shape == bud::asset::CollisionShapeType::Mesh)));
+
+				if (use_mesh) {
+					desc.shape.type = bud::physics::ShapeType::Mesh;
+				} else {
+					desc.shape.type = bud::physics::ShapeType::ConvexHull;
+				}
+
+				if (entity.is_static) {
+					auto make_edge_key = [](uint32_t a, uint32_t b) -> uint64_t {
+						if (a > b)
+							std::swap(a, b);
+						return (static_cast<uint64_t>(a) << 32) | static_cast<uint64_t>(b);
+					};
+					std::unordered_set<uint64_t> unique_edges;
+					unique_edges.reserve(local_indices.size());
+					for (size_t i = 0; i + 2 < local_indices.size(); i += 3) {
+						unique_edges.insert(make_edge_key(local_indices[i], local_indices[i + 1]));
+						unique_edges.insert(make_edge_key(local_indices[i + 1], local_indices[i + 2]));
+						unique_edges.insert(make_edge_key(local_indices[i + 2], local_indices[i]));
+					}
+					constexpr float col_r = 0.2f;
+					constexpr float col_g = 0.85f;
+					constexpr float col_b = 0.3f;
+					for (uint64_t edge : unique_edges) {
+						uint32_t idx_a = static_cast<uint32_t>(edge >> 32);
+						uint32_t idx_b = static_cast<uint32_t>(edge & 0xFFFFFFFFull);
+						if (idx_a < world_vertices.size() && idx_b < world_vertices.size()) {
+							const auto& va = world_vertices[idx_a];
+							const auto& vb = world_vertices[idx_b];
+							static_collision_debug_vertices.push_back({{va.x, va.y, va.z}, {col_r, col_g, col_b}});
+							static_collision_debug_vertices.push_back({{vb.x, vb.y, vb.z}, {col_r, col_g, col_b}});
+						}
+					}
+				}
+
+				desc.shape.vertices = std::move(world_vertices);
+				desc.shape.indices = std::move(valid_indices);
+				desc.position = bud::math::vec3(0.0f);
+				desc.rotation = bud::math::quaternion(1.0f, 0.0f, 0.0f, 0.0f);
+
+				auto handle = physics_scene->add_rigid_body(desc);
+				if (handle.is_valid()) {
+					bud::print("[Physics] Instantiated Data-Driven CollisionLOD for '{}' (type={}, verts={}, tris={})",
+					           entity.name, use_mesh ? "Mesh" : "ConvexHull",
+					           desc.shape.vertices.size(), desc.shape.indices.size() / 3);
+				}
+			}
+		}
+	}
+
 	void BudEngine::load_scene_resources_async(std::function<void()> on_finished) {
+		{
+			std::scoped_lock lock(collision_mutex);
+			collision_loaded_assets.clear();
+			static_collision_debug_vertices.clear();
+			if (renderer)
+				renderer->set_static_physics_debug_vertices({});
+		}
+
 		// Shared cloth registration: expand culling bounds (traditional draw path must
 		// stay non-page-based) and load the ClothPhysics chunk. The mega-buffer vertex
 		// offset comes straight from the upload handle (reserved at enqueue time).
@@ -1139,8 +1336,39 @@ namespace bud::engine {
 			return;
 		}
 
-		auto pending_count = std::make_shared<std::atomic<int>>(static_cast<int>(unique_asset_paths.size()));
+		auto pending_count = std::make_shared<std::atomic<int>>(static_cast<int>(unique_asset_paths.size() * 2));
 		auto finish = std::make_shared<std::function<void()>>(std::move(on_finished));
+
+		// Asynchronously load CollisionLOD chunks for all unique assets
+		for (const auto& path : unique_asset_paths) {
+			this->asset_manager->load_budasset_async(path, [this, path, pending_count, finish](std::shared_ptr<bud::io::BudAssetPackage> pkg) {
+				if (!pkg) {
+					if (pending_count->fetch_sub(1) == 1) {
+						bud::print("[BudEngine] Scene resources and colliders fully loaded and dispatched ({} entities)", scene.entities.size());
+						if (*finish)
+							(*finish)();
+					}
+					return;
+				}
+				if (pkg->find_chunk(bud::asset::AssetChunkType::Collision)) {
+					this->asset_manager->load_budasset_chunk_async(pkg, bud::asset::AssetChunkType::Collision, [this, path, pending_count, finish](std::vector<char> data) {
+						if (!data.empty())
+							this->register_collision_asset(path, data);
+						if (pending_count->fetch_sub(1) == 1) {
+							bud::print("[BudEngine] Scene resources and colliders fully loaded and dispatched ({} entities)", scene.entities.size());
+							if (*finish)
+								(*finish)();
+						}
+					});
+				} else {
+					if (pending_count->fetch_sub(1) == 1) {
+						bud::print("[BudEngine] Scene resources and colliders fully loaded and dispatched ({} entities)", scene.entities.size());
+						if (*finish)
+							(*finish)();
+					}
+				}
+			});
+		}
 
 		if (streaming_manager) {
 			// VG assets: streaming manager's callback sets mesh_index and decrements pending_count.
@@ -1224,5 +1452,13 @@ namespace bud::engine {
 				});
 			}
 		}
+	}
+
+	void BudEngine::reset_frame_timer() {
+		reset_timer_requested.store(true, std::memory_order_release);
+	}
+
+	void BudEngine::pump_events() {
+		handle_events();
 	}
 } // namespace bud::engine
