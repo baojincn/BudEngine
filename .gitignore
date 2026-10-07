@@ -90,6 +90,8 @@ Content/**
 !Content/rl/**
 !Content/Robots/
 !Content/Robots/**
+!content/cryteksponza/
+!content/cryteksponza/**
 
 # MuJoCo writes its own log next to the working directory
 MUJOCO_LOG.TXT

@@ -1,0 +1,244 @@
+{
+  "asset_manifest": {
+    "aabb_max": [
+      8.618857383728027,
+      0.6761940121650696,
+      1.8333748579025269
+    ],
+    "aabb_min": [
+      8.063583374023438,
+      0.4442399740219116,
+      1.261538028717041
+    ],
+    "submesh_count": 1,
+    "textures": [
+      "Content/cryteksponza/Textures/vase_plant.budasset",
+      "Content/cryteksponza/Textures/vase_plant_spec_metallicRoughness.budasset"
+    ],
+    "total_triangles": 400,
+    "total_vertices": 454
+  },
+  "chunk_table": [
+    {
+      "chunk_id": 0,
+      "chunk_type": "Material",
+      "flags": "None",
+      "material_count": 1
+    },
+    {
+      "chunk_id": 1,
+      "chunk_type": "VirtualGeometry",
+      "flags": "None",
+      "vg_magic": "BVGT",
+      "vg_version": 1
+    }
+  ],
+  "container_header": {
+    "asset_type": "Mesh",
+    "chunk_count": 2,
+    "magic": "BUDASSET",
+    "version": 1
+  },
+  "materials": [
+    {
+      "alpha_cutoff": 0.5,
+      "alpha_mode": "Mask",
+      "base_color_texture": "Content/cryteksponza/Textures/vase_plant.budasset",
+      "double_sided": true,
+      "material_index": 0,
+      "name": "Material__57"
+    }
+  ],
+  "virtual_geometry": {
+    "clusters": [
+      {
+        "bounds_center": [
+          8.315650939941406,
+          0.5894005298614502,
+          1.5798745155334473
+        ],
+        "bounds_extent": [
+          0.24393510818481445,
+          0.08679351210594177,
+          0.25350040197372437
+        ],
+        "cluster_index": 0,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 0,
+        "index_offset": 0,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.303720474243164,
+          0.6027910709381104,
+          1.579298973083496
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.27097463607788086,
+        "material_index": 0,
+        "num_tris": 112,
+        "num_verts": 126,
+        "parent_lod_error": 0.0,
+        "position_offset": 0,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          8.354244232177734,
+          0.5810719728469849,
+          1.557924509048462
+        ],
+        "bounds_extent": [
+          0.26461362838745117,
+          0.06536400318145752,
+          0.22712451219558716
+        ],
+        "cluster_index": 1,
+        "cone_axis": [
+          0.35433071851730347,
+          0.9212598204612732,
+          -0.12598425149917603
+        ],
+        "cone_cutoff": 0.9291338324546814,
+        "group_index": 0,
+        "index_offset": 112,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.358203887939453,
+          0.5554214715957642,
+          1.564045786857605
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.27752965688705444,
+        "material_index": 0,
+        "num_tris": 112,
+        "num_verts": 127,
+        "parent_lod_error": 0.0,
+        "position_offset": 126,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          8.314044952392578,
+          0.5685240030288696,
+          1.522118091583252
+        ],
+        "bounds_extent": [
+          0.2504611015319824,
+          0.08823898434638977,
+          0.26058000326156616
+        ],
+        "cluster_index": 2,
+        "cone_axis": [
+          0.18897637724876404,
+          0.9685039520263672,
+          -0.14173229038715363
+        ],
+        "cone_cutoff": 0.9291338324546814,
+        "group_index": 0,
+        "index_offset": 224,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.319416046142578,
+          0.5775265097618103,
+          1.5344303846359253
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.2950188219547272,
+        "material_index": 0,
+        "num_tris": 111,
+        "num_verts": 128,
+        "parent_lod_error": 0.0,
+        "position_offset": 253,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          8.346261024475098,
+          0.5580484867095947,
+          1.5537669658660889
+        ],
+        "bounds_extent": [
+          0.2465362548828125,
+          0.1138085126876831,
+          0.19716399908065796
+        ],
+        "cluster_index": 3,
+        "cone_axis": [
+          0.3385826647281647,
+          0.9370078444480896,
+          0.07086614519357681
+        ],
+        "cone_cutoff": 0.960629940032959,
+        "group_index": 0,
+        "index_offset": 335,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.34964656829834,
+          0.5502448678016663,
+          1.5578516721725464
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.272886723279953,
+        "material_index": 0,
+        "num_tris": 65,
+        "num_verts": 75,
+        "parent_lod_error": 0.0,
+        "position_offset": 381,
+        "position_page_offset": 0
+      }
+    ],
+    "groups": [
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 0,
+        "lod_bounds_center": [
+          8.332746505737305,
+          0.5714959502220154,
+          1.5589067935943604
+        ],
+        "lod_bounds_radius": 0.32353484630584717,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      }
+    ],
+    "pages": [
+      {
+        "bulk_offset": 0,
+        "dependency_page_id": 0,
+        "flags": 1,
+        "is_streamable": true,
+        "page_index": 0,
+        "raw_index_count": 400,
+        "raw_vertex_count": 456,
+        "size_in_bytes": 11664,
+        "storage": "budbulk"
+      }
+    ],
+    "stats": {
+      "aabb_max": [
+        8.618857383728027,
+        0.6761940121650696,
+        1.8333748579025269
+      ],
+      "aabb_min": [
+        8.063583374023438,
+        0.4442399740219116,
+        1.261538028717041
+      ],
+      "cluster_count": 4,
+      "dependency_count": 1,
+      "group_count": 1,
+      "material_count": 1,
+      "page_count": 1,
+      "page_size_kb": 128,
+      "texture_count": 2
+    }
+  }
+}

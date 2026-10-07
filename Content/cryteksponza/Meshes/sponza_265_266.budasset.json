@@ -1,0 +1,244 @@
+{
+  "asset_manifest": {
+    "aabb_max": [
+      -6.079936981201172,
+      8.494707107543945,
+      -2.5038669109344482
+    ],
+    "aabb_min": [
+      -6.28653621673584,
+      8.288108825683594,
+      -2.577838182449341
+    ],
+    "submesh_count": 1,
+    "textures": [
+      "Content/cryteksponza/Textures/sponza_flagpole_diff.budasset",
+      "Content/cryteksponza/Textures/sponza_flagpole_spec_metallicRoughness.budasset"
+    ],
+    "total_triangles": 456,
+    "total_vertices": 402
+  },
+  "chunk_table": [
+    {
+      "chunk_id": 0,
+      "chunk_type": "Material",
+      "flags": "None",
+      "material_count": 1
+    },
+    {
+      "chunk_id": 1,
+      "chunk_type": "VirtualGeometry",
+      "flags": "None",
+      "vg_magic": "BVGT",
+      "vg_version": 1
+    }
+  ],
+  "container_header": {
+    "asset_type": "Mesh",
+    "chunk_count": 2,
+    "magic": "BUDASSET",
+    "version": 1
+  },
+  "materials": [
+    {
+      "alpha_cutoff": 0.5,
+      "alpha_mode": "Opaque",
+      "base_color_texture": "Content/cryteksponza/Textures/sponza_flagpole_diff.budasset",
+      "double_sided": false,
+      "material_index": 0,
+      "name": "flagpole"
+    }
+  ],
+  "virtual_geometry": {
+    "clusters": [
+      {
+        "bounds_center": [
+          -6.183236598968506,
+          8.39140796661377,
+          -2.5408525466918945
+        ],
+        "bounds_extent": [
+          0.10329961776733398,
+          0.10329914093017578,
+          0.03698563575744629
+        ],
+        "cluster_index": 0,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 0,
+        "index_offset": 0,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.183236122131348,
+          8.39140796661377,
+          -2.577838182449341
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.10330080986022949,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 124,
+        "parent_lod_error": 0.0,
+        "position_offset": 0,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.213931083679199,
+          8.383787155151367,
+          -2.5286693572998047
+        ],
+        "bounds_extent": [
+          0.06598758697509766,
+          0.08906269073486328,
+          0.024802565574645996
+        ],
+        "cluster_index": 1,
+        "cone_axis": [
+          -0.22834645211696625,
+          0.29133859276771545,
+          0.9291338324546814
+        ],
+        "cone_cutoff": 0.9370078444480896,
+        "group_index": 0,
+        "index_offset": 128,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.187126636505127,
+          8.382840156555176,
+          -2.5500190258026123
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.09325078874826431,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 110,
+        "parent_lod_error": 0.0,
+        "position_offset": 124,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.1832356452941895,
+          8.39140796661377,
+          -2.530956506729126
+        ],
+        "bounds_extent": [
+          0.09668302536010742,
+          0.09668350219726563,
+          0.022515535354614258
+        ],
+        "cluster_index": 2,
+        "cone_axis": [
+          0.4724409580230713,
+          0.07874015718698502,
+          0.8818897604942322
+        ],
+        "cone_cutoff": 0.8582677245140076,
+        "group_index": 0,
+        "index_offset": 256,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.183236122131348,
+          8.39140796661377,
+          -2.5534720420837402
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.0966838151216507,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 109,
+        "parent_lod_error": 0.0,
+        "position_offset": 234,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.1832356452941895,
+          8.39140796661377,
+          -2.515962600708008
+        ],
+        "bounds_extent": [
+          0.040325164794921875,
+          0.04032421112060547,
+          0.01209557056427002
+        ],
+        "cluster_index": 3,
+        "cone_axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "cone_cutoff": 0.9763779640197754,
+        "group_index": 0,
+        "index_offset": 384,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.183062553405762,
+          8.391700744628906,
+          -2.5043587684631348
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.041267454624176025,
+        "material_index": 0,
+        "num_tris": 72,
+        "num_verts": 91,
+        "parent_lod_error": 0.0,
+        "position_offset": 343,
+        "position_page_offset": 0
+      }
+    ],
+    "groups": [
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 0,
+        "lod_bounds_center": [
+          -6.184165954589844,
+          8.389339447021484,
+          -2.546422004699707
+        ],
+        "lod_bounds_radius": 0.13479873538017273,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      }
+    ],
+    "pages": [
+      {
+        "bulk_offset": 0,
+        "dependency_page_id": 0,
+        "flags": 1,
+        "is_streamable": true,
+        "page_index": 0,
+        "raw_index_count": 456,
+        "raw_vertex_count": 434,
+        "size_in_bytes": 11240,
+        "storage": "budbulk"
+      }
+    ],
+    "stats": {
+      "aabb_max": [
+        -6.079936981201172,
+        8.494707107543945,
+        -2.5038669109344482
+      ],
+      "aabb_min": [
+        -6.28653621673584,
+        8.288108825683594,
+        -2.577838182449341
+      ],
+      "cluster_count": 4,
+      "dependency_count": 1,
+      "group_count": 1,
+      "material_count": 1,
+      "page_count": 1,
+      "page_size_kb": 128,
+      "texture_count": 2
+    }
+  }
+}
