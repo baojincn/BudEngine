@@ -88,6 +88,8 @@ Content/**
 # version-controlled (the small JSON specs and flat .bin weights, not the cooked assets).
 !Content/rl/
 !Content/rl/**
+!Content/Robots/
+!Content/Robots/**
 
 # MuJoCo writes its own log next to the working directory
 MUJOCO_LOG.TXT
