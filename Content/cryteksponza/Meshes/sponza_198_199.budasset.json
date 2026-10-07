@@ -1,0 +1,140 @@
+{
+  "asset_manifest": {
+    "aabb_max": [
+      6.635958194732666,
+      6.872191429138184,
+      2.0936648845672607
+    ],
+    "aabb_min": [
+      6.485952377319336,
+      6.741235733032227,
+      2.0014140605926514
+    ],
+    "submesh_count": 1,
+    "textures": [
+      "Content/cryteksponza/Textures/sponza_column_b_diff.budasset",
+      "Content/cryteksponza/Textures/sponza_column_b_bump.budasset",
+      "Content/cryteksponza/Textures/sponza_column_b_spec_metallicRoughness.budasset"
+    ],
+    "total_triangles": 18,
+    "total_vertices": 30
+  },
+  "chunk_table": [
+    {
+      "chunk_id": 0,
+      "chunk_type": "Material",
+      "flags": "None",
+      "material_count": 1
+    },
+    {
+      "chunk_id": 1,
+      "chunk_type": "VirtualGeometry",
+      "flags": "None",
+      "vg_magic": "BVGT",
+      "vg_version": 1
+    }
+  ],
+  "container_header": {
+    "asset_type": "Mesh",
+    "chunk_count": 2,
+    "magic": "BUDASSET",
+    "version": 1
+  },
+  "materials": [
+    {
+      "alpha_cutoff": 0.5,
+      "alpha_mode": "Opaque",
+      "base_color_texture": "Content/cryteksponza/Textures/sponza_column_b_diff.budasset",
+      "double_sided": false,
+      "material_index": 0,
+      "name": "column_b"
+    }
+  ],
+  "virtual_geometry": {
+    "clusters": [
+      {
+        "bounds_center": [
+          6.560955047607422,
+          6.806713581085205,
+          2.047539472579956
+        ],
+        "bounds_extent": [
+          0.07500290870666504,
+          0.06547784805297852,
+          0.04612541198730469
+        ],
+        "cluster_index": 0,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 0,
+        "index_offset": 0,
+        "index_page_offset": 0,
+        "lod_center": [
+          6.560955047607422,
+          6.806713581085205,
+          2.047539472579956
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.10972863435745239,
+        "material_index": 0,
+        "num_tris": 18,
+        "num_verts": 30,
+        "parent_lod_error": 0.0,
+        "position_offset": 0,
+        "position_page_offset": 0
+      }
+    ],
+    "groups": [
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 0,
+        "lod_bounds_center": [
+          6.560955047607422,
+          6.806713581085205,
+          2.047539472579956
+        ],
+        "lod_bounds_radius": 0.10972863435745239,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      }
+    ],
+    "pages": [
+      {
+        "bulk_offset": 0,
+        "dependency_page_id": 0,
+        "flags": 1,
+        "is_streamable": true,
+        "page_index": 0,
+        "raw_index_count": 18,
+        "raw_vertex_count": 30,
+        "size_in_bytes": 792,
+        "storage": "budbulk"
+      }
+    ],
+    "stats": {
+      "aabb_max": [
+        6.635958194732666,
+        6.872191429138184,
+        2.0936648845672607
+      ],
+      "aabb_min": [
+        6.485952377319336,
+        6.741235733032227,
+        2.0014140605926514
+      ],
+      "cluster_count": 1,
+      "dependency_count": 1,
+      "group_count": 1,
+      "material_count": 1,
+      "page_count": 1,
+      "page_size_kb": 128,
+      "texture_count": 3
+    }
+  }
+}

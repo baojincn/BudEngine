@@ -1,0 +1,244 @@
+{
+  "asset_manifest": {
+    "aabb_max": [
+      9.256037712097168,
+      2.2099709510803223,
+      2.466148853302002
+    ],
+    "aabb_min": [
+      8.163393020629883,
+      -0.02460699900984764,
+      1.3735029697418213
+    ],
+    "submesh_count": 1,
+    "textures": [
+      "Content/cryteksponza/Textures/sponza_column_a_diff.budasset",
+      "Content/cryteksponza/Textures/sponza_column_a_bump.budasset"
+    ],
+    "total_triangles": 340,
+    "total_vertices": 471
+  },
+  "chunk_table": [
+    {
+      "chunk_id": 0,
+      "chunk_type": "Material",
+      "flags": "None",
+      "material_count": 1
+    },
+    {
+      "chunk_id": 1,
+      "chunk_type": "VirtualGeometry",
+      "flags": "None",
+      "vg_magic": "BVGT",
+      "vg_version": 1
+    }
+  ],
+  "container_header": {
+    "asset_type": "Mesh",
+    "chunk_count": 2,
+    "magic": "BUDASSET",
+    "version": 1
+  },
+  "materials": [
+    {
+      "alpha_cutoff": 0.5,
+      "alpha_mode": "Opaque",
+      "base_color_texture": "Content/cryteksponza/Textures/sponza_column_a_diff.budasset",
+      "double_sided": false,
+      "material_index": 0,
+      "name": "column_a"
+    }
+  ],
+  "virtual_geometry": {
+    "clusters": [
+      {
+        "bounds_center": [
+          8.561700820922852,
+          1.0926820039749146,
+          2.081758499145508
+        ],
+        "bounds_extent": [
+          0.39830827713012695,
+          1.1172889471054077,
+          0.3843904137611389
+        ],
+        "cluster_index": 0,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 0,
+        "index_offset": 0,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.55545425415039,
+          1.1102045774459839,
+          2.0241992473602295
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.248405933380127,
+        "material_index": 0,
+        "num_tris": 105,
+        "num_verts": 126,
+        "parent_lod_error": 0.0,
+        "position_offset": 0,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          8.709714889526367,
+          1.0926820039749146,
+          1.9198259115219116
+        ],
+        "bounds_extent": [
+          0.5463223457336426,
+          1.1172889471054077,
+          0.5463229417800903
+        ],
+        "cluster_index": 1,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 0,
+        "index_offset": 105,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.635205268859863,
+          1.1842913627624512,
+          1.9908183813095093
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.348528265953064,
+        "material_index": 0,
+        "num_tris": 78,
+        "num_verts": 128,
+        "parent_lod_error": 0.0,
+        "position_offset": 126,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          8.871647834777832,
+          1.0926820039749146,
+          1.7718119621276855
+        ],
+        "bounds_extent": [
+          0.38438987731933594,
+          1.1172889471054077,
+          0.39830899238586426
+        ],
+        "cluster_index": 2,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 0,
+        "index_offset": 183,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.814088821411133,
+          1.1102044582366943,
+          1.765565276145935
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.2484060525894165,
+        "material_index": 0,
+        "num_tris": 100,
+        "num_verts": 126,
+        "parent_lod_error": 0.0,
+        "position_offset": 254,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          8.871647834777832,
+          1.0926820039749146,
+          1.9198259115219116
+        ],
+        "bounds_extent": [
+          0.38438987731933594,
+          1.1172889471054077,
+          0.5463229417800903
+        ],
+        "cluster_index": 3,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 0,
+        "index_offset": 283,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.916353225708008,
+          1.1499322652816772,
+          2.0410196781158447
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.297938585281372,
+        "material_index": 0,
+        "num_tris": 57,
+        "num_verts": 93,
+        "parent_lod_error": 0.0,
+        "position_offset": 380,
+        "position_page_offset": 0
+      }
+    ],
+    "groups": [
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 0,
+        "lod_bounds_center": [
+          8.73027515411377,
+          1.1386581659317017,
+          1.9554007053375244
+        ],
+        "lod_bounds_radius": 1.5030794143676758,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      }
+    ],
+    "pages": [
+      {
+        "bulk_offset": 0,
+        "dependency_page_id": 0,
+        "flags": 1,
+        "is_streamable": true,
+        "page_index": 0,
+        "raw_index_count": 340,
+        "raw_vertex_count": 473,
+        "size_in_bytes": 11996,
+        "storage": "budbulk"
+      }
+    ],
+    "stats": {
+      "aabb_max": [
+        9.256037712097168,
+        2.2099709510803223,
+        2.466148853302002
+      ],
+      "aabb_min": [
+        8.163393020629883,
+        -0.02460699900984764,
+        1.3735029697418213
+      ],
+      "cluster_count": 4,
+      "dependency_count": 1,
+      "group_count": 1,
+      "material_count": 1,
+      "page_count": 1,
+      "page_size_kb": 128,
+      "texture_count": 2
+    }
+  }
+}

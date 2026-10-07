@@ -1,0 +1,564 @@
+{
+  "asset_manifest": {
+    "aabb_max": [
+      9.175025939941406,
+      6.953227996826172,
+      -2.172560930252075
+    ],
+    "aabb_min": [
+      8.193109512329102,
+      5.07139778137207,
+      -3.1544759273529053
+    ],
+    "submesh_count": 1,
+    "textures": [
+      "Content/cryteksponza/Textures/sponza_column_c_diff.budasset",
+      "Content/cryteksponza/Textures/sponza_column_c_bump.budasset",
+      "Content/cryteksponza/Textures/sponza_column_c_spec_metallicRoughness.budasset"
+    ],
+    "total_triangles": 396,
+    "total_vertices": 718
+  },
+  "chunk_table": [
+    {
+      "chunk_id": 0,
+      "chunk_type": "Material",
+      "flags": "None",
+      "material_count": 1
+    },
+    {
+      "chunk_id": 1,
+      "chunk_type": "VirtualGeometry",
+      "flags": "None",
+      "vg_magic": "BVGT",
+      "vg_version": 1
+    }
+  ],
+  "container_header": {
+    "asset_type": "Mesh",
+    "chunk_count": 2,
+    "magic": "BUDASSET",
+    "version": 1
+  },
+  "materials": [
+    {
+      "alpha_cutoff": 0.5,
+      "alpha_mode": "Opaque",
+      "base_color_texture": "Content/cryteksponza/Textures/sponza_column_c_diff.budasset",
+      "double_sided": false,
+      "material_index": 0,
+      "name": "column_c"
+    }
+  ],
+  "virtual_geometry": {
+    "clusters": [
+      {
+        "bounds_center": [
+          8.452512741088867,
+          6.078325271606445,
+          -2.7816669940948486
+        ],
+        "bounds_extent": [
+          0.25940370559692383,
+          0.8749027252197266,
+          0.37280893325805664
+        ],
+        "cluster_index": 0,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 0,
+        "index_offset": 0,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.460243225097656,
+          6.090602397918701,
+          -2.7544257640838623
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.9754772186279297,
+        "material_index": 0,
+        "num_tris": 73,
+        "num_verts": 127,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 0,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          8.452512741088867,
+          6.012312889099121,
+          -2.7816669940948486
+        ],
+        "bounds_extent": [
+          0.25940370559692383,
+          0.9409151077270508,
+          0.37280893325805664
+        ],
+        "cluster_index": 1,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 0,
+        "index_offset": 73,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.45112133026123,
+          6.006960868835449,
+          -2.7788236141204834
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.0364468097686768,
+        "material_index": 0,
+        "num_tris": 72,
+        "num_verts": 126,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 127,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          8.688135147094727,
+          6.012312889099121,
+          -2.6737470626831055
+        ],
+        "bounds_extent": [
+          0.4868912696838379,
+          0.9409151077270508,
+          0.48072898387908936
+        ],
+        "cluster_index": 2,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 0,
+        "index_offset": 145,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.687017440795898,
+          6.018229007720947,
+          -2.6790459156036377
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.1518784761428833,
+        "material_index": 0,
+        "num_tris": 68,
+        "num_verts": 126,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 253,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          8.802215576171875,
+          6.0358171463012695,
+          -2.4319634437561035
+        ],
+        "bounds_extent": [
+          0.37280988693237305,
+          0.9174106121063232,
+          0.2594025135040283
+        ],
+        "cluster_index": 3,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 1,
+        "index_offset": 213,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.798965454101563,
+          6.032741546630859,
+          -2.43570613861084
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.0142816305160522,
+        "material_index": 0,
+        "num_tris": 70,
+        "num_verts": 128,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 379,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          8.80388355255127,
+          6.012312889099121,
+          -2.433631420135498
+        ],
+        "bounds_extent": [
+          0.3711423873901367,
+          0.9409151077270508,
+          0.25773441791534424
+        ],
+        "cluster_index": 4,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 1,
+        "index_offset": 283,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.805072784423828,
+          6.011849403381348,
+          -2.4408278465270996
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.034968614578247,
+        "material_index": 0,
+        "num_tris": 70,
+        "num_verts": 128,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 507,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          8.80388355255127,
+          6.012312889099121,
+          -2.6737165451049805
+        ],
+        "bounds_extent": [
+          0.3711423873901367,
+          0.9409151077270508,
+          0.48075950145721436
+        ],
+        "cluster_index": 5,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 1,
+        "index_offset": 353,
+        "index_page_offset": 0,
+        "lod_center": [
+          8.80124282836914,
+          6.011509418487549,
+          -2.666907548904419
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.1095271110534668,
+        "material_index": 0,
+        "num_tris": 43,
+        "num_verts": 83,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 635,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          8.452512741088867,
+          6.0358171463012695,
+          -2.7816669940948486
+        ],
+        "bounds_extent": [
+          0.25940370559692383,
+          0.9174106121063232,
+          0.37280893325805664
+        ],
+        "cluster_index": 6,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 2,
+        "index_offset": 0,
+        "index_page_offset": 1,
+        "lod_center": [
+          8.461358070373535,
+          6.0354084968566895,
+          -2.784493923187256
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.0135788917541504,
+        "material_index": 0,
+        "num_tris": 65,
+        "num_verts": 127,
+        "parent_lod_error": 0.0,
+        "position_offset": 0,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          8.454181671142578,
+          6.012312889099121,
+          -2.783334255218506
+        ],
+        "bounds_extent": [
+          0.2577347755432129,
+          0.9409151077270508,
+          0.37114155292510986
+        ],
+        "cluster_index": 7,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 2,
+        "index_offset": 65,
+        "index_page_offset": 1,
+        "lod_center": [
+          8.461379051208496,
+          6.011849880218506,
+          -2.7845230102539063
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.0349684953689575,
+        "material_index": 0,
+        "num_tris": 70,
+        "num_verts": 126,
+        "parent_lod_error": 0.0,
+        "position_offset": 127,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          8.694265365600586,
+          6.012312889099121,
+          -2.6737470626831055
+        ],
+        "bounds_extent": [
+          0.4807600975036621,
+          0.9409151077270508,
+          0.48072898387908936
+        ],
+        "cluster_index": 8,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 2,
+        "index_offset": 135,
+        "index_page_offset": 1,
+        "lod_center": [
+          8.691047668457031,
+          6.022202014923096,
+          -2.682971239089966
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.151960849761963,
+        "material_index": 0,
+        "num_tris": 64,
+        "num_verts": 126,
+        "parent_lod_error": 0.0,
+        "position_offset": 253,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          8.802215576171875,
+          6.012312889099121,
+          -2.3343474864959717
+        ],
+        "bounds_extent": [
+          0.37280988693237305,
+          0.9409151077270508,
+          0.16178655624389648
+        ],
+        "cluster_index": 9,
+        "cone_axis": [
+          -0.3858267664909363,
+          -0.007874015718698502,
+          0.9212598204612732
+        ],
+        "cone_cutoff": 0.9842519760131836,
+        "group_index": 2,
+        "index_offset": 199,
+        "index_page_offset": 1,
+        "lod_center": [
+          8.799383163452148,
+          6.012720108032227,
+          -2.3098409175872803
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.0112006664276123,
+        "material_index": 0,
+        "num_tris": 64,
+        "num_verts": 128,
+        "parent_lod_error": 0.0,
+        "position_offset": 379,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          8.80388355255127,
+          6.012312889099121,
+          -2.6651864051818848
+        ],
+        "bounds_extent": [
+          0.3711423873901367,
+          0.9409151077270508,
+          0.48928940296173096
+        ],
+        "cluster_index": 10,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 2,
+        "index_offset": 263,
+        "index_page_offset": 1,
+        "lod_center": [
+          8.806581497192383,
+          6.009927749633789,
+          -2.6700854301452637
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.1094201803207397,
+        "material_index": 0,
+        "num_tris": 68,
+        "num_verts": 128,
+        "parent_lod_error": 0.0,
+        "position_offset": 507,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          8.802215576171875,
+          6.012312889099121,
+          -2.672049045562744
+        ],
+        "bounds_extent": [
+          0.3694744110107422,
+          0.9409151077270508,
+          0.479092001914978
+        ],
+        "cluster_index": 11,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 2,
+        "index_offset": 331,
+        "index_page_offset": 1,
+        "lod_center": [
+          8.80124282836914,
+          6.011509418487549,
+          -2.666907548904419
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.1095271110534668,
+        "material_index": 0,
+        "num_tris": 17,
+        "num_verts": 35,
+        "parent_lod_error": 0.0,
+        "position_offset": 635,
+        "position_page_offset": 1
+      }
+    ],
+    "groups": [
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 0,
+        "lod_bounds_center": [
+          8.532793998718262,
+          6.038597106933594,
+          -2.737431764602661
+        ],
+        "lod_bounds_radius": 1.3180369138717651,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 1,
+        "lod_bounds_center": [
+          8.80176067352295,
+          6.018700122833252,
+          -2.5144805908203125
+        ],
+        "lod_bounds_radius": 1.2621244192123413,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 2,
+        "children_start": 0,
+        "group_index": 2,
+        "lod_bounds_center": [
+          8.667277336120605,
+          6.028648376464844,
+          -2.6259560585021973
+        ],
+        "lod_bounds_radius": 1.4929986000061035,
+        "lod_error": 0.014999999664723873,
+        "page_index_num": 1,
+        "page_index_start": 1
+      }
+    ],
+    "pages": [
+      {
+        "bulk_offset": 0,
+        "dependency_page_id": 0,
+        "flags": 1,
+        "is_streamable": true,
+        "page_index": 0,
+        "raw_index_count": 396,
+        "raw_vertex_count": 718,
+        "size_in_bytes": 17180,
+        "storage": "budbulk"
+      },
+      {
+        "bulk_offset": 17180,
+        "dependency_page_id": 4294967295,
+        "flags": 1,
+        "is_streamable": true,
+        "page_index": 1,
+        "raw_index_count": 348,
+        "raw_vertex_count": 670,
+        "size_in_bytes": 15924,
+        "storage": "budbulk"
+      }
+    ],
+    "stats": {
+      "aabb_max": [
+        9.175025939941406,
+        6.953227996826172,
+        -2.172560930252075
+      ],
+      "aabb_min": [
+        8.193109512329102,
+        5.07139778137207,
+        -3.1544759273529053
+      ],
+      "cluster_count": 12,
+      "dependency_count": 1,
+      "group_count": 3,
+      "material_count": 1,
+      "page_count": 2,
+      "page_size_kb": 128,
+      "texture_count": 3
+    }
+  }
+}

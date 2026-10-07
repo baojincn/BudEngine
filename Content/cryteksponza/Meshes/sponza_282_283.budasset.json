@@ -1,0 +1,2981 @@
+{
+  "asset_manifest": {
+    "aabb_max": [
+      -4.538620948791504,
+      5.205938816070557,
+      2.522857904434204
+    ],
+    "aabb_min": [
+      -7.837941646575928,
+      3.394429922103882,
+      1.5716429948806763
+    ],
+    "submesh_count": 1,
+    "textures": [
+      "Content/cryteksponza/Textures/sponza_fabric_green_diff.budasset"
+    ],
+    "total_triangles": 5504,
+    "total_vertices": 3355
+  },
+  "chunk_table": [
+    {
+      "chunk_id": 0,
+      "chunk_type": "Material",
+      "flags": "None",
+      "material_count": 1
+    },
+    {
+      "chunk_id": 1,
+      "chunk_type": "VirtualGeometry",
+      "flags": "None",
+      "vg_magic": "BVGT",
+      "vg_version": 1
+    }
+  ],
+  "container_header": {
+    "asset_type": "Mesh",
+    "chunk_count": 2,
+    "magic": "BUDASSET",
+    "version": 1
+  },
+  "materials": [
+    {
+      "alpha_cutoff": 0.5,
+      "alpha_mode": "Opaque",
+      "base_color_texture": "Content/cryteksponza/Textures/sponza_fabric_green_diff.budasset",
+      "double_sided": false,
+      "material_index": 0,
+      "name": "fabric_e"
+    }
+  ],
+  "virtual_geometry": {
+    "clusters": [
+      {
+        "bounds_center": [
+          -6.596035957336426,
+          3.8090362548828125,
+          1.6191478967666626
+        ],
+        "bounds_extent": [
+          0.39481592178344727,
+          0.4146064519882202,
+          0.02242600917816162
+        ],
+        "cluster_index": 0,
+        "cone_axis": [
+          -0.06299212574958801,
+          0.007874015718698502,
+          -1.0
+        ],
+        "cone_cutoff": 0.31496062874794006,
+        "group_index": 0,
+        "index_offset": 0,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.596402645111084,
+          3.7992100715637207,
+          1.6368885040283203
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.5630567073822021,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 82,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 0,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.890902042388916,
+          4.307318687438965,
+          1.6785094738006592
+        ],
+        "bounds_extent": [
+          0.3129086494445801,
+          0.8374054431915283,
+          0.08832651376724243
+        ],
+        "cluster_index": 1,
+        "cone_axis": [
+          0.08661417663097382,
+          0.6299212574958801,
+          -0.7716535329818726
+        ],
+        "cone_cutoff": 0.8818897604942322,
+        "group_index": 0,
+        "index_offset": 128,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.929664611816406,
+          4.302657127380371,
+          1.6872926950454712
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.87799072265625,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 95,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 82,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.6616926193237305,
+          4.4158220291137695,
+          1.6099555492401123
+        ],
+        "bounds_extent": [
+          0.46047234535217285,
+          0.5106511116027832,
+          0.02506357431411743
+        ],
+        "cluster_index": 2,
+        "cone_axis": [
+          -0.03937007859349251,
+          0.023622047156095505,
+          -1.0
+        ],
+        "cone_cutoff": 0.4409448802471161,
+        "group_index": 0,
+        "index_offset": 256,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.608152389526367,
+          4.4158220291137695,
+          1.6151795387268066
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.652967095375061,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 92,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 177,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.624360084533691,
+          3.7326488494873047,
+          1.650615930557251
+        ],
+        "bounds_extent": [
+          0.4199349880218506,
+          0.3382190465927124,
+          0.01812303066253662
+        ],
+        "cluster_index": 3,
+        "cone_axis": [
+          0.031496062874794006,
+          0.015748031437397003,
+          1.0
+        ],
+        "cone_cutoff": 0.30708661675453186,
+        "group_index": 1,
+        "index_offset": 384,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.624668121337891,
+          3.669938564300537,
+          1.6492079496383667
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.5020460486412048,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 90,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 269,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.851747512817383,
+          4.466548919677734,
+          1.695514440536499
+        ],
+        "bounds_extent": [
+          0.3149600028991699,
+          0.6497830152511597,
+          0.07132148742675781
+        ],
+        "cluster_index": 4,
+        "cone_axis": [
+          0.031496062874794006,
+          -0.6220472455024719,
+          0.7795275449752808
+        ],
+        "cone_cutoff": 0.834645688533783,
+        "group_index": 1,
+        "index_offset": 512,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.760352611541748,
+          4.478586673736572,
+          1.7002487182617188
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.6807515621185303,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 93,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 359,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.605316162109375,
+          4.221870422363281,
+          1.649804949760437
+        ],
+        "bounds_extent": [
+          0.39771032333374023,
+          0.31994450092315674,
+          0.018934011459350586
+        ],
+        "cluster_index": 5,
+        "cone_axis": [
+          0.031496062874794006,
+          -0.031496062874794006,
+          1.0
+        ],
+        "cone_cutoff": 0.3937007784843445,
+        "group_index": 1,
+        "index_offset": 640,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.605316162109375,
+          4.191039085388184,
+          1.6540755033493042
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.49175941944122314,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 84,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 452,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.2727766036987305,
+          4.597941875457764,
+          1.6822340488433838
+        ],
+        "bounds_extent": [
+          0.9316723346710205,
+          0.5023360252380371,
+          0.058528006076812744
+        ],
+        "cluster_index": 6,
+        "cone_axis": [
+          -0.023622047156095505,
+          -0.6377952694892883,
+          0.7716535329818726
+        ],
+        "cone_cutoff": 0.8897637724876404,
+        "group_index": 1,
+        "index_offset": 768,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.2727766036987305,
+          4.807544708251953,
+          1.6981189250946045
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.9744666218757629,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 90,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 536,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.318329811096191,
+          4.49432373046875,
+          1.6135754585266113
+        ],
+        "bounds_extent": [
+          0.4094254970550537,
+          0.5847271680831909,
+          0.020838558673858643
+        ],
+        "cluster_index": 7,
+        "cone_axis": [
+          -0.03937007859349251,
+          0.007874015718698502,
+          -1.0
+        ],
+        "cone_cutoff": 0.30708661675453186,
+        "group_index": 2,
+        "index_offset": 896,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.329371452331543,
+          4.532413482666016,
+          1.6137416362762451
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.6380832195281982,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 87,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 626,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.836352348327637,
+          3.723398208618164,
+          1.6279898881912231
+        ],
+        "bounds_extent": [
+          0.36868834495544434,
+          0.3289684057235718,
+          0.01851499080657959
+        ],
+        "cluster_index": 8,
+        "cone_axis": [
+          0.08661417663097382,
+          -0.10236220806837082,
+          -0.9921259880065918
+        ],
+        "cone_cutoff": 0.22834645211696625,
+        "group_index": 2,
+        "index_offset": 1024,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.83594274520874,
+          3.652764081954956,
+          1.6332058906555176
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.45068883895874023,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 85,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 713,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.269571781158447,
+          4.347106456756592,
+          1.6759040355682373
+        ],
+        "bounds_extent": [
+          0.5214338302612305,
+          0.7958194017410278,
+          0.08355706930160522
+        ],
+        "cluster_index": 9,
+        "cone_axis": [
+          0.08661417663097382,
+          0.6771653294563293,
+          -0.7244094610214233
+        ],
+        "cone_cutoff": 0.8503937125205994,
+        "group_index": 2,
+        "index_offset": 1152,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.188414573669434,
+          4.387241363525391,
+          1.6501410007476807
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.9461543560028076,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 99,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 798,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.647830009460449,
+          4.457446098327637,
+          1.6134589910507202
+        ],
+        "bounds_extent": [
+          0.3923838138580322,
+          0.5374701023101807,
+          0.02111208438873291
+        ],
+        "cluster_index": 10,
+        "cone_axis": [
+          0.0,
+          -0.03937007859349251,
+          -1.0
+        ],
+        "cone_cutoff": 0.22047244012355804,
+        "group_index": 2,
+        "index_offset": 1280,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.687209129333496,
+          4.449862480163574,
+          1.617630958557129
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.6269519329071045,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 87,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 897,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -7.434414863586426,
+          4.840994358062744,
+          1.6619014739990234
+        ],
+        "bounds_extent": [
+          0.36798644065856934,
+          0.2866196632385254,
+          0.07171851396560669
+        ],
+        "cluster_index": 11,
+        "cone_axis": [
+          -0.14960630238056183,
+          0.5511810779571533,
+          -0.8267716765403748
+        ],
+        "cone_cutoff": 0.874015748500824,
+        "group_index": 3,
+        "index_offset": 1408,
+        "index_page_offset": 0,
+        "lod_center": [
+          -7.434414863586426,
+          4.863405227661133,
+          1.668938398361206
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.4446486532688141,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 85,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 984,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -7.263561725616455,
+          4.151066303253174,
+          1.6339459419250488
+        ],
+        "bounds_extent": [
+          0.41681814193725586,
+          0.5358085632324219,
+          0.01696401834487915
+        ],
+        "cluster_index": 12,
+        "cone_axis": [
+          -0.031496062874794006,
+          -0.04724409431219101,
+          -1.0
+        ],
+        "cone_cutoff": 0.22834645211696625,
+        "group_index": 3,
+        "index_offset": 1536,
+        "index_page_offset": 0,
+        "lod_center": [
+          -7.321715831756592,
+          4.131652355194092,
+          1.6470699310302734
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.6287432312965393,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 86,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 1069,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -7.2036848068237305,
+          4.361395835876465,
+          2.050417900085449
+        ],
+        "bounds_extent": [
+          0.5987164974212646,
+          0.7461380958557129,
+          0.44816505908966064
+        ],
+        "cluster_index": 13,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 3,
+        "index_offset": 1664,
+        "index_page_offset": 0,
+        "lod_center": [
+          -7.318560600280762,
+          4.448683738708496,
+          1.7880492210388184
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.0101070404052734,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 98,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 1155,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.930549621582031,
+          4.467363357543945,
+          1.6790385246276855
+        ],
+        "bounds_extent": [
+          0.7229435443878174,
+          0.6270484924316406,
+          0.0553324818611145
+        ],
+        "cluster_index": 14,
+        "cone_axis": [
+          0.12598425149917603,
+          -0.5826771855354309,
+          0.8031495809555054
+        ],
+        "cone_cutoff": 0.8661417365074158,
+        "group_index": 3,
+        "index_offset": 1792,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.930549621582031,
+          4.496320724487305,
+          1.685103416442871
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.9367452263832092,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 87,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 1253,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.997736930847168,
+          4.237614631652832,
+          1.6039639711380005
+        ],
+        "bounds_extent": [
+          0.22486329078674316,
+          0.33346009254455566,
+          0.03179895877838135
+        ],
+        "cluster_index": 15,
+        "cone_axis": [
+          0.11023622006177902,
+          -0.007874015718698502,
+          -0.9921259880065918
+        ],
+        "cone_cutoff": 0.23622047901153564,
+        "group_index": 4,
+        "index_offset": 1920,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.045138835906982,
+          4.226710319519043,
+          1.6209416389465332
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.3576548397541046,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 84,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 1340,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.627979278564453,
+          4.696385383605957,
+          2.0517826080322266
+        ],
+        "bounds_extent": [
+          1.2087297439575195,
+          0.36857128143310547,
+          0.4628845453262329
+        ],
+        "cluster_index": 16,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 4,
+        "index_offset": 2048,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.626002311706543,
+          4.680169582366943,
+          2.049093008041382
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.3344922065734863,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 91,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 1424,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.555084228515625,
+          4.836530685424805,
+          1.6910674571990967
+        ],
+        "bounds_extent": [
+          0.3682515621185303,
+          0.2863905429840088,
+          0.06839358806610107
+        ],
+        "cluster_index": 17,
+        "cone_axis": [
+          -0.14960630238056183,
+          -0.5590550899505615,
+          0.8188976645469666
+        ],
+        "cone_cutoff": 0.8976377844810486,
+        "group_index": 4,
+        "index_offset": 2176,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.555084228515625,
+          4.847983360290527,
+          1.6831419467926025
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.44335126876831055,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 85,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 1515,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.527179718017578,
+          4.579571723937988,
+          2.0559020042419434
+        ],
+        "bounds_extent": [
+          1.306424617767334,
+          0.40145039558410645,
+          0.44136500358581543
+        ],
+        "cluster_index": 18,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 4,
+        "index_offset": 2304,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.527179718017578,
+          4.659204959869385,
+          2.0755109786987305
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.391636848449707,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 94,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 1600,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.542627334594727,
+          4.579214096069336,
+          1.6089744567871094
+        ],
+        "bounds_extent": [
+          0.3237926959991455,
+          0.352341890335083,
+          0.037331461906433105
+        ],
+        "cluster_index": 19,
+        "cone_axis": [
+          -0.12598425149917603,
+          0.007874015718698502,
+          -0.9921259880065918
+        ],
+        "cone_cutoff": 0.5039370059967041,
+        "group_index": 5,
+        "index_offset": 2432,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.565417766571045,
+          4.5594072341918945,
+          1.6080479621887207
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.4469856023788452,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 93,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 1694,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.686126708984375,
+          4.494719982147217,
+          2.0494775772094727
+        ],
+        "bounds_extent": [
+          1.1454060077667236,
+          0.35379600524902344,
+          0.4521384835243225
+        ],
+        "cluster_index": 20,
+        "cone_axis": [
+          -0.08661417663097382,
+          -0.03937007859349251,
+          -0.9921259880065918
+        ],
+        "cone_cutoff": 0.4566929042339325,
+        "group_index": 5,
+        "index_offset": 2560,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.677411079406738,
+          4.516880989074707,
+          2.0618960857391357
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.2382316589355469,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 96,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 1787,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.5329060554504395,
+          4.477511405944824,
+          1.620190978050232
+        ],
+        "bounds_extent": [
+          0.31665515899658203,
+          0.313495397567749,
+          0.048547983169555664
+        ],
+        "cluster_index": 21,
+        "cone_axis": [
+          0.27559053897857666,
+          0.16535432636737823,
+          0.9448819160461426
+        ],
+        "cone_cutoff": 0.5905511975288391,
+        "group_index": 5,
+        "index_offset": 2688,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.489739418029785,
+          4.477511405944824,
+          1.6503360271453857
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.41617393493652344,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 89,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 1883,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.943276405334473,
+          4.17732572555542,
+          1.6213239431381226
+        ],
+        "bounds_extent": [
+          0.2793242931365967,
+          0.2754000425338745,
+          0.04741501808166504
+        ],
+        "cluster_index": 22,
+        "cone_axis": [
+          -0.09448818862438202,
+          0.17322835326194763,
+          0.9842519760131836
+        ],
+        "cone_cutoff": 0.3700787425041199,
+        "group_index": 5,
+        "index_offset": 2816,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.9716362953186035,
+          4.206038951873779,
+          1.620551347732544
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.38575637340545654,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 83,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 1972,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.069103240966797,
+          4.547842025756836,
+          2.0519473552703857
+        ],
+        "bounds_extent": [
+          0.4758341312408447,
+          0.5768599510192871,
+          0.46763938665390015
+        ],
+        "cluster_index": 23,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 6,
+        "index_offset": 2944,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.140135288238525,
+          4.583127021789551,
+          2.028604507446289
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.8306167125701904,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 90,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 2055,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.301204681396484,
+          4.524384498596191,
+          1.6772249937057495
+        ],
+        "bounds_extent": [
+          0.4410245418548584,
+          0.5689494609832764,
+          0.05031096935272217
+        ],
+        "cluster_index": 24,
+        "cone_axis": [
+          0.19685038924217224,
+          -0.6141732335090637,
+          0.7716535329818726
+        ],
+        "cone_cutoff": 0.8503937125205994,
+        "group_index": 6,
+        "index_offset": 3072,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.321325302124023,
+          4.510183334350586,
+          1.6432888507843018
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.6923253536224365,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 89,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 2145,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.257880210876465,
+          4.129156112670898,
+          1.6569125652313232
+        ],
+        "bounds_extent": [
+          0.5245304107666016,
+          0.6244841814041138,
+          0.011448562145233154
+        ],
+        "cluster_index": 25,
+        "cone_axis": [
+          0.07874015718698502,
+          -0.04724409431219101,
+          0.9921259880065918
+        ],
+        "cone_cutoff": 0.18110236525535583,
+        "group_index": 6,
+        "index_offset": 3200,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.2269697189331055,
+          4.123581886291504,
+          1.6568944454193115
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.7454344034194946,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 89,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 2234,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.424877166748047,
+          4.217203617095947,
+          1.6434714794158936
+        ],
+        "bounds_extent": [
+          0.782728910446167,
+          0.8227735757827759,
+          0.025267481803894043
+        ],
+        "cluster_index": 26,
+        "cone_axis": [
+          -0.015748031437397003,
+          -0.05511811003088951,
+          1.0
+        ],
+        "cone_cutoff": 0.4488188922405243,
+        "group_index": 6,
+        "index_offset": 3328,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.513973712921143,
+          4.218844413757324,
+          1.6410895586013794
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 1.0757832527160645,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 90,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 2323,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -7.528021335601807,
+          4.74680233001709,
+          2.2445199489593506
+        ],
+        "bounds_extent": [
+          0.3099203109741211,
+          0.4155545234680176,
+          0.2734590172767639
+        ],
+        "cluster_index": 27,
+        "cone_axis": [
+          0.05511811003088951,
+          0.7007874250411987,
+          0.7165354490280151
+        ],
+        "cone_cutoff": 0.834645688533783,
+        "group_index": 7,
+        "index_offset": 3456,
+        "index_page_offset": 0,
+        "lod_center": [
+          -7.505695343017578,
+          4.745570182800293,
+          2.2363343238830566
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.5676388740539551,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 90,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 2413,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -7.358702659606934,
+          4.745570182800293,
+          2.118593454360962
+        ],
+        "bounds_extent": [
+          0.4456453323364258,
+          0.4112584590911865,
+          0.3994884490966797
+        ],
+        "cluster_index": 28,
+        "cone_axis": [
+          0.05511811003088951,
+          0.7244094610214233,
+          0.6850393414497375
+        ],
+        "cone_cutoff": 0.8661417365074158,
+        "group_index": 7,
+        "index_offset": 3584,
+        "index_page_offset": 0,
+        "lod_center": [
+          -7.393070220947266,
+          4.720396995544434,
+          2.114234447479248
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.6872013807296753,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 92,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 2503,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.91590690612793,
+          4.740747928619385,
+          2.1257662773132324
+        ],
+        "bounds_extent": [
+          0.3082597255706787,
+          0.4039759635925293,
+          0.39231550693511963
+        ],
+        "cluster_index": 29,
+        "cone_axis": [
+          0.015748031437397003,
+          0.6535432934761047,
+          0.7559055089950562
+        ],
+        "cone_cutoff": 0.7795275449752808,
+        "group_index": 7,
+        "index_offset": 3712,
+        "index_page_offset": 0,
+        "lod_center": [
+          -7.024968147277832,
+          4.768002986907959,
+          2.0841047763824463
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.6289888024330139,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 90,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 2595,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.837517738342285,
+          4.731015205383301,
+          2.2428412437438965
+        ],
+        "bounds_extent": [
+          0.23254942893981934,
+          0.394026517868042,
+          0.27490246295928955
+        ],
+        "cluster_index": 30,
+        "cone_axis": [
+          0.023622047156095505,
+          0.6456692814826965,
+          0.7637795209884644
+        ],
+        "cone_cutoff": 0.787401556968689,
+        "group_index": 7,
+        "index_offset": 3840,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.7977495193481445,
+          4.738415241241455,
+          2.2644283771514893
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.5012931823730469,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 86,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 2685,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -7.527097225189209,
+          4.710150718688965,
+          2.2726998329162598
+        ],
+        "bounds_extent": [
+          0.30899620056152344,
+          0.38078856468200684,
+          0.22890794277191162
+        ],
+        "cluster_index": 31,
+        "cone_axis": [
+          0.0,
+          -0.7007874250411987,
+          -0.7165354490280151
+        ],
+        "cone_cutoff": 0.7244094610214233,
+        "group_index": 8,
+        "index_offset": 3968,
+        "index_page_offset": 0,
+        "lod_center": [
+          -7.510472774505615,
+          4.733023166656494,
+          2.285079002380371
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.5397560000419617,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 86,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 2771,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -7.521195411682129,
+          4.9486613273620605,
+          2.1085410118103027
+        ],
+        "bounds_extent": [
+          0.31674647331237793,
+          0.21369552612304688,
+          0.38764601945877075
+        ],
+        "cluster_index": 32,
+        "cone_axis": [
+          -0.5826771855354309,
+          -0.5590550899505615,
+          -0.5905511975288391
+        ],
+        "cone_cutoff": 0.8425197005271912,
+        "group_index": 8,
+        "index_offset": 4096,
+        "index_page_offset": 0,
+        "lod_center": [
+          -7.520770072937012,
+          5.011218070983887,
+          2.115278959274292
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.5014877915382385,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 89,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 2857,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -7.221334934234619,
+          4.7178778648376465,
+          2.313230514526367
+        ],
+        "bounds_extent": [
+          0.6157560348510742,
+          0.3900637626647949,
+          0.18930447101593018
+        ],
+        "cluster_index": 33,
+        "cone_axis": [
+          0.0,
+          -0.7086614370346069,
+          -0.7086614370346069
+        ],
+        "cone_cutoff": 0.7322834730148315,
+        "group_index": 8,
+        "index_offset": 4224,
+        "index_page_offset": 0,
+        "lod_center": [
+          -7.221577167510986,
+          4.7178778648376465,
+          2.3103749752044678
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.7486330270767212,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 97,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 2946,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.915706157684326,
+          5.079616069793701,
+          2.1041808128356934
+        ],
+        "bounds_extent": [
+          0.3080587387084961,
+          0.0359649658203125,
+          0.36980998516082764
+        ],
+        "cluster_index": 34,
+        "cone_axis": [
+          0.14173229038715363,
+          -0.8661417365074158,
+          -0.4803149700164795
+        ],
+        "cone_cutoff": 0.5118110179901123,
+        "group_index": 8,
+        "index_offset": 4352,
+        "index_page_offset": 0,
+        "lod_center": [
+          -6.919445514678955,
+          5.096619129180908,
+          2.1048924922943115
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.46748945116996765,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 86,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 3043,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -4.854243755340576,
+          4.9760847091674805,
+          2.10151743888855
+        ],
+        "bounds_extent": [
+          0.30904579162597656,
+          0.22985386848449707,
+          0.39899349212646484
+        ],
+        "cluster_index": 35,
+        "cone_axis": [
+          0.7637795209884644,
+          -0.4488188922405243,
+          -0.4645669162273407
+        ],
+        "cone_cutoff": 0.9291338324546814,
+        "group_index": 9,
+        "index_offset": 4480,
+        "index_page_offset": 0,
+        "lod_center": [
+          -4.866186618804932,
+          4.920185089111328,
+          2.1066365242004395
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.5317995548248291,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 89,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 3129,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.077515125274658,
+          4.714803218841553,
+          2.1134443283081055
+        ],
+        "bounds_extent": [
+          0.5388941764831543,
+          0.3760385513305664,
+          0.38870948553085327
+        ],
+        "cluster_index": 36,
+        "cone_axis": [
+          0.015748031437397003,
+          -0.7007874250411987,
+          -0.7086614370346069
+        ],
+        "cone_cutoff": 0.7244094610214233,
+        "group_index": 9,
+        "index_offset": 4608,
+        "index_page_offset": 0,
+        "lod_center": [
+          -4.974698066711426,
+          4.648565769195557,
+          2.1877431869506836
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.7787700891494751,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 96,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 3218,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.475240230560303,
+          5.026765823364258,
+          2.110579013824463
+        ],
+        "bounds_extent": [
+          0.3088226318359375,
+          0.08742809295654297,
+          0.38304293155670166
+        ],
+        "cluster_index": 37,
+        "cone_axis": [
+          -0.14960630238056183,
+          -0.7165354490280151,
+          -0.6850393414497375
+        ],
+        "cone_cutoff": 0.7086614370346069,
+        "group_index": 9,
+        "index_offset": 4736,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.481926441192627,
+          5.015089988708496,
+          2.110579013824463
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.4894287586212158,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 85,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 3314,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.185144424438477,
+          4.721122741699219,
+          2.061530113220215
+        ],
+        "bounds_extent": [
+          0.5918755531311035,
+          0.3834059238433838,
+          0.44039905071258545
+        ],
+        "cluster_index": 38,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 9,
+        "index_offset": 4864,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.184512138366699,
+          4.713077545166016,
+          2.0733418464660645
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.8131096959114075,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 98,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 3399,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -4.850171089172363,
+          4.772272109985352,
+          2.3208365440368652
+        ],
+        "bounds_extent": [
+          0.3115503787994385,
+          0.4317471981048584,
+          0.20202147960662842
+        ],
+        "cluster_index": 39,
+        "cone_axis": [
+          -0.22047244012355804,
+          0.6456692814826965,
+          0.7322834730148315
+        ],
+        "cone_cutoff": 0.913385808467865,
+        "group_index": 10,
+        "index_offset": 4992,
+        "index_page_offset": 0,
+        "lod_center": [
+          -4.885039329528809,
+          4.754685401916504,
+          2.3214001655578613
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.559616208076477,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 87,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 3497,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -4.889916896820068,
+          5.023614883422852,
+          2.1071767807006836
+        ],
+        "bounds_extent": [
+          0.2966480255126953,
+          0.17856860160827637,
+          0.41568100452423096
+        ],
+        "cluster_index": 40,
+        "cone_axis": [
+          0.17322835326194763,
+          0.9055117964744568,
+          0.3858267664909363
+        ],
+        "cone_cutoff": 0.9685039520263672,
+        "group_index": 10,
+        "index_offset": 5120,
+        "index_page_offset": 0,
+        "lod_center": [
+          -4.87774658203125,
+          4.974909782409668,
+          2.110361099243164
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.5135427117347717,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 87,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 3584,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.212854385375977,
+          4.771827697753906,
+          2.2342543601989746
+        ],
+        "bounds_extent": [
+          0.5685162544250488,
+          0.4341108798980713,
+          0.28533244132995605
+        ],
+        "cluster_index": 41,
+        "cone_axis": [
+          -0.18897637724876404,
+          0.7086614370346069,
+          0.6850393414497375
+        ],
+        "cone_cutoff": 0.8976377844810486,
+        "group_index": 10,
+        "index_offset": 5248,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.207424163818359,
+          4.769949913024902,
+          2.221404552459717
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.7603540420532227,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 95,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 3671,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -5.475244522094727,
+          4.99351692199707,
+          2.1230382919311523
+        ],
+        "bounds_extent": [
+          0.3088185787200928,
+          0.14940857887268066,
+          0.39454448223114014
+        ],
+        "cluster_index": 42,
+        "cone_axis": [
+          0.10236220806837082,
+          0.7244094610214233,
+          0.6850393414497375
+        ],
+        "cone_cutoff": 0.7401574850082397,
+        "group_index": 10,
+        "index_offset": 5376,
+        "index_page_offset": 0,
+        "lod_center": [
+          -5.4106974601745605,
+          4.99816370010376,
+          2.091034412384033
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.5126456618309021,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 86,
+        "parent_lod_error": 0.014999999664723873,
+        "position_offset": 3766,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          -6.668482780456543,
+          4.266326904296875,
+          1.6758639812469482
+        ],
+        "bounds_extent": [
+          0.46726250648498535,
+          0.8718968629837036,
+          0.09097200632095337
+        ],
+        "cluster_index": 43,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 11,
+        "index_offset": 0,
+        "index_page_offset": 1,
+        "lod_center": [
+          -6.5168986320495605,
+          4.266326904296875,
+          1.6995564699172974
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 0.9278046488761902,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 107,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 0,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -6.743863105773926,
+          4.2695770263671875,
+          1.673861026763916
+        ],
+        "bounds_extent": [
+          0.5394070148468018,
+          0.8751469850540161,
+          0.08367806673049927
+        ],
+        "cluster_index": 44,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 11,
+        "index_offset": 128,
+        "index_page_offset": 1,
+        "lod_center": [
+          -6.704425811767578,
+          4.259726524353027,
+          1.6875123977661133
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.0001168251037598,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 102,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 107,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -6.650402069091797,
+          4.18355655670166,
+          1.649804949760437
+        ],
+        "bounds_extent": [
+          0.44597697257995605,
+          0.7212707996368408,
+          0.018934011459350586
+        ],
+        "cluster_index": 45,
+        "cone_axis": [
+          -0.3779527544975281,
+          -0.06299212574958801,
+          0.9212598204612732
+        ],
+        "cone_cutoff": 0.748031497001648,
+        "group_index": 11,
+        "index_offset": 256,
+        "index_page_offset": 1,
+        "lod_center": [
+          -6.603030681610107,
+          4.190164089202881,
+          1.6589564085006714
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 0.7834383249282837,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 100,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 209,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -7.176564693450928,
+          4.420071125030518,
+          1.6952710151672363
+        ],
+        "bounds_extent": [
+          0.5985713005065918,
+          0.6962610483169556,
+          0.07156497240066528
+        ],
+        "cluster_index": 46,
+        "cone_axis": [
+          0.07874015718698502,
+          -0.6299212574958801,
+          0.7795275449752808
+        ],
+        "cone_cutoff": 0.8976377844810486,
+        "group_index": 11,
+        "index_offset": 384,
+        "index_page_offset": 1,
+        "lod_center": [
+          -7.2594475746154785,
+          4.478808403015137,
+          1.643874168395996
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 0.919479489326477,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 94,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 309,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -6.571752548217773,
+          4.504729747772217,
+          1.6683119535446167
+        ],
+        "bounds_extent": [
+          1.2306487560272217,
+          0.6028040647506714,
+          0.06605899333953857
+        ],
+        "cluster_index": 47,
+        "cone_axis": [
+          -0.30708661675453186,
+          -0.5748031735420227,
+          0.7637795209884644
+        ],
+        "cone_cutoff": 0.8818897604942322,
+        "group_index": 11,
+        "index_offset": 512,
+        "index_page_offset": 1,
+        "lod_center": [
+          -6.571752548217773,
+          4.815890312194824,
+          1.6913809776306152
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.2650785446166992,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 105,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 403,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -5.476589202880859,
+          4.263543128967285,
+          1.6760990619659424
+        ],
+        "bounds_extent": [
+          0.7284514904022217,
+          0.8691130876541138,
+          0.08336204290390015
+        ],
+        "cluster_index": 48,
+        "cone_axis": [
+          0.0,
+          0.6535432934761047,
+          -0.7559055089950562
+        ],
+        "cone_cutoff": 0.8503937125205994,
+        "group_index": 11,
+        "index_offset": 640,
+        "index_page_offset": 1,
+        "lod_center": [
+          -5.476589202880859,
+          4.246829986572266,
+          1.6392333507537842
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.1212639808654785,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 106,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 508,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -6.49448299407959,
+          4.5314507484436035,
+          1.6750179529190063
+        ],
+        "bounds_extent": [
+          1.3079183101654053,
+          0.6114749908447266,
+          0.08267104625701904
+        ],
+        "cluster_index": 49,
+        "cone_axis": [
+          -0.15748031437397003,
+          0.5511810779571533,
+          -0.8188976645469666
+        ],
+        "cone_cutoff": 0.874015748500824,
+        "group_index": 11,
+        "index_offset": 768,
+        "index_page_offset": 1,
+        "lod_center": [
+          -6.491835594177246,
+          5.1135454177856445,
+          1.72438383102417
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.3117766380310059,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 110,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 614,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -7.158563613891602,
+          4.401510238647461,
+          2.0443830490112305
+        ],
+        "bounds_extent": [
+          0.5535948276519775,
+          0.6772764921188354,
+          0.4542000889778137
+        ],
+        "cluster_index": 50,
+        "cone_axis": [
+          -0.12598425149917603,
+          -0.14173229038715363,
+          -0.9842519760131836
+        ],
+        "cone_cutoff": 0.4330708682537079,
+        "group_index": 11,
+        "index_offset": 896,
+        "index_page_offset": 1,
+        "lod_center": [
+          -7.121623992919922,
+          4.40932035446167,
+          2.0332021713256836
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 0.8155478239059448,
+        "material_index": 0,
+        "num_tris": 64,
+        "num_verts": 64,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 724,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -6.628170013427734,
+          4.484555721282959,
+          2.045072078704834
+        ],
+        "bounds_extent": [
+          1.2089207172393799,
+          0.5804009437561035,
+          0.4729069471359253
+        ],
+        "cluster_index": 51,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 12,
+        "index_offset": 960,
+        "index_page_offset": 1,
+        "lod_center": [
+          -6.626002311706543,
+          4.680169582366943,
+          2.049093008041382
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.3344922065734863,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 111,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 788,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -6.661171913146973,
+          4.662795066833496,
+          2.0459439754486084
+        ],
+        "bounds_extent": [
+          1.1767699718475342,
+          0.4995615482330322,
+          0.4720349907875061
+        ],
+        "cluster_index": 52,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 12,
+        "index_offset": 1088,
+        "index_page_offset": 1,
+        "lod_center": [
+          -6.671848773956299,
+          5.089043617248535,
+          2.0991621017456055
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.241051435470581,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 111,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 899,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -6.510218620300293,
+          4.504073143005371,
+          2.0344550609588623
+        ],
+        "bounds_extent": [
+          1.3233857154846191,
+          0.6021474599838257,
+          0.46281200647354126
+        ],
+        "cluster_index": 53,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 12,
+        "index_offset": 1216,
+        "index_page_offset": 1,
+        "lod_center": [
+          -6.5051093101501465,
+          4.761706352233887,
+          2.1104300022125244
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.4227097034454346,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 105,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 1010,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -6.557641983032227,
+          4.574769973754883,
+          1.6089744567871094
+        ],
+        "bounds_extent": [
+          0.3087780475616455,
+          0.35678553581237793,
+          0.037331461906433105
+        ],
+        "cluster_index": 54,
+        "cone_axis": [
+          -0.13385826349258423,
+          0.06299212574958801,
+          -0.9921259880065918
+        ],
+        "cone_cutoff": 0.4803149700164795,
+        "group_index": 12,
+        "index_offset": 1344,
+        "index_page_offset": 1,
+        "lod_center": [
+          -6.565417766571045,
+          4.5594072341918945,
+          1.6080479621887207
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 0.4469855725765228,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 90,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 1115,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -5.62477445602417,
+          4.494719982147217,
+          2.038728952407837
+        ],
+        "bounds_extent": [
+          1.0840535163879395,
+          0.35379600524902344,
+          0.4628870487213135
+        ],
+        "cluster_index": 55,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 12,
+        "index_offset": 1472,
+        "index_page_offset": 1,
+        "lod_center": [
+          -5.603235721588135,
+          4.495141506195068,
+          2.0594418048858643
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.1773483753204346,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 107,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 1205,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -5.721415042877197,
+          4.547842025756836,
+          2.0456149578094482
+        ],
+        "bounds_extent": [
+          1.1281461715698242,
+          0.5768599510192871,
+          0.4739719033241272
+        ],
+        "cluster_index": 56,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 12,
+        "index_offset": 1600,
+        "index_page_offset": 1,
+        "lod_center": [
+          -5.721415042877197,
+          4.868069648742676,
+          1.6825743913650513
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.1528531312942505,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 113,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 1312,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -5.453330039978027,
+          4.197973728179932,
+          1.6478264331817627
+        ],
+        "bounds_extent": [
+          0.7542755603790283,
+          0.8035439252853394,
+          0.020912468433380127
+        ],
+        "cluster_index": 57,
+        "cone_axis": [
+          0.007874015718698502,
+          0.03937007859349251,
+          1.0
+        ],
+        "cone_cutoff": 0.3779527544975281,
+        "group_index": 12,
+        "index_offset": 1728,
+        "index_page_offset": 1,
+        "lod_center": [
+          -5.556269645690918,
+          4.185832500457764,
+          1.6407458782196045
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.0233392715454102,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 98,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 1425,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -5.933157444000244,
+          4.352425575256348,
+          2.068142890930176
+        ],
+        "bounds_extent": [
+          1.2910094261169434,
+          0.7922980785369873,
+          0.44993895292282104
+        ],
+        "cluster_index": 58,
+        "cone_axis": [
+          0.20472441613674164,
+          0.4881889820098877,
+          0.8425197005271912
+        ],
+        "cone_cutoff": 0.9370078444480896,
+        "group_index": 12,
+        "index_offset": 1856,
+        "index_page_offset": 1,
+        "lod_center": [
+          -5.952108860015869,
+          4.8792572021484375,
+          2.075056314468384
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.4427915811538696,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 109,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 1523,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -7.222794532775879,
+          4.722471237182617,
+          2.112968921661377
+        ],
+        "bounds_extent": [
+          0.6151471138000488,
+          0.3931095600128174,
+          0.388638973236084
+        ],
+        "cluster_index": 59,
+        "cone_axis": [
+          0.14960630238056183,
+          -0.6850393414497375,
+          -0.7086614370346069
+        ],
+        "cone_cutoff": 0.7637795209884644,
+        "group_index": 13,
+        "index_offset": 1984,
+        "index_page_offset": 1,
+        "lod_center": [
+          -7.220625877380371,
+          4.772828578948975,
+          2.131772518157959
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 0.7914546728134155,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 106,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 1632,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -6.191276550292969,
+          4.766876220703125,
+          2.1117148399353027
+        ],
+        "bounds_extent": [
+          1.6460788249969482,
+          0.43906235694885254,
+          0.3908199667930603
+        ],
+        "cluster_index": 60,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 13,
+        "index_offset": 2112,
+        "index_page_offset": 1,
+        "lod_center": [
+          -6.231548309326172,
+          4.915829181671143,
+          2.123567819595337
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 1.7461228370666504,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 110,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 1738,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -5.119584083557129,
+          4.7723517417907715,
+          2.1023387908935547
+        ],
+        "bounds_extent": [
+          0.5809628963470459,
+          0.43358707427978516,
+          0.3998149633407593
+        ],
+        "cluster_index": 61,
+        "cone_axis": [
+          0.7716535329818726,
+          -0.4566929042339325,
+          -0.4488188922405243
+        ],
+        "cone_cutoff": 0.9291338324546814,
+        "group_index": 13,
+        "index_offset": 2240,
+        "index_page_offset": 1,
+        "lod_center": [
+          -5.094885349273682,
+          4.7151336669921875,
+          2.1108345985412598
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 0.7696164846420288,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 104,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 1848,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -5.161341667175293,
+          4.725955486297607,
+          2.070262908935547
+        ],
+        "bounds_extent": [
+          0.6227209568023682,
+          0.38823843002319336,
+          0.44913196563720703
+        ],
+        "cluster_index": 62,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 13,
+        "index_offset": 2368,
+        "index_page_offset": 1,
+        "lod_center": [
+          -5.161271572113037,
+          4.7335286140441895,
+          2.129300355911255
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 0.8183594942092896,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 112,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 1952,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -4.8666887283325195,
+          4.773231506347656,
+          2.1071767807006836
+        ],
+        "bounds_extent": [
+          0.31987643241882324,
+          0.4327070713043213,
+          0.41568100452423096
+        ],
+        "cluster_index": 63,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 13,
+        "index_offset": 2496,
+        "index_page_offset": 1,
+        "lod_center": [
+          -4.877167224884033,
+          4.726515769958496,
+          2.0986554622650146
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 0.6257455348968506,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 90,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 2064,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -5.4694671630859375,
+          4.740321159362793,
+          2.124040365219116
+        ],
+        "bounds_extent": [
+          0.31459546089172363,
+          0.402604341506958,
+          0.39554643630981445
+        ],
+        "cluster_index": 64,
+        "cone_axis": [
+          -0.023622047156095505,
+          0.6456692814826965,
+          0.7637795209884644
+        ],
+        "cone_cutoff": 0.787401556968689,
+        "group_index": 13,
+        "index_offset": 2624,
+        "index_page_offset": 1,
+        "lod_center": [
+          -5.473953723907471,
+          4.725836753845215,
+          2.1167120933532715
+        ],
+        "lod_error": 0.014999999664723873,
+        "lod_radius": 0.6308901309967041,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 98,
+        "parent_lod_error": 0.054999999701976776,
+        "position_offset": 2154,
+        "position_page_offset": 1
+      },
+      {
+        "bounds_center": [
+          -6.7748703956604,
+          4.266326904296875,
+          1.6692395210266113
+        ],
+        "bounds_extent": [
+          0.5736503601074219,
+          0.8718968629837036,
+          0.09759646654129028
+        ],
+        "cluster_index": 65,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 14,
+        "index_offset": 0,
+        "index_page_offset": 2,
+        "lod_center": [
+          -6.5168986320495605,
+          4.266326904296875,
+          1.6995564699172974
+        ],
+        "lod_error": 0.054999999701976776,
+        "lod_radius": 0.9278046488761902,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 126,
+        "parent_lod_error": 0.0,
+        "position_offset": 0,
+        "position_page_offset": 2
+      },
+      {
+        "bounds_center": [
+          -6.994414329528809,
+          4.2695770263671875,
+          1.673861026763916
+        ],
+        "bounds_extent": [
+          0.789989709854126,
+          0.8751469850540161,
+          0.08367806673049927
+        ],
+        "cluster_index": 66,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 14,
+        "index_offset": 128,
+        "index_page_offset": 2,
+        "lod_center": [
+          -6.9666972160339355,
+          4.24254035949707,
+          1.6823384761810303
+        ],
+        "lod_error": 0.054999999701976776,
+        "lod_radius": 1.14064621925354,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 121,
+        "parent_lod_error": 0.0,
+        "position_offset": 126,
+        "position_page_offset": 2
+      },
+      {
+        "bounds_center": [
+          -6.571752548217773,
+          4.509129047393799,
+          1.6692395210266113
+        ],
+        "bounds_extent": [
+          1.2306487560272217,
+          0.6072031259536743,
+          0.09759646654129028
+        ],
+        "cluster_index": 67,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 14,
+        "index_offset": 256,
+        "index_page_offset": 2,
+        "lod_center": [
+          -6.571752548217773,
+          4.815890312194824,
+          1.6913809776306152
+        ],
+        "lod_error": 0.054999999701976776,
+        "lod_radius": 1.2650785446166992,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 117,
+        "parent_lod_error": 0.0,
+        "position_offset": 247,
+        "position_page_offset": 2
+      },
+      {
+        "bounds_center": [
+          -5.565752029418945,
+          4.258675575256348,
+          1.6666849851608276
+        ],
+        "bounds_extent": [
+          0.6568481922149658,
+          0.8642455339431763,
+          0.09277606010437012
+        ],
+        "cluster_index": 68,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 14,
+        "index_offset": 384,
+        "index_page_offset": 2,
+        "lod_center": [
+          -5.556972503662109,
+          4.186987400054932,
+          1.6236999034881592
+        ],
+        "lod_error": 0.054999999701976776,
+        "lod_radius": 1.0239431858062744,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 120,
+        "parent_lod_error": 0.0,
+        "position_offset": 364,
+        "position_page_offset": 2
+      },
+      {
+        "bounds_center": [
+          -5.405690670013428,
+          4.3934855461120605,
+          1.6684825420379639
+        ],
+        "bounds_extent": [
+          0.8124217987060547,
+          0.7494403123855591,
+          0.09097856283187866
+        ],
+        "cluster_index": 69,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 14,
+        "index_offset": 512,
+        "index_page_offset": 2,
+        "lod_center": [
+          -5.3989057540893555,
+          4.374287128448486,
+          1.661705493927002
+        ],
+        "lod_error": 0.054999999701976776,
+        "lod_radius": 1.0881462097167969,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 128,
+        "parent_lod_error": 0.0,
+        "position_offset": 484,
+        "position_page_offset": 2
+      },
+      {
+        "bounds_center": [
+          -6.951314926147461,
+          4.558698654174805,
+          2.0373499393463135
+        ],
+        "bounds_extent": [
+          0.8510863780975342,
+          0.5663388967514038,
+          0.46518492698669434
+        ],
+        "cluster_index": 70,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 14,
+        "index_offset": 640,
+        "index_page_offset": 2,
+        "lod_center": [
+          -6.923272132873535,
+          4.740429401397705,
+          1.672248125076294
+        ],
+        "lod_error": 0.054999999701976776,
+        "lod_radius": 0.9693776965141296,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 123,
+        "parent_lod_error": 0.0,
+        "position_offset": 612,
+        "position_page_offset": 2
+      },
+      {
+        "bounds_center": [
+          -6.1893310546875,
+          4.745085716247559,
+          2.118541955947876
+        ],
+        "bounds_extent": [
+          1.6486103534698486,
+          0.41727137565612793,
+          0.39943695068359375
+        ],
+        "cluster_index": 71,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 14,
+        "index_offset": 768,
+        "index_page_offset": 2,
+        "lod_center": [
+          -6.2016167640686035,
+          4.725688457489014,
+          2.1194941997528076
+        ],
+        "lod_error": 0.054999999701976776,
+        "lod_radius": 1.725105881690979,
+        "material_index": 0,
+        "num_tris": 123,
+        "num_verts": 127,
+        "parent_lod_error": 0.0,
+        "position_offset": 735,
+        "position_page_offset": 2
+      },
+      {
+        "bounds_center": [
+          -5.162391662597656,
+          4.730586051940918,
+          2.1041674613952637
+        ],
+        "bounds_extent": [
+          0.6216709613800049,
+          0.3923156261444092,
+          0.39798641204833984
+        ],
+        "cluster_index": 72,
+        "cone_axis": [
+          0.015748031437397003,
+          -0.6062992215156555,
+          -0.7952755689620972
+        ],
+        "cone_cutoff": 0.9763779640197754,
+        "group_index": 14,
+        "index_offset": 891,
+        "index_page_offset": 2,
+        "lod_center": [
+          -5.162391662597656,
+          4.784639358520508,
+          2.129338502883911
+        ],
+        "lod_error": 0.054999999701976776,
+        "lod_radius": 0.7949153184890747,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 118,
+        "parent_lod_error": 0.0,
+        "position_offset": 862,
+        "position_page_offset": 2
+      },
+      {
+        "bounds_center": [
+          -5.178103446960449,
+          4.771827697753906,
+          2.0703587532043457
+        ],
+        "bounds_extent": [
+          0.6059596538543701,
+          0.4341108798980713,
+          0.4492279291152954
+        ],
+        "cluster_index": 73,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 14,
+        "index_offset": 1019,
+        "index_page_offset": 2,
+        "lod_center": [
+          -5.170105457305908,
+          4.697885036468506,
+          2.0686371326446533
+        ],
+        "lod_error": 0.054999999701976776,
+        "lod_radius": 0.8310762643814087,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 114,
+        "parent_lod_error": 0.0,
+        "position_offset": 980,
+        "position_page_offset": 2
+      },
+      {
+        "bounds_center": [
+          -5.908411026000977,
+          4.250578880310059,
+          2.0695548057556152
+        ],
+        "bounds_extent": [
+          1.3151419162750244,
+          0.8561488389968872,
+          0.44842398166656494
+        ],
+        "cluster_index": 74,
+        "cone_axis": [
+          -0.03937007859349251,
+          -0.5433070659637451,
+          0.8425197005271912
+        ],
+        "cone_cutoff": 0.8425197005271912,
+        "group_index": 14,
+        "index_offset": 1147,
+        "index_page_offset": 2,
+        "lod_center": [
+          -5.9083075523376465,
+          4.7113752365112305,
+          2.077202320098877
+        ],
+        "lod_error": 0.054999999701976776,
+        "lod_radius": 1.427534818649292,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 111,
+        "parent_lod_error": 0.0,
+        "position_offset": 1094,
+        "position_page_offset": 2
+      },
+      {
+        "bounds_center": [
+          -6.18798828125,
+          4.766876220703125,
+          2.1050825119018555
+        ],
+        "bounds_extent": [
+          1.649367332458496,
+          0.43906235694885254,
+          0.41358649730682373
+        ],
+        "cluster_index": 75,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 14,
+        "index_offset": 1275,
+        "index_page_offset": 2,
+        "lod_center": [
+          -6.186957359313965,
+          4.729081630706787,
+          2.113520622253418
+        ],
+        "lod_error": 0.054999999701976776,
+        "lod_radius": 1.736832857131958,
+        "material_index": 0,
+        "num_tris": 117,
+        "num_verts": 128,
+        "parent_lod_error": 0.0,
+        "position_offset": 1205,
+        "position_page_offset": 2
+      }
+    ],
+    "groups": [
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 0,
+        "lod_bounds_center": [
+          -6.711406707763672,
+          4.172563076019287,
+          1.6464534997940063
+        ],
+        "lod_bounds_radius": 1.1353403329849243,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 1,
+        "lod_bounds_center": [
+          -6.565778732299805,
+          4.286777496337891,
+          1.675412893295288
+        ],
+        "lod_bounds_radius": 1.5724334716796875,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 2,
+        "lod_bounds_center": [
+          -5.510234832763672,
+          4.255570411682129,
+          1.628679871559143
+        ],
+        "lod_bounds_radius": 1.2945307493209839,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 3,
+        "lod_bounds_center": [
+          -7.251310348510742,
+          4.485015869140625,
+          1.6972901821136475
+        ],
+        "lod_bounds_radius": 1.2579363584518433,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 4,
+        "lod_bounds_center": [
+          -6.188351154327393,
+          4.603517055511475,
+          1.857171893119812
+        ],
+        "lod_bounds_radius": 1.818483829498291,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 5,
+        "lod_bounds_center": [
+          -6.176050662994385,
+          4.439959526062012,
+          1.7352077960968018
+        ],
+        "lod_bounds_radius": 1.8393003940582275,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 6,
+        "lod_bounds_center": [
+          -5.300601005554199,
+          4.35893440246582,
+          1.742469310760498
+        ],
+        "lod_bounds_radius": 1.3504302501678467,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 7,
+        "lod_bounds_center": [
+          -7.180370330810547,
+          4.743096351623535,
+          2.1747753620147705
+        ],
+        "lod_bounds_radius": 0.9095113277435303,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 8,
+        "lod_bounds_center": [
+          -7.293066024780273,
+          4.889684677124023,
+          2.203906536102295
+        ],
+        "lod_bounds_radius": 0.9630246162414551,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 9,
+        "lod_bounds_center": [
+          -5.1268310546875,
+          4.8242292404174805,
+          2.119575023651123
+        ],
+        "lod_bounds_radius": 1.02094566822052,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 10,
+        "lod_bounds_center": [
+          -5.095226764678955,
+          4.874427318572998,
+          2.1860499382019043
+        ],
+        "lod_bounds_radius": 0.9176872372627258,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      },
+      {
+        "children_num": 4,
+        "children_start": 0,
+        "group_index": 11,
+        "lod_bounds_center": [
+          -6.509682655334473,
+          4.299982070922852,
+          1.661959171295166
+        ],
+        "lod_bounds_radius": 2.295518159866333,
+        "lod_error": 0.014999999664723873,
+        "page_index_num": 1,
+        "page_index_start": 1
+      },
+      {
+        "children_num": 4,
+        "children_start": 4,
+        "group_index": 12,
+        "lod_bounds_center": [
+          -6.211343288421631,
+          4.536376953125,
+          1.877406120300293
+        ],
+        "lod_bounds_radius": 2.288057804107666,
+        "lod_error": 0.014999999664723873,
+        "page_index_num": 1,
+        "page_index_start": 1
+      },
+      {
+        "children_num": 3,
+        "children_start": 8,
+        "group_index": 13,
+        "lod_bounds_center": [
+          -5.838374614715576,
+          4.8627800941467285,
+          2.169843912124634
+        ],
+        "lod_bounds_radius": 2.418363571166992,
+        "lod_error": 0.014999999664723873,
+        "page_index_num": 1,
+        "page_index_start": 1
+      },
+      {
+        "children_num": 3,
+        "children_start": 11,
+        "group_index": 14,
+        "lod_bounds_center": [
+          -6.186466693878174,
+          4.566379547119141,
+          1.9030698537826538
+        ],
+        "lod_bounds_radius": 2.947693109512329,
+        "lod_error": 0.054999999701976776,
+        "page_index_num": 1,
+        "page_index_start": 2
+      }
+    ],
+    "pages": [
+      {
+        "bulk_offset": 0,
+        "dependency_page_id": 0,
+        "flags": 1,
+        "is_streamable": true,
+        "page_index": 0,
+        "raw_index_count": 5504,
+        "raw_vertex_count": 3852,
+        "size_in_bytes": 114120,
+        "storage": "budbulk"
+      },
+      {
+        "bulk_offset": 114120,
+        "dependency_page_id": 4294967295,
+        "flags": 1,
+        "is_streamable": true,
+        "page_index": 1,
+        "raw_index_count": 2752,
+        "raw_vertex_count": 2252,
+        "size_in_bytes": 63800,
+        "storage": "budbulk"
+      },
+      {
+        "bulk_offset": 177920,
+        "dependency_page_id": 4294967295,
+        "flags": 1,
+        "is_streamable": true,
+        "page_index": 2,
+        "raw_index_count": 1392,
+        "raw_vertex_count": 1333,
+        "size_in_bytes": 36272,
+        "storage": "budbulk"
+      }
+    ],
+    "stats": {
+      "aabb_max": [
+        -4.538620948791504,
+        5.205938816070557,
+        2.522857904434204
+      ],
+      "aabb_min": [
+        -7.837941646575928,
+        3.394429922103882,
+        1.5716429948806763
+      ],
+      "cluster_count": 76,
+      "dependency_count": 1,
+      "group_count": 15,
+      "material_count": 1,
+      "page_count": 3,
+      "page_size_kb": 128,
+      "texture_count": 1
+    }
+  }
+}

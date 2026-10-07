@@ -1,0 +1,244 @@
+{
+  "asset_manifest": {
+    "aabb_max": [
+      5.404412746429443,
+      2.9411401748657227,
+      -2.690436840057373
+    ],
+    "aabb_min": [
+      5.276674747467041,
+      2.749595880508423,
+      -2.897036075592041
+    ],
+    "submesh_count": 1,
+    "textures": [
+      "Content/cryteksponza/Textures/sponza_flagpole_diff.budasset",
+      "Content/cryteksponza/Textures/sponza_flagpole_spec_metallicRoughness.budasset"
+    ],
+    "total_triangles": 456,
+    "total_vertices": 357
+  },
+  "chunk_table": [
+    {
+      "chunk_id": 0,
+      "chunk_type": "Material",
+      "flags": "None",
+      "material_count": 1
+    },
+    {
+      "chunk_id": 1,
+      "chunk_type": "VirtualGeometry",
+      "flags": "None",
+      "vg_magic": "BVGT",
+      "vg_version": 1
+    }
+  ],
+  "container_header": {
+    "asset_type": "Mesh",
+    "chunk_count": 2,
+    "magic": "BUDASSET",
+    "version": 1
+  },
+  "materials": [
+    {
+      "alpha_cutoff": 0.5,
+      "alpha_mode": "Opaque",
+      "base_color_texture": "Content/cryteksponza/Textures/sponza_flagpole_diff.budasset",
+      "double_sided": false,
+      "material_index": 0,
+      "name": "flagpole"
+    }
+  ],
+  "virtual_geometry": {
+    "clusters": [
+      {
+        "bounds_center": [
+          5.340543746948242,
+          2.845367908477783,
+          -2.793736457824707
+        ],
+        "bounds_extent": [
+          0.06386899948120117,
+          0.0957721471786499,
+          0.10329961776733398
+        ],
+        "cluster_index": 0,
+        "cone_axis": [
+          0.913385808467865,
+          -0.4015747904777527,
+          0.015748031437397003
+        ],
+        "cone_cutoff": 0.9842519760131836,
+        "group_index": 0,
+        "index_offset": 0,
+        "index_page_offset": 0,
+        "lod_center": [
+          5.320330619812012,
+          2.8475184440612793,
+          -2.793736457824707
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.10329985618591309,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 127,
+        "parent_lod_error": 0.0,
+        "position_offset": 0,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          5.3463029861450195,
+          2.8167693614959717,
+          -2.7985379695892334
+        ],
+        "bounds_extent": [
+          0.04474925994873047,
+          0.06717348098754883,
+          0.0885319709777832
+        ],
+        "cluster_index": 1,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 0,
+        "index_offset": 128,
+        "index_page_offset": 0,
+        "lod_center": [
+          5.329073429107666,
+          2.80734920501709,
+          -2.799758195877075
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.09349393844604492,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 93,
+        "parent_lod_error": 0.0,
+        "position_offset": 127,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          5.359906196594238,
+          2.853430986404419,
+          -2.793736457824707
+        ],
+        "bounds_extent": [
+          0.03792166709899902,
+          0.07141494750976563,
+          0.09668350219726563
+        ],
+        "cluster_index": 2,
+        "cone_axis": [
+          0.9921259880065918,
+          -0.04724409431219101,
+          0.11811023950576782
+        ],
+        "cone_cutoff": 0.9055117964744568,
+        "group_index": 0,
+        "index_offset": 256,
+        "index_page_offset": 0,
+        "lod_center": [
+          5.342412948608398,
+          2.8372206687927246,
+          -2.7937369346618652
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.0966845154762268,
+        "material_index": 0,
+        "num_tris": 128,
+        "num_verts": 90,
+        "parent_lod_error": 0.0,
+        "position_offset": 220,
+        "position_page_offset": 0
+      },
+      {
+        "bounds_center": [
+          5.378654479980469,
+          2.81845760345459,
+          -2.793736457824707
+        ],
+        "bounds_extent": [
+          0.02575826644897461,
+          0.03874647617340088,
+          0.04032456874847412
+        ],
+        "cluster_index": 3,
+        "cone_axis": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cone_cutoff": 0.0,
+        "group_index": 0,
+        "index_offset": 384,
+        "index_page_offset": 0,
+        "lod_center": [
+          5.387031555175781,
+          2.81668758392334,
+          -2.7934939861297607
+        ],
+        "lod_error": 0.0,
+        "lod_radius": 0.04126182943582535,
+        "material_index": 0,
+        "num_tris": 72,
+        "num_verts": 83,
+        "parent_lod_error": 0.0,
+        "position_offset": 310,
+        "position_page_offset": 0
+      }
+    ],
+    "groups": [
+      {
+        "children_num": 0,
+        "children_start": 0,
+        "group_index": 0,
+        "lod_bounds_center": [
+          5.344712257385254,
+          2.8271939754486084,
+          -2.7951815128326416
+        ],
+        "lod_bounds_radius": 0.13507463037967682,
+        "lod_error": 0.0,
+        "page_index_num": 1,
+        "page_index_start": 0
+      }
+    ],
+    "pages": [
+      {
+        "bulk_offset": 0,
+        "dependency_page_id": 0,
+        "flags": 1,
+        "is_streamable": true,
+        "page_index": 0,
+        "raw_index_count": 456,
+        "raw_vertex_count": 393,
+        "size_in_bytes": 10460,
+        "storage": "budbulk"
+      }
+    ],
+    "stats": {
+      "aabb_max": [
+        5.404412746429443,
+        2.9411401748657227,
+        -2.690436840057373
+      ],
+      "aabb_min": [
+        5.276674747467041,
+        2.749595880508423,
+        -2.897036075592041
+      ],
+      "cluster_count": 4,
+      "dependency_count": 1,
+      "group_count": 1,
+      "material_count": 1,
+      "page_count": 1,
+      "page_size_kb": 128,
+      "texture_count": 2
+    }
+  }
+}
